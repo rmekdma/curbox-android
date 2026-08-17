@@ -38,7 +38,9 @@ object AppRuleEvaluator {
         nowMs: Long,
         zone: ZoneId = ZoneId.systemDefault(),
         useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet()
     ): AppRulesEvaluation {
         val validationErrors = snapshot.validate()
         if (validationErrors.isNotEmpty()) {
@@ -60,12 +62,17 @@ object AppRuleEvaluator {
             )
         }
 
-        val groups = snapshot.appGroups.associateBy { it.id }
         val sessionList = sessions.toList()
         val evaluations = snapshot.appRules
             .filter { it.isActive }
             .mapNotNull { rule ->
-                val packages = groups[rule.appGroupId]?.selectedPackages.orEmpty().toSet()
+                val packages = rule.effectiveScope().resolve(
+                    groups = snapshot.appGroups,
+                    // A caller that does not have a launcher listing is still able to evaluate
+                    // the event package. The service supplies the complete dynamic listing.
+                    launchablePackages = availablePackages.ifEmpty { setOf(packageName) },
+                    essentialExcludedPackages = essentialExcludedPackages
+                )
                 if (packageName !in packages) return@mapNotNull null
                 evaluateRule(
                     rule,
@@ -93,7 +100,9 @@ object AppRuleEvaluator {
         nowMs: Long,
         zone: ZoneId = ZoneId.systemDefault(),
         useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        @Suppress("UNUSED_PARAMETER") availablePackages: Set<String> = emptySet(),
+        @Suppress("UNUSED_PARAMETER") essentialExcludedPackages: Set<String> = emptySet()
     ): AppRuleEvaluation {
         val activeWindow = AppRuleSchedule.activeWindow(rule, nowMs, zone)
         val allowanceMillis = rule.allowedMinutes
@@ -173,7 +182,9 @@ object AppRuleEvaluator {
         nowMs: Long,
         resetTime: UseDayResetTime,
         zone: ZoneId = ZoneId.systemDefault(),
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet()
     ): AppRuleEvaluation = evaluateRule(
         rule = rule,
         targetPackages = targetPackages,
@@ -182,7 +193,9 @@ object AppRuleEvaluator {
         nowMs = nowMs,
         zone = zone,
         useDayCalculator = ConfigurableUseDayCalculator(zone, resetTime),
-        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+        availablePackages = availablePackages,
+        essentialExcludedPackages = essentialExcludedPackages
     )
 
     fun evaluateWithResetTime(
@@ -193,7 +206,9 @@ object AppRuleEvaluator {
         nowMs: Long,
         resetTime: UseDayResetTime,
         zone: ZoneId = ZoneId.systemDefault(),
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet()
     ): AppRulesEvaluation = evaluate(
         snapshot = snapshot,
         packageName = packageName,
@@ -202,7 +217,9 @@ object AppRuleEvaluator {
         nowMs = nowMs,
         zone = zone,
         useDayCalculator = ConfigurableUseDayCalculator(zone, resetTime),
-        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+        availablePackages = availablePackages,
+        essentialExcludedPackages = essentialExcludedPackages
     )
 
     fun evaluate(
@@ -213,7 +230,9 @@ object AppRuleEvaluator {
         nowMs: Long,
         resetTime: UseDayResetTime,
         zone: ZoneId = ZoneId.systemDefault(),
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet()
     ): AppRulesEvaluation = evaluateWithResetTime(
         snapshot = snapshot,
         packageName = packageName,
@@ -222,7 +241,9 @@ object AppRuleEvaluator {
         nowMs = nowMs,
         resetTime = resetTime,
         zone = zone,
-        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+        availablePackages = availablePackages,
+        essentialExcludedPackages = essentialExcludedPackages
     )
 
     private fun overlapMillis(

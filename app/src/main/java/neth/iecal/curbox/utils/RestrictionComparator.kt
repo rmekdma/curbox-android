@@ -92,36 +92,59 @@ object RestrictionComparator {
      * rule, removing a previously covered target, or deleting it is delayed.
      */
     fun appRuleSnapshots(old: AppRuleSnapshot, new: AppRuleSnapshot): Boolean {
-        if (!new.isValid) return false
-        val oldGroups = old.appGroups.associateBy { it.id }
-        val newGroups = new.appGroups.associateBy { it.id }
+        if (!old.isValid || !new.isValid) return false
         val newRules = new.appRules.associateBy { it.id }
         return old.appRules.filter { it.isActive }.all { oldRule ->
             val newRule = newRules[oldRule.id] ?: return@all false
-            val oldGroup = oldGroups[oldRule.appGroupId] ?: return@all false
-            val newGroup = newGroups[newRule.appGroupId] ?: return@all false
-            appRule(oldRule, newRule, oldGroup.selectedPackages.toSet(), newGroup.selectedPackages.toSet())
+            appRule(oldRule, newRule, old.appGroups, new.appGroups)
         }
     }
 
     private fun appRule(
         old: AppRule,
         new: AppRule,
-        oldPackages: Set<String>,
-        newPackages: Set<String>
+        oldGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>,
+        newGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>
     ): Boolean {
-        if (!new.isActive || old.appGroupId != new.appGroupId) return false
-        // A larger target set adds protection and is safe to apply immediately. Removing a
+        if (!new.isActive) return false
+        // A wider target set adds protection and is safe to apply immediately. Removing a
         // previously covered package weakens the rule and must stay behind the delay.
-        if (!newPackages.containsAll(oldPackages)) return false
+        if (!appRuleScopeSameOrWider(old, new, oldGroups, newGroups)) return false
         if (new.allowedMinutes > old.allowedMinutes) return false
         val oldCoverage = ruleCoverage(old)
         val newCoverage = ruleCoverage(new)
         return oldCoverage.indices.all { !oldCoverage[it] || newCoverage[it] }
     }
 
+    /** Public seam used by tests and settings editors to classify scope-only edits. */
+    fun appRuleScopeSameOrWider(
+        old: AppRule,
+        new: AppRule,
+        oldGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>,
+        newGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>
+    ): Boolean {
+        val knownPackages = (oldGroups + newGroups)
+            .flatMap { it.selectedPackages }
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toSet()
+        val oldPackages = old.effectiveScope().resolve(oldGroups, knownPackages)
+        val newPackages = new.effectiveScope().resolve(newGroups, knownPackages)
+        // A dynamic all-apps scope includes future launchable packages. A finite replacement can
+        // never be proven to retain that future coverage, even when current package sets match.
+        if (old.effectiveScope().includeAllApps && !new.effectiveScope().includeAllApps) return false
+        return newPackages.containsAll(oldPackages)
+    }
+
     private fun ruleCoverage(rule: AppRule): BooleanArray {
         return AppRuleSchedule.weeklyCoverage(rule)
+    }
+
+    /** Public schedule seam: every previously restricted minute must remain covered. */
+    fun appRuleScheduleSameOrWider(old: AppRule, new: AppRule): Boolean {
+        val oldCoverage = ruleCoverage(old)
+        val newCoverage = ruleCoverage(new)
+        return oldCoverage.indices.all { !oldCoverage[it] || newCoverage[it] }
     }
 
     private fun appGroup(o: AppGroup, n: AppGroup): Boolean {

@@ -25,6 +25,8 @@ import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.AppRuleEssentialPackages
+import neth.iecal.curbox.domain.apprules.AppRuleLaunchablePackages
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.ui.activity.WarningActivity
@@ -46,6 +48,8 @@ class AppRuleBlocker {
     private val handler = Handler(Looper.getMainLooper())
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var lastShownAt = 0L
+    @Volatile private var launchablePackages: Set<String> = emptySet()
+    @Volatile private var essentialPackages: Set<String> = emptySet()
     @Volatile private var resetTime = UseDayResetTime()
     @Volatile private var useDayGenerationStartedAtMs = 0L
 
@@ -55,6 +59,7 @@ class AppRuleBlocker {
         val database = AppDatabase.getInstance(service)
         sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
         enforcement = AppRuleEnforcement(sessionRepository)
+        refreshPackageScope()
         try {
             val initialSettings = runBlocking(Dispatchers.IO) { service.dataStoreManager.settings.first() }
             resetTime = safeResetTime(initialSettings.useDayResetHour, initialSettings.useDayResetMinute)
@@ -93,14 +98,24 @@ class AppRuleBlocker {
             filter,
             ContextCompat.RECEIVER_EXPORTED
         )
+        val packageFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        ContextCompat.registerReceiver(
+            service,
+            packageReceiver,
+            packageFilter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
     }
 
     fun doAppRuleCheck(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val packageName = event.packageName?.toString().orEmpty()
-        if (packageName.isBlank() || packageName == service.packageName ||
-            packageName == Constants.SYSTEM_UI_PACKAGE_NAME
-        ) return
+        if (packageName.isBlank() || packageName in essentialPackages) return
 
         val currentSnapshot = snapshot.snapshot()
         if (currentSnapshot.appRules.none { it.isActive }) return
@@ -115,7 +130,9 @@ class AppRuleBlocker {
                     useDayId = useDayId,
                     nowMs = now,
                     calculator = calculator,
-                    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+                    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+                    availablePackages = launchablePackages,
+                    essentialExcludedPackages = essentialPackages
                 )
             }
         } catch (error: CancellationException) {
@@ -167,6 +184,11 @@ class AppRuleBlocker {
         } catch (error: Exception) {
             logNonFatal(error)
         }
+        try {
+            service.unregisterReceiver(packageReceiver)
+        } catch (error: Exception) {
+            logNonFatal(error)
+        }
     }
 
     private val refreshReceiver = object : BroadcastReceiver() {
@@ -176,6 +198,7 @@ class AppRuleBlocker {
             // refresh path as the legacy blocker and simply triggers a harmless re-read.
             scope.launch {
                 try {
+                    refreshPackageScope()
                     service.dataStoreManager.settings.first().appRuleSnapshot
                         .takeIf { it.isValid }
                         ?.let(snapshot::accept)
@@ -185,6 +208,25 @@ class AppRuleBlocker {
                     logNonFatal(error)
                 }
             }
+        }
+    }
+
+    private val packageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            // A new launchable app is part of an all-apps scope without requiring a rule edit.
+            refreshPackageScope()
+        }
+    }
+
+    private fun refreshPackageScope() {
+        if (!::service.isInitialized) return
+        try {
+            launchablePackages = AppRuleLaunchablePackages.fromContext(service)
+            essentialPackages = AppRuleEssentialPackages.fromContext(service).all +
+                service.packageName + Constants.SYSTEM_UI_PACKAGE_NAME
+        } catch (error: Exception) {
+            essentialPackages = setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
+            logNonFatal(error)
         }
     }
 

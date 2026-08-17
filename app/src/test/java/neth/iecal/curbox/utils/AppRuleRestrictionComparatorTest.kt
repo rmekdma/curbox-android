@@ -6,6 +6,8 @@ import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleScope
+import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.Settings
 import org.junit.Assert.assertFalse
@@ -73,5 +75,32 @@ class AppRuleRestrictionComparatorTest {
         assertTrue(restored.appRuleSnapshot.appGroups.isEmpty())
         assertTrue(restored.appRuleSnapshot.appRules.isEmpty())
         assertTrue(restored.blockedAppGroups.any { it.id == "legacy" })
+    }
+
+    @Test
+    fun addingAnExcludedGroupIsDelayedBecauseItRemovesTargetCoverage() {
+        val excluded = AppRuleAppGroup("excluded", "Games", listOf("com.example.game"))
+        val scoped = rule.copy(
+            appGroupId = "",
+            scope = AppRuleScope(
+                includeAllApps = true,
+                excludedGroupIds = setOf(excluded.id)
+            ),
+            timeRanges = listOf(AppRuleTimeRange(22 * 60, 6 * 60))
+        )
+        val old = Settings(
+            appRuleSnapshot = AppRuleSnapshot(
+                listOf(group, excluded),
+                listOf(scoped.copy(scope = AppRuleScope(includeAllApps = true)))
+            )
+        )
+        val proposed = old.copy(
+            appRuleSnapshot = AppRuleSnapshot(
+                listOf(group, excluded),
+                listOf(scoped)
+            )
+        )
+
+        assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
     }
 }

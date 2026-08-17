@@ -30,6 +30,7 @@ import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
 import neth.iecal.curbox.databinding.ActivitySelectAppsBinding
 import neth.iecal.curbox.databinding.DialogAddKeywordBinding
+import neth.iecal.curbox.domain.apprules.AppRuleEssentialPackages
 import neth.iecal.curbox.utils.DataStoreManager
 
 class SelectAppsActivity : AppCompatActivity() {
@@ -88,7 +89,9 @@ class SelectAppsActivity : AppCompatActivity() {
             intent.getStringArrayListExtra("PRE_SELECTED_APPS")?.toHashSet() ?: HashSet()
 
         ignoredApps = intent.getStringArrayListExtra("IGNORED_APPS")?.toHashSet() ?: HashSet()
-        ignoredApps.add(packageName) // also remove curbox app from the list
+        // These packages keep the management path alive and must never be offered as a group
+        // target. Android Settings is intentionally not in this set and remains selectable.
+        ignoredApps.addAll(AppRuleEssentialPackages.fromContext(this).all)
         val strictLaunchableOnly = intent.getBooleanExtra("STRICT_LAUNCHABLE_APPS", false)
 
         Log.d("pre-selected-apps", selectedAppList.toString())
@@ -104,6 +107,7 @@ class SelectAppsActivity : AppCompatActivity() {
                 val settings = dataStoreManager.settings.first()
                 allGroups = buildList {
                     settings.blockedAppGroups.forEach { add(it.name to it.selectedPackages.toSet()) }
+                    settings.appRuleSnapshot.appGroups.forEach { add(it.name to it.selectedPackages.toSet()) }
                     settings.manualFocusGroups.forEach { add(it.groupName to it.packages) }
                     settings.grayscaleGroups.forEach { add(it.groupName to it.packages) }
                 }
@@ -149,6 +153,7 @@ class SelectAppsActivity : AppCompatActivity() {
                             val packages = allGroups.getOrNull(menuItem.itemId - 2000)?.second
                             if (packages != null) {
                                 selectedAppList.addAll(packages)
+                                selectedAppList.removeAll(ignoredApps)
                                 val slist = sortSelectedItemsToTop(appItemList)
                                 (binding.appList.adapter as ApplicationAdapter).updateData(slist)
                                 updateSelectAllButton()
@@ -162,6 +167,7 @@ class SelectAppsActivity : AppCompatActivity() {
                                     selectedAppList.add(item.packageName)
                                 }
                             }
+                            selectedAppList.removeAll(ignoredApps)
                             val slist = sortSelectedItemsToTop(appItemList)
                             (binding.appList.adapter as ApplicationAdapter).updateData(slist)
                             updateSelectAllButton()
@@ -253,6 +259,7 @@ class SelectAppsActivity : AppCompatActivity() {
         }
 
         binding.confirmSelection.setOnClickListener {
+            selectedAppList.removeAll(ignoredApps)
             val selectedAppsArrayList = ArrayList(selectedAppList)
             val resultIntent = intent.apply {
                 putStringArrayListExtra("SELECTED_APPS", selectedAppsArrayList)

@@ -1368,6 +1368,10 @@
     <string name="app_rules_group_summary">%1$s\n%2$d apps</string>
     <string name="app_rules_rule_summary">%1$s\n%2$s · %3$d minutes</string>
     <string name="app_rules_missing_group">Missing group</string>
+    <string name="app_rules_configuration_error">Some app rules need attention before they can run</string>
+    <string name="app_rules_all_apps">All launchable apps</string>
+    <string name="app_rules_all_apps_and_groups">All launchable apps and %1$s</string>
+    <string name="app_rules_empty_scope">No apps selected</string>
     <string name="app_rules_group_name_hint">Group name</string>
     <string name="app_rules_select_apps">Select apps</string>
     <string name="app_rules_select_apps_count">Select apps (%1$d)</string>
@@ -1376,6 +1380,10 @@
     <string name="app_rules_enter_group">Enter a name and choose an app</string>
     <string name="app_rules_save_failed">Could not save app group</string>
     <string name="app_rules_remove_group_first">Remove this group from its rules first</string>
+    <string name="app_rules_group_delete_referenced_title">This group is used by app rules</string>
+    <string name="app_rules_group_delete_referenced_message">%1$d app rules use this group as a target. Choose what to do.</string>
+    <string name="app_rules_remove_group_references">Remove it from those rules</string>
+    <string name="app_rules_delete_dependent_rules">Delete those rules</string>
     <string name="app_rules_rule_name_hint">Rule name</string>
     <string name="app_rules_allowed_minutes_hint">Allowed minutes</string>
     <string name="app_rules_active">Rule active</string>
@@ -1390,6 +1398,11 @@
     <string name="app_rules_thursday">Thursday</string>
     <string name="app_rules_friday">Friday</string>
     <string name="app_rules_saturday">Saturday</string>
+    <string name="app_rules_include_all_apps">Include all launchable apps</string>
+    <string name="app_rules_include_groups">Include app groups</string>
+    <string name="app_rules_exclude_groups">Exclude app groups</string>
+    <string name="app_rules_add_time_range">Add time range</string>
+    <string name="remove">Remove</string>
     <string name="change_delay_field_auto_dnd">Auto DND</string>
     <string name="change_delay_field_reel_blocker">Reel blocker</string>
     <string name="change_delay_field_keyword_blocker">Keyword blocker</string>

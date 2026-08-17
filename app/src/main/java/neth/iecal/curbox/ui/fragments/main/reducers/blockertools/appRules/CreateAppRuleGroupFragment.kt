@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
@@ -97,12 +98,35 @@ class CreateAppRuleGroupFragment : Fragment() {
         val group = editingGroup ?: return
         viewLifecycleOwner.lifecycleScope.launch {
             val current = dataStore.settingsForEditing.first().appRuleSnapshot
-            if (current.appRules.any { it.appGroupId == group.id }) {
-                Toast.makeText(requireContext(), R.string.app_rules_remove_group_first, Toast.LENGTH_SHORT).show()
+            val references = current.targetRuleIdsReferencing(group.id)
+            if (references.isEmpty()) {
+                dataStore.updateAppRuleSnapshot(
+                    current.copy(appGroups = current.appGroups.filterNot { it.id == group.id })
+                )
+                requireActivity().finish()
                 return@launch
             }
-            dataStore.updateAppRuleSnapshot(current.copy(appGroups = current.appGroups.filterNot { it.id == group.id }))
-            requireActivity().finish()
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.app_rules_group_delete_referenced_title)
+                .setMessage(getString(R.string.app_rules_group_delete_referenced_message, references.size))
+                .setItems(
+                    arrayOf(
+                        getString(R.string.app_rules_remove_group_references),
+                        getString(R.string.app_rules_delete_dependent_rules)
+                    )
+                ) { _, which ->
+                    viewLifecycleOwner.lifecycleScope.launch deleteGroup@{
+                        val latest = dataStore.settingsForEditing.first().appRuleSnapshot
+                        val updated = latest.deleteTargetGroup(
+                            group.id,
+                            removeReferences = which == 0,
+                            deleteDependentRules = which == 1
+                        ) ?: return@deleteGroup
+                        if (dataStore.updateAppRuleSnapshot(updated)) requireActivity().finish()
+                    }
+                }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
         }
     }
 

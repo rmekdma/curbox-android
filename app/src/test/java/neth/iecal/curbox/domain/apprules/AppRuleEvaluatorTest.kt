@@ -3,6 +3,7 @@ package neth.iecal.curbox.domain.apprules
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.ForegroundSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -211,6 +212,88 @@ class AppRuleEvaluatorTest {
 
         assertFalse(result.isAllowed)
         assertEquals(2 * 60_000L, result.evaluations.single().usedMillis)
+    }
+
+    @Test
+    fun compositeScopeAppliesAllAppsButExcludesAnIncludedGroup() {
+        val excluded = AppRuleAppGroup.create("Excluded", listOf("com.example.notes"))
+        val composite = rule(allowedMinutes = 0).copy(
+            appGroupId = "",
+            scope = AppRuleScope(
+                includeAllApps = true,
+                includedGroupIds = setOf(group.id),
+                excludedGroupIds = setOf(excluded.id)
+            )
+        )
+        val snapshot = AppRuleSnapshot(
+            listOf(group, excluded),
+            listOf(composite)
+        )
+
+        val included = AppRuleEvaluator.evaluate(
+            snapshot,
+            "com.example.reader",
+            "2026-08-17",
+            emptyList(),
+            now,
+            zone,
+            availablePackages = setOf("com.example.reader", "com.example.notes", "com.example.future")
+        )
+        val excludedResult = AppRuleEvaluator.evaluate(
+            snapshot,
+            "com.example.notes",
+            "2026-08-17",
+            emptyList(),
+            now,
+            zone,
+            availablePackages = setOf("com.example.reader", "com.example.notes", "com.example.future")
+        )
+
+        assertFalse(included.isAllowed)
+        assertTrue(excludedResult.isAllowed)
+        assertTrue(excludedResult.evaluations.isEmpty())
+    }
+
+    @Test
+    fun essentialPackagesAreRemovedEvenWhenAllAppsIsTheOnlyInclude() {
+        val allAppsRule = rule(allowedMinutes = 0).copy(
+            appGroupId = "",
+            scope = AppRuleScope(includeAllApps = true)
+        )
+        val result = AppRuleEvaluator.evaluate(
+            AppRuleSnapshot(listOf(group), listOf(allAppsRule)),
+            "com.android.systemui",
+            "2026-08-17",
+            emptyList(),
+            now,
+            zone,
+            availablePackages = setOf("com.android.systemui", "com.example.reader"),
+            essentialExcludedPackages = setOf("com.android.systemui")
+        )
+
+        assertTrue(result.isAllowed)
+        assertTrue(result.evaluations.isEmpty())
+    }
+
+    @Test
+    fun touchingRangesShareOneAllowanceAndDoNotDoubleChargeTheirBoundary() {
+        val rule = rule(allowedMinutes = 90).copy(
+            timeRanges = listOf(
+                neth.iecal.curbox.data.models.AppRuleTimeRange(9 * 60, 10 * 60),
+                neth.iecal.curbox.data.models.AppRuleTimeRange(10 * 60, 11 * 60)
+            )
+        )
+        val session = ForegroundSession(
+            useDayId = "2026-08-17",
+            packageName = "com.example.reader",
+            startedAtMs = Instant.parse("2026-08-17T09:00:00Z").toEpochMilli(),
+            endedAtMs = Instant.parse("2026-08-17T10:30:00Z").toEpochMilli()
+        )
+
+        val result = evaluate(rule, sessions = listOf(session))
+
+        assertEquals(90 * 60_000L, result.evaluations.single().usedMillis)
+        assertFalse(result.isAllowed)
     }
 
     private fun evaluate(

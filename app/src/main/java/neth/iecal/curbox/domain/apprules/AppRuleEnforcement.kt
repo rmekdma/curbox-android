@@ -26,7 +26,9 @@ class AppRuleEnforcement(
         useDayId: String,
         nowMs: Long,
         calculator: UseDayCalculator = useDayCalculator,
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet()
     ): AppRulesEvaluation = AppRuleEvaluator.evaluate(
         snapshot = snapshot,
         packageName = packageName,
@@ -35,7 +37,9 @@ class AppRuleEnforcement(
         nowMs = nowMs,
         zone = zone,
         useDayCalculator = calculator,
-        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+        availablePackages = availablePackages,
+        essentialExcludedPackages = essentialExcludedPackages
     )
 
     /**
@@ -48,9 +52,20 @@ class AppRuleEnforcement(
         useDayId: String,
         nowMs: Long,
         calculator: UseDayCalculator = useDayCalculator,
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet()
     ): AppRulesEvaluation = try {
-        check(snapshot, packageName, useDayId, nowMs, calculator, useDayGenerationStartedAtMs)
+        check(
+            snapshot,
+            packageName,
+            useDayId,
+            nowMs,
+            calculator,
+            useDayGenerationStartedAtMs,
+            availablePackages,
+            essentialExcludedPackages
+        )
     } catch (error: CancellationException) {
         throw error
     } catch (_: Exception) {

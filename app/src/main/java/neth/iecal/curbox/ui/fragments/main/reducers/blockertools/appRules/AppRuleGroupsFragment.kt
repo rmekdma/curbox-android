@@ -55,7 +55,12 @@ class AppRuleGroupsFragment : Fragment() {
     private fun render(snapshot: AppRuleSnapshot) {
         binding.groupsContainer.removeAllViews()
         binding.rulesContainer.removeAllViews()
-        binding.addRuleButton.isEnabled = snapshot.appGroups.isNotEmpty()
+        val errors = snapshot.validate()
+        binding.configurationStatus.visibility = if (errors.isEmpty()) View.GONE else View.VISIBLE
+        binding.configurationStatus.text = if (errors.isEmpty()) "" else {
+            getString(R.string.app_rules_configuration_error)
+        }
+        binding.addRuleButton.isEnabled = errors.isEmpty()
         snapshot.appGroups.forEach(::addGroup)
         snapshot.appRules.forEach { rule -> addRule(rule, snapshot) }
     }
@@ -78,8 +83,17 @@ class AppRuleGroupsFragment : Fragment() {
     }
 
     private fun addRule(rule: AppRule, snapshot: AppRuleSnapshot) {
-        val groupName = snapshot.appGroups.find { it.id == rule.appGroupId }?.name
-            ?: getString(R.string.app_rules_missing_group)
+        val scope = rule.effectiveScope()
+        val groupNames = scope.includedGroupIds.mapNotNull { id ->
+            snapshot.appGroups.find { it.id == id }?.name
+        }
+        val groupName = when {
+            scope.includeAllApps && groupNames.isNotEmpty() ->
+                getString(R.string.app_rules_all_apps_and_groups, groupNames.joinToString())
+            scope.includeAllApps -> getString(R.string.app_rules_all_apps)
+            groupNames.isNotEmpty() -> groupNames.joinToString()
+            else -> getString(R.string.app_rules_empty_scope)
+        }
         binding.rulesContainer.addView(MaterialCardView(requireContext()).apply {
             setContentPadding(16.dp(), 12.dp(), 16.dp(), 12.dp())
             addView(TextView(context).apply {
