@@ -173,6 +173,30 @@ class AppRuleContributorTest {
         assertEquals(12 * MINUTE, result.evaluations.single().allowanceMillis)
     }
 
+    @Test
+    fun snapshotRuleEvaluationExposesTheCurrentUseDayBreakdownForCards() {
+        val rule = rule(allowedMinutes = 10).copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 5,
+            earnedAllowanceEnabled = true
+        )
+        val evaluation = AppRuleEvaluator.evaluateRuleForSnapshot(
+            snapshot = AppRuleSnapshot(listOf(target, contributor), listOf(rule)),
+            rule = rule,
+            useDayId = USE_DAY,
+            sessions = listOf(sourceSession(8), session("com.target", 3)),
+            nowMs = now,
+            zone = zone
+        )
+
+        assertEquals(8 * MINUTE, evaluation.contributorUsageMillis)
+        assertEquals(5 * MINUTE, evaluation.conditionRequiredMillis)
+        assertEquals(8 * MINUTE, evaluation.earnedAllowanceMillis)
+        assertEquals(10 * MINUTE, evaluation.directAllowanceMillis)
+        assertEquals(15 * MINUTE, evaluation.remainingMillis)
+    }
+
     private fun evaluate(
         rule: AppRule,
         sessions: List<ForegroundSession>,

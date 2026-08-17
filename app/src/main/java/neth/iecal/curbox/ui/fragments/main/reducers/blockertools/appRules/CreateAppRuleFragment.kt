@@ -126,6 +126,15 @@ class CreateAppRuleFragment : Fragment() {
         scope.includedGroupIds.forEach { includedChecks[it]?.isChecked = true }
         scope.excludedGroupIds.forEach { excludedChecks[it]?.isChecked = true }
         rule.effectiveContributorGroupIds().forEach { contributorChecks[it]?.isChecked = true }
+        missingContributorGroupIdsForEditor(rule, groups.map { it.id }.toSet()).forEach { id ->
+            val missing = MaterialCheckBox(requireContext()).apply {
+                text = getString(R.string.app_rules_missing_contributor_item, id)
+                isChecked = true
+                tag = id
+            }
+            contributorChecks[id] = missing
+            binding.contributorGroupsContainer.addView(missing)
+        }
 
         val ranges = rule.effectiveTimeRanges()
         clearTimeRanges()
@@ -225,14 +234,9 @@ class CreateAppRuleFragment : Fragment() {
             includedGroupIds = includedChecks.filterValues { it.isChecked }.keys,
             excludedGroupIds = excludedChecks.filterValues { it.isChecked }.keys
         )
-        val missingContributorIds = editingRule
-            ?.effectiveContributorGroupIds()
-            .orEmpty()
-            .filter { id -> groups.none { it.id == id } }
-        val contributorGroupIds = contributorChecks
-            .filterValues { it.isChecked }
-            .keys
-            .toSet() + missingContributorIds
+        val contributorGroupIds = contributorGroupIdsFromEditorChecks(
+            contributorChecks.mapValues { (_, check) -> check.isChecked }
+        )
         val usageConditionEnabled = binding.usageConditionSwitch.isChecked
         val earnedAllowanceEnabled = binding.earnedAllowanceSwitch.isChecked
         val firstRange = ranges.first()
@@ -287,8 +291,20 @@ class CreateAppRuleFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        includedChecks.clear()
+        excludedChecks.clear()
+        contributorChecks.clear()
         super.onDestroyView()
         _binding = null
         rangeEditors.clear()
     }
 }
+
+internal fun missingContributorGroupIdsForEditor(
+    rule: AppRule,
+    availableGroupIds: Set<String>
+): Set<String> = rule.effectiveContributorGroupIds() - availableGroupIds
+
+internal fun contributorGroupIdsFromEditorChecks(
+    checks: Map<String, Boolean>
+): Set<String> = checks.filterValues { it }.keys

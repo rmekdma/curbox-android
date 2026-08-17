@@ -12,25 +12,48 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.card.MaterialCardView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
+import neth.iecal.curbox.data.db.AppDatabase
+import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.databinding.FragmentAppRuleGroupsBinding
+import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
+import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
+import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.ui.activity.FragmentActivity
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
+import java.time.ZoneId
 
 /** Entry point for the first unified app-rule vertical slice. */
 class AppRuleGroupsFragment : Fragment() {
     companion object {
         const val FRAGMENT_ID = "app_rule_groups"
+        private const val MILLIS_PER_MINUTE = 60_000L
     }
 
     private var _binding: FragmentAppRuleGroupsBinding? = null
     private val binding get() = _binding!!
     private val dataStore by lazy { DataStoreManager(requireContext().applicationContext) }
+    private val sessionRepository by lazy {
+        RoomCurrentUseDaySessionRepository(
+            AppDatabase.getInstance(requireContext().applicationContext).foregroundSessionDao()
+        )
+    }
+    private val packageScopeReader by lazy {
+        AppRulePackageScopeReader.fromContext(requireContext().applicationContext)
+    }
+    private var latestSettings: Settings? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -47,12 +70,65 @@ class AppRuleGroupsFragment : Fragment() {
         binding.addRuleButton.setOnClickListener { open(CreateAppRuleFragment.FRAGMENT_ID) }
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                dataStore.settingsForEditing.collectLatest { render(it.appRuleSnapshot) }
+                launch {
+                    dataStore.settingsForEditing.collectLatest { settings ->
+                        latestSettings = settings
+                        refresh(settings)
+                    }
+                }
+                launch {
+                    while (isActive) {
+                        latestSettings?.let { refresh(it) }
+                        delay(5_000L)
+                    }
+                }
             }
         }
     }
 
-    private fun render(snapshot: AppRuleSnapshot) {
+    private suspend fun refresh(settings: Settings) {
+        val usage = try {
+            withContext(Dispatchers.IO) {
+                val now = System.currentTimeMillis()
+                val zone = ZoneId.systemDefault()
+                val calculator = ConfigurableUseDayCalculator(zone, settings.useDayResetTime)
+                val useDayId = calculator.idAt(now)
+                val sessions = sessionRepository.sessionsForUseDay(
+                    useDayId,
+                    settings.useDayGenerationStartedAtMs
+                )
+                val availablePackages = packageScopeReader.readLaunchablePackages()
+                val essentialPackages = packageScopeReader.readEssentialPackages()
+                settings.appRuleSnapshot.appRules.associate { rule ->
+                    rule.id to AppRuleEvaluator.evaluateRuleForSnapshot(
+                        snapshot = settings.appRuleSnapshot,
+                        rule = rule,
+                        useDayId = useDayId,
+                        sessions = sessions,
+                        nowMs = now,
+                        zone = zone,
+                        useDayCalculator = calculator,
+                        useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
+                        availablePackages = availablePackages,
+                        essentialExcludedPackages = essentialPackages
+                    )
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        if (isAdded) {
+            render(settings.appRuleSnapshot, usage, usage != null)
+        }
+    }
+
+    private fun render(
+        snapshot: AppRuleSnapshot,
+        evaluations: Map<String, AppRuleEvaluation>?,
+        usageAvailable: Boolean
+    ) {
         binding.groupsContainer.removeAllViews()
         binding.rulesContainer.removeAllViews()
         val errors = snapshot.validate()
@@ -66,7 +142,9 @@ class AppRuleGroupsFragment : Fragment() {
         }
         binding.addRuleButton.isEnabled = errors.isEmpty()
         snapshot.appGroups.forEach(::addGroup)
-        snapshot.appRules.forEach { rule -> addRule(rule, snapshot) }
+        snapshot.appRules.forEach { rule ->
+            addRule(rule, snapshot, evaluations?.get(rule.id), usageAvailable)
+        }
     }
 
     private fun addGroup(group: AppRuleAppGroup) {
@@ -86,7 +164,12 @@ class AppRuleGroupsFragment : Fragment() {
         })
     }
 
-    private fun addRule(rule: AppRule, snapshot: AppRuleSnapshot) {
+    private fun addRule(
+        rule: AppRule,
+        snapshot: AppRuleSnapshot,
+        evaluation: AppRuleEvaluation?,
+        usageAvailable: Boolean
+    ) {
         val scope = rule.effectiveScope()
         val groupNames = scope.includedGroupIds.mapNotNull { id ->
             snapshot.appGroups.find { it.id == id }?.name
@@ -109,8 +192,10 @@ class AppRuleGroupsFragment : Fragment() {
                     rule.allowedMinutes
                 )
             )
-            append("\n")
-            append(getString(R.string.app_rules_direct_summary, rule.allowedMinutes))
+            if (!usageAvailable || evaluation == null) {
+                append("\n")
+                append(getString(R.string.app_rules_direct_summary, rule.allowedMinutes))
+            }
             append("\n")
             append(
                 getString(
@@ -147,6 +232,43 @@ class AppRuleGroupsFragment : Fragment() {
             if (missingContributorIds.isNotEmpty()) {
                 append("\n")
                 append(getString(R.string.app_rules_missing_contributor))
+            }
+            append("\n")
+            if (!usageAvailable || evaluation == null) {
+                append(getString(R.string.app_rules_current_usage_unavailable))
+            } else {
+                if (evaluation.conditionEnabled) {
+                    append(
+                        getString(
+                            R.string.app_rules_condition_progress_summary,
+                            evaluation.contributorUsageMillis.toMinutesForDisplay(),
+                            evaluation.conditionRequiredMillis.toMinutesForDisplay()
+                        )
+                    )
+                } else {
+                    append(getString(R.string.app_rules_condition_off_summary))
+                }
+                append("\n")
+                append(
+                    getString(
+                        R.string.app_rules_earned_actual_summary,
+                        evaluation.earnedAllowanceMillis.toMinutesForDisplay()
+                    )
+                )
+                append("\n")
+                append(
+                    getString(
+                        R.string.app_rules_direct_summary,
+                        evaluation.directAllowanceMillis.toMinutesForDisplay()
+                    )
+                )
+                append("\n")
+                append(
+                    getString(
+                        R.string.app_rules_remaining_summary,
+                        evaluation.remainingMillis.coerceAtLeast(0L).toMinutesForDisplay()
+                    )
+                )
             }
         }
         binding.rulesContainer.addView(MaterialCardView(requireContext()).apply {
@@ -188,4 +310,6 @@ class AppRuleGroupsFragment : Fragment() {
     }
 
     private fun Int.dp(): Int = (this * resources.displayMetrics.density).toInt()
+
+    private fun Long.toMinutesForDisplay(): Long = this / MILLIS_PER_MINUTE
 }

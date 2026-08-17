@@ -1408,11 +1408,17 @@
     <string name="app_rules_usage_condition_minutes_hint">Condition minutes</string>
     <string name="app_rules_earned_allowance">Add earned allowance</string>
     <string name="app_rules_missing_contributor">Missing contributor app group. Fix this rule.</string>
+    <string name="app_rules_missing_contributor_item">Missing contributor group: %1$s. Uncheck to remove it.</string>
     <string name="app_rules_contributor_summary">Contributors: %1$s</string>
     <string name="app_rules_contributor_none">No contributor app groups</string>
     <string name="app_rules_condition_summary">Condition: %1$d minutes</string>
+    <string name="app_rules_condition_progress_summary">Condition progress: %1$d of %2$d minutes</string>
+    <string name="app_rules_condition_off_summary">Condition: Off</string>
     <string name="app_rules_earning_summary">Earned allowance: %1$s</string>
+    <string name="app_rules_earned_actual_summary">Earned now: %1$d minutes</string>
     <string name="app_rules_direct_summary">Direct allowance: %1$d minutes</string>
+    <string name="app_rules_remaining_summary">Final remaining: %1$d minutes</string>
+    <string name="app_rules_current_usage_unavailable">Current use day usage unavailable</string>
     <string name="app_rules_on">On</string>
     <string name="app_rules_off">Off</string>
     <string name="app_rules_add_time_range">Add time range</string>

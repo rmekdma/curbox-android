@@ -157,28 +157,6 @@ data class AppRule(
         .map(String::trim)
         .filter(String::isNotEmpty)
         .toSet()
-
-    /** Compatibility aliases keep the domain vocabulary readable at call sites. */
-    val prerequisiteEnabled: Boolean
-        get() = usageConditionEnabled
-
-    val prerequisiteMinutes: Long
-        get() = usageConditionMinutes
-
-    val earningEnabled: Boolean
-        get() = earnedAllowanceEnabled
-
-    val contributorAppGroupIds: Set<String>
-        get() = contributorGroupIds
-
-    val isUsageConditionEnabled: Boolean
-        get() = usageConditionEnabled
-
-    val requiredContributorMinutes: Long
-        get() = usageConditionMinutes
-
-    val isEarnedAllowanceEnabled: Boolean
-        get() = earnedAllowanceEnabled
 }
 
 /**

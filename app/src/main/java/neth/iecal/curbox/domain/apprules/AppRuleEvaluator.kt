@@ -24,19 +24,7 @@ data class AppRuleEvaluation(
     val isConditionMet: Boolean = true,
     val directAllowanceMillis: Long = 0L,
     val earnedAllowanceMillis: Long = 0L
-) {
-    val conditionProgressMillis: Long
-        get() = contributorUsageMillis
-
-    val finalAllowanceMillis: Long
-        get() = allowanceMillis
-
-    val earnedMillis: Long
-        get() = earnedAllowanceMillis
-
-    val isConditionEnabled: Boolean
-        get() = conditionEnabled
-}
+)
 
 data class AppRulesEvaluation(
     val isAllowed: Boolean,
@@ -116,6 +104,40 @@ object AppRuleEvaluator {
             isAllowed = evaluations.all { it.isAllowed },
             denyingRules = evaluations.filterNot { it.isAllowed },
             evaluations = evaluations
+        )
+    }
+
+    /** Evaluates one persisted rule for display or other callers that need its full breakdown. */
+    fun evaluateRuleForSnapshot(
+        snapshot: AppRuleSnapshot,
+        rule: AppRule,
+        useDayId: String,
+        sessions: Iterable<ForegroundSession>,
+        nowMs: Long,
+        zone: ZoneId = ZoneId.systemDefault(),
+        useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
+        useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet()
+    ): AppRuleEvaluation {
+        val sessionList = sessions.toList()
+        val targetPackages = rule.effectiveScope().resolve(
+            groups = snapshot.appGroups,
+            launchablePackages = availablePackages,
+            essentialExcludedPackages = essentialExcludedPackages
+        )
+        val contributorResolution = resolveContributors(snapshot, rule)
+        return evaluateRule(
+            rule = rule,
+            targetPackages = targetPackages,
+            useDayId = useDayId,
+            sessions = sessionList,
+            nowMs = nowMs,
+            zone = zone,
+            useDayCalculator = useDayCalculator,
+            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+            contributorPackages = contributorResolution.packages,
+            missingContributorGroupIds = contributorResolution.missingGroupIds
         )
     }
 
@@ -211,23 +233,9 @@ object AppRuleEvaluator {
             }
             .groupBy { it.packageName }
         val usedMillis = intervalsByPackage.values.sumOf { intervals ->
-            val merged = intervals.map { AppRuleInterval(it.start, it.end) }
-                .sortedBy { it.startMs }
-                .fold(mutableListOf<AppRuleInterval>()) { result, interval ->
-                    val previous = result.lastOrNull()
-                    if (previous != null && interval.startMs <= previous.endMs) {
-                        result[result.lastIndex] = AppRuleInterval(
-                            previous.startMs,
-                            maxOf(previous.endMs, interval.endMs)
-                        )
-                    } else {
-                        result += interval
-                    }
-                    result
-                }
-            merged.sumOf { interval ->
+            mergeIntervals(intervals).sumOf { interval ->
                 usageWindows.sumOf { window ->
-                    overlapMillis(interval.startMs, interval.endMs, window.startMs, window.endMs)
+                    overlapMillis(interval.start, interval.end, window.startMs, window.endMs)
                 }
             }
         }

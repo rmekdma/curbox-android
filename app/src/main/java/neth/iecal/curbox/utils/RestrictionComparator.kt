@@ -38,6 +38,11 @@ object RestrictionComparator {
 
     private val gson = Gson()
 
+    private data class ContributorPackageResolution(
+        val packages: Set<String>,
+        val hasMissingGroup: Boolean
+    )
+
     fun isSameOrStricter(field: GatedSettingsField, current: Settings, proposed: Settings): Boolean {
         return try {
             when (field) {
@@ -172,24 +177,34 @@ object RestrictionComparator {
         val newDependsOnContributors = new.usageConditionEnabled || new.earnedAllowanceEnabled
         if (!oldDependsOnContributors && !newDependsOnContributors) return true
 
-        val oldPackages = resolveContributorPackages(old, oldGroups) ?: return false
-        val newPackages = resolveContributorPackages(new, newGroups) ?: return false
-        return newPackages.all { it in oldPackages }
+        val oldResolution = resolveContributorPackages(old, oldGroups)
+        val newResolution = resolveContributorPackages(new, newGroups)
+        // A newly missing contributor cannot unlock or earn time, so preserving its stale ID is
+        // an immediate strengthening. Repairing an old missing reference restores capability and
+        // must wait behind the settings delay.
+        if (newResolution.hasMissingGroup) return true
+        if (oldResolution.hasMissingGroup) return false
+        return newResolution.packages.all { it in oldResolution.packages }
     }
 
     private fun resolveContributorPackages(
         rule: AppRule,
         groups: List<AppRuleAppGroup>
-    ): Set<String>? {
+    ): ContributorPackageResolution {
         val byId = groups.associateBy { it.id.trim() }
         val packages = linkedSetOf<String>()
+        var hasMissingGroup = false
         rule.effectiveContributorGroupIds().forEach { id ->
-            val group = byId[id] ?: return null
-            group.selectedPackages.map(String::trim)
-                .filter(String::isNotEmpty)
-                .forEach(packages::add)
+            val group = byId[id]
+            if (group == null) {
+                hasMissingGroup = true
+            } else {
+                group.selectedPackages.map(String::trim)
+                    .filter(String::isNotEmpty)
+                    .forEach(packages::add)
+            }
         }
-        return packages
+        return ContributorPackageResolution(packages, hasMissingGroup)
     }
 
     private fun appGroup(o: AppGroup, n: AppGroup): Boolean {

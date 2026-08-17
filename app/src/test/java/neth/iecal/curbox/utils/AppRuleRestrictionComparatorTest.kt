@@ -179,4 +179,38 @@ class AppRuleRestrictionComparatorTest {
 
         assertTrue(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
     }
+
+    @Test
+    fun deletingReferencedContributorIsImmediatelyStricterEvenWhenTheIdIsRetained() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val configured = rule.copy(
+            contributorGroupIds = setOf(contributor.id),
+            earnedAllowanceEnabled = true
+        )
+        val old = Settings(
+            appRuleSnapshot = AppRuleSnapshot(listOf(group, contributor), listOf(configured))
+        )
+        val proposed = old.copy(
+            appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(configured))
+        )
+
+        assertTrue(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun repairingAnOldMissingContributorIsDelayedBecauseItRestoresAllowance() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val configured = rule.copy(
+            contributorGroupIds = setOf(contributor.id),
+            earnedAllowanceEnabled = true
+        )
+        val old = Settings(
+            appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(configured))
+        )
+        val proposed = old.copy(
+            appRuleSnapshot = AppRuleSnapshot(listOf(group, contributor), listOf(configured))
+        )
+
+        assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
 }

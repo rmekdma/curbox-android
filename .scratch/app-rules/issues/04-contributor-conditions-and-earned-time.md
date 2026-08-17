@@ -46,14 +46,20 @@
   earning switches, direct allowance and missing-reference repair state. `WarningActivity` shows
   a runtime breakdown of condition progress, required minutes, earned minutes, direct minutes and
   final remaining minutes.
-- JBR21 focused run (`AppRuleContributorTest`, `AppRuleSnapshotIntegrityTest`,
-  `AppRuleEnforcementTest`, `VisibleApplicationSessionReconcilerTest`,
-  `AppRuleRestrictionComparatorTest`): 32 tests passed, 0 failed, 0 errors and 0 skipped.
-  Full `testFullDebugUnitTest`: 176 tests, 175 passed and 1 failed. The only failure is the known
+- The review fix preserves stale contributor IDs while making newly missing references an
+  immediately stricter comparison, adds an explicit missing-reference removal row, clears editor
+  checkbox maps with the view, consolidates evaluator interval merging, and removes computed
+  compatibility aliases without changing persisted Gson fields. Current-use-day card values are
+  evaluated from raw foreground sessions and displayed as separate condition, earned, direct and
+  final remaining values.
+- JBR21 focused review-fix run (`AppRuleRestrictionComparatorTest`,
+  `AppRuleContributorTest.snapshotRuleEvaluationExposesTheCurrentUseDayBreakdownForCards`,
+  `CreateAppRuleContributorEditorTest`): 13 tests passed, 0 failed, 0 errors and 0 skipped.
+  Full `testFullDebugUnitTest`: 180 tests, 179 passed and 1 failed. The only failure is the known
   fixed-base `ScriptLanguageTest.matchesRegexSupportsCommonFlags`; no ticket 04 test failed.
-- `assembleFullDebug`, `assemblePlaystoreDebug` and `assembleFdroidDebug` passed with
-  `C:\Users\DELL\.jdks\jbr-21.0.11`. `lintFullDebug` completed successfully and retains the
-  repository's existing translation and baseline warnings. `git diff --check` passes.
+- `assembleFullDebug`, `assemblePlaystoreDebug`, `assembleFdroidDebug` and `lintFullDebug` passed
+  with `C:\Users\DELL\.jdks\jbr-21.0.11`. Lint retains the repository's existing translation and
+  baseline warnings. `git diff --check` passes.
 - `adb devices` reported no attached device or emulator on 2026-08-18. The reproducible device
-  procedure and the pending end to end evidence are recorded in
-  `.scratch/app-rules/evidence/ticket-04-device-verification.md`.
+  procedure and evidence are recorded in `.scratch/app-rules/evidence/ticket-04-device-verification.md`;
+  the unexecuted device run is a confidence limitation, not an implementation blocker.

@@ -3,7 +3,8 @@
 This procedure is required for the representative contributor, service and warning-screen
 checks. The SDK command
 `C:\Users\DELL\AppData\Local\Android\Sdk\platform-tools\adb.exe devices` reported no
-attached device or emulator on 2026-08-18, so the run remains pending and these steps record the
+attached device or emulator on 2026-08-18. The device run is therefore unexecuted; this is a
+confidence limitation rather than an implementation blocker, and these steps record the
 reproducible procedure.
 
 ## Setup
