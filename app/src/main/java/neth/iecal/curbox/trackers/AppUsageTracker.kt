@@ -9,11 +9,15 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import neth.iecal.curbox.Constants
+import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.AppUsageDao
 import neth.iecal.curbox.data.db.AppUsageEntity
@@ -30,10 +34,11 @@ class AppUsageTracker {
 
     companion object {
         private const val HEARTBEAT_MS = 20_000L
-        private val IGNORED_PACKAGES = setOf("com.android.systemui")
+        private val IGNORED_PACKAGES = setOf(Constants.SYSTEM_UI_PACKAGE_NAME)
     }
 
     private lateinit var service: BaseBlockingService
+    private lateinit var crashLogger: CrashLogger
     private lateinit var dao: AppUsageDao
     private lateinit var sessionRepository: CurrentUseDaySessionRepository
 
@@ -57,25 +62,36 @@ class AppUsageTracker {
 
     fun setup(service: BaseBlockingService) {
         this.service = service
+        crashLogger = CrashLogger(service)
         this.ownPackage = service.packageName
         val database = AppDatabase.getInstance(service)
         this.dao = database.appUsageDao()
         this.sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
-        runCatching {
+        try {
             val now = System.currentTimeMillis()
             runBlocking(Dispatchers.IO) {
                 sessionRepository.finishOpenSessions(UseDay.idAt(now), now)
             }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
         }
         val powerManager = service.getSystemService(Context.POWER_SERVICE) as PowerManager
         screenOn = powerManager.isInteractive
         registerScreenReceiver()
         scope.launch {
-            service.dataStoreManager.settings.collect { settings ->
-                val enabled = settings.isAppUsageTrackingEnabled
-                trackingEnabled = enabled
-                enforcementLedgerRequired = settings.appRuleSnapshot.appRules.any { it.isActive }
-                if (!recordingEnabled) mainHandler.post { discardCurrentSession() }
+            try {
+                service.dataStoreManager.settings.collect { settings ->
+                    val enabled = settings.isAppUsageTrackingEnabled
+                    trackingEnabled = enabled
+                    enforcementLedgerRequired = settings.appRuleSnapshot.appRules.any { it.isActive }
+                    if (!recordingEnabled) mainHandler.post { discardCurrentSession() }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logNonFatal(error)
             }
         }
     }
@@ -87,7 +103,8 @@ class AppUsageTracker {
 
         val activePackage = try {
             service.rootInActiveWindow?.packageName?.toString()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            logNonFatal(error)
             null
         }
         val foreground = activePackage ?: event.packageName?.toString() ?: return
@@ -119,7 +136,10 @@ class AppUsageTracker {
             runBlocking(Dispatchers.IO) {
                 sessionRepository.startSession(currentUseDayId, packageName, sessionStartWall)
             }
-        } catch (_: Exception) {
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
             0L
         }
 
@@ -137,7 +157,10 @@ class AppUsageTracker {
                 runBlocking(Dispatchers.IO) {
                     sessionRepository.finishSession(sessionId, endedAt)
                 }
-            } catch (_: Exception) {
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logNonFatal(error)
             }
         }
         currentPackage = null
@@ -182,7 +205,13 @@ class AppUsageTracker {
         val segments = splitIntoHourlySegments(startWall, endWall)
         if (!trackingEnabled) return
         scope.launch {
-            segments.forEach { addUsage(it.date, packageName, it.hour, it.durationMs, it.endWall) }
+            try {
+                segments.forEach { addUsage(it.date, packageName, it.hour, it.durationMs, it.endWall) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logNonFatal(error)
+            }
         }
     }
 
@@ -192,34 +221,48 @@ class AppUsageTracker {
             runBlocking(Dispatchers.IO) {
                 sessionRepository.updateSessionEnd(currentSessionId, endWall)
             }
-        } catch (_: Exception) {
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
         }
     }
 
-    private fun startSession(packageName: String, startedAt: Long, useDayId: String): Long = try {
-        runBlocking(Dispatchers.IO) {
-            sessionRepository.startSession(useDayId, packageName, startedAt)
+    private fun startSession(packageName: String, startedAt: Long, useDayId: String): Long {
+        return try {
+            runBlocking(Dispatchers.IO) {
+                sessionRepository.startSession(useDayId, packageName, startedAt)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
+            0L
         }
-    } catch (_: Exception) {
-        0L
     }
 
     private fun recordLaunch(packageName: String, wall: Long) {
         val date = TimeTools.dayKey(LocalDate.now())
         scope.launch {
-            if (!trackingEnabled) return@launch
-            val existing = dao.get(date, packageName)
-            dao.upsert(
-                existing?.copy(
-                    launchCount = existing.launchCount + 1,
-                    lastUsed = maxOf(existing.lastUsed, wall)
-                ) ?: AppUsageEntity(
-                    date = date,
-                    packageName = packageName,
-                    launchCount = 1,
-                    lastUsed = wall
+            try {
+                if (!trackingEnabled) return@launch
+                val existing = dao.get(date, packageName)
+                dao.upsert(
+                    existing?.copy(
+                        launchCount = existing.launchCount + 1,
+                        lastUsed = maxOf(existing.lastUsed, wall)
+                    ) ?: AppUsageEntity(
+                        date = date,
+                        packageName = packageName,
+                        launchCount = 1,
+                        lastUsed = wall
+                    )
                 )
-            )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logNonFatal(error)
+            }
         }
     }
 
@@ -302,7 +345,8 @@ class AppUsageTracker {
         if (!recordingEnabled || !screenOn || currentPackage != null) return
         val active = try {
             service.rootInActiveWindow?.packageName?.toString()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            logNonFatal(error)
             null
         } ?: return
         if (active.isEmpty() || active == ownPackage || active in IGNORED_PACKAGES) return
@@ -322,11 +366,13 @@ class AppUsageTracker {
         stopHeartbeat()
         try {
             endCurrentSession()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            logNonFatal(error)
         }
         try {
             service.unregisterReceiver(screenReceiver)
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            logNonFatal(error)
         }
     }
 
@@ -341,4 +387,8 @@ class AppUsageTracker {
     }
 
     private fun serializeHourly(hourly: LongArray): String = hourly.joinToString(",")
+
+    private fun logNonFatal(error: Exception) {
+        if (::crashLogger.isInitialized) crashLogger.logNonFatalError(error)
+    }
 }

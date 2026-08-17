@@ -173,9 +173,6 @@ class DataStoreManager(private val context: Context) {
         return true
     }
 
-    suspend fun updateAppRules(snapshot: AppRuleSnapshot): Boolean =
-        updateAppRuleSnapshot(snapshot)
-
     suspend fun updateManualFocusGroups(newGroup: List<ManualFocusGroup>){
         settingsDataStore.updateData { it.copy(manualFocusGroups = newGroup) }
     }

@@ -13,7 +13,4 @@ interface CurrentUseDaySessionRepository {
     suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession>
 
     suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long)
-
-    suspend fun sessions(useDayId: String): List<ForegroundSession> =
-        sessionsForUseDay(useDayId)
 }

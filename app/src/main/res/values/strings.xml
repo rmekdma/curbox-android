@@ -1360,11 +1360,13 @@
     <string name="app_rules_subtitle">Reusable app groups with one daily allowance</string>
     <string name="app_rules_screen_title">App rules</string>
     <string name="app_rules_add_group">Add app group</string>
+    <string name="app_rules_edit_group">Edit app group</string>
     <string name="app_rules_add_rule">Add app rule</string>
+    <string name="app_rules_edit_rule">Edit app rule</string>
     <string name="app_rules_groups">App groups</string>
     <string name="app_rules_rules">Rules</string>
-    <string name="app_rules_group_apps">%1$d apps</string>
-    <string name="app_rules_rule_summary">%1$s · %2$d minutes</string>
+    <string name="app_rules_group_summary">%1$s\n%2$d apps</string>
+    <string name="app_rules_rule_summary">%1$s\n%2$s · %3$d minutes</string>
     <string name="app_rules_missing_group">Missing group</string>
     <string name="app_rules_group_name_hint">Group name</string>
     <string name="app_rules_select_apps">Select apps</string>

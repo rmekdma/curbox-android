@@ -11,5 +11,7 @@ class Constants {
         const val WARNING_SCREEN_MODE_APP_BLOCKER = 2
         const val WARNING_SCREEN_MODE_KEYWORD_BLOCKER = 3
 
+        const val SYSTEM_UI_PACKAGE_NAME = "com.android.systemui"
+
     }
 }

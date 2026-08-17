@@ -127,10 +127,6 @@ data class AppRuleSnapshot(
         get() = validate().isEmpty()
 }
 
-/** Name used by callers that prefer the longer domain wording. */
-typealias AppRuleConfiguration = AppRuleSnapshot
-typealias NeutralAppGroup = AppRuleAppGroup
-
 /** A persisted foreground session for one app in one current use day. */
 data class ForegroundSession(
     val id: Long = 0L,

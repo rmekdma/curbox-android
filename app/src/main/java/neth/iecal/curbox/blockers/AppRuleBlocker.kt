@@ -9,15 +9,17 @@ import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.cancel
 import neth.iecal.curbox.Constants
+import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
@@ -36,6 +38,7 @@ class AppRuleBlocker {
     }
 
     private lateinit var service: BaseBlockingService
+    private lateinit var crashLogger: CrashLogger
     private lateinit var sessionRepository: CurrentUseDaySessionRepository
     private lateinit var enforcement: AppRuleEnforcement
     private val snapshot = AtomicReference(AppRuleSnapshot())
@@ -46,21 +49,31 @@ class AppRuleBlocker {
 
     fun setup(service: BaseBlockingService) {
         this.service = service
+        crashLogger = CrashLogger(service)
         val database = AppDatabase.getInstance(service)
         sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
         enforcement = AppRuleEnforcement(sessionRepository)
         try {
             val initial = runBlocking(Dispatchers.IO) { service.dataStoreManager.settings.first().appRuleSnapshot }
             if (initial.isValid) snapshot.set(initial)
-        } catch (_: Exception) {
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
         }
         settingsJob?.cancel()
         settingsJob = scope.launch {
-            service.dataStoreManager.settings.collectLatest { settings ->
-                val candidate = settings.appRuleSnapshot
-                // A malformed value can only come from older/corrupted storage. Keep the last
-                // valid runtime snapshot rather than exposing a partial reference graph.
-                if (candidate.isValid) snapshot.set(candidate)
+            try {
+                service.dataStoreManager.settings.collectLatest { settings ->
+                    val candidate = settings.appRuleSnapshot
+                    // A malformed value can only come from older/corrupted storage. Keep the last
+                    // valid runtime snapshot rather than exposing a partial reference graph.
+                    if (candidate.isValid) snapshot.set(candidate)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logNonFatal(error)
             }
         }
     }
@@ -79,7 +92,7 @@ class AppRuleBlocker {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val packageName = event.packageName?.toString().orEmpty()
         if (packageName.isBlank() || packageName == service.packageName ||
-            packageName == "com.android.systemui"
+            packageName == Constants.SYSTEM_UI_PACKAGE_NAME
         ) return
 
         val currentSnapshot = snapshot.get()
@@ -95,9 +108,12 @@ class AppRuleBlocker {
                     nowMs = now
                 )
             }
-        } catch (_: Exception) {
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
             // A failed read must not terminate the accessibility service. Failing open here is
             // limited to a storage outage; a malformed persisted snapshot fails closed above.
+            logNonFatal(error)
             return
         }
 
@@ -124,9 +140,10 @@ class AppRuleBlocker {
             }
             try {
                 service.startActivity(intent)
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 // The service remains alive when Android rejects an activity start from the
                 // service process. The next accessibility event will retry the decision.
+                logNonFatal(error)
             }
         }, 100L)
     }
@@ -137,7 +154,8 @@ class AppRuleBlocker {
         scope.cancel()
         try {
             service.unregisterReceiver(refreshReceiver)
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            logNonFatal(error)
         }
     }
 
@@ -146,12 +164,15 @@ class AppRuleBlocker {
             if (intent?.action != INTENT_ACTION_REFRESH_APP_RULES) return
             // Settings flow is authoritative. This action exists for the same UI to service
             // refresh path as the legacy blocker and simply triggers a harmless re-read.
-            settingsJob?.cancel()
-            settingsJob = scope.launch {
-                runCatching {
+            scope.launch {
+                try {
                     service.dataStoreManager.settings.first().appRuleSnapshot
                         .takeIf { it.isValid }
                         ?.let(snapshot::set)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    logNonFatal(error)
                 }
             }
         }
@@ -161,9 +182,12 @@ class AppRuleBlocker {
         handler.removeCallbacksAndMessages(null)
         val delay = remainingMillis.coerceIn(1_000L, 20_000L)
         handler.postDelayed({
-            val currentPackage = runCatching {
+            val currentPackage = try {
                 service.rootInActiveWindow?.packageName?.toString()
-            }.getOrNull()
+            } catch (error: Exception) {
+                logNonFatal(error)
+                null
+            }
             if (currentPackage != null && currentPackage == packageName) {
                 val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
                 event.packageName = packageName
@@ -174,5 +198,9 @@ class AppRuleBlocker {
                 }
             }
         }, delay)
+    }
+
+    private fun logNonFatal(error: Exception) {
+        if (::crashLogger.isInitialized) crashLogger.logNonFatalError(error)
     }
 }

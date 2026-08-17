@@ -8,6 +8,7 @@ import neth.iecal.curbox.data.models.AppTimeConfig
 import neth.iecal.curbox.data.models.AppUsageConfig
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.domain.apprules.AppRuleSchedule
 import neth.iecal.curbox.data.models.AutoDndGroup
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.GrayscaleGroup
@@ -120,23 +121,7 @@ object RestrictionComparator {
     }
 
     private fun ruleCoverage(rule: AppRule): BooleanArray {
-        val coverage = BooleanArray(7 * 24 * 60)
-        rule.weekdays.filter { it in 0..6 }.forEach { day ->
-            val start = rule.startMinute.coerceIn(0, 1439)
-            val end = rule.endMinute.coerceIn(0, 1440)
-            if (start == end) {
-                for (minute in start until 1440) coverage[day * 1440 + minute] = true
-                val nextDay = (day + 1) % 7
-                for (minute in 0 until start) coverage[nextDay * 1440 + minute] = true
-            } else if (start < end) {
-                for (minute in start until end) coverage[day * 1440 + minute] = true
-            } else {
-                for (minute in start until 1440) coverage[day * 1440 + minute] = true
-                val nextDay = (day + 1) % 7
-                for (minute in 0 until end) coverage[nextDay * 1440 + minute] = true
-            }
-        }
-        return coverage
+        return AppRuleSchedule.weeklyCoverage(rule)
     }
 
     private fun appGroup(o: AppGroup, n: AppGroup): Boolean {

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:id="@+id/screen_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_rules_screen_title"
+            android:textSize="24sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/add_group_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/app_rules_add_group" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/add_rule_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/app_rules_add_rule" />
+
+        <TextView
+            android:id="@+id/groups_section_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/app_rules_groups"
+            android:textSize="16sp" />
+
+        <LinearLayout
+            android:id="@+id/groups_container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        <TextView
+            android:id="@+id/rules_section_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/app_rules_rules"
+            android:textSize="16sp" />
+
+        <LinearLayout
+            android:id="@+id/rules_container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </LinearLayout>
+</ScrollView>
