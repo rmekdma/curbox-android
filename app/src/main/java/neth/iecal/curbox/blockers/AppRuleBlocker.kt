@@ -24,6 +24,7 @@ import neth.iecal.curbox.R
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
+import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
@@ -58,6 +59,7 @@ class AppRuleBlocker {
     private var setupReady = false
     @Volatile private var resetTime = UseDayResetTime()
     @Volatile private var useDayGenerationStartedAtMs = 0L
+    @Volatile private var overrideState = neth.iecal.curbox.data.models.AppRuleOverrideState()
 
     fun setup(service: BaseBlockingService) {
         setupReady = false
@@ -72,6 +74,7 @@ class AppRuleBlocker {
             val initialSettings = runBlocking(Dispatchers.IO) { service.dataStoreManager.settings.first() }
             resetTime = safeResetTime(initialSettings.useDayResetHour, initialSettings.useDayResetMinute)
             useDayGenerationStartedAtMs = initialSettings.useDayGenerationStartedAtMs
+            overrideState = initialSettings.appRuleOverrideState
             val initial = initialSettings.appRuleSnapshot
             snapshot.accept(initial)
         } catch (error: CancellationException) {
@@ -86,6 +89,7 @@ class AppRuleBlocker {
                     val candidate = settings.appRuleSnapshot
                     resetTime = safeResetTime(settings.useDayResetHour, settings.useDayResetMinute)
                     useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
+                    overrideState = settings.appRuleOverrideState
                     // A malformed value can only come from older/corrupted storage. Keep the last
                     // valid runtime snapshot rather than exposing a partial reference graph.
                     snapshot.accept(candidate)
@@ -166,7 +170,8 @@ class AppRuleBlocker {
                     calculator = calculator,
                     useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
                     availablePackages = launchablePackages,
-                    essentialExcludedPackages = evaluationEssentialPackages
+                    essentialExcludedPackages = evaluationEssentialPackages,
+                    overrides = overrideState
                 )
             }
         } catch (error: CancellationException) {
@@ -182,27 +187,31 @@ class AppRuleBlocker {
             .filter { it.isActive && it.remainingMillis > 0L }
             .minOfOrNull { it.remainingMillis }
         if (nextRemaining != null) scheduleRecheck(packageName, nextRemaining)
-        val denyingRule = evaluation.denyingRules.firstOrNull() ?: return
+        if (evaluation.denyingRules.isEmpty()) return
         if (now - lastShownAt < 1_000L) return
         lastShownAt = now
-        showWarning(packageName, denyingRule)
+        showWarning(packageName, evaluation)
     }
 
-    private fun showWarning(packageName: String, evaluation: AppRuleEvaluation) {
+    private fun showWarning(packageName: String, evaluation: neth.iecal.curbox.domain.apprules.AppRulesEvaluation) {
         if (!service.isDelayOver(1_000)) return
         service.pressHome()
         handler.postDelayed({
             try {
+                val denialRows = evaluation.denyingRules.map { denial ->
+                    val rule = snapshot.snapshot().appRules.find { it.id == denial.ruleId }
+                    AppRuleGuardianDenial(
+                        ruleId = denial.ruleId,
+                        ruleName = rule?.name ?: denial.ruleId,
+                        reason = warningStatus(denial)
+                    )
+                }
                 val intent = Intent(service, WarningActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
                     putExtra("mode", Constants.WARNING_SCREEN_MODE_APP_BLOCKER)
-                    putExtra("result_id", evaluation.ruleId)
                     putExtra("launch_package", packageName)
-                    putExtra("app_rule_status", warningStatus(evaluation))
-                    putExtra(
-                        "warning_config",
-                        Gson().toJson(AppBlockerWarningScreenConfig())
-                    )
+                    putExtra("app_rule_guardian", true)
+                    putExtra("app_rule_denials_json", Gson().toJson(denialRows))
                 }
                 service.startActivity(intent)
             } catch (error: Exception) {
@@ -247,9 +256,10 @@ class AppRuleBlocker {
             scope.launch {
                 try {
                     refreshPackageScope()
-                    service.dataStoreManager.settings.first().appRuleSnapshot
-                        .takeIf { it.isValid }
-                        ?.let(snapshot::accept)
+                    service.dataStoreManager.settings.first().let { settings ->
+                        overrideState = settings.appRuleOverrideState
+                        settings.appRuleSnapshot.takeIf { it.isValid }?.let(snapshot::accept)
+                    }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {

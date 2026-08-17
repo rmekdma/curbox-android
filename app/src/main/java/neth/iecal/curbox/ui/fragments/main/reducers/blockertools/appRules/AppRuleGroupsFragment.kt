@@ -110,7 +110,8 @@ class AppRuleGroupsFragment : Fragment() {
                         useDayCalculator = calculator,
                         useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
                         availablePackages = availablePackages,
-                        essentialExcludedPackages = essentialPackages
+                        essentialExcludedPackages = essentialPackages,
+                        overrides = settings.appRuleOverrideState
                     )
                 }
             }
@@ -269,6 +270,20 @@ class AppRuleGroupsFragment : Fragment() {
                         evaluation.remainingMillis.coerceAtLeast(0L).toMinutesForDisplay()
                     )
                 )
+                if (evaluation.guardianAllowanceMillis > 0L) {
+                    append("\n")
+                    append(
+                        getString(
+                            R.string.app_rules_guardian_time_summary,
+                            evaluation.guardianRemainingMillis.coerceAtLeast(0L)
+                                .toMinutesForDisplay()
+                        )
+                    )
+                }
+                if (evaluation.isSkipped) {
+                    append("\n")
+                    append(getString(R.string.app_rules_guardian_skipped))
+                }
             }
         }
         binding.rulesContainer.addView(MaterialCardView(requireContext()).apply {

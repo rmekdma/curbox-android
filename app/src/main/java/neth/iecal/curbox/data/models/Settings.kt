@@ -34,7 +34,11 @@ data class Settings(
     val useDayResetHour: Int = UseDay.DEFAULT_RESET_HOUR,
     val useDayResetMinute: Int = UseDay.DEFAULT_RESET_MINUTE,
     /** Latest reset setting change. It prevents an in-place reset edit from reusing old rows. */
-    val useDayGenerationStartedAtMs: Long = 0L
+    val useDayGenerationStartedAtMs: Long = 0L,
+    /** Local guardian credential, independent from anti-uninstall protection. */
+    val guardianAuthConfig: GuardianAuthConfig = GuardianAuthConfig(),
+    /** Rule-scoped approvals; reset atomically by use-day id. */
+    val appRuleOverrideState: AppRuleOverrideState = AppRuleOverrideState()
 ) {
     /** Convenient scalar form for settings UIs and deterministic tests. */
     val useDayResetTimeMinutes: Int
@@ -42,4 +46,7 @@ data class Settings(
 
     val useDayResetTime: UseDayResetTime
         get() = UseDayResetTime(useDayResetHour, useDayResetMinute)
+
+    val guardianPasswordConfigured: Boolean
+        get() = guardianAuthConfig.isConfigured
 }

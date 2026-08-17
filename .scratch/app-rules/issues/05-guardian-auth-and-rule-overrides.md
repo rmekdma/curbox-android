@@ -4,7 +4,15 @@
 
 **Blocked by:** 03 — 복합 적용 범위와 시간 구간 완성; 04 — 사용 조건과 적립 허용량 완성.
 
-**Status:** ready-for-agent
+**Status:** review-pending
+
+**Verification evidence (JBR 21, 2026-08-18):**
+
+- Focused guardian, rule override, warning selection, session, and sync isolation tests passed (15 tests).
+- `testFullDebugUnitTest`: 195 tests completed; one fixed-base failure remains at `ScriptLanguageTest > matchesRegexSupportsCommonFlags`.
+- `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed.
+- `lintFullDebug` passed; the report contains existing baseline findings and no new Guardian issue.
+- No Android device or emulator was available. Device verification procedure: install the Full debug APK, set a guardian password, leave Curbox for another app and return to confirm reauthentication, trigger two simultaneous denying rules and confirm every denial is shown with one selectable approval, exercise both timed skip choices and additive time, then repeat on Play Store and F-Droid APKs while checking the Play Store manifest has no `AdminReceiver` or `NodePickerService`.
 
 - [ ] 보호자 비밀번호는 기존 제거 방지 비밀번호와 분리된 기기 로컬 자격 증명이다.
 - [ ] 비밀번호 검증 값은 임의 솔트와 느린 비밀번호 파생 함수로 저장되며 평문이나 재사용 가능한 원본 해시는 저장하지 않는다.

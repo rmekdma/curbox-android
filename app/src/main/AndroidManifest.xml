@@ -41,6 +41,12 @@
             android:theme="@style/Theme.Curbox.TransparentDialog" />
 
         <activity
+            android:name=".ui.activity.GuardianApprovalActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/Theme.Curbox.TransparentDialog" />
+
+        <activity
             android:name=".ui.activity.PendingChangeReviewActivity"
             android:excludeFromRecents="true"
             android:exported="false"

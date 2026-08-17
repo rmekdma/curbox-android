@@ -1,6 +1,7 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDayCalculator
 import kotlinx.coroutines.CancellationException
@@ -28,7 +29,8 @@ class AppRuleEnforcement(
         calculator: UseDayCalculator = useDayCalculator,
         useDayGenerationStartedAtMs: Long = 0L,
         availablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        essentialExcludedPackages: Set<String> = emptySet(),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRulesEvaluation = AppRuleEvaluator.evaluate(
         snapshot = snapshot,
         packageName = packageName,
@@ -39,7 +41,8 @@ class AppRuleEnforcement(
         useDayCalculator = calculator,
         useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
         availablePackages = availablePackages,
-        essentialExcludedPackages = essentialExcludedPackages
+        essentialExcludedPackages = essentialExcludedPackages,
+        overrides = overrides
     )
 
     /**
@@ -54,7 +57,8 @@ class AppRuleEnforcement(
         calculator: UseDayCalculator = useDayCalculator,
         useDayGenerationStartedAtMs: Long = 0L,
         availablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        essentialExcludedPackages: Set<String> = emptySet(),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRulesEvaluation = try {
         check(
             snapshot,
@@ -64,7 +68,8 @@ class AppRuleEnforcement(
             calculator,
             useDayGenerationStartedAtMs,
             availablePackages,
-            essentialExcludedPackages
+            essentialExcludedPackages,
+            overrides
         )
     } catch (error: CancellationException) {
         throw error

@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.map
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleOverrideState
+import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.KeywordBlocker
 import neth.iecal.curbox.data.models.ManualFocusGroup
@@ -173,6 +175,111 @@ class DataStoreManager(private val context: Context) {
         return true
     }
 
+    /** Stores only a salted, slow-derived verifier. Empty input deliberately clears the password. */
+    suspend fun setGuardianPassword(
+        password: String,
+        currentPassword: String = ""
+    ): Boolean = setGuardianPasswordAuthorized(currentPassword, password)
+
+    /** Changing or clearing an existing credential requires the existing guardian password. */
+    suspend fun setGuardianPasswordAuthorized(
+        currentPassword: String,
+        newPassword: String
+    ): Boolean {
+        var changed = false
+        settingsDataStore.updateData { current ->
+            if (current.guardianAuthConfig.isConfigured &&
+                !GuardianPassword.verify(currentPassword, current.guardianAuthConfig)
+            ) return@updateData current
+            changed = true
+            current.copy(guardianAuthConfig = GuardianPassword.createCredential(newPassword))
+        }
+        return changed
+    }
+
+    suspend fun clearGuardianPassword(currentPassword: String = ""): Boolean =
+        setGuardianPasswordAuthorized(currentPassword, "")
+
+    suspend fun guardianPasswordIsValid(password: String): Boolean =
+        GuardianPassword.verify(password, settingsDataStore.data.first().guardianAuthConfig)
+
+    suspend fun guardianPasswordConfigured(): Boolean =
+        settingsDataStore.data.first().guardianAuthConfig.isConfigured
+
+    /**
+     * Guardian approval writes stay in the owner DataStore transaction. There is no exported
+     * broadcast carrying a rule id or duration; the service observes the shared flow instead.
+     */
+    suspend fun grantAppRuleTime(
+        password: String,
+        ruleId: String,
+        useDayId: String,
+        durationMinutes: Long,
+        grantedAtMs: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (durationMinutes <= 0L || ruleId.isBlank() || useDayId.isBlank()) return false
+        var changed = false
+        settingsDataStore.updateData { current ->
+            if (current.guardianAuthConfig.isConfigured &&
+                !GuardianPassword.verify(password, current.guardianAuthConfig)
+            ) return@updateData current
+            val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
+                current.appRuleOverrideState,
+                ruleId,
+                useDayId,
+                saturatedMillis(durationMinutes),
+                grantedAtMs
+            )
+            changed = true
+            current.copy(appRuleOverrideState = next)
+        }
+        return changed
+    }
+
+    suspend fun skipAppRuleUntil(
+        password: String,
+        ruleId: String,
+        useDayId: String,
+        selectedUntilMs: Long,
+        nextResetAtMs: Long,
+        nowMs: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (ruleId.isBlank() || useDayId.isBlank() || nextResetAtMs <= nowMs) return false
+        var changed = false
+        settingsDataStore.updateData { current ->
+            if (current.guardianAuthConfig.isConfigured &&
+                !GuardianPassword.verify(password, current.guardianAuthConfig)
+            ) return@updateData current
+            val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.skipUntil(
+                current.appRuleOverrideState,
+                ruleId,
+                useDayId,
+                selectedUntilMs,
+                nextResetAtMs,
+                nowMs
+            )
+            changed = true
+            current.copy(appRuleOverrideState = next)
+        }
+        return changed
+    }
+
+    /** Trusted internal callers use this after an already completed guardian session. */
+    suspend fun writeAppRuleOverrideState(
+        password: String,
+        state: AppRuleOverrideState
+    ): Boolean {
+        var changed = false
+        settingsDataStore.updateData { current ->
+            if (current.guardianAuthConfig.isConfigured &&
+                !GuardianPassword.verify(password, current.guardianAuthConfig)
+            ) return@updateData current
+            changed = true
+            current.copy(appRuleOverrideState = state)
+        }
+        return changed
+    }
+
     suspend fun updateManualFocusGroups(newGroup: List<ManualFocusGroup>){
         settingsDataStore.updateData { it.copy(manualFocusGroups = newGroup) }
     }
@@ -238,6 +345,8 @@ class DataStoreManager(private val context: Context) {
                 useDayResetHour = current.useDayResetHour,
                 useDayResetMinute = current.useDayResetMinute,
                 useDayGenerationStartedAtMs = current.useDayGenerationStartedAtMs,
+                guardianAuthConfig = current.guardianAuthConfig,
+                appRuleOverrideState = current.appRuleOverrideState,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -511,6 +620,9 @@ class DataStoreManager(private val context: Context) {
         } else {
             System.currentTimeMillis() + durationMinutes.coerceIn(1L, 43_200L) * 60_000L
         }
+
+    private fun saturatedMillis(minutes: Long): Long =
+        if (minutes > Long.MAX_VALUE / 60_000L) Long.MAX_VALUE else minutes * 60_000L
 
     private fun earliestTemporaryDisable(settings: Settings): Long? {
         val deadlines = buildList {

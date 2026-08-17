@@ -29,6 +29,7 @@ import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.uiHider.UiHider
 import neth.iecal.curbox.ui.fragments.main.reducers.advanced.AntiUninstallFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.advanced.ServiceProtectionFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.advanced.SettingsChangeDelayFragment
+import neth.iecal.curbox.ui.fragments.main.reducers.advanced.GuardianAuthFragment
 import androidx.core.view.isVisible
 import android.animation.ValueAnimator
 import android.content.Context
@@ -38,22 +39,33 @@ import android.graphics.Shader
 import android.net.Uri
 import android.os.Build
 import android.widget.TextView
+import android.widget.EditText
+import android.text.InputType
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class FragmentActivity : AppCompatActivity() {
+    private var selectedFragmentId: String = AllAppsUsageFragment.FRAGMENT_ID
+    private var guardianDialogVisible = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val sharedPreferences = getSharedPreferences("AppPreferences", android.content.Context.MODE_PRIVATE)
         val isFirstLaunchComplete = sharedPreferences.getBoolean("isFirstLaunchComplete", false)
         val selectedFragment = intent.getStringExtra("fragment") ?: if (!isFirstLaunchComplete) OnboardingFragment.FRAGMENT_ID else AllAppsUsageFragment.FRAGMENT_ID
+        selectedFragmentId = selectedFragment
 
         if (selectedFragment == OnboardingFragment.FRAGMENT_ID) {
             setTheme(R.style.Theme_Curbox_Onboarding)
         }
 
         super.onCreate(savedInstanceState)
+        GuardianSessionRegistry.onCurboxActivityStarted()
 
         // Screens for features this flavor does not ship stay unreachable even
         // through shortcuts or external intents.
@@ -69,6 +81,7 @@ class FragmentActivity : AppCompatActivity() {
 
         enableEdgeToEdge()
         setContentView(R.layout.activity_fragment)
+        requestGuardianAccessIfNeeded()
 
         maybeShowTermsConsent()
         maybeShowWhatsNew()
@@ -115,6 +128,7 @@ class FragmentActivity : AppCompatActivity() {
             AntiUninstallFragment.FRAGMENT_ID,
             ServiceProtectionFragment.FRAGMENT_ID,
             SettingsChangeDelayFragment.FRAGMENT_ID,
+            GuardianAuthFragment.FRAGMENT_ID,
             CreateKeywordGroupFragment.FRAGMENT_ID -> {
                 // Hide bottom nav for these standalone fragments
                 bottomNav.visibility = android.view.View.GONE
@@ -143,6 +157,7 @@ class FragmentActivity : AppCompatActivity() {
                     AntiUninstallFragment.FRAGMENT_ID -> AntiUninstallFragment()
                     ServiceProtectionFragment.FRAGMENT_ID -> ServiceProtectionFragment()
                     SettingsChangeDelayFragment.FRAGMENT_ID -> SettingsChangeDelayFragment()
+                    GuardianAuthFragment.FRAGMENT_ID -> GuardianAuthFragment()
                     else -> AccessibilityGuide()
                 }
                 fragment.arguments = intent.extras
@@ -178,6 +193,65 @@ class FragmentActivity : AppCompatActivity() {
                     true
                 }
             }
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        GuardianSessionRegistry.markExternalSystemScreen()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        GuardianSessionRegistry.onCurboxActivityStopped()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (selectedFragmentId != OnboardingFragment.FRAGMENT_ID) {
+            requestGuardianAccessIfNeeded()
+        }
+    }
+
+    private fun requestGuardianAccessIfNeeded() {
+        if (guardianDialogVisible || isFinishing || isDestroyed) return
+        lifecycleScope.launch {
+            val config = DataStoreManager(applicationContext).settings.first().guardianAuthConfig
+            if (!config.isConfigured) return@launch
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            if (GuardianSessionRegistry.session.isAuthenticated(true)) return@launch
+            guardianDialogVisible = true
+            val input = EditText(this@FragmentActivity).apply {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                hint = getString(R.string.guardian_password_hint)
+            }
+            MaterialAlertDialogBuilder(this@FragmentActivity)
+                .setTitle(R.string.guardian_auth_title)
+                .setMessage(R.string.guardian_auth_message)
+                .setView(input)
+                .setCancelable(false)
+                .setPositiveButton(R.string.common_continue) { _, _ ->
+                    lifecycleScope.launch {
+                        val valid = GuardianSessionRegistry.session.authenticate(
+                            input.text?.toString().orEmpty(),
+                            config
+                        )
+                        guardianDialogVisible = false
+                        if (!valid) {
+                            android.widget.Toast.makeText(
+                                this@FragmentActivity,
+                                R.string.guardian_wrong_password,
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                            finish()
+                        }
+                    }
+                }
+                .setNegativeButton(R.string.cancel) { _, _ ->
+                    guardianDialogVisible = false
+                    finish()
+                }
+                .show()
         }
     }
 

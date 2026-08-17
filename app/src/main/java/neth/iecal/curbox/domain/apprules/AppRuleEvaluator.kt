@@ -2,6 +2,8 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleGuardianGrant
+import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDay
@@ -23,7 +25,11 @@ data class AppRuleEvaluation(
     val conditionEnabled: Boolean = false,
     val isConditionMet: Boolean = true,
     val directAllowanceMillis: Long = 0L,
-    val earnedAllowanceMillis: Long = 0L
+    val earnedAllowanceMillis: Long = 0L,
+    val guardianAllowanceMillis: Long = 0L,
+    val guardianUsedMillis: Long = 0L,
+    val guardianRemainingMillis: Long = 0L,
+    val isSkipped: Boolean = false
 )
 
 data class AppRulesEvaluation(
@@ -36,6 +42,12 @@ data class AppRulesEvaluation(
 object AppRuleEvaluator {
 
     private data class SessionInterval(val packageName: String, val start: Long, val end: Long)
+
+    private data class AllowanceAllocation(
+        val baseRemainingMillis: Long,
+        val guardianUsedMillis: Long,
+        val guardianRemainingMillis: Long
+    )
 
     private data class ContributorResolution(
         val packages: Set<String>,
@@ -52,7 +64,8 @@ object AppRuleEvaluator {
         useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
         useDayGenerationStartedAtMs: Long = 0L,
         availablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        essentialExcludedPackages: Set<String> = emptySet(),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRulesEvaluation {
         val validationErrors = snapshot.validate()
         if (validationErrors.isNotEmpty()) {
@@ -97,7 +110,8 @@ object AppRuleEvaluator {
                     useDayCalculator,
                     useDayGenerationStartedAtMs,
                     contributorResolution.packages,
-                    contributorResolution.missingGroupIds
+                    contributorResolution.missingGroupIds,
+                    overrides
                 )
             }
         return AppRulesEvaluation(
@@ -118,7 +132,8 @@ object AppRuleEvaluator {
         useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
         useDayGenerationStartedAtMs: Long = 0L,
         availablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        essentialExcludedPackages: Set<String> = emptySet(),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRuleEvaluation {
         val sessionList = sessions.toList()
         val targetPackages = rule.effectiveScope().resolve(
@@ -137,7 +152,8 @@ object AppRuleEvaluator {
             useDayCalculator = useDayCalculator,
             useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
             contributorPackages = contributorResolution.packages,
-            missingContributorGroupIds = contributorResolution.missingGroupIds
+            missingContributorGroupIds = contributorResolution.missingGroupIds,
+            overrides = overrides
         )
     }
 
@@ -151,7 +167,8 @@ object AppRuleEvaluator {
         useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
         useDayGenerationStartedAtMs: Long = 0L,
         contributorPackages: Set<String> = emptySet(),
-        missingContributorGroupIds: Set<String> = emptySet()
+        missingContributorGroupIds: Set<String> = emptySet(),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRuleEvaluation {
         val activeWindow = AppRuleSchedule.activeWindow(rule, nowMs, zone)
         val sessionList = sessions.toList()
@@ -188,14 +205,30 @@ object AppRuleEvaluator {
         val validationErrors = missingContributorGroupIds.map { groupId ->
             "App rule ${rule.id} references a missing contributor app group $groupId"
         }
+        val activeOverrides = AppRuleGuardianOverrides.normalize(overrides, useDayId, nowMs)
+        val isSkipped = AppRuleGuardianOverrides.isSkipped(
+            activeOverrides,
+            rule.id,
+            useDayId,
+            nowMs
+        )
+        val grants = AppRuleGuardianOverrides.grantsForRule(
+            activeOverrides,
+            rule.id,
+            useDayId,
+            nowMs
+        )
+        val guardianAllowanceMillis = grants.fold(0L) { total, grant ->
+            safeAdd(total, grant.grantedMillis)
+        }
         if (activeWindow == null) {
             return AppRuleEvaluation(
                 ruleId = rule.id,
                 isApplicable = true,
                 isActive = false,
                 usedMillis = 0L,
-                allowanceMillis = allowanceMillis,
-                remainingMillis = allowanceMillis,
+                allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
+                remainingMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
                 isAllowed = true,
                 validationErrors = validationErrors,
                 contributorUsageMillis = contributorUsageMillis,
@@ -203,7 +236,34 @@ object AppRuleEvaluator {
                 conditionEnabled = rule.usageConditionEnabled,
                 isConditionMet = isConditionMet,
                 directAllowanceMillis = directAllowanceMillis,
-                earnedAllowanceMillis = earnedAllowanceMillis
+                earnedAllowanceMillis = earnedAllowanceMillis,
+                guardianAllowanceMillis = guardianAllowanceMillis,
+                guardianRemainingMillis = guardianAllowanceMillis,
+                isSkipped = isSkipped
+            )
+        }
+
+        // A skip removes this rule from consumption for its lifetime. The global session ledger
+        // remains untouched, so another rule can still charge the same foreground minute.
+        if (isSkipped) {
+            return AppRuleEvaluation(
+                ruleId = rule.id,
+                isApplicable = true,
+                isActive = true,
+                usedMillis = 0L,
+                allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
+                remainingMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
+                isAllowed = true,
+                validationErrors = validationErrors,
+                contributorUsageMillis = contributorUsageMillis,
+                conditionRequiredMillis = conditionRequiredMillis,
+                conditionEnabled = rule.usageConditionEnabled,
+                isConditionMet = isConditionMet,
+                directAllowanceMillis = directAllowanceMillis,
+                earnedAllowanceMillis = earnedAllowanceMillis,
+                guardianAllowanceMillis = guardianAllowanceMillis,
+                guardianRemainingMillis = guardianAllowanceMillis,
+                isSkipped = true
             )
         }
 
@@ -232,29 +292,42 @@ object AppRuleEvaluator {
                 }
             }
             .groupBy { it.packageName }
-        val usedMillis = intervalsByPackage.values.sumOf { intervals ->
-            mergeIntervals(intervals).sumOf { interval ->
-                usageWindows.sumOf { window ->
-                    overlapMillis(interval.start, interval.end, window.startMs, window.endMs)
+        val usageIntervals = intervalsByPackage.values.flatMap { intervals ->
+            mergeIntervals(intervals).flatMap { interval ->
+                usageWindows.mapNotNull { window ->
+                    val start = maxOf(interval.start, window.startMs)
+                    val end = minOf(interval.end, window.endMs)
+                    if (start < end) SessionInterval(interval.packageName, start, end) else null
                 }
             }
-        }
-        val remainingMillis = allowanceMillis - usedMillis
+        }.sortedBy { it.start }
+        val usedMillis = usageIntervals.sumOf { it.end - it.start }
+        val allocation = allocateAllowance(
+            usageIntervals = usageIntervals,
+            baseAllowanceMillis = allowanceMillis,
+            grants = grants
+        )
+        val remainingMillis = safeAdd(allocation.baseRemainingMillis, allocation.guardianRemainingMillis)
         return AppRuleEvaluation(
             ruleId = rule.id,
             isApplicable = true,
             isActive = true,
             usedMillis = usedMillis,
-            allowanceMillis = allowanceMillis,
+            allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
             remainingMillis = remainingMillis,
-            isAllowed = remainingMillis > 0L && !hasMissingContributor,
+            isAllowed = isSkipped ||
+                (remainingMillis > 0L && (!hasMissingContributor || allocation.guardianRemainingMillis > 0L)),
             validationErrors = validationErrors,
             contributorUsageMillis = contributorUsageMillis,
             conditionRequiredMillis = conditionRequiredMillis,
             conditionEnabled = rule.usageConditionEnabled,
             isConditionMet = isConditionMet,
             directAllowanceMillis = directAllowanceMillis,
-            earnedAllowanceMillis = earnedAllowanceMillis
+            earnedAllowanceMillis = earnedAllowanceMillis,
+            guardianAllowanceMillis = guardianAllowanceMillis,
+            guardianUsedMillis = allocation.guardianUsedMillis,
+            guardianRemainingMillis = allocation.guardianRemainingMillis,
+            isSkipped = isSkipped
         )
     }
 
@@ -268,7 +341,8 @@ object AppRuleEvaluator {
         zone: ZoneId = ZoneId.systemDefault(),
         useDayGenerationStartedAtMs: Long = 0L,
         contributorPackages: Set<String> = emptySet(),
-        missingContributorGroupIds: Set<String> = emptySet()
+        missingContributorGroupIds: Set<String> = emptySet(),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRuleEvaluation = evaluateRule(
         rule = rule,
         targetPackages = targetPackages,
@@ -279,7 +353,8 @@ object AppRuleEvaluator {
         useDayCalculator = ConfigurableUseDayCalculator(zone, resetTime),
         useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
         contributorPackages = contributorPackages,
-        missingContributorGroupIds = missingContributorGroupIds
+        missingContributorGroupIds = missingContributorGroupIds,
+        overrides = overrides
     )
 
     fun evaluateWithResetTime(
@@ -292,7 +367,8 @@ object AppRuleEvaluator {
         zone: ZoneId = ZoneId.systemDefault(),
         useDayGenerationStartedAtMs: Long = 0L,
         availablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        essentialExcludedPackages: Set<String> = emptySet(),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRulesEvaluation = evaluate(
         snapshot = snapshot,
         packageName = packageName,
@@ -303,7 +379,8 @@ object AppRuleEvaluator {
         useDayCalculator = ConfigurableUseDayCalculator(zone, resetTime),
         useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
         availablePackages = availablePackages,
-        essentialExcludedPackages = essentialExcludedPackages
+        essentialExcludedPackages = essentialExcludedPackages,
+        overrides = overrides
     )
 
     fun evaluate(
@@ -316,7 +393,8 @@ object AppRuleEvaluator {
         zone: ZoneId = ZoneId.systemDefault(),
         useDayGenerationStartedAtMs: Long = 0L,
         availablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        essentialExcludedPackages: Set<String> = emptySet(),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRulesEvaluation = evaluateWithResetTime(
         snapshot = snapshot,
         packageName = packageName,
@@ -327,7 +405,8 @@ object AppRuleEvaluator {
         zone = zone,
         useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
         availablePackages = availablePackages,
-        essentialExcludedPackages = essentialExcludedPackages
+        essentialExcludedPackages = essentialExcludedPackages,
+        overrides = overrides
     )
 
     private fun overlapMillis(
@@ -403,6 +482,60 @@ object AppRuleEvaluator {
             }
             result
         }
+
+    /**
+     * Allocates visible foreground time in chronological order. Direct and earned allowance is
+     * consumed first; only time after a grant was issued can consume that grant. This is what
+     * makes a grant issued during an inactive rule window usable in the next window, while old
+     * usage cannot retroactively spend it.
+     */
+    private fun allocateAllowance(
+        usageIntervals: List<SessionInterval>,
+        baseAllowanceMillis: Long,
+        grants: List<AppRuleGuardianGrant>
+    ): AllowanceAllocation {
+        var baseRemaining = baseAllowanceMillis
+        val grantRemaining = grants
+            .sortedBy { it.grantedAtMs }
+            .map { it to it.grantedMillis.coerceAtLeast(0L) }
+            .toMutableList()
+        var guardianUsed = 0L
+
+        usageIntervals.forEach { interval ->
+            val cutPoints = buildList {
+                add(interval.start)
+                grants.forEach { grant ->
+                    if (grant.grantedAtMs > interval.start && grant.grantedAtMs < interval.end) {
+                        add(grant.grantedAtMs)
+                    }
+                }
+                add(interval.end)
+            }.distinct().sorted()
+            cutPoints.zipWithNext().forEach segment@{ (start, end) ->
+                var remaining = end - start
+                if (remaining <= 0L) return@segment
+                if (baseRemaining > 0L) {
+                    val consumed = minOf(baseRemaining, remaining)
+                    baseRemaining -= consumed
+                    remaining -= consumed
+                }
+                if (remaining <= 0L) return@segment
+                grantRemaining.indices.forEach grant@{ index ->
+                    if (remaining <= 0L) return@grant
+                    val (grant, available) = grantRemaining[index]
+                    if (grant.grantedAtMs > start || available <= 0L) return@grant
+                    val consumed = minOf(available, remaining)
+                    grantRemaining[index] = grant to (available - consumed)
+                    guardianUsed = safeAdd(guardianUsed, consumed)
+                    remaining -= consumed
+                }
+            }
+        }
+        val guardianRemaining = grantRemaining.fold(0L) { total, (_, remaining) ->
+            safeAdd(total, remaining)
+        }
+        return AllowanceAllocation(baseRemaining, guardianUsed, guardianRemaining)
+    }
 
     private fun safeAdd(left: Long, right: Long): Long =
         if (Long.MAX_VALUE - left < right) Long.MAX_VALUE else left + right

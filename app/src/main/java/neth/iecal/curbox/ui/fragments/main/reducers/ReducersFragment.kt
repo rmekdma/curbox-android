@@ -20,6 +20,7 @@ import com.google.android.material.card.MaterialCardView
 import neth.iecal.curbox.ui.fragments.main.reducers.anti_stimulants.grayscale.GrayscaleFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appBlocker.AppBlockerGroupsFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.AppRuleGroupsFragment
+import neth.iecal.curbox.ui.fragments.main.reducers.advanced.GuardianAuthFragment
 
 class ReducersFragment : Fragment() {
     override fun onCreateView(
@@ -141,6 +142,13 @@ class ReducersFragment : Fragment() {
         serviceProtectionCard.setOnClickListener {
             val intent = Intent(requireContext(), FragmentActivity::class.java).apply {
                 putExtra("fragment", neth.iecal.curbox.ui.fragments.main.reducers.advanced.ServiceProtectionFragment.FRAGMENT_ID)
+            }
+            startActivity(intent)
+        }
+
+        view.findViewById<MaterialCardView>(R.id.card_guardian_auth).setOnClickListener {
+            val intent = Intent(requireContext(), FragmentActivity::class.java).apply {
+                putExtra("fragment", GuardianAuthFragment.FRAGMENT_ID)
             }
             startActivity(intent)
         }
