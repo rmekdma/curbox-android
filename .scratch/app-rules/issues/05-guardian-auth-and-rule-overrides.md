@@ -8,11 +8,12 @@
 
 **Verification evidence (JBR 21, 2026-08-18):**
 
-- Focused guardian, rule override, warning selection, session, and sync isolation test suites passed (24 tests across the added regression suites).
-- `testFullDebugUnitTest`: 205 tests completed; one fixed-base failure remains at `ScriptLanguageTest > matchesRegexSupportsCommonFlags`.
+- Final focused JBR21 regression command covering guardian session/password, reevaluation, override calculation, warning selection, DataStore write results, and sync isolation passed (31 tests).
+- `testFullDebugUnitTest`: 211 tests completed; one fixed-base failure remains at `ScriptLanguageTest > matchesRegexSupportsCommonFlags`.
 - `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed.
 - `lintFullDebug` passed; the report contains existing baseline findings and no new Guardian issue.
 - No Android device or emulator was available. Device verification procedure: install the Full debug APK, set a guardian password, leave Curbox for another app and return to confirm reauthentication, trigger two simultaneous denying rules and confirm every denial is shown with one selectable approval, exercise both timed skip choices and additive time, then repeat on Play Store and F-Droid APKs while checking the Play Store manifest has no `AdminReceiver` or `NodePickerService`.
+- F-Droid sync route and complete locale translation coverage were not changed; they remain fixed-base or out of scope for this review fix.
 
 - [ ] 보호자 비밀번호는 기존 제거 방지 비밀번호와 분리된 기기 로컬 자격 증명이다.
 - [ ] 비밀번호 검증 값은 임의 솔트와 느린 비밀번호 파생 함수로 저장되며 평문이나 재사용 가능한 원본 해시는 저장하지 않는다.

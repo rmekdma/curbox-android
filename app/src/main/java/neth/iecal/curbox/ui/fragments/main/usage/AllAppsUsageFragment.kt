@@ -209,7 +209,7 @@ class AllAppsUsageFragment : Fragment() {
                                         ArrayList(ignoredApps)
                                     )
                                     selectIgnoredAppsLauncher.launch(
-                                        GuardianSessionRegistry.attachInternalNavigationToken(intent),
+                                        intent,
                                         ActivityOptionsCompat.makeCustomAnimation(
                                             requireContext(),
                                             R.anim.fade_in,

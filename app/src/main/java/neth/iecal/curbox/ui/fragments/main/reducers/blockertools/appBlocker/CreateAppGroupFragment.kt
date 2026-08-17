@@ -22,7 +22,6 @@ import neth.iecal.curbox.data.models.AppGroupConfig
 import neth.iecal.curbox.databinding.FragmentCreateAppGroupBinding
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
 import neth.iecal.curbox.utils.scheduleConflictsWith
-import neth.iecal.curbox.utils.GuardianSessionRegistry
 import java.util.UUID
 
 class CreateAppGroupFragment : Fragment() {
@@ -207,7 +206,7 @@ class CreateAppGroupFragment : Fragment() {
     private fun openAppSelector() {
         val intent = Intent(requireContext(), SelectAppsActivity::class.java)
         intent.putStringArrayListExtra("PRE_SELECTED_APPS", selectedApps)
-        selectAppsLauncher.launch(GuardianSessionRegistry.attachInternalNavigationToken(intent))
+        selectAppsLauncher.launch(intent)
     }
 
     private fun openScheduleEditor() {

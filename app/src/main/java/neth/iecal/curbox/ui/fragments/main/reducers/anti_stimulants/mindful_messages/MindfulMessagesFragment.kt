@@ -23,7 +23,6 @@ import neth.iecal.curbox.R
 import neth.iecal.curbox.databinding.FragmentMindfulMessagesBinding
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
 import neth.iecal.curbox.ui.overlay.OverlayDragHelper
-import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class MindfulMessagesFragment : Fragment() {
 
@@ -106,7 +105,7 @@ class MindfulMessagesFragment : Fragment() {
         binding.btnSelectApps.setOnClickListener {
             val intent = Intent(requireContext(), SelectAppsActivity::class.java)
             intent.putStringArrayListExtra("PRE_SELECTED_APPS", selectedApps)
-            selectAppsLauncher.launch(GuardianSessionRegistry.attachInternalNavigationToken(intent))
+            selectAppsLauncher.launch(intent)
         }
 
         binding.etMessages.addTextChangedListener(object : TextWatcher {

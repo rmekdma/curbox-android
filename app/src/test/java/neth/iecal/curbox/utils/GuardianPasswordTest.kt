@@ -126,4 +126,62 @@ class GuardianPasswordTest {
         assertTrue(GuardianSessionRegistry.consumeInternalNavigationToken(token))
         session.clear()
     }
+
+    @Test
+    fun ownedChildReturnHandoffPreservesSessionAndParentConsumesIt() {
+        val session = GuardianSessionRegistry.session
+        session.clear()
+        assertTrue(session.authenticate("x", GuardianPassword.createCredential("x", iterations = 1)))
+
+        val forwardToken = GuardianSessionRegistry.issueInternalNavigationToken()
+        assertTrue(GuardianSessionRegistry.onCurboxActivityStarted(forwardToken))
+        GuardianSessionRegistry.onCurboxActivityStopped(isInternalActivity = false)
+        assertTrue(session.isAuthenticated(hasPassword = true))
+
+        val returnToken = GuardianSessionRegistry.issueInternalReturnToken()
+        assertTrue(GuardianSessionRegistry.onCurboxActivityStopped(isInternalActivity = true, isFinishing = true))
+        assertTrue(GuardianSessionRegistry.consumeInternalReturnToken(returnToken))
+        assertTrue(session.isAuthenticated(hasPassword = true))
+        session.clear()
+    }
+
+    @Test
+    fun invalidReturnHandoffIsRejectedAndInvalidatesSession() {
+        val session = GuardianSessionRegistry.session
+        session.clear()
+        assertTrue(session.authenticate("x", GuardianPassword.createCredential("x", iterations = 1)))
+        GuardianSessionRegistry.issueInternalReturnToken()
+
+        assertFalse(GuardianSessionRegistry.consumeInternalReturnToken("not-the-token"))
+        assertFalse(session.isAuthenticated(hasPassword = true))
+        session.clear()
+    }
+
+    @Test
+    fun externalFocusLossInvalidatesAnUnconsumedReturnHandoff() {
+        val session = GuardianSessionRegistry.session
+        session.clear()
+        assertTrue(session.authenticate("x", GuardianPassword.createCredential("x", iterations = 1)))
+        GuardianSessionRegistry.issueInternalReturnToken()
+
+        assertTrue(GuardianSessionRegistry.handleWindowFocusLost())
+        assertFalse(session.isAuthenticated(hasPassword = true))
+        session.clear()
+    }
+
+    @Test
+    fun unexpectedFocusLossInvalidatesButAnExplicitOwnedTokenPreserves() {
+        val session = GuardianSessionRegistry.session
+        session.clear()
+        assertTrue(session.authenticate("x", GuardianPassword.createCredential("x", iterations = 1)))
+
+        val ownedToken = GuardianSessionRegistry.issueOwnedTransitionToken()
+        assertFalse(GuardianSessionRegistry.handleWindowFocusLost(ownedToken))
+        assertTrue(session.isAuthenticated(hasPassword = true))
+
+        GuardianSessionRegistry.markOwnedDialogHidden()
+        assertTrue(GuardianSessionRegistry.handleWindowFocusLost())
+        assertFalse(session.isAuthenticated(hasPassword = true))
+        session.clear()
+    }
 }

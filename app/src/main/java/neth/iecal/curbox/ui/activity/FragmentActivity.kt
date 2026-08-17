@@ -56,6 +56,8 @@ class FragmentActivity : AppCompatActivity() {
     private var selectedFragmentId: String = AllAppsUsageFragment.FRAGMENT_ID
     private var guardianDialogVisible = false
     private var initialGuardianGate = false
+    private var internalNavigationOwner = false
+    private var ownedDialogToken: String? = null
 
     /** Attach a one-shot handoff to every explicit Curbox child launch from this host. */
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
@@ -64,13 +66,24 @@ class FragmentActivity : AppCompatActivity() {
         requestCode: Int,
         options: Bundle?
     ) {
-        val target = intent.component
-        val internalIntent = if (target?.packageName == packageName) {
+        super.startActivityForResult(prepareInternalNavigationIntent(intent), requestCode, options)
+    }
+
+    override fun startActivity(intent: Intent) {
+        super.startActivity(prepareInternalNavigationIntent(intent))
+    }
+
+    override fun startActivity(intent: Intent, options: Bundle?) {
+        super.startActivity(prepareInternalNavigationIntent(intent), options)
+    }
+
+    private fun prepareInternalNavigationIntent(intent: Intent): Intent {
+        val targetPackage = intent.component?.packageName ?: intent.`package`
+        return if (targetPackage == packageName) {
             GuardianSessionRegistry.attachInternalNavigationToken(intent)
         } else {
             intent
         }
-        super.startActivityForResult(internalIntent, requestCode, options)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,7 +97,7 @@ class FragmentActivity : AppCompatActivity() {
         }
 
         super.onCreate(savedInstanceState)
-        GuardianSessionRegistry.onCurboxActivityStarted(
+        internalNavigationOwner = GuardianSessionRegistry.onCurboxActivityStarted(
             intent.getStringExtra(GuardianSessionRegistry.EXTRA_INTERNAL_NAVIGATION_TOKEN)
         )
 
@@ -118,6 +131,11 @@ class FragmentActivity : AppCompatActivity() {
 
         enableEdgeToEdge()
         setContentView(R.layout.activity_fragment)
+        if (selectedFragment == OnboardingFragment.FRAGMENT_ID) {
+            revealGuardianContent()
+        } else {
+            obscureGuardianContent()
+        }
 
         maybeShowTermsConsent()
         maybeShowWhatsNew()
@@ -232,6 +250,25 @@ class FragmentActivity : AppCompatActivity() {
         }
     }
 
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        data?.getStringExtra(GuardianSessionRegistry.EXTRA_INTERNAL_RETURN_TOKEN)?.let {
+            GuardianSessionRegistry.consumeInternalReturnToken(it)
+        }
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus && !isFinishing) {
+            obscureGuardianContent()
+            GuardianSessionRegistry.handleWindowFocusLost(
+                ownedTransitionToken = ownedDialogToken,
+                isInternalActivity = internalNavigationOwner
+            )
+        }
+    }
+
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         if (!GuardianSessionRegistry.isAwaitingOneShotSystemResult()) {
@@ -242,13 +279,18 @@ class FragmentActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
-            GuardianSessionRegistry.onCurboxActivityStopped()
+            GuardianSessionRegistry.onCurboxActivityStopped(
+                isInternalActivity = internalNavigationOwner,
+                isFinishing = isFinishing
+            )
         }
     }
 
     override fun onResume() {
         super.onResume()
         if (selectedFragmentId != OnboardingFragment.FRAGMENT_ID) {
+            obscureGuardianContent()
+            GuardianSessionRegistry.consumePendingInternalReturnHandoff()
             requestGuardianAccessIfNeeded()
         }
     }
@@ -260,11 +302,15 @@ class FragmentActivity : AppCompatActivity() {
             val config = DataStoreManager(applicationContext).settings.first().guardianAuthConfig
             if (!config.isConfigured) {
                 guardianDialogVisible = false
+                ownedDialogToken = null
+                revealGuardianContent()
                 return@launch
             }
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
             if (GuardianSessionRegistry.session.isAuthenticated(true)) {
                 guardianDialogVisible = false
+                ownedDialogToken = null
+                revealGuardianContent()
                 return@launch
             }
             val input = EditText(this@FragmentActivity).apply {
@@ -283,6 +329,8 @@ class FragmentActivity : AppCompatActivity() {
                             config
                         )
                         guardianDialogVisible = false
+                        ownedDialogToken = null
+                        GuardianSessionRegistry.markOwnedDialogHidden()
                         if (!valid) {
                             android.widget.Toast.makeText(
                                 this@FragmentActivity,
@@ -302,10 +350,26 @@ class FragmentActivity : AppCompatActivity() {
                 }
                 .setNegativeButton(R.string.cancel) { _, _ ->
                     guardianDialogVisible = false
+                    ownedDialogToken = null
+                    GuardianSessionRegistry.markOwnedDialogHidden()
                     finish()
+                }
+                .also {
+                    ownedDialogToken = GuardianSessionRegistry.issueOwnedTransitionToken()
                 }
                 .show()
         }
+    }
+
+    private fun obscureGuardianContent() {
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        findViewById<android.view.View>(R.id.guardian_content_gate)?.visibility =
+            android.view.View.VISIBLE
+    }
+
+    private fun revealGuardianContent() {
+        findViewById<android.view.View>(R.id.guardian_content_gate)?.visibility =
+            android.view.View.GONE
     }
 
     private fun maybeShowTermsConsent() {

@@ -20,7 +20,6 @@ import neth.iecal.curbox.ui.activity.SelectAppsActivity
 import neth.iecal.curbox.utils.SettingsChangeDelayUtils
 import neth.iecal.curbox.utils.TemporaryDisableDialog
 import neth.iecal.curbox.utils.ViewUtils
-import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class ReelBlockerFragment : Fragment() {
 
@@ -109,7 +108,7 @@ class ReelBlockerFragment : Fragment() {
                 putStringArrayListExtra("APP_LIST", ArrayList(ReelAppConfig.reelData.keys.sorted()))
                 putExtra("ALLOW_CUSTOM_APPS", false)
             }
-            selectExcludedAppsLauncher.launch(GuardianSessionRegistry.attachInternalNavigationToken(intent))
+            selectExcludedAppsLauncher.launch(intent)
         }
     }
 

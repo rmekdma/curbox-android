@@ -14,4 +14,16 @@ class AppRuleReevaluationGateTest {
         assertTrue(gate.consumeIfApplicable(hasApplicableRules = true))
         assertFalse(gate.consumeIfApplicable(hasApplicableRules = true))
     }
+
+    @Test
+    fun concurrentMarksAreNotConsumedByAnUnrelatedForegroundPackage() {
+        val gate = AppRuleReevaluationGate()
+        gate.markOverrideChanged()
+
+        assertFalse(gate.consumeIfApplicable(hasApplicableRules = false))
+        gate.markOverrideChanged()
+
+        assertTrue(gate.consumeIfApplicable(hasApplicableRules = true))
+        assertFalse(gate.consumeIfApplicable(hasApplicableRules = true))
+    }
 }

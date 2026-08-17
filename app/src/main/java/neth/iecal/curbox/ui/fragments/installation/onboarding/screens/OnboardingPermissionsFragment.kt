@@ -52,7 +52,8 @@ class OnboardingPermissionsFragment : Fragment() {
     private val appBlockerViewModel: AppBlockerSettingViewModel by activityViewModels()
 
     private val notificationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+            GuardianSessionRegistry.completeOneShotSystemResult()
             updatePermissionsState()
         }
 

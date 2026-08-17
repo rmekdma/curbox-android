@@ -43,6 +43,8 @@ class SelectAppsActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivitySelectAppsBinding
     private lateinit var selectedAppList: HashSet<String>
+    private var internalNavigationOwner = false
+    private var ownedDialogToken: String? = null
 
     private var appItemList: MutableList<AppItem> = mutableListOf()
 
@@ -76,7 +78,7 @@ class SelectAppsActivity : AppCompatActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        GuardianSessionRegistry.onCurboxActivityStarted(
+        internalNavigationOwner = GuardianSessionRegistry.onCurboxActivityStarted(
             intent.getStringExtra(GuardianSessionRegistry.EXTRA_INTERNAL_NAVIGATION_TOKEN)
         )
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
@@ -273,9 +275,9 @@ class SelectAppsActivity : AppCompatActivity() {
         binding.confirmSelection.setOnClickListener {
             selectedAppList.removeAll(ignoredApps)
             val selectedAppsArrayList = ArrayList(selectedAppList)
-            val resultIntent = intent.apply {
+            val resultIntent = GuardianSessionRegistry.attachInternalReturnToken(intent.apply {
                 putStringArrayListExtra("SELECTED_APPS", selectedAppsArrayList)
-            }
+            })
             setResult(RESULT_OK, resultIntent)
             finish()
         }
@@ -382,10 +384,23 @@ class SelectAppsActivity : AppCompatActivity() {
         }
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus && !isFinishing) {
+            GuardianSessionRegistry.handleWindowFocusLost(
+                ownedTransitionToken = ownedDialogToken,
+                isInternalActivity = internalNavigationOwner
+            )
+        }
+    }
+
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
-            GuardianSessionRegistry.onCurboxActivityStopped()
+            GuardianSessionRegistry.onCurboxActivityStopped(
+                isInternalActivity = internalNavigationOwner,
+                isFinishing = isFinishing
+            )
         }
     }
 
@@ -436,10 +451,17 @@ class SelectAppsActivity : AppCompatActivity() {
                         Toast.makeText(this, getString(R.string.package_already_exists), Toast.LENGTH_SHORT).show()
                     }
                 }
+                ownedDialogToken = null
+                GuardianSessionRegistry.markOwnedDialogHidden()
                 dialog.dismiss()
             }
             .setNegativeButton(getString(R.string.cancel)) { dialog, _ ->
+                ownedDialogToken = null
+                GuardianSessionRegistry.markOwnedDialogHidden()
                 dialog.dismiss()
+            }
+            .also {
+                ownedDialogToken = GuardianSessionRegistry.issueOwnedTransitionToken()
             }
             .show()
     }

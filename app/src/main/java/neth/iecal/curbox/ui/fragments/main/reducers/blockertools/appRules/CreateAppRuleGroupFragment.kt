@@ -18,7 +18,6 @@ import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.databinding.FragmentCreateAppRuleGroupBinding
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
 import neth.iecal.curbox.utils.DataStoreManager
-import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class CreateAppRuleGroupFragment : Fragment() {
     companion object {
@@ -53,14 +52,12 @@ class CreateAppRuleGroupFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         binding.selectAppsButton.setOnClickListener {
-            selectApps.launch(GuardianSessionRegistry.attachInternalNavigationToken(
-                Intent(requireContext(), SelectAppsActivity::class.java).apply {
+            selectApps.launch(Intent(requireContext(), SelectAppsActivity::class.java).apply {
                 putStringArrayListExtra("PRE_SELECTED_APPS", selectedPackages)
                 putExtra("ALLOW_CUSTOM_APPS", false)
                 putExtra(SelectAppsActivity.EXTRA_STRICT_LAUNCHABLE_APPS, true)
                 putExtra(SelectAppsActivity.EXTRA_FILTER_APP_RULE_ESSENTIALS, true)
-                }
-            ))
+            })
         }
         binding.saveGroupButton.setOnClickListener { save() }
         val id = requireActivity().intent.getStringExtra("app_rule_group_id")

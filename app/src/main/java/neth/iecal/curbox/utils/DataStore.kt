@@ -186,15 +186,14 @@ class DataStoreManager(private val context: Context) {
         currentPassword: String,
         newPassword: String
     ): Boolean {
-        var changed = false
-        settingsDataStore.updateData { current ->
+        val credential = GuardianPassword.createCredential(newPassword)
+        val updated = settingsDataStore.updateData { current ->
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(currentPassword, current.guardianAuthConfig)
             ) return@updateData current
-            changed = true
-            current.copy(guardianAuthConfig = GuardianPassword.createCredential(newPassword))
+            current.copy(guardianAuthConfig = credential)
         }
-        return changed
+        return GuardianDataStoreWriteResult.passwordWasStored(updated, credential)
     }
 
     suspend fun clearGuardianPassword(currentPassword: String = ""): Boolean =
@@ -218,8 +217,8 @@ class DataStoreManager(private val context: Context) {
         grantedAtMs: Long = System.currentTimeMillis()
     ): Boolean {
         if (durationMinutes <= 0L || ruleId.isBlank() || useDayId.isBlank()) return false
-        var changed = false
-        settingsDataStore.updateData { current ->
+        val grantedMillis = saturatedMillis(durationMinutes)
+        val updated = settingsDataStore.updateData { current ->
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
@@ -231,14 +230,19 @@ class DataStoreManager(private val context: Context) {
                 ),
                 ruleId,
                 useDayId,
-                saturatedMillis(durationMinutes),
+                grantedMillis,
                 grantedAtMs,
                 current.useDayGenerationStartedAtMs
             )
-            changed = true
             current.copy(appRuleOverrideState = next)
         }
-        return changed
+        return GuardianDataStoreWriteResult.grantWasStored(
+            updated,
+            ruleId,
+            useDayId,
+            grantedMillis,
+            grantedAtMs.coerceAtLeast(0L)
+        )
     }
 
     suspend fun skipAppRuleUntil(
@@ -250,8 +254,7 @@ class DataStoreManager(private val context: Context) {
         nowMs: Long = System.currentTimeMillis()
     ): Boolean {
         if (ruleId.isBlank() || useDayId.isBlank() || nextResetAtMs <= nowMs) return false
-        var changed = false
-        settingsDataStore.updateData { current ->
+        val updated = settingsDataStore.updateData { current ->
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
@@ -268,10 +271,15 @@ class DataStoreManager(private val context: Context) {
                 nowMs,
                 current.useDayGenerationStartedAtMs
             )
-            changed = true
             current.copy(appRuleOverrideState = next)
         }
-        return changed
+        return GuardianDataStoreWriteResult.skipWasStored(
+            updated,
+            ruleId,
+            useDayId,
+            nowMs,
+            selectedUntilMs.coerceIn(nowMs, nextResetAtMs)
+        )
     }
 
     /** Trusted internal callers use this after an already completed guardian session. */
@@ -279,21 +287,19 @@ class DataStoreManager(private val context: Context) {
         password: String,
         state: AppRuleOverrideState
     ): Boolean {
-        var changed = false
-        settingsDataStore.updateData { current ->
+        val updated = settingsDataStore.updateData { current ->
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
-            changed = true
             current.copy(appRuleOverrideState = state)
         }
-        return changed
+        return updated.appRuleOverrideState == state
     }
 
     /** Compacts the current local approval ledger without uploading or changing credentials. */
     suspend fun compactAppRuleOverrides(nowMs: Long = System.currentTimeMillis()): Boolean {
-        var changed = false
-        settingsDataStore.updateData { current ->
+        val before = settingsDataStore.data.first()
+        val updated = settingsDataStore.updateData { current ->
             val calculator = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime)
             val useDayId = calculator.idAt(nowMs)
             val compacted = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
@@ -301,11 +307,9 @@ class DataStoreManager(private val context: Context) {
                 useDayId,
                 current.useDayGenerationStartedAtMs
             )
-            if (compacted == current.appRuleOverrideState) return@updateData current
-            changed = true
             current.copy(appRuleOverrideState = compacted)
         }
-        return changed
+        return updated.appRuleOverrideState != before.appRuleOverrideState
     }
 
     suspend fun updateManualFocusGroups(newGroup: List<ManualFocusGroup>){
@@ -932,5 +936,41 @@ class DataStoreManager(private val context: Context) {
             } catch (_: Exception) {
             }
         }
+    }
+}
+
+/**
+ * Pure success predicates for guardian writes.  The caller must use the value returned by
+ * DataStore.updateData; inspecting mutable state from inside its transform is not retry safe.
+ */
+internal object GuardianDataStoreWriteResult {
+    fun passwordWasStored(settings: Settings, credential: GuardianAuthConfig): Boolean =
+        settings.guardianAuthConfig == credential
+
+    fun grantWasStored(
+        settings: Settings,
+        ruleId: String,
+        useDayId: String,
+        grantedMillis: Long,
+        grantedAtMs: Long
+    ): Boolean = settings.appRuleOverrideState.grants.any {
+        it.ruleId == ruleId &&
+            it.useDayId == useDayId &&
+            it.grantedMillis == grantedMillis &&
+            it.grantedAtMs == grantedAtMs
+    }
+
+    fun skipWasStored(
+        settings: Settings,
+        ruleId: String,
+        useDayId: String,
+        skipFromMs: Long,
+        skipUntilMs: Long
+    ): Boolean = settings.appRuleOverrideState.skips.any {
+        it.ruleId == ruleId &&
+            it.useDayId == useDayId &&
+            it.skipFromMs == skipFromMs &&
+            it.skipUntilMs == skipUntilMs &&
+            it.skipUntilMs > it.skipFromMs
     }
 }
