@@ -296,6 +296,41 @@ class AppRuleEvaluatorTest {
         assertFalse(result.isAllowed)
     }
 
+    @Test
+    fun compositeNighttimeScopeUsesOneAllowanceAcrossOvernightSession() {
+        val excluded = AppRuleAppGroup.create("Excluded", listOf("com.example.notes"))
+        val rule = rule(allowedMinutes = 60).copy(
+            appGroupId = "",
+            weekdays = setOf(1),
+            startMinute = 22 * 60,
+            endMinute = 6 * 60,
+            scope = AppRuleScope(
+                includeAllApps = true,
+                includedGroupIds = setOf(group.id),
+                excludedGroupIds = setOf(excluded.id)
+            )
+        )
+        val session = ForegroundSession(
+            useDayId = "2026-08-17",
+            packageName = "com.example.reader",
+            startedAtMs = Instant.parse("2026-08-17T22:30:00Z").toEpochMilli(),
+            endedAtMs = Instant.parse("2026-08-18T01:30:00Z").toEpochMilli()
+        )
+
+        val result = AppRuleEvaluator.evaluate(
+            AppRuleSnapshot(listOf(group, excluded), listOf(rule)),
+            "com.example.reader",
+            "2026-08-17",
+            listOf(session),
+            Instant.parse("2026-08-18T01:30:00Z").toEpochMilli(),
+            zone,
+            availablePackages = setOf("com.example.reader", "com.example.notes", "com.example.future")
+        )
+
+        assertEquals(3 * 60 * 60_000L, result.evaluations.single().usedMillis)
+        assertFalse(result.isAllowed)
+    }
+
     private fun evaluate(
         rule: AppRule,
         sessions: List<ForegroundSession> = emptyList(),

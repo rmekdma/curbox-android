@@ -26,9 +26,9 @@ class AppRuleScheduleCompositeTest {
         val merged = AppRuleSchedule.usageWindowsForUseDay(rule, "2026-08-17", zone)
 
         assertEquals(1, merged.size)
-        assertEquals(9 * 60 * 60_000L, merged.single().first -
+        assertEquals(9 * 60 * 60_000L, merged.single().startMs -
             Instant.parse("2026-08-17T00:00:00Z").toEpochMilli())
-        assertEquals(14 * 60 * 60_000L, merged.single().second -
+        assertEquals(14 * 60 * 60_000L, merged.single().endMs -
             Instant.parse("2026-08-17T00:00:00Z").toEpochMilli())
 
         val fullDay = rule.copy(timeRanges = listOf(AppRuleTimeRange(10 * 60, 10 * 60)))
@@ -37,7 +37,7 @@ class AppRuleScheduleCompositeTest {
             Instant.parse("2026-08-17T12:00:00Z").toEpochMilli(),
             zone
         )
-        assertEquals(24 * 60 * 60_000L, fullDayWindow!!.second - fullDayWindow.first)
+        assertEquals(24 * 60 * 60_000L, fullDayWindow!!.endMs - fullDayWindow.startMs)
     }
 
     @Test

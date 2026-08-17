@@ -1,17 +1,17 @@
 package neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules
 
 import android.os.Bundle
+import android.text.format.DateFormat
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.CheckBox
-import android.widget.LinearLayout
-import android.widget.TimePicker
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.button.MaterialButton
 import com.google.android.material.checkbox.MaterialCheckBox
+import com.google.android.material.timepicker.MaterialTimePicker
+import com.google.android.material.timepicker.TimeFormat
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
@@ -20,6 +20,7 @@ import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.databinding.FragmentCreateAppRuleBinding
+import neth.iecal.curbox.databinding.ItemAppRuleTimeRangeBinding
 import neth.iecal.curbox.utils.DataStoreManager
 
 class CreateAppRuleFragment : Fragment() {
@@ -34,7 +35,13 @@ class CreateAppRuleFragment : Fragment() {
     private var groups: List<AppRuleAppGroup> = emptyList()
     private val includedChecks = linkedMapOf<String, CheckBox>()
     private val excludedChecks = linkedMapOf<String, CheckBox>()
-    private val rangePickers = mutableListOf<Pair<TimePicker, TimePicker>>()
+    private data class RangeEditor(
+        val binding: ItemAppRuleTimeRangeBinding,
+        var startMinute: Int,
+        var endMinute: Int
+    )
+
+    private val rangeEditors = mutableListOf<RangeEditor>()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -47,13 +54,7 @@ class CreateAppRuleFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        binding.startPicker.setIs24HourView(true)
-        binding.endPicker.setIs24HourView(true)
-        binding.startPicker.hour = 9
-        binding.startPicker.minute = 0
-        binding.endPicker.hour = 17
-        binding.endPicker.minute = 0
-        rangePickers += binding.startPicker to binding.endPicker
+        addTimeRange(AppRuleTimeRange(9 * 60, 17 * 60))
         binding.addTimeRangeButton.setOnClickListener { addTimeRange() }
         binding.saveRuleButton.setOnClickListener { save() }
         binding.deleteRuleButton.setOnClickListener { delete() }
@@ -114,47 +115,79 @@ class CreateAppRuleFragment : Fragment() {
         scope.excludedGroupIds.forEach { excludedChecks[it]?.isChecked = true }
 
         val ranges = rule.effectiveTimeRanges()
-        setPicker(binding.startPicker, ranges.first())
-        setPicker(binding.endPicker, ranges.first(), end = true)
-        ranges.drop(1).forEach(::addTimeRange)
+        clearTimeRanges()
+        ranges.forEach(::addTimeRange)
     }
 
-    private fun setPicker(
-        picker: TimePicker,
-        range: AppRuleTimeRange,
-        end: Boolean = false
-    ) {
-        val minute = if (end) range.endMinute else range.startMinute
-        picker.hour = minute / 60
-        picker.minute = minute % 60
+    private fun clearTimeRanges() {
+        binding.timeRangesContainer.removeAllViews()
+        rangeEditors.clear()
     }
 
-    private fun addTimeRange(range: AppRuleTimeRange? = null) {
-        val row = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.HORIZONTAL
+    private fun addTimeRange(range: AppRuleTimeRange = AppRuleTimeRange(9 * 60, 17 * 60)) {
+        val rowBinding = ItemAppRuleTimeRangeBinding.inflate(
+            LayoutInflater.from(requireContext()),
+            binding.timeRangesContainer,
+            false
+        )
+        val editor = RangeEditor(rowBinding, range.startMinute, range.endMinute)
+        rowBinding.startTimeButton.setOnClickListener { showTimePicker(editor, isStart = true) }
+        rowBinding.endTimeButton.setOnClickListener { showTimePicker(editor, isStart = false) }
+        rowBinding.removeTimeRangeButton.setOnClickListener {
+            binding.timeRangesContainer.removeView(rowBinding.root)
+            rangeEditors.remove(editor)
+            renderRangeSummary()
         }
-        val start = TimePicker(requireContext()).apply {
-            setIs24HourView(true)
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            range?.let { setPicker(this, it) }
+        binding.timeRangesContainer.addView(rowBinding.root)
+        rangeEditors += editor
+        renderEditor(editor)
+    }
+
+    private fun showTimePicker(editor: RangeEditor, isStart: Boolean) {
+        val minute = if (isStart) editor.startMinute else editor.endMinute
+        val picker = MaterialTimePicker.Builder()
+            .setTimeFormat(
+                if (DateFormat.is24HourFormat(requireContext())) {
+                    TimeFormat.CLOCK_24H
+                } else {
+                    TimeFormat.CLOCK_12H
+                }
+            )
+            .setHour(minute / 60)
+            .setMinute(minute % 60)
+            .setTitleText(
+                getString(if (isStart) R.string.select_start_time else R.string.select_end_time)
+            )
+            .build()
+        picker.addOnPositiveButtonClickListener {
+            val selectedMinute = picker.hour * 60 + picker.minute
+            if (isStart) editor.startMinute = selectedMinute else editor.endMinute = selectedMinute
+            renderEditor(editor)
         }
-        val end = TimePicker(requireContext()).apply {
-            setIs24HourView(true)
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            range?.let { setPicker(this, it, end = true) }
+        picker.show(childFragmentManager, "app_rule_time_picker")
+    }
+
+    private fun renderEditor(editor: RangeEditor) {
+        editor.binding.startTimeButton.text = formatMinute(editor.startMinute)
+        editor.binding.endTimeButton.text = formatMinute(editor.endMinute)
+        renderRangeSummary()
+    }
+
+    private fun renderRangeSummary() {
+        val summary = rangeEditors.joinToString { editor ->
+            "${formatMinute(editor.startMinute)} to ${formatMinute(editor.endMinute)}"
         }
-        val remove = MaterialButton(requireContext()).apply {
-            text = getString(R.string.remove)
-            setOnClickListener {
-                binding.timeRangesContainer.removeView(row)
-                rangePickers.remove(start to end)
-            }
+        binding.timeRangesSummary.text = getString(R.string.app_rules_time_ranges_summary, summary)
+    }
+
+    private fun formatMinute(minute: Int): String {
+        val calendar = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, (minute / 60) % 24)
+            set(java.util.Calendar.MINUTE, minute % 60)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
         }
-        row.addView(start)
-        row.addView(end)
-        row.addView(remove)
-        binding.timeRangesContainer.addView(row)
-        rangePickers += start to end
+        return DateFormat.getTimeFormat(requireContext()).format(calendar.time)
     }
 
     private fun save() {
@@ -163,8 +196,8 @@ class CreateAppRuleFragment : Fragment() {
         val weekdays = weekdayChecks().mapIndexedNotNull { index, check ->
             index.takeIf { check.isChecked }
         }.toSet()
-        val ranges = rangePickers.map { (start, end) ->
-            AppRuleTimeRange(start.hour * 60 + start.minute, end.hour * 60 + end.minute)
+        val ranges = rangeEditors.map { editor ->
+            AppRuleTimeRange(editor.startMinute, editor.endMinute)
         }
         if (name.isEmpty() || allowance == null || allowance < 0 || weekdays.isEmpty() || ranges.isEmpty()) {
             Toast.makeText(requireContext(), R.string.app_rules_complete_fields, Toast.LENGTH_SHORT).show()
@@ -185,11 +218,7 @@ class CreateAppRuleFragment : Fragment() {
             appGroupId = "",
             allowedMinutes = allowance,
             scope = scope,
-            timeRanges = ranges,
-            ranges = emptyList(),
-            includeAllApps = false,
-            includedGroupIds = emptySet(),
-            excludedGroupIds = emptySet()
+            timeRanges = ranges
         ) ?: AppRule.create(
             name = name,
             weekdays = weekdays,
@@ -222,6 +251,6 @@ class CreateAppRuleFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         _binding = null
-        rangePickers.clear()
+        rangeEditors.clear()
     }
 }

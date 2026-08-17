@@ -25,8 +25,8 @@ import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
-import neth.iecal.curbox.domain.apprules.AppRuleEssentialPackages
-import neth.iecal.curbox.domain.apprules.AppRuleLaunchablePackages
+import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
+import neth.iecal.curbox.domain.apprules.AppRuleReceiverLifecycle
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.ui.activity.WarningActivity
@@ -50,6 +50,8 @@ class AppRuleBlocker {
     private var lastShownAt = 0L
     @Volatile private var launchablePackages: Set<String> = emptySet()
     @Volatile private var essentialPackages: Set<String> = emptySet()
+    private var packageScopeReader: AppRulePackageScopeReader? = null
+    private var receiverLifecycle: AppRuleReceiverLifecycle? = null
     @Volatile private var resetTime = UseDayResetTime()
     @Volatile private var useDayGenerationStartedAtMs = 0L
 
@@ -59,6 +61,7 @@ class AppRuleBlocker {
         val database = AppDatabase.getInstance(service)
         sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
         enforcement = AppRuleEnforcement(sessionRepository)
+        packageScopeReader = AppRulePackageScopeReader.fromContext(service)
         refreshPackageScope()
         try {
             val initialSettings = runBlocking(Dispatchers.IO) { service.dataStoreManager.settings.first() }
@@ -92,30 +95,53 @@ class AppRuleBlocker {
 
     fun setupReceivers() {
         val filter = IntentFilter(INTENT_ACTION_REFRESH_APP_RULES)
-        ContextCompat.registerReceiver(
-            service,
-            refreshReceiver,
-            filter,
-            ContextCompat.RECEIVER_EXPORTED
-        )
         val packageFilter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)
             addAction(Intent.ACTION_PACKAGE_REPLACED)
             addDataScheme("package")
         }
-        ContextCompat.registerReceiver(
-            service,
-            packageReceiver,
-            packageFilter,
-            ContextCompat.RECEIVER_EXPORTED
+        val lifecycle = AppRuleReceiverLifecycle(
+            listOf(
+                AppRuleReceiverLifecycle.Registration(
+                    register = {
+                        ContextCompat.registerReceiver(
+                            service,
+                            refreshReceiver,
+                            filter,
+                            ContextCompat.RECEIVER_EXPORTED
+                        )
+                    },
+                    unregister = { service.unregisterReceiver(refreshReceiver) }
+                ),
+                AppRuleReceiverLifecycle.Registration(
+                    register = {
+                        ContextCompat.registerReceiver(
+                            service,
+                            packageReceiver,
+                            packageFilter,
+                            ContextCompat.RECEIVER_EXPORTED
+                        )
+                    },
+                    unregister = { service.unregisterReceiver(packageReceiver) }
+                )
+            )
         )
+        receiverLifecycle?.unregister()?.forEach(::logNonFatal)
+        receiverLifecycle = lifecycle
+        try {
+            lifecycle.register()
+        } catch (error: Exception) {
+            logNonFatal(error)
+        }
     }
 
     fun doAppRuleCheck(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val packageName = event.packageName?.toString().orEmpty()
-        if (packageName.isBlank() || packageName in essentialPackages) return
+        if (packageName.isBlank()) return
+        val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
+        if (packageName in evaluationEssentialPackages) return
 
         val currentSnapshot = snapshot.snapshot()
         if (currentSnapshot.appRules.none { it.isActive }) return
@@ -132,7 +158,7 @@ class AppRuleBlocker {
                     calculator = calculator,
                     useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
                     availablePackages = launchablePackages,
-                    essentialExcludedPackages = essentialPackages
+                    essentialExcludedPackages = evaluationEssentialPackages
                 )
             }
         } catch (error: CancellationException) {
@@ -179,16 +205,8 @@ class AppRuleBlocker {
         settingsJob?.cancel()
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
-        try {
-            service.unregisterReceiver(refreshReceiver)
-        } catch (error: Exception) {
-            logNonFatal(error)
-        }
-        try {
-            service.unregisterReceiver(packageReceiver)
-        } catch (error: Exception) {
-            logNonFatal(error)
-        }
+        receiverLifecycle?.unregister()?.forEach(::logNonFatal)
+        receiverLifecycle = null
     }
 
     private val refreshReceiver = object : BroadcastReceiver() {
@@ -220,13 +238,23 @@ class AppRuleBlocker {
 
     private fun refreshPackageScope() {
         if (!::service.isInitialized) return
+        val reader = packageScopeReader ?: return
         try {
-            launchablePackages = AppRuleLaunchablePackages.fromContext(service)
-            essentialPackages = AppRuleEssentialPackages.fromContext(service).all +
-                service.packageName + Constants.SYSTEM_UI_PACKAGE_NAME
+            launchablePackages = reader.readLaunchablePackages()
+            essentialPackages = reader.readEssentialPackages()
         } catch (error: Exception) {
             essentialPackages = setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
             logNonFatal(error)
+        }
+    }
+
+    private fun readEssentialPackagesForEvaluation(): Set<String> {
+        val reader = packageScopeReader ?: return essentialPackages
+        return try {
+            reader.readEssentialPackages().also { essentialPackages = it }
+        } catch (error: Exception) {
+            logNonFatal(error)
+            essentialPackages
         }
     }
 

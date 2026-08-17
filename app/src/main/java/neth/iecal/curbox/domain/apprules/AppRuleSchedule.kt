@@ -9,6 +9,12 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 
+/** A named epoch interval shared by schedule and allowance calculations. */
+data class AppRuleInterval(
+    val startMs: Long,
+    val endMs: Long
+)
+
 /** Shared time semantics for rule evaluation and conservative settings comparison. */
 object AppRuleSchedule {
     /** All merged windows that contain [nowMs], including an overnight window started yesterday. */
@@ -16,12 +22,12 @@ object AppRuleSchedule {
         rule: AppRule,
         nowMs: Long,
         zone: ZoneId
-    ): List<Pair<Long, Long>> {
+    ): List<AppRuleInterval> {
         val now = Instant.ofEpochMilli(nowMs).atZone(zone)
         val today = now.toLocalDate()
         val windows = (-1..0).flatMap { offset ->
             windowsForAnchor(rule, today.plusDays(offset.toLong()), zone)
-        }.filter { nowMs >= it.first && nowMs < it.second }
+        }.filter { nowMs >= it.startMs && nowMs < it.endMs }
         return merge(windows)
     }
 
@@ -29,7 +35,7 @@ object AppRuleSchedule {
         rule: AppRule,
         nowMs: Long,
         zone: ZoneId
-    ): Pair<Long, Long>? {
+    ): AppRuleInterval? {
         return activeWindows(rule, nowMs, zone).firstOrNull()
     }
 
@@ -38,7 +44,7 @@ object AppRuleSchedule {
         rule: AppRule,
         useDayId: String,
         zone: ZoneId
-    ): List<Pair<Long, Long>> = usageWindowsForUseDay(
+    ): List<AppRuleInterval> = usageWindowsForUseDay(
         rule = rule,
         useDayId = useDayId,
         zone = zone,
@@ -50,16 +56,16 @@ object AppRuleSchedule {
         useDayId: String,
         zone: ZoneId,
         resetTime: UseDayResetTime
-    ): List<Pair<Long, Long>> {
+    ): List<AppRuleInterval> {
         val useDay = UseDay.windowFor(useDayId, zone, resetTime)
         val date = LocalDate.parse(useDayId)
         val windows = (-2..2).flatMap { offset ->
             windowsForAnchor(rule, date.plusDays(offset.toLong()), zone)
         }.mapNotNull { window ->
-            val start = maxOf(window.first, useDay.first)
-            val end = minOf(window.second, useDay.last + 1)
+            val start = maxOf(window.startMs, useDay.first)
+            val end = minOf(window.endMs, useDay.last + 1)
             if (start < end) start to end else null
-        }
+        }.map { AppRuleInterval(it.first, it.second) }
         return merge(windows)
     }
 
@@ -67,7 +73,7 @@ object AppRuleSchedule {
         rule: AppRule,
         useDayId: String,
         calculator: UseDayCalculator
-    ): List<Pair<Long, Long>> = usageWindowsForUseDay(
+    ): List<AppRuleInterval> = usageWindowsForUseDay(
         rule,
         useDayId,
         calculator.zone,
@@ -102,22 +108,25 @@ object AppRuleSchedule {
         rule: AppRule,
         anchor: LocalDate,
         zone: ZoneId
-    ): List<Pair<Long, Long>> {
+    ): List<AppRuleInterval> {
         if (weekday(anchor) !in rule.weekdays) return emptyList()
         return rule.effectiveTimeRanges().map { range ->
             val start = atMinute(anchor, range.startMinute, zone)
             val endDate = if (range.endMinute <= range.startMinute) anchor.plusDays(1) else anchor
             val end = atMinute(endDate, range.endMinute, zone)
-            start to end
+            AppRuleInterval(start, end)
         }
     }
 
-    private fun merge(windows: Iterable<Pair<Long, Long>>): List<Pair<Long, Long>> =
-        windows.filter { it.first < it.second }.sortedBy { it.first }
+    private fun merge(windows: Iterable<AppRuleInterval>): List<AppRuleInterval> =
+        windows.filter { it.startMs < it.endMs }.sortedBy { it.startMs }
             .fold(mutableListOf()) { merged, window ->
                 val previous = merged.lastOrNull()
-                if (previous != null && window.first <= previous.second) {
-                    merged[merged.lastIndex] = previous.first to maxOf(previous.second, window.second)
+                if (previous != null && window.startMs <= previous.endMs) {
+                    merged[merged.lastIndex] = AppRuleInterval(
+                        previous.startMs,
+                        maxOf(previous.endMs, window.endMs)
+                    )
                 } else {
                     merged += window
                 }

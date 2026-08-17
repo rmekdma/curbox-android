@@ -37,25 +37,30 @@
 
 - `AppRuleScope.resolve` computes dynamic launchable all-apps plus included-group union, then
   subtracts excluded-group union and the Curbox, launcher, System UI and current IME essentials.
-  `AppRulePackageResolver` refreshes launchable packages on setup, package add/remove/replace and
-  each rule evaluation; the picker applies the same exclusions while leaving Android Settings
-  selectable.
+  `AppRulePackageScopeReader` keeps launchable caching independent while rereading launcher and
+  IME essentials at every enforcement evaluation; the app-rule picker opts into the same
+  exclusions while leaving Android Settings selectable, and legacy picker callers are unchanged.
 - `AppRuleSchedule` preserves start-weekday overnight windows, treats equal endpoints as 24 hours,
   and merges overlapping or touching windows before intersecting persisted sessions. `AppRuleEvaluator`
   shares one allowance across a rule's active windows, leaves outside-window sessions to global
   statistics, and applies overlapping rules independently with any-deny enforcement.
 - `AppRuleSnapshot.validate`, `deleteTargetGroup`, and the app-rule coordinator preserve the last
   valid runtime snapshot, report invalid cold-start configuration without blocking unknown apps,
-  and require an explicit reference-removal or dependent-rule-deletion choice. The editor and
+  and require an explicit reference-removal or dependent-rule-deletion choice. Mixed legacy
+  `appGroupId` and composite references are both counted once. Compatibility normalization
+  migrates ticket 01 target and time fields into the canonical scope and range list. The editor and
   groups screen expose invalid state and use ViewBinding plus Material controls for composite CRUD.
+- `CreateAppRuleFragment` uses the existing `MaterialTimePicker` flow and ViewBinding range rows
+  with button summaries; no platform `TimePicker` remains in the rule editor. Receiver setup is
+  transactional and cleanup unregisters only registrations that completed successfully.
 - `AppRuleRestrictionComparatorTest` covers scope and schedule strength in both directions. The
-  focused JBR21 app-rule run covered 26 tests: 26 passed, 0 failed, 0 errors and 0 skipped. The
-  final full JBR21 run covered 155 tests: 154 passed, 1 failed, 0 errors and 0 skipped. The sole
+  focused JBR21 app-rule run covered 31 tests: 31 passed, 0 failed, 0 errors and 0 skipped. The
+  final full JBR21 run covered 160 tests: 159 passed, 1 failed, 0 errors and 0 skipped. The sole
   failure is `ScriptLanguageTest.matchesRegexSupportsCommonFlags`, also present at fixed base
   `3c6ef5d8` and unrelated to ticket 03.
 - `assembleFullDebug`, `assemblePlaystoreDebug` and `assembleFdroidDebug` all succeeded under
   `C:\Users\DELL\.jdks\jbr-21.0.11` after the final source change. `lintFullDebug` completed
-  successfully; its report retains the repository baseline (888 errors, 581 warnings and 7
+  successfully; its report retains the repository baseline (889 errors, 581 warnings and 7
   hints). `git diff --check` passes for ticket files.
 - The SDK `adb devices` command reported no attached device or emulator. The exact composite
   scope and time-window procedure is recorded in `.scratch/app-rules/evidence/ticket-03-device-verification.md`.

@@ -100,9 +100,7 @@ object AppRuleEvaluator {
         nowMs: Long,
         zone: ZoneId = ZoneId.systemDefault(),
         useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
-        useDayGenerationStartedAtMs: Long = 0L,
-        @Suppress("UNUSED_PARAMETER") availablePackages: Set<String> = emptySet(),
-        @Suppress("UNUSED_PARAMETER") essentialExcludedPackages: Set<String> = emptySet()
+        useDayGenerationStartedAtMs: Long = 0L
     ): AppRuleEvaluation {
         val activeWindow = AppRuleSchedule.activeWindow(rule, nowMs, zone)
         val allowanceMillis = rule.allowedMinutes
@@ -146,19 +144,23 @@ object AppRuleEvaluator {
             }
             .groupBy { it.packageName }
         val usedMillis = intervalsByPackage.values.sumOf { intervals ->
-            val merged = intervals.map { it.start to it.end }.sortedBy { it.first }
-                .fold(mutableListOf<Pair<Long, Long>>()) { result, interval ->
+            val merged = intervals.map { AppRuleInterval(it.start, it.end) }
+                .sortedBy { it.startMs }
+                .fold(mutableListOf<AppRuleInterval>()) { result, interval ->
                     val previous = result.lastOrNull()
-                    if (previous != null && interval.first <= previous.second) {
-                        result[result.lastIndex] = previous.first to maxOf(previous.second, interval.second)
+                    if (previous != null && interval.startMs <= previous.endMs) {
+                        result[result.lastIndex] = AppRuleInterval(
+                            previous.startMs,
+                            maxOf(previous.endMs, interval.endMs)
+                        )
                     } else {
                         result += interval
                     }
                     result
                 }
-            merged.sumOf { (sessionStart, sessionEnd) ->
-                usageWindows.sumOf { (windowStart, windowEnd) ->
-                    overlapMillis(sessionStart, sessionEnd, windowStart, windowEnd)
+            merged.sumOf { interval ->
+                usageWindows.sumOf { window ->
+                    overlapMillis(interval.startMs, interval.endMs, window.startMs, window.endMs)
                 }
             }
         }
@@ -182,9 +184,7 @@ object AppRuleEvaluator {
         nowMs: Long,
         resetTime: UseDayResetTime,
         zone: ZoneId = ZoneId.systemDefault(),
-        useDayGenerationStartedAtMs: Long = 0L,
-        availablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        useDayGenerationStartedAtMs: Long = 0L
     ): AppRuleEvaluation = evaluateRule(
         rule = rule,
         targetPackages = targetPackages,
@@ -193,9 +193,7 @@ object AppRuleEvaluator {
         nowMs = nowMs,
         zone = zone,
         useDayCalculator = ConfigurableUseDayCalculator(zone, resetTime),
-        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
-        availablePackages = availablePackages,
-        essentialExcludedPackages = essentialExcludedPackages
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
     )
 
     fun evaluateWithResetTime(

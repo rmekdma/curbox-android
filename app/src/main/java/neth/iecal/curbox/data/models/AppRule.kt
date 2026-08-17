@@ -42,15 +42,6 @@ data class AppRuleScope(
     val includedGroupIds: Set<String> = emptySet(),
     val excludedGroupIds: Set<String> = emptySet()
 ) {
-    val includesAllApps: Boolean
-        get() = includeAllApps
-
-    val includeGroupIds: Set<String>
-        get() = includedGroupIds
-
-    val excludeGroupIds: Set<String>
-        get() = excludedGroupIds
-
     val isEmpty: Boolean
         get() = !includeAllApps && includedGroupIds.isEmpty() && excludedGroupIds.isEmpty()
 
@@ -110,13 +101,8 @@ data class AppRule(
     val allowedMinutes: Long = 0L,
     /** Composite target scope introduced after the first single-group rule. */
     val scope: AppRuleScope = AppRuleScope(),
-    /** Additional semantic ranges. Empty keeps the legacy start/end fields readable. */
-    val timeRanges: List<AppRuleTimeRange> = emptyList(),
-    val ranges: List<AppRuleTimeRange> = emptyList(),
-    /** Flat aliases keep serialized and test construction ergonomic during the migration. */
-    val includeAllApps: Boolean = false,
-    val includedGroupIds: Set<String> = emptySet(),
-    val excludedGroupIds: Set<String> = emptySet()
+    /** Canonical semantic ranges. Empty is migrated from the legacy start/end fields. */
+    val timeRanges: List<AppRuleTimeRange> = emptyList()
 ) {
     companion object {
         fun create(
@@ -142,25 +128,15 @@ data class AppRule(
     fun copyWithNewId(): AppRule = copy(id = newId())
 
     fun effectiveScope(): AppRuleScope {
-        val direct = AppRuleScope(
-            includeAllApps = includeAllApps,
-            includedGroupIds = includedGroupIds,
-            excludedGroupIds = excludedGroupIds
-        )
         return when {
-            !scope.isEmpty -> scope.copy(
-                includeAllApps = scope.includeAllApps || direct.includeAllApps,
-                includedGroupIds = scope.includedGroupIds + direct.includedGroupIds,
-                excludedGroupIds = scope.excludedGroupIds + direct.excludedGroupIds
-            )
-            !direct.isEmpty -> direct
+            !scope.isEmpty -> scope
             appGroupId.isNotBlank() -> AppRuleScope.forGroup(appGroupId)
             else -> scope
         }
     }
 
     fun effectiveTimeRanges(): List<AppRuleTimeRange> =
-        (timeRanges + ranges).ifEmpty { listOf(AppRuleTimeRange(startMinute, endMinute)) }
+        timeRanges.ifEmpty { listOf(AppRuleTimeRange(startMinute, endMinute)) }
 }
 
 /**
@@ -182,21 +158,20 @@ data class AppRuleSnapshot(
             )
         },
         appRules = appRules.map { rule ->
+            val normalizedAppGroupId = rule.appGroupId.trim()
+            val normalizedScope = rule.scope.normalized()
             rule.copy(
                 id = rule.id.trim(),
                 name = rule.name.trim(),
-                appGroupId = rule.appGroupId.trim(),
-                scope = rule.scope.normalized(),
-                timeRanges = rule.timeRanges.toList(),
-                ranges = rule.ranges.toList(),
-                includedGroupIds = rule.includedGroupIds
-                    .map(String::trim)
-                    .filter(String::isNotEmpty)
-                    .toSet(),
-                excludedGroupIds = rule.excludedGroupIds
-                    .map(String::trim)
-                    .filter(String::isNotEmpty)
-                    .toSet()
+                appGroupId = normalizedAppGroupId,
+                scope = if (normalizedScope.isEmpty && normalizedAppGroupId.isNotEmpty()) {
+                    AppRuleScope.forGroup(normalizedAppGroupId)
+                } else {
+                    normalizedScope
+                },
+                timeRanges = rule.timeRanges.ifEmpty {
+                    listOf(AppRuleTimeRange(rule.startMinute, rule.endMinute))
+                }
             )
         }
     )
@@ -252,7 +227,9 @@ data class AppRuleSnapshot(
     /** Target rules must be handled explicitly before a referenced group can be removed. */
     fun targetRuleIdsReferencing(groupId: String): List<String> = appRules.filter { rule ->
         val scope = rule.effectiveScope()
-        groupId in scope.includedGroupIds || groupId in scope.excludedGroupIds
+        rule.appGroupId == groupId ||
+            groupId in scope.includedGroupIds ||
+            groupId in scope.excludedGroupIds
     }.map { it.id }
 
     fun canDeleteTargetGroup(groupId: String): Boolean =
@@ -275,10 +252,7 @@ data class AppRuleSnapshot(
                     scope = scope.copy(
                         includedGroupIds = scope.includedGroupIds - groupId,
                         excludedGroupIds = scope.excludedGroupIds - groupId
-                    ),
-                    includeAllApps = scope.includeAllApps,
-                    includedGroupIds = emptySet(),
-                    excludedGroupIds = emptySet()
+                    )
                 )
             }
             else -> appRules

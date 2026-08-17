@@ -35,6 +35,11 @@ import neth.iecal.curbox.utils.DataStoreManager
 
 class SelectAppsActivity : AppCompatActivity() {
 
+    companion object {
+        const val EXTRA_FILTER_APP_RULE_ESSENTIALS = "FILTER_APP_RULE_ESSENTIALS"
+        const val EXTRA_STRICT_LAUNCHABLE_APPS = "STRICT_LAUNCHABLE_APPS"
+    }
+
     private lateinit var binding: ActivitySelectAppsBinding
     private lateinit var selectedAppList: HashSet<String>
 
@@ -89,10 +94,12 @@ class SelectAppsActivity : AppCompatActivity() {
             intent.getStringArrayListExtra("PRE_SELECTED_APPS")?.toHashSet() ?: HashSet()
 
         ignoredApps = intent.getStringArrayListExtra("IGNORED_APPS")?.toHashSet() ?: HashSet()
-        // These packages keep the management path alive and must never be offered as a group
-        // target. Android Settings is intentionally not in this set and remains selectable.
-        ignoredApps.addAll(AppRuleEssentialPackages.fromContext(this).all)
-        val strictLaunchableOnly = intent.getBooleanExtra("STRICT_LAUNCHABLE_APPS", false)
+        // App rule groups opt into this stricter picker policy. Other callers retain their
+        // historical picker behavior and may still pass their own IGNORED_APPS set.
+        if (intent.getBooleanExtra(EXTRA_FILTER_APP_RULE_ESSENTIALS, false)) {
+            ignoredApps.addAll(AppRuleEssentialPackages.fromContext(this).all)
+        }
+        val strictLaunchableOnly = intent.getBooleanExtra(EXTRA_STRICT_LAUNCHABLE_APPS, false)
 
         Log.d("pre-selected-apps", selectedAppList.toString())
 

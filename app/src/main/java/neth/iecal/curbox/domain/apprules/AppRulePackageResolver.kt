@@ -6,6 +6,32 @@ import android.content.pm.PackageManager
 import android.provider.Settings
 import neth.iecal.curbox.Constants
 
+/** Public seam for independently refreshing launchable and always safe package sets. */
+class AppRulePackageScopeReader(
+    private val launchableReader: () -> Set<String>,
+    private val essentialReader: () -> Set<String>
+) {
+    fun readLaunchablePackages(): Set<String> = launchableReader().normalizedPackages()
+
+    fun readEssentialPackages(): Set<String> = essentialReader().normalizedPackages()
+
+    companion object {
+        fun fromContext(context: Context): AppRulePackageScopeReader {
+            val appContext = context.applicationContext
+            return AppRulePackageScopeReader(
+                launchableReader = { AppRuleLaunchablePackages.fromContext(appContext) },
+                essentialReader = {
+                    AppRuleEssentialPackages.fromContext(appContext).all +
+                        appContext.packageName + Constants.SYSTEM_UI_PACKAGE_NAME
+                }
+            )
+        }
+    }
+}
+
+private fun Set<String>.normalizedPackages(): Set<String> =
+    map(String::trim).filter(String::isNotEmpty).toSet()
+
 /** The packages that every rule removes after resolving its configured include union. */
 data class AppRuleEssentialPackages(
     val ownPackage: String,

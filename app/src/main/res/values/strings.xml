@@ -1402,6 +1402,7 @@
     <string name="app_rules_include_groups">Include app groups</string>
     <string name="app_rules_exclude_groups">Exclude app groups</string>
     <string name="app_rules_add_time_range">Add time range</string>
+    <string name="app_rules_time_ranges_summary">Time ranges: %1$s</string>
     <string name="remove">Remove</string>
     <string name="change_delay_field_auto_dnd">Auto DND</string>
     <string name="change_delay_field_reel_blocker">Reel blocker</string>

@@ -55,7 +55,8 @@ class CreateAppRuleGroupFragment : Fragment() {
             selectApps.launch(Intent(requireContext(), SelectAppsActivity::class.java).apply {
                 putStringArrayListExtra("PRE_SELECTED_APPS", selectedPackages)
                 putExtra("ALLOW_CUSTOM_APPS", false)
-                putExtra("STRICT_LAUNCHABLE_APPS", true)
+                putExtra(SelectAppsActivity.EXTRA_STRICT_LAUNCHABLE_APPS, true)
+                putExtra(SelectAppsActivity.EXTRA_FILTER_APP_RULE_ESSENTIALS, true)
             })
         }
         binding.saveGroupButton.setOnClickListener { save() }
