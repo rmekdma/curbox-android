@@ -10,6 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 import java.time.ZoneId
+import neth.iecal.curbox.utils.UseDayResetTime
 
 class AppRuleEvaluatorTest {
 
@@ -144,6 +145,59 @@ class AppRuleEvaluatorTest {
         assertFalse(group.id == copiedGroup.id)
         assertEquals(rule.name, copiedRule.name)
         assertEquals(group.selectedPackages, copiedGroup.selectedPackages)
+    }
+
+    @Test
+    fun customResetTimeUsesTheConfiguredUseDayWindowForIntersections() {
+        val rule = rule(allowedMinutes = 10)
+        val session = ForegroundSession(
+            useDayId = "2026-08-17",
+            packageName = "com.example.reader",
+            startedAtMs = Instant.parse("2026-08-17T10:00:00Z").toEpochMilli(),
+            endedAtMs = Instant.parse("2026-08-17T10:05:00Z").toEpochMilli()
+        )
+
+        val result = AppRuleEvaluator.evaluateWithResetTime(
+            snapshot = AppRuleSnapshot(listOf(group), listOf(rule)),
+            packageName = "com.example.reader",
+            useDayId = "2026-08-17",
+            sessions = listOf(session),
+            nowMs = Instant.parse("2026-08-17T10:30:00Z").toEpochMilli(),
+            resetTime = UseDayResetTime(6, 0),
+            zone = zone
+        )
+
+        assertEquals(5 * 60_000L, result.evaluations.single().usedMillis)
+    }
+
+    @Test
+    fun resetGenerationDoesNotReinterpretSessionsFromBeforeTheSettingChange() {
+        val rule = rule(allowedMinutes = 30)
+        val generation = now - 5 * 60_000L
+        val oldSession = ForegroundSession(
+            useDayId = "2026-08-17",
+            packageName = "com.example.reader",
+            startedAtMs = now - 20 * 60_000L,
+            endedAtMs = now - 10 * 60_000L,
+            useDayGenerationStartedAtMs = 0L
+        )
+        val newSession = oldSession.copy(
+            startedAtMs = generation,
+            endedAtMs = now,
+            useDayGenerationStartedAtMs = generation
+        )
+
+        val result = AppRuleEvaluator.evaluate(
+            snapshot = AppRuleSnapshot(listOf(group), listOf(rule)),
+            packageName = "com.example.reader",
+            useDayId = "2026-08-17",
+            sessions = listOf(oldSession, newSession),
+            nowMs = now,
+            zone = zone,
+            useDayGenerationStartedAtMs = generation
+        )
+
+        assertEquals(5 * 60_000L, result.evaluations.single().usedMillis)
     }
 
     private fun evaluate(

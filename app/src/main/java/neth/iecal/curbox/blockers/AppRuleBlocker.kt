@@ -28,7 +28,8 @@ import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.ui.activity.WarningActivity
-import neth.iecal.curbox.utils.UseDay
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
+import neth.iecal.curbox.utils.UseDayResetTime
 
 /** Enforces the new atomic app-rule snapshot without changing the legacy blocker. */
 class AppRuleBlocker {
@@ -45,6 +46,8 @@ class AppRuleBlocker {
     private val handler = Handler(Looper.getMainLooper())
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var lastShownAt = 0L
+    @Volatile private var resetTime = UseDayResetTime()
+    @Volatile private var useDayGenerationStartedAtMs = 0L
 
     fun setup(service: BaseBlockingService) {
         this.service = service
@@ -53,7 +56,10 @@ class AppRuleBlocker {
         sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
         enforcement = AppRuleEnforcement(sessionRepository)
         try {
-            val initial = runBlocking(Dispatchers.IO) { service.dataStoreManager.settings.first().appRuleSnapshot }
+            val initialSettings = runBlocking(Dispatchers.IO) { service.dataStoreManager.settings.first() }
+            resetTime = safeResetTime(initialSettings.useDayResetHour, initialSettings.useDayResetMinute)
+            useDayGenerationStartedAtMs = initialSettings.useDayGenerationStartedAtMs
+            val initial = initialSettings.appRuleSnapshot
             snapshot.accept(initial)
         } catch (error: CancellationException) {
             throw error
@@ -65,6 +71,8 @@ class AppRuleBlocker {
             try {
                 service.dataStoreManager.settings.collectLatest { settings ->
                     val candidate = settings.appRuleSnapshot
+                    resetTime = safeResetTime(settings.useDayResetHour, settings.useDayResetMinute)
+                    useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
                     // A malformed value can only come from older/corrupted storage. Keep the last
                     // valid runtime snapshot rather than exposing a partial reference graph.
                     snapshot.accept(candidate)
@@ -97,14 +105,17 @@ class AppRuleBlocker {
         val currentSnapshot = snapshot.snapshot()
         if (currentSnapshot.appRules.none { it.isActive }) return
         val now = System.currentTimeMillis()
-        val useDayId = UseDay.idAt(now)
+        val calculator = ConfigurableUseDayCalculator(resetTime = resetTime)
+        val useDayId = calculator.idAt(now)
         val evaluation = try {
             runBlocking(Dispatchers.IO) {
                 enforcement.check(
                     snapshot = currentSnapshot,
                     packageName = packageName,
                     useDayId = useDayId,
-                    nowMs = now
+                    nowMs = now,
+                    calculator = calculator,
+                    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
                 )
             }
         } catch (error: CancellationException) {
@@ -181,13 +192,16 @@ class AppRuleBlocker {
         handler.removeCallbacksAndMessages(null)
         val delay = remainingMillis.coerceIn(1_000L, 20_000L)
         handler.postDelayed({
-            val currentPackage = try {
-                service.rootInActiveWindow?.packageName?.toString()
+            val packageStillVisible = try {
+                service.windows.any { window ->
+                    window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION &&
+                        window.packageName?.toString() == packageName
+                }
             } catch (error: Exception) {
                 logNonFatal(error)
-                null
+                false
             }
-            if (currentPackage != null && currentPackage == packageName) {
+            if (packageStillVisible) {
                 val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
                 event.packageName = packageName
                 try {
@@ -202,4 +216,7 @@ class AppRuleBlocker {
     private fun logNonFatal(error: Exception) {
         if (::crashLogger.isInitialized) crashLogger.logNonFatalError(error)
     }
+
+    private fun safeResetTime(hour: Int, minute: Int): UseDayResetTime =
+        runCatching { UseDayResetTime(hour, minute) }.getOrDefault(UseDayResetTime())
 }

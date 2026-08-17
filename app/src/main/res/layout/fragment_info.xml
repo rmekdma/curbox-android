@@ -390,6 +390,31 @@
                     android:text="@string/website_usage_tracking" />
 
                 <TextView
+                    android:id="@+id/text_use_day_reset_time"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="@string/use_day_reset_time"
+                    style="@style/TextAppearance.Material3.TitleSmall" />
+
+                <TextView
+                    android:id="@+id/text_use_day_reset_time_description"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/use_day_reset_time_description"
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    style="@style/TextAppearance.Material3.BodySmall" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/button_use_day_reset_time"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/use_day_reset_time" />
+
+                <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"

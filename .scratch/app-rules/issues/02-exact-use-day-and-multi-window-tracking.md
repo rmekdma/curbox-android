@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — 첫 번째 통합 앱 규칙 완성.
 
-**Status:** ready-for-agent
+**Status:** in-progress (implementation complete; final build and device verification pending)
 
 - [ ] 전역 사용일 복원 시각의 기본값은 현지 시각 04:00이며 보호자가 설정에서 변경할 수 있다.
 - [ ] 티켓 01의 고정 04:00 사용일 ID를 유지하면서 이 티켓에서만 복원 시각을 설정 가능하게 확장한다.
@@ -32,3 +32,32 @@
 - [ ] 접근성 창이나 저장소 조회가 실패해도 서비스가 종료되지 않고 이후 이벤트를 계속 처리한다.
 - [ ] 다중 프로세스 갱신, 재시작과 세션 저장 실패가 현재 수직 기능의 자동화 테스트에서 검증된다.
 - [ ] full, playstore, fdroid 변형이 모두 컴파일된다.
+
+## Agent evidence
+
+- `UseDayResetTime`, `UseDayCalculator` and `ConfigurableUseDayCalculator` preserve the fixed
+  04:00 default while accepting a validated local reset time. `Settings` stores the reset hour,
+  minute and reset generation marker with defaults, and `DataStoreManager.updateUseDayResetTime`
+  applies a changed boundary immediately without rewriting aggregate rows.
+- `AppRuleEvaluator` and `AppRuleEnforcement` now accept the configurable calculator and calculate
+  allowance from exact intersections of merged persisted session intervals and active rule windows.
+  A reset generation marker excludes sessions from before an in-place reset edit.
+- `AppUsageTracker` reconciles the complete `AccessibilityService.windows` application package set,
+  deduplicates packages, ignores Curbox, System UI, IME, overlays and non application windows,
+  flushes removed packages before starting new ones, splits rows at reset boundaries, and closes
+  rows on screen off and normal service shutdown. `flagRetrieveInteractiveWindows` is enabled in
+  the service configuration.
+- `AppUsageTrackingPolicy` makes the statistics versus enforcement ledger decision explicit. When
+  statistics are off and an active time rule exists, only session rows are written; aggregate and
+  launch history writes remain disabled. When neither needs tracking, active recording is stopped.
+- Room v13 adds the reset generation marker and launch ledger. Startup recovery discards open rows
+  left by a process death and cleans rows older than the current use day. The accepted destructive
+  migration policy therefore includes the additional v13 local data loss risk.
+- The settings UI exposes the global local reset time and the service and blocker both consume the
+  multi process settings flow. JVM seam tests were added for configurable reset calculation,
+  generation filtering, visible package reconciliation, session finish ordering and tracking
+  policy.
+- `git diff --check` passes. Gradle verification is currently blocked before compilation by the
+  installed JDK 25.0.3, which Kotlin 1.9.24 rejects while parsing the Java version (`IllegalArgumentException: 25.0.3`).
+  Instrumentation window verification and all three flavor builds remain unchecked until a
+  supported JDK is available.

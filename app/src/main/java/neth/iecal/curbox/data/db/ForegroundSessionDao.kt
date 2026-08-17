@@ -20,4 +20,10 @@ interface ForegroundSessionDao {
 
     @Query("UPDATE foreground_sessions SET endedAtMs = :endedAtMs WHERE useDayId = :useDayId AND endedAtMs IS NULL")
     suspend fun finishOpenForUseDay(useDayId: String, endedAtMs: Long): Int
+
+    @Query("UPDATE foreground_sessions SET endedAtMs = startedAtMs WHERE useDayId = :useDayId AND endedAtMs IS NULL")
+    suspend fun discardOpenForUseDay(useDayId: String): Int
+
+    @Query("DELETE FROM foreground_sessions WHERE useDayId < :currentUseDayId")
+    suspend fun deleteBeforeUseDay(currentUseDayId: String): Int
 }

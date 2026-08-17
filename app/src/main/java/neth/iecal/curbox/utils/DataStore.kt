@@ -235,6 +235,9 @@ class DataStoreManager(private val context: Context) {
                 mindfulMessageConfig = current.mindfulMessageConfig,
                 uiHiderConfig = current.uiHiderConfig,
                 appRuleSnapshot = current.appRuleSnapshot,
+                useDayResetHour = current.useDayResetHour,
+                useDayResetMinute = current.useDayResetMinute,
+                useDayGenerationStartedAtMs = current.useDayGenerationStartedAtMs,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -314,6 +317,43 @@ class DataStoreManager(private val context: Context) {
 
     suspend fun updateAppUsageTrackingEnabled(isEnabled: Boolean) {
         updateGated(GatedSettingsField.APP_USAGE_TRACKING) { isEnabled }
+    }
+
+    /**
+     * Changes the global use-day boundary. This is local runtime configuration rather than a
+     * restriction snapshot: the tracker observes the settings flow and closes the old session at
+     * the moment the new boundary is saved. Existing aggregate rows are never rewritten.
+     */
+    suspend fun updateUseDayResetTime(hour: Int, minute: Int) {
+        require(hour in 0..23) { "reset hour must be between 0 and 23" }
+        require(minute in 0..59) { "reset minute must be between 0 and 59" }
+        settingsDataStore.updateData {
+            if (it.useDayResetHour == hour && it.useDayResetMinute == minute) {
+                it
+            } else {
+                it.copy(
+                    useDayResetHour = hour,
+                    useDayResetMinute = minute,
+                    useDayGenerationStartedAtMs = System.currentTimeMillis()
+                )
+            }
+        }
+        runCatching {
+            context.sendBroadcast(
+                Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
+            )
+        }
+    }
+
+    suspend fun updateUseDayResetMinutes(minutesSinceMidnight: Int) {
+        require(minutesSinceMidnight in 0 until 24 * 60) {
+            "reset time must be within one local day"
+        }
+        updateUseDayResetTime(minutesSinceMidnight / 60, minutesSinceMidnight % 60)
+    }
+
+    suspend fun updateUseDayResetTime(resetTime: UseDayResetTime) {
+        updateUseDayResetTime(resetTime.hour, resetTime.minute)
     }
 
     suspend fun updateWebsiteUsageTrackingEnabled(isEnabled: Boolean) {

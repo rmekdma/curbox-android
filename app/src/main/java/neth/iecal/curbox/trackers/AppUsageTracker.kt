@@ -13,7 +13,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.Constants
@@ -22,14 +24,24 @@ import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.AppUsageDao
 import neth.iecal.curbox.data.db.AppUsageEntity
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.AppUsageTrackingPolicy
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.VisibleApplicationPackages
+import neth.iecal.curbox.domain.apprules.VisibleApplicationWindow
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.UseDay
+import neth.iecal.curbox.utils.UseDayCalculator
+import neth.iecal.curbox.utils.UseDayResetTime
 import java.time.Instant
-import java.time.LocalDate
 import java.time.ZoneId
 
+/**
+ * Records the complete set of visible application packages. Accessibility window enumeration is
+ * intentionally kept here as a lightweight operation; node traversal remains in the service's
+ * background worker.
+ */
 class AppUsageTracker {
 
     companion object {
@@ -42,51 +54,102 @@ class AppUsageTracker {
     private lateinit var dao: AppUsageDao
     private lateinit var sessionRepository: CurrentUseDaySessionRepository
 
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var ownPackage = ""
-    private var currentPackage: String? = null
-    private var sessionStartElapsed = 0L
-    private var sessionStartWall = 0L
-    private var lastCommitElapsed = 0L
-    private var currentSessionId = 0L
-    private var currentUseDayId = ""
+    @Volatile private var resetTime = UseDayResetTime()
+    @Volatile private var useDayGenerationStartedAtMs = 0L
+    @Volatile private var useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(resetTime = resetTime)
+    @Volatile private var trackingDecision = AppUsageTrackingPolicy.decide(
+        statisticsTrackingEnabled = true,
+        hasActiveTimeBasedRules = false
+    )
+    private var settingsJob: kotlinx.coroutines.Job? = null
     private var screenOn = true
-    @Volatile private var trackingEnabled = true
-    @Volatile private var enforcementLedgerRequired = false
+
+    private data class ActiveSession(
+        val packageName: String,
+        var useDayId: String,
+        var sessionId: Long,
+        var lastCommittedWallMs: Long,
+        var lastCommittedElapsedMs: Long
+    )
+
+    /** Access is confined to the accessibility service thread and its main-handler callbacks. */
+    private val activeSessions = LinkedHashMap<String, ActiveSession>()
 
     private val recordingEnabled: Boolean
-        get() = trackingEnabled || enforcementLedgerRequired
+        get() = trackingDecision.shouldRecordSessions
 
     fun setup(service: BaseBlockingService) {
         this.service = service
         crashLogger = CrashLogger(service)
-        this.ownPackage = service.packageName
+        ownPackage = service.packageName
         val database = AppDatabase.getInstance(service)
-        this.dao = database.appUsageDao()
-        this.sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
+        dao = database.appUsageDao()
+        sessionRepository = RoomCurrentUseDaySessionRepository(
+            database.foregroundSessionDao(),
+            database.foregroundLaunchDao()
+        )
+
         try {
+            val initialSettings = runBlocking(Dispatchers.IO) {
+                service.dataStoreManager.settings.first()
+            }
+            resetTime = safeResetTime(initialSettings.useDayResetHour, initialSettings.useDayResetMinute)
+            useDayGenerationStartedAtMs = initialSettings.useDayGenerationStartedAtMs
+            useDayCalculator = ConfigurableUseDayCalculator(ZoneId.systemDefault(), resetTime)
+            trackingDecision = AppUsageTrackingPolicy.decide(
+                statisticsTrackingEnabled = initialSettings.isAppUsageTrackingEnabled,
+                hasActiveTimeBasedRules = initialSettings.appRuleSnapshot.appRules.any { it.isActive }
+            )
+            // A session row is written before its first heartbeat. If the process died before a
+            // heartbeat, discard that uncommitted tail rather than inventing time on restart.
             val now = System.currentTimeMillis()
+            val currentUseDayId = useDayCalculator.idAt(now)
             runBlocking(Dispatchers.IO) {
-                sessionRepository.finishOpenSessions(UseDay.idAt(now), now)
+                sessionRepository.recoverOpenSessions(currentUseDayId)
+                sessionRepository.cleanupBeforeUseDay(currentUseDayId)
             }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
             logNonFatal(error)
         }
+
         val powerManager = service.getSystemService(Context.POWER_SERVICE) as PowerManager
         screenOn = powerManager.isInteractive
         registerScreenReceiver()
-        scope.launch {
+        settingsJob?.cancel()
+        settingsJob = scope.launch {
             try {
                 service.dataStoreManager.settings.collect { settings ->
-                    val enabled = settings.isAppUsageTrackingEnabled
-                    trackingEnabled = enabled
-                    enforcementLedgerRequired = settings.appRuleSnapshot.appRules.any { it.isActive }
-                    if (!recordingEnabled) mainHandler.post { discardCurrentSession() }
+                    val nextReset = safeResetTime(settings.useDayResetHour, settings.useDayResetMinute)
+                    val nextDecision = AppUsageTrackingPolicy.decide(
+                        statisticsTrackingEnabled = settings.isAppUsageTrackingEnabled,
+                        hasActiveTimeBasedRules = settings.appRuleSnapshot.appRules.any { it.isActive }
+                    )
+                    mainHandler.post {
+                        try {
+                            val resetChanged = nextReset != resetTime
+                            val packagesToResume = if (resetChanged) {
+                                rotateForResetChange()
+                            } else {
+                                emptyList()
+                            }
+                            resetTime = nextReset
+                            useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
+                            useDayCalculator = ConfigurableUseDayCalculator(ZoneId.systemDefault(), nextReset)
+                            trackingDecision = nextDecision
+                            if (packagesToResume.isNotEmpty() && screenOn && recordingEnabled) {
+                                packagesToResume.forEach { startSession(it, System.currentTimeMillis(), SystemClock.elapsedRealtime()) }
+                            }
+                            if (!recordingEnabled) endAllSessions()
+                        } catch (error: Exception) {
+                            logNonFatal(error)
+                        }
+                    }
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -97,44 +160,87 @@ class AppUsageTracker {
     }
 
     fun onEvent(event: AccessibilityEvent?) {
-        if (!recordingEnabled) return
-        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        if (!screenOn) return
+        if (!recordingEnabled || !screenOn || event == null) return
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        ) return
 
-        val activePackage = try {
-            service.rootInActiveWindow?.packageName?.toString()
-        } catch (error: Exception) {
-            logNonFatal(error)
-            null
-        }
-        val foreground = activePackage ?: event.packageName?.toString() ?: return
-
-        if (foreground.isEmpty()) return
-        if (foreground == ownPackage || foreground in IGNORED_PACKAGES) {
-            // Curbox and System UI are not billable apps. They still end the one foreground
-            // session tracked by this first slice so time is not charged while either surface
-            // is on top of the previous app.
-            endCurrentSession()
-            return
-        }
-        if (foreground == currentPackage) return
-
-        switchTo(foreground)
+        val visiblePackages = queryVisiblePackages(event)
+        reconcileVisiblePackages(visiblePackages)
     }
 
-    private fun switchTo(packageName: String) {
-        if (!recordingEnabled) return
-        endCurrentSession()
+    /**
+     * Returns only application windows. A failed query falls back to the event package; a
+     * successful empty query deliberately returns an empty set so System UI and overlays do not
+     * keep charging the last application.
+     */
+    private fun queryVisiblePackages(event: AccessibilityEvent): Set<String> {
+        return try {
+            val windows = service.windows
+            val normalized = windows.map { window ->
+                VisibleApplicationWindow(
+                    packageName = window.packageName?.toString().orEmpty(),
+                    type = window.type,
+                    // Accessibility reports application windows in the interactive list. The
+                    // package set, rather than focus, determines split-screen visibility.
+                    isInteractive = true
+                )
+            }
+            VisibleApplicationPackages.fromWindows(
+                windows = normalized,
+                ownPackage = ownPackage,
+                systemUiPackage = Constants.SYSTEM_UI_PACKAGE_NAME
+            )
+        } catch (error: Exception) {
+            logNonFatal(error)
+            fallbackPackage(event)
+        }
+    }
 
+    private fun fallbackPackage(event: AccessibilityEvent): Set<String> {
+        val packageName = event.packageName?.toString()?.trim().orEmpty()
+        return if (packageName.isNotEmpty() && packageName != ownPackage &&
+            packageName !in IGNORED_PACKAGES
+        ) setOf(packageName) else emptySet()
+    }
+
+    private fun reconcileVisiblePackages(nextPackages: Set<String>) {
+        if (!recordingEnabled) {
+            endAllSessions()
+            return
+        }
+
+        val nowWall = System.currentTimeMillis()
         val nowElapsed = SystemClock.elapsedRealtime()
-        currentPackage = packageName
-        sessionStartElapsed = nowElapsed
-        sessionStartWall = System.currentTimeMillis()
-        lastCommitElapsed = nowElapsed
-        currentUseDayId = UseDay.idAt(sessionStartWall)
-        currentSessionId = try {
+        val previousPackages = activeSessions.keys.toSet()
+
+        // Flush retained sessions before changing the set. This makes the preceding package's
+        // contribution available before a newly visible package is evaluated.
+        (previousPackages intersect nextPackages).forEach { packageName ->
+            commitSession(activeSessions.getValue(packageName), nowWall, nowElapsed)
+        }
+
+        (previousPackages - nextPackages).forEach { packageName ->
+            endSession(packageName, nowWall, nowElapsed)
+        }
+
+        // Starts happen only after every disappearing package has been serialized and closed.
+        (nextPackages - previousPackages).forEach { packageName ->
+            startSession(packageName, nowWall, nowElapsed)
+        }
+    }
+
+    private fun startSession(packageName: String, startedAtWallMs: Long, startedAtElapsedMs: Long) {
+        if (activeSessions.containsKey(packageName)) return
+        val useDayId = useDayCalculator.idAt(startedAtWallMs)
+        val sessionId = try {
             runBlocking(Dispatchers.IO) {
-                sessionRepository.startSession(currentUseDayId, packageName, sessionStartWall)
+                sessionRepository.startSessionAtGeneration(
+                    useDayId,
+                    packageName,
+                    startedAtWallMs,
+                    useDayGenerationStartedAtMs
+                )
             }
         } catch (error: CancellationException) {
             throw error
@@ -142,20 +248,23 @@ class AppUsageTracker {
             logNonFatal(error)
             0L
         }
-
-        if (trackingEnabled) recordLaunch(packageName, sessionStartWall)
-        startHeartbeat()
-    }
-
-    private fun endCurrentSession() {
-        if (currentPackage == null) return
-        commit(SystemClock.elapsedRealtime())
-        val sessionId = currentSessionId
-        val endedAt = System.currentTimeMillis()
-        if (sessionId != 0L) {
+        activeSessions[packageName] = ActiveSession(
+            packageName = packageName,
+            useDayId = useDayId,
+            sessionId = sessionId,
+            lastCommittedWallMs = startedAtWallMs,
+            lastCommittedElapsedMs = startedAtElapsedMs
+        )
+        if (trackingDecision.recordStatistics) {
+            recordLaunch(packageName, startedAtWallMs)
             try {
                 runBlocking(Dispatchers.IO) {
-                    sessionRepository.finishSession(sessionId, endedAt)
+                    sessionRepository.recordLaunch(
+                        useDayId = useDayId,
+                        packageName = packageName,
+                        launchedAtMs = startedAtWallMs,
+                        generationStartedAtMs = useDayGenerationStartedAtMs
+                    )
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -163,75 +272,88 @@ class AppUsageTracker {
                 logNonFatal(error)
             }
         }
-        currentPackage = null
-        currentSessionId = 0L
-        currentUseDayId = ""
-        stopHeartbeat()
+        startHeartbeat()
     }
 
-    private fun discardCurrentSession() {
-        endCurrentSession()
-    }
-
-    private fun commit(nowElapsed: Long) {
-        val packageName = currentPackage ?: return
-        if (nowElapsed <= lastCommitElapsed) return
-
-        val startWall = sessionStartWall + (lastCommitElapsed - sessionStartElapsed)
-        val endWall = sessionStartWall + (nowElapsed - sessionStartElapsed)
-        val boundary = UseDay.windowFor(currentUseDayId).last + 1
-        // Rotate exactly at the reset instant as well. Without the equality case, a foreground
-        // app that remains open across 04:00 would keep its old use-day id until the next
-        // heartbeat or window transition.
-        if (endWall > boundary || (endWall == boundary && startWall < boundary)) {
-            persistCommit(packageName, startWall, boundary)
-            persistSessionEnd(boundary)
-            val newUseDayId = UseDay.idAt(boundary)
-            currentUseDayId = newUseDayId
-            sessionStartWall = boundary
-            sessionStartElapsed += boundary - startWall
-            lastCommitElapsed = sessionStartElapsed
-            currentSessionId = startSession(packageName, boundary, newUseDayId)
-            commit(nowElapsed)
-            return
-        }
-
-        persistCommit(packageName, startWall, endWall)
-        persistSessionEnd(endWall)
-        lastCommitElapsed = nowElapsed
-    }
-
-    private fun persistCommit(packageName: String, startWall: Long, endWall: Long) {
-        val segments = splitIntoHourlySegments(startWall, endWall)
-        if (!trackingEnabled) return
-        scope.launch {
+    private fun endSession(packageName: String, endedAtWallMs: Long, endedAtElapsedMs: Long) {
+        val session = activeSessions[packageName] ?: return
+        commitSession(session, endedAtWallMs, endedAtElapsedMs)
+        if (session.sessionId != 0L) {
             try {
-                segments.forEach { addUsage(it.date, packageName, it.hour, it.durationMs, it.endWall) }
+                runBlocking(Dispatchers.IO) {
+                    sessionRepository.finishSession(session.sessionId, endedAtWallMs)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 logNonFatal(error)
             }
         }
+        activeSessions.remove(packageName)
+        if (activeSessions.isEmpty()) stopHeartbeat()
     }
 
-    private fun persistSessionEnd(endWall: Long) {
-        if (currentSessionId == 0L) return
+    private fun endAllSessions() {
+        if (activeSessions.isEmpty()) return
+        val nowWall = System.currentTimeMillis()
+        val nowElapsed = SystemClock.elapsedRealtime()
+        activeSessions.keys.toList().forEach { endSession(it, nowWall, nowElapsed) }
+    }
+
+    /** Close the old boundary at the setting-change instant and begin a fresh session. */
+    private fun rotateForResetChange(): List<String> {
+        if (activeSessions.isEmpty()) return emptyList()
+        val nowWall = System.currentTimeMillis()
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val packages = activeSessions.keys.toList()
+        packages.forEach { endSession(it, nowWall, nowElapsed) }
+        return packages
+    }
+
+    /**
+     * Commits the exact wall-clock interval since the last checkpoint. If a reset boundary lies
+     * inside it, the Room session is closed at that boundary and a new row starts there.
+     */
+    private fun commitSession(session: ActiveSession, nowWallMs: Long, nowElapsedMs: Long) {
+        val endWallMs = maxOf(nowWallMs, session.lastCommittedWallMs)
+        var cursorWallMs = session.lastCommittedWallMs
+        var cursorElapsedMs = session.lastCommittedElapsedMs
+
+        while (true) {
+            val boundary = useDayCalculator.windowFor(session.useDayId).last + 1L
+            if (cursorWallMs < boundary && endWallMs >= boundary) {
+                persistInterval(session.packageName, cursorWallMs, boundary)
+                persistSessionEnd(session.sessionId, boundary)
+                val nextUseDayId = useDayCalculator.idAt(boundary)
+                val nextId = startPersistedSession(session.packageName, boundary, nextUseDayId)
+                session.useDayId = nextUseDayId
+                session.sessionId = nextId
+                cursorElapsedMs += (boundary - session.lastCommittedWallMs).coerceAtLeast(0L)
+                cursorWallMs = boundary
+                session.lastCommittedWallMs = boundary
+                session.lastCommittedElapsedMs = cursorElapsedMs
+                continue
+            }
+            break
+        }
+
+        if (endWallMs > cursorWallMs) {
+            persistInterval(session.packageName, cursorWallMs, endWallMs)
+            persistSessionEnd(session.sessionId, endWallMs)
+        }
+        session.lastCommittedWallMs = endWallMs
+        session.lastCommittedElapsedMs = maxOf(nowElapsedMs, cursorElapsedMs)
+    }
+
+    private fun startPersistedSession(packageName: String, startedAtMs: Long, useDayId: String): Long =
         try {
             runBlocking(Dispatchers.IO) {
-                sessionRepository.updateSessionEnd(currentSessionId, endWall)
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            logNonFatal(error)
-        }
-    }
-
-    private fun startSession(packageName: String, startedAt: Long, useDayId: String): Long {
-        return try {
-            runBlocking(Dispatchers.IO) {
-                sessionRepository.startSession(useDayId, packageName, startedAt)
+                sessionRepository.startSessionAtGeneration(
+                    useDayId,
+                    packageName,
+                    startedAtMs,
+                    useDayGenerationStartedAtMs
+                )
             }
         } catch (error: CancellationException) {
             throw error
@@ -239,35 +361,49 @@ class AppUsageTracker {
             logNonFatal(error)
             0L
         }
-    }
 
-    private fun recordLaunch(packageName: String, wall: Long) {
-        val date = TimeTools.dayKey(LocalDate.now())
-        scope.launch {
-            try {
-                if (!trackingEnabled) return@launch
-                val existing = dao.get(date, packageName)
-                dao.upsert(
-                    existing?.copy(
-                        launchCount = existing.launchCount + 1,
-                        lastUsed = maxOf(existing.lastUsed, wall)
-                    ) ?: AppUsageEntity(
-                        date = date,
-                        packageName = packageName,
-                        launchCount = 1,
-                        lastUsed = wall
-                    )
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                logNonFatal(error)
+    private fun persistSessionEnd(sessionId: Long, endedAtMs: Long) {
+        if (sessionId == 0L) return
+        try {
+            runBlocking(Dispatchers.IO) {
+                sessionRepository.updateSessionEnd(sessionId, endedAtMs)
             }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
         }
     }
 
-    private suspend fun addUsage(date: String, packageName: String, hour: Int, durationMs: Long, wall: Long) {
-        if (durationMs <= 0 || !trackingEnabled) return
+    private fun persistInterval(packageName: String, startWallMs: Long, endWallMs: Long) {
+        if (endWallMs <= startWallMs || !trackingDecision.recordStatistics) return
+        try {
+            runBlocking(Dispatchers.IO) {
+                splitIntoHourlySegments(startWallMs, endWallMs).forEach { segment ->
+                    addUsage(
+                        date = segment.date,
+                        packageName = packageName,
+                        hour = segment.hour,
+                        durationMs = segment.durationMs,
+                        wall = segment.endWall
+                    )
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
+        }
+    }
+
+    private suspend fun addUsage(
+        date: String,
+        packageName: String,
+        hour: Int,
+        durationMs: Long,
+        wall: Long
+    ) {
+        if (durationMs <= 0L) return
         val existing = dao.get(date, packageName)
         val hourly = parseHourly(existing?.hourlyUsage)
         hourly[hour] += durationMs
@@ -283,7 +419,39 @@ class AppUsageTracker {
         )
     }
 
-    private data class Segment(val date: String, val hour: Int, val durationMs: Long, val endWall: Long)
+    private fun recordLaunch(packageName: String, wall: Long) {
+        if (!trackingDecision.recordStatistics) return
+        // Calendar-keyed rows are derived history consumed by the existing usage UI. The
+        // authoritative current-use-day launch event is the session start itself.
+        val date = TimeTools.dayKey(Instant.ofEpochMilli(wall).atZone(ZoneId.systemDefault()).toLocalDate())
+        try {
+            runBlocking(Dispatchers.IO) {
+                val existing = dao.get(date, packageName)
+                dao.upsert(
+                    existing?.copy(
+                        launchCount = existing.launchCount + 1,
+                        lastUsed = maxOf(existing.lastUsed, wall)
+                    ) ?: AppUsageEntity(
+                        date = date,
+                        packageName = packageName,
+                        launchCount = 1,
+                        lastUsed = wall
+                    )
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
+        }
+    }
+
+    private data class Segment(
+        val date: String,
+        val hour: Int,
+        val durationMs: Long,
+        val endWall: Long
+    )
 
     private fun splitIntoHourlySegments(startWall: Long, endWall: Long): List<Segment> {
         if (endWall <= startWall) return emptyList()
@@ -295,13 +463,11 @@ class AppUsageTracker {
             val nextHour = zdt.plusHours(1).withMinute(0).withSecond(0).withNano(0)
                 .toInstant().toEpochMilli()
             val segmentEnd = minOf(endWall, nextHour)
-            segments.add(
-                Segment(
-                    date = TimeTools.dayKey(zdt.toLocalDate()),
-                    hour = zdt.hour,
-                    durationMs = segmentEnd - cursor,
-                    endWall = segmentEnd
-                )
+            segments += Segment(
+                date = TimeTools.dayKey(zdt.toLocalDate()),
+                hour = zdt.hour,
+                durationMs = segmentEnd - cursor,
+                endWall = segmentEnd
             )
             cursor = segmentEnd
         }
@@ -310,9 +476,17 @@ class AppUsageTracker {
 
     private val heartbeat = object : Runnable {
         override fun run() {
-            if (!recordingEnabled) return
-            commit(SystemClock.elapsedRealtime())
-            mainHandler.postDelayed(this, HEARTBEAT_MS)
+            if (!recordingEnabled || activeSessions.isEmpty()) return
+            try {
+                val nowWall = System.currentTimeMillis()
+                val nowElapsed = SystemClock.elapsedRealtime()
+                activeSessions.values.toList().forEach { commitSession(it, nowWall, nowElapsed) }
+            } catch (error: Exception) {
+                logNonFatal(error)
+            }
+            if (recordingEnabled && activeSessions.isNotEmpty()) {
+                mainHandler.postDelayed(this, HEARTBEAT_MS)
+            }
         }
     }
 
@@ -330,27 +504,37 @@ class AppUsageTracker {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
                     screenOn = false
-                    endCurrentSession()
+                    try {
+                        endAllSessions()
+                    } catch (error: Exception) {
+                        logNonFatal(error)
+                    }
                 }
                 Intent.ACTION_SCREEN_ON -> screenOn = true
                 Intent.ACTION_USER_PRESENT -> {
                     screenOn = true
-                    mainHandler.postDelayed({ resumeForegroundApp() }, 300)
+                    mainHandler.postDelayed({ resumeVisibleApplications() }, 300L)
                 }
             }
         }
     }
 
-    private fun resumeForegroundApp() {
-        if (!recordingEnabled || !screenOn || currentPackage != null) return
-        val active = try {
-            service.rootInActiveWindow?.packageName?.toString()
+    private fun resumeVisibleApplications() {
+        if (!recordingEnabled || !screenOn) return
+        try {
+            val windows = service.windows.map { window ->
+                VisibleApplicationWindow(window.packageName?.toString().orEmpty(), window.type)
+            }
+            reconcileVisiblePackages(
+                VisibleApplicationPackages.fromWindows(
+                    windows,
+                    ownPackage,
+                    Constants.SYSTEM_UI_PACKAGE_NAME
+                )
+            )
         } catch (error: Exception) {
             logNonFatal(error)
-            null
-        } ?: return
-        if (active.isEmpty() || active == ownPackage || active in IGNORED_PACKAGES) return
-        switchTo(active)
+        }
     }
 
     private fun registerScreenReceiver() {
@@ -365,10 +549,12 @@ class AppUsageTracker {
     fun onDestroy() {
         stopHeartbeat()
         try {
-            endCurrentSession()
+            endAllSessions()
         } catch (error: Exception) {
             logNonFatal(error)
         }
+        settingsJob?.cancel()
+        scope.cancel()
         try {
             service.unregisterReceiver(screenReceiver)
         } catch (error: Exception) {
@@ -380,13 +566,14 @@ class AppUsageTracker {
         val result = LongArray(24)
         if (serialized.isNullOrEmpty()) return result
         val parts = serialized.split(',')
-        for (i in 0 until minOf(24, parts.size)) {
-            result[i] = parts[i].toLongOrNull() ?: 0L
-        }
+        for (i in 0 until minOf(24, parts.size)) result[i] = parts[i].toLongOrNull() ?: 0L
         return result
     }
 
     private fun serializeHourly(hourly: LongArray): String = hourly.joinToString(",")
+
+    private fun safeResetTime(hour: Int, minute: Int): UseDayResetTime =
+        runCatching { UseDayResetTime(hour, minute) }.getOrDefault(UseDayResetTime())
 
     private fun logNonFatal(error: Exception) {
         if (::crashLogger.isInitialized) crashLogger.logNonFatalError(error)

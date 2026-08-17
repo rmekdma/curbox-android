@@ -3,6 +3,9 @@ package neth.iecal.curbox.domain.apprules
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.ForegroundSession
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
+import neth.iecal.curbox.utils.UseDayCalculator
+import neth.iecal.curbox.utils.UseDayResetTime
 import java.time.ZoneId
 
 data class AppRuleEvaluation(
@@ -25,13 +28,17 @@ data class AppRulesEvaluation(
 /** Pure rule decision boundary used by both the service and JVM unit tests. */
 object AppRuleEvaluator {
 
+    private data class SessionInterval(val packageName: String, val start: Long, val end: Long)
+
     fun evaluate(
         snapshot: AppRuleSnapshot,
         packageName: String,
         useDayId: String,
         sessions: Iterable<ForegroundSession>,
         nowMs: Long,
-        zone: ZoneId = ZoneId.systemDefault()
+        zone: ZoneId = ZoneId.systemDefault(),
+        useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
+        useDayGenerationStartedAtMs: Long = 0L
     ): AppRulesEvaluation {
         val validationErrors = snapshot.validate()
         if (validationErrors.isNotEmpty()) {
@@ -60,7 +67,16 @@ object AppRuleEvaluator {
             .mapNotNull { rule ->
                 val packages = groups[rule.appGroupId]?.selectedPackages.orEmpty().toSet()
                 if (packageName !in packages) return@mapNotNull null
-                evaluateRule(rule, packages, useDayId, sessionList, nowMs, zone)
+                evaluateRule(
+                    rule,
+                    packages,
+                    useDayId,
+                    sessionList,
+                    nowMs,
+                    zone,
+                    useDayCalculator,
+                    useDayGenerationStartedAtMs
+                )
             }
         return AppRulesEvaluation(
             isAllowed = evaluations.all { it.isAllowed },
@@ -75,7 +91,9 @@ object AppRuleEvaluator {
         useDayId: String,
         sessions: Iterable<ForegroundSession>,
         nowMs: Long,
-        zone: ZoneId = ZoneId.systemDefault()
+        zone: ZoneId = ZoneId.systemDefault(),
+        useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone),
+        useDayGenerationStartedAtMs: Long = 0L
     ): AppRuleEvaluation {
         val activeWindow = AppRuleSchedule.activeWindow(rule, nowMs, zone)
         val allowanceMillis = rule.allowedMinutes
@@ -93,15 +111,48 @@ object AppRuleEvaluator {
             )
         }
 
-        val usageWindows = AppRuleSchedule.usageWindowsForUseDay(rule, useDayId, zone)
-        val usedMillis = sessions.asSequence()
-            .filter { it.useDayId == useDayId && it.packageName in targetPackages }
-            .sumOf { session ->
+        val usageWindows = AppRuleSchedule.usageWindowsForUseDay(
+            rule,
+            useDayId,
+            zone,
+            useDayCalculator.resetTime
+        )
+        // A package may be represented by more than one persisted row after a process restart or
+        // a visibility reconciliation. Merge its intervals first so duplicate rows cannot charge
+        // the same visible package twice.
+        val intervalsByPackage = sessions.asSequence()
+            .filter {
+                it.useDayId == useDayId &&
+                    it.packageName in targetPackages &&
+                    (useDayGenerationStartedAtMs <= 0L ||
+                        it.useDayGenerationStartedAtMs >= useDayGenerationStartedAtMs)
+            }
+            .mapNotNull { session ->
                 val end = minOf(session.endedAtMs ?: nowMs, nowMs)
-                usageWindows.sumOf { (windowStart, windowEnd) ->
-                    overlapMillis(session.startedAtMs, end, windowStart, windowEnd)
+                if (end <= session.startedAtMs) {
+                    null
+                } else {
+                    SessionInterval(session.packageName, session.startedAtMs, end)
                 }
             }
+            .groupBy { it.packageName }
+        val usedMillis = intervalsByPackage.values.sumOf { intervals ->
+            val merged = intervals.map { it.start to it.end }.sortedBy { it.first }
+                .fold(mutableListOf<Pair<Long, Long>>()) { result, interval ->
+                    val previous = result.lastOrNull()
+                    if (previous != null && interval.first <= previous.second) {
+                        result[result.lastIndex] = previous.first to maxOf(previous.second, interval.second)
+                    } else {
+                        result += interval
+                    }
+                    result
+                }
+            merged.sumOf { (sessionStart, sessionEnd) ->
+                usageWindows.sumOf { (windowStart, windowEnd) ->
+                    overlapMillis(sessionStart, sessionEnd, windowStart, windowEnd)
+                }
+            }
+        }
         val remainingMillis = allowanceMillis - usedMillis
         return AppRuleEvaluation(
             ruleId = rule.id,
@@ -113,6 +164,66 @@ object AppRuleEvaluator {
             isAllowed = remainingMillis > 0L
         )
     }
+
+    fun evaluateRule(
+        rule: AppRule,
+        targetPackages: Set<String>,
+        useDayId: String,
+        sessions: Iterable<ForegroundSession>,
+        nowMs: Long,
+        resetTime: UseDayResetTime,
+        zone: ZoneId = ZoneId.systemDefault(),
+        useDayGenerationStartedAtMs: Long = 0L
+    ): AppRuleEvaluation = evaluateRule(
+        rule = rule,
+        targetPackages = targetPackages,
+        useDayId = useDayId,
+        sessions = sessions,
+        nowMs = nowMs,
+        zone = zone,
+        useDayCalculator = ConfigurableUseDayCalculator(zone, resetTime),
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+    )
+
+    fun evaluateWithResetTime(
+        snapshot: AppRuleSnapshot,
+        packageName: String,
+        useDayId: String,
+        sessions: Iterable<ForegroundSession>,
+        nowMs: Long,
+        resetTime: UseDayResetTime,
+        zone: ZoneId = ZoneId.systemDefault(),
+        useDayGenerationStartedAtMs: Long = 0L
+    ): AppRulesEvaluation = evaluate(
+        snapshot = snapshot,
+        packageName = packageName,
+        useDayId = useDayId,
+        sessions = sessions,
+        nowMs = nowMs,
+        zone = zone,
+        useDayCalculator = ConfigurableUseDayCalculator(zone, resetTime),
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+    )
+
+    fun evaluate(
+        snapshot: AppRuleSnapshot,
+        packageName: String,
+        useDayId: String,
+        sessions: Iterable<ForegroundSession>,
+        nowMs: Long,
+        resetTime: UseDayResetTime,
+        zone: ZoneId = ZoneId.systemDefault(),
+        useDayGenerationStartedAtMs: Long = 0L
+    ): AppRulesEvaluation = evaluateWithResetTime(
+        snapshot = snapshot,
+        packageName = packageName,
+        useDayId = useDayId,
+        sessions = sessions,
+        nowMs = nowMs,
+        resetTime = resetTime,
+        zone = zone,
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+    )
 
     private fun overlapMillis(
         leftStart: Long,

@@ -14,7 +14,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.timepicker.MaterialTimePicker
+import com.google.android.material.timepicker.TimeFormat
+import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import java.io.File
 import neth.iecal.curbox.BuildConfig
 import neth.iecal.curbox.data.sync.SyncGateway
@@ -44,6 +48,7 @@ class InfoFragment : Fragment() {
 
         setupAccountSection()
         setupUsageTrackingSettings()
+        setupUseDayResetTime()
         setupClickListeners()
         LanguageUtils.bindLanguageSelector(binding.languageSelector, binding.textCurrentLanguage)
     }
@@ -66,6 +71,43 @@ class InfoFragment : Fragment() {
                     binding.switchAppUsageTracking.isChecked = settings.isAppUsageTrackingEnabled
                     binding.switchWebsiteUsageTracking.isChecked = settings.isWebsiteUsageTrackingEnabled
                     renderingTrackingSettings = false
+                }
+            }
+        }
+    }
+
+    private fun setupUseDayResetTime() {
+        val button = binding.root.findViewById<MaterialButton>(R.id.button_use_day_reset_time)
+        if (button == null) return
+
+        fun formatTime(hour: Int, minute: Int): String =
+            "%02d:%02d".format(java.util.Locale.getDefault(), hour, minute)
+
+        button.setOnClickListener {
+            viewLifecycleOwner.lifecycleScope.launch {
+                val settings = dataStore.settings.first()
+                val picker = MaterialTimePicker.Builder()
+                    .setTimeFormat(TimeFormat.CLOCK_24H)
+                    .setHour(settings.useDayResetHour)
+                    .setMinute(settings.useDayResetMinute)
+                    .setTitleText(R.string.use_day_reset_time)
+                    .build()
+                picker.addOnPositiveButtonClickListener {
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        dataStore.updateUseDayResetTime(picker.hour, picker.minute)
+                    }
+                }
+                picker.show(childFragmentManager, "use_day_reset_time_picker")
+            }
+        }
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                dataStore.settings.collect { settings ->
+                    button.text = getString(
+                        R.string.use_day_reset_time_value,
+                        formatTime(settings.useDayResetHour, settings.useDayResetMinute)
+                    )
                 }
             }
         }

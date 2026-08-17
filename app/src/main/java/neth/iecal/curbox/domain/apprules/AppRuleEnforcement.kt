@@ -1,6 +1,8 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
+import neth.iecal.curbox.utils.UseDayCalculator
 import kotlinx.coroutines.CancellationException
 import java.time.ZoneId
 
@@ -10,20 +12,30 @@ import java.time.ZoneId
  */
 class AppRuleEnforcement(
     private val sessionRepository: CurrentUseDaySessionRepository,
-    private val zone: ZoneId = ZoneId.systemDefault()
+    private val zone: ZoneId = ZoneId.systemDefault(),
+    private val useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(zone)
 ) {
+    constructor(
+        sessionRepository: CurrentUseDaySessionRepository,
+        useDayCalculator: UseDayCalculator
+    ) : this(sessionRepository, useDayCalculator.zone, useDayCalculator)
+
     suspend fun check(
         snapshot: AppRuleSnapshot,
         packageName: String,
         useDayId: String,
-        nowMs: Long
+        nowMs: Long,
+        calculator: UseDayCalculator = useDayCalculator,
+        useDayGenerationStartedAtMs: Long = 0L
     ): AppRulesEvaluation = AppRuleEvaluator.evaluate(
         snapshot = snapshot,
         packageName = packageName,
         useDayId = useDayId,
         sessions = sessionRepository.sessionsForUseDay(useDayId),
         nowMs = nowMs,
-        zone = zone
+        zone = zone,
+        useDayCalculator = calculator,
+        useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
     )
 
     /**
@@ -34,9 +46,11 @@ class AppRuleEnforcement(
         snapshot: AppRuleSnapshot,
         packageName: String,
         useDayId: String,
-        nowMs: Long
+        nowMs: Long,
+        calculator: UseDayCalculator = useDayCalculator,
+        useDayGenerationStartedAtMs: Long = 0L
     ): AppRulesEvaluation = try {
-        check(snapshot, packageName, useDayId, nowMs)
+        check(snapshot, packageName, useDayId, nowMs, calculator, useDayGenerationStartedAtMs)
     } catch (error: CancellationException) {
         throw error
     } catch (_: Exception) {

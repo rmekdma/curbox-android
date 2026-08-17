@@ -1,5 +1,8 @@
 package neth.iecal.curbox.data.models
 
+import neth.iecal.curbox.utils.UseDay
+import neth.iecal.curbox.utils.UseDayResetTime
+
 data class Settings(
     val blockedAppGroups: List<AppGroup> = listOf(),
     val manualFocusGroups: List<ManualFocusGroup> = listOf(),
@@ -26,5 +29,17 @@ data class Settings(
     val antiUninstallConfig2: AntiUninstallConfig = AntiUninstallConfig(),
     val settingsChangeDelayConfig2: SettingsChangeDelayConfig = SettingsChangeDelayConfig(),
     /** New unified app rules. The legacy [blockedAppGroups] field remains readable for old data. */
-    val appRuleSnapshot: AppRuleSnapshot = AppRuleSnapshot()
-)
+    val appRuleSnapshot: AppRuleSnapshot = AppRuleSnapshot(),
+    /** Local clock time at which the global use day starts. */
+    val useDayResetHour: Int = UseDay.DEFAULT_RESET_HOUR,
+    val useDayResetMinute: Int = UseDay.DEFAULT_RESET_MINUTE,
+    /** Latest reset setting change. It prevents an in-place reset edit from reusing old rows. */
+    val useDayGenerationStartedAtMs: Long = 0L
+) {
+    /** Convenient scalar form for settings UIs and deterministic tests. */
+    val useDayResetTimeMinutes: Int
+        get() = useDayResetHour.coerceIn(0, 23) * 60 + useDayResetMinute.coerceIn(0, 59)
+
+    val useDayResetTime: UseDayResetTime
+        get() = UseDayResetTime(useDayResetHour, useDayResetMinute)
+}

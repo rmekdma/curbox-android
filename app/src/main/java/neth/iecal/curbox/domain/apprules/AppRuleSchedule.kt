@@ -2,6 +2,8 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.utils.UseDay
+import neth.iecal.curbox.utils.UseDayCalculator
+import neth.iecal.curbox.utils.UseDayResetTime
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -30,8 +32,20 @@ object AppRuleSchedule {
         rule: AppRule,
         useDayId: String,
         zone: ZoneId
+    ): List<Pair<Long, Long>> = usageWindowsForUseDay(
+        rule = rule,
+        useDayId = useDayId,
+        zone = zone,
+        resetTime = UseDayResetTime()
+    )
+
+    fun usageWindowsForUseDay(
+        rule: AppRule,
+        useDayId: String,
+        zone: ZoneId,
+        resetTime: UseDayResetTime
     ): List<Pair<Long, Long>> {
-        val useDay = UseDay.windowFor(useDayId, zone)
+        val useDay = UseDay.windowFor(useDayId, zone, resetTime)
         val date = LocalDate.parse(useDayId)
         val windows = (-1..1).mapNotNull { offset ->
             val window = windowForAnchor(rule, date.plusDays(offset.toLong()), zone)
@@ -51,6 +65,17 @@ object AppRuleSchedule {
             merged
         }
     }
+
+    fun usageWindowsForUseDay(
+        rule: AppRule,
+        useDayId: String,
+        calculator: UseDayCalculator
+    ): List<Pair<Long, Long>> = usageWindowsForUseDay(
+        rule,
+        useDayId,
+        calculator.zone,
+        calculator.resetTime
+    )
 
     /** Returns minute coverage for all weekdays, including an overnight continuation. */
     fun weeklyCoverage(rule: AppRule): BooleanArray {

@@ -1727,6 +1727,9 @@
     <string name="app_usage_tracking">App Usage Tracking</string>
     <string name="website_usage_tracking">Website Usage Tracking</string>
     <string name="usage_tracking_disabled_warning">Warning: Usage Based blocking options will not work for a tracking type while it is turned off.</string>
+    <string name="use_day_reset_time">Use day reset time</string>
+    <string name="use_day_reset_time_description">Today starts at this local time. The default is 04:00.</string>
+    <string name="use_day_reset_time_value">Starts at %1$s</string>
 
     <!-- Units -->
     <string name="unit_minutes">Minutes</string>

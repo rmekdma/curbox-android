@@ -36,4 +36,21 @@ class UseDayTest {
         assertTrue(window.last - window.first >= 23 * 60 * 60 * 1000L)
         assertTrue(window.last - window.first <= 25 * 60 * 60 * 1000L)
     }
+
+    @Test
+    fun configurableResetTimeChangesTheUseDayBoundary() {
+        val calculator = ConfigurableUseDayCalculator(
+            zone = zone,
+            resetTime = UseDayResetTime(hour = 6, minute = 30)
+        )
+
+        assertEquals(
+            "2026-08-17",
+            calculator.idAt(Instant.parse("2026-08-17T21:29:59Z").toEpochMilli())
+        )
+        assertEquals(
+            "2026-08-18",
+            calculator.idAt(Instant.parse("2026-08-17T21:30:00Z").toEpochMilli())
+        )
+    }
 }

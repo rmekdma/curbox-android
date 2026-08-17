@@ -133,7 +133,9 @@ data class ForegroundSession(
     val useDayId: String = "",
     val packageName: String = "",
     val startedAtMs: Long = 0L,
-    val endedAtMs: Long? = null
+    val endedAtMs: Long? = null,
+    /** Nonzero only when a changed reset setting starts a new use-day instance. */
+    val useDayGenerationStartedAtMs: Long = 0L
 )
 
 private fun newId(): String = UUID.randomUUID().toString()

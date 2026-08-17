@@ -8,8 +8,10 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [ReelStatsEntity::class, ReelUsageStatsEntity::class, ScrollPatternEntity::class, FocusStatsEntity::class, WebsiteStatsEntity::class, IntentLogEntity::class, AppUsageEntity::class, ForegroundSessionEntity::class],
-    version = 11,
+    entities = [ReelStatsEntity::class, ReelUsageStatsEntity::class, ScrollPatternEntity::class, FocusStatsEntity::class, WebsiteStatsEntity::class, IntentLogEntity::class, AppUsageEntity::class, ForegroundSessionEntity::class, ForegroundLaunchEntity::class],
+    // v13 adds launch events alongside the reset-generation marker. The database intentionally
+    // keeps fallbackToDestructiveMigration because the app-rule rollout accepts local usage loss.
+    version = 13,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -22,6 +24,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun intentLogDao(): IntentLogDao
     abstract fun appUsageDao(): AppUsageDao
     abstract fun foregroundSessionDao(): ForegroundSessionDao
+    abstract fun foregroundLaunchDao(): ForegroundLaunchDao
 
     companion object {
         @Volatile
