@@ -1,6 +1,7 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import kotlinx.coroutines.CancellationException
 import java.time.ZoneId
 
 /**
@@ -24,4 +25,21 @@ class AppRuleEnforcement(
         nowMs = nowMs,
         zone = zone
     )
+
+    /**
+     * Keeps a storage failure local to this decision. The service can continue receiving later
+     * accessibility events, while cancellation still propagates through coroutine workers.
+     */
+    suspend fun checkSafely(
+        snapshot: AppRuleSnapshot,
+        packageName: String,
+        useDayId: String,
+        nowMs: Long
+    ): AppRulesEvaluation = try {
+        check(snapshot, packageName, useDayId, nowMs)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        AppRulesEvaluation(isAllowed = true, denyingRules = emptyList(), evaluations = emptyList())
+    }
 }

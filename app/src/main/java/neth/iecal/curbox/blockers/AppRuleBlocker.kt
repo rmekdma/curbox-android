@@ -23,13 +23,12 @@ import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
-import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.ui.activity.WarningActivity
 import neth.iecal.curbox.utils.UseDay
-import java.util.concurrent.atomic.AtomicReference
 
 /** Enforces the new atomic app-rule snapshot without changing the legacy blocker. */
 class AppRuleBlocker {
@@ -41,7 +40,7 @@ class AppRuleBlocker {
     private lateinit var crashLogger: CrashLogger
     private lateinit var sessionRepository: CurrentUseDaySessionRepository
     private lateinit var enforcement: AppRuleEnforcement
-    private val snapshot = AtomicReference(AppRuleSnapshot())
+    private val snapshot = AppRuleSnapshotCoordinator()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val handler = Handler(Looper.getMainLooper())
     private var settingsJob: kotlinx.coroutines.Job? = null
@@ -55,7 +54,7 @@ class AppRuleBlocker {
         enforcement = AppRuleEnforcement(sessionRepository)
         try {
             val initial = runBlocking(Dispatchers.IO) { service.dataStoreManager.settings.first().appRuleSnapshot }
-            if (initial.isValid) snapshot.set(initial)
+            snapshot.accept(initial)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -68,7 +67,7 @@ class AppRuleBlocker {
                     val candidate = settings.appRuleSnapshot
                     // A malformed value can only come from older/corrupted storage. Keep the last
                     // valid runtime snapshot rather than exposing a partial reference graph.
-                    if (candidate.isValid) snapshot.set(candidate)
+                    snapshot.accept(candidate)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -95,7 +94,7 @@ class AppRuleBlocker {
             packageName == Constants.SYSTEM_UI_PACKAGE_NAME
         ) return
 
-        val currentSnapshot = snapshot.get()
+        val currentSnapshot = snapshot.snapshot()
         if (currentSnapshot.appRules.none { it.isActive }) return
         val now = System.currentTimeMillis()
         val useDayId = UseDay.idAt(now)
@@ -168,7 +167,7 @@ class AppRuleBlocker {
                 try {
                     service.dataStoreManager.settings.first().appRuleSnapshot
                         .takeIf { it.isValid }
-                        ?.let(snapshot::set)
+                        ?.let(snapshot::accept)
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
