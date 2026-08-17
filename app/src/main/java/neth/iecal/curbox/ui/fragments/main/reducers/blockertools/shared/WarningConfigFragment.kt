@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
 import neth.iecal.curbox.databinding.FragmentWarningConfigBinding
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class WarningConfigFragment : Fragment() {
     private var _binding: FragmentWarningConfigBinding? = null
@@ -24,6 +25,7 @@ class WarningConfigFragment : Fragment() {
     private var nfcController: WarningConfigNfcController? = null
 
     private val barcodeLauncher = registerForActivityResult(ScanContract()) { result ->
+        GuardianSessionRegistry.completeOneShotSystemResult()
         qrController?.onBarcodeResult(result.contents)
     }
 

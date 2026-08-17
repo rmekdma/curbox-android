@@ -40,6 +40,7 @@ import neth.iecal.curbox.ui.fragments.main.usage.AllAppsUsageFragment
 import neth.iecal.curbox.utils.PermissionUtils
 import neth.iecal.curbox.utils.ZipUtils
 import neth.iecal.curbox.utils.ZipUtils.unzipSharedPreferencesFromUri
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import java.util.UUID
 
 class OnboardingPermissionsFragment : Fragment() {
@@ -65,6 +66,7 @@ class OnboardingPermissionsFragment : Fragment() {
 
     private val restorePicker: ActivityResultLauncher<Intent> =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            GuardianSessionRegistry.completeOneShotSystemResult()
             result.data?.data?.let { uri ->
                 val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
                 activity?.contentResolver?.takePersistableUriPermission(uri, takeFlags)
@@ -157,6 +159,8 @@ class OnboardingPermissionsFragment : Fragment() {
                     rationale = getString(R.string.onboarding_perm_notif_rationale),
                     openSourceExplanation = getString(R.string.onboarding_perm_notif_opensource)
                 ) {
+                    requireActivity().window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                    GuardianSessionRegistry.markOneShotSystemResult()
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
             }

@@ -55,6 +55,7 @@ import neth.iecal.curbox.ui.widgets.ReelsWidgetProvider
 import neth.iecal.curbox.ui.widgets.ScreentimeWidgetProvider
 import neth.iecal.curbox.utils.ColorUtils
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import neth.iecal.curbox.utils.PermissionUtils
 import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.UsageStatsHelper
@@ -94,6 +95,7 @@ class AllAppsUsageFragment : Fragment() {
 
         private val createCsvLauncher =
             registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+                GuardianSessionRegistry.completeOneShotSystemResult()
                 uri?.let {
                     lifecycleScope.launch(Dispatchers.IO) {
                         try {
@@ -207,7 +209,7 @@ class AllAppsUsageFragment : Fragment() {
                                         ArrayList(ignoredApps)
                                     )
                                     selectIgnoredAppsLauncher.launch(
-                                        intent,
+                                        GuardianSessionRegistry.attachInternalNavigationToken(intent),
                                         ActivityOptionsCompat.makeCustomAnimation(
                                             requireContext(),
                                             R.anim.fade_in,
@@ -518,6 +520,10 @@ class AllAppsUsageFragment : Fragment() {
 
                 withContext(Dispatchers.Main) {
                     val name = "UsageData_${dateFormat.format(Date(startMs))}.csv"
+                    requireActivity().window.addFlags(
+                        android.view.WindowManager.LayoutParams.FLAG_SECURE
+                    )
+                    GuardianSessionRegistry.markOneShotSystemResult()
                     createCsvLauncher.launch(name)
                 }
             }

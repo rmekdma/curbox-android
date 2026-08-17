@@ -45,14 +45,33 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class FragmentActivity : AppCompatActivity() {
     private var selectedFragmentId: String = AllAppsUsageFragment.FRAGMENT_ID
     private var guardianDialogVisible = false
+    private var initialGuardianGate = false
+
+    /** Attach a one-shot handoff to every explicit Curbox child launch from this host. */
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun startActivityForResult(
+        intent: Intent,
+        requestCode: Int,
+        options: Bundle?
+    ) {
+        val target = intent.component
+        val internalIntent = if (target?.packageName == packageName) {
+            GuardianSessionRegistry.attachInternalNavigationToken(intent)
+        } else {
+            intent
+        }
+        super.startActivityForResult(internalIntent, requestCode, options)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val sharedPreferences = getSharedPreferences("AppPreferences", android.content.Context.MODE_PRIVATE)
@@ -65,7 +84,9 @@ class FragmentActivity : AppCompatActivity() {
         }
 
         super.onCreate(savedInstanceState)
-        GuardianSessionRegistry.onCurboxActivityStarted()
+        GuardianSessionRegistry.onCurboxActivityStarted(
+            intent.getStringExtra(GuardianSessionRegistry.EXTRA_INTERNAL_NAVIGATION_TOKEN)
+        )
 
         // Screens for features this flavor does not ship stay unreachable even
         // through shortcuts or external intents.
@@ -79,9 +100,24 @@ class FragmentActivity : AppCompatActivity() {
             return
         }
 
+        val guardianConfigured = if (selectedFragment != OnboardingFragment.FRAGMENT_ID) {
+            runBlocking(Dispatchers.IO) {
+                DataStoreManager(applicationContext).settings.first().guardianAuthConfig.isConfigured
+            }
+        } else {
+            false
+        }
+        if (guardianConfigured && !GuardianSessionRegistry.session.isAuthenticated(true)) {
+            initialGuardianGate = true
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            enableEdgeToEdge()
+            setContentView(R.layout.activity_guardian_gate)
+            requestGuardianAccessIfNeeded()
+            return
+        }
+
         enableEdgeToEdge()
         setContentView(R.layout.activity_fragment)
-        requestGuardianAccessIfNeeded()
 
         maybeShowTermsConsent()
         maybeShowWhatsNew()
@@ -198,12 +234,16 @@ class FragmentActivity : AppCompatActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        GuardianSessionRegistry.markExternalSystemScreen()
+        if (!GuardianSessionRegistry.isAwaitingOneShotSystemResult()) {
+            GuardianSessionRegistry.markExternalSystemScreen()
+        }
     }
 
     override fun onStop() {
         super.onStop()
-        GuardianSessionRegistry.onCurboxActivityStopped()
+        if (!isChangingConfigurations) {
+            GuardianSessionRegistry.onCurboxActivityStopped()
+        }
     }
 
     override fun onResume() {
@@ -215,12 +255,18 @@ class FragmentActivity : AppCompatActivity() {
 
     private fun requestGuardianAccessIfNeeded() {
         if (guardianDialogVisible || isFinishing || isDestroyed) return
+        guardianDialogVisible = true
         lifecycleScope.launch {
             val config = DataStoreManager(applicationContext).settings.first().guardianAuthConfig
-            if (!config.isConfigured) return@launch
+            if (!config.isConfigured) {
+                guardianDialogVisible = false
+                return@launch
+            }
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-            if (GuardianSessionRegistry.session.isAuthenticated(true)) return@launch
-            guardianDialogVisible = true
+            if (GuardianSessionRegistry.session.isAuthenticated(true)) {
+                guardianDialogVisible = false
+                return@launch
+            }
             val input = EditText(this@FragmentActivity).apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
                 hint = getString(R.string.guardian_password_hint)
@@ -244,6 +290,13 @@ class FragmentActivity : AppCompatActivity() {
                                 android.widget.Toast.LENGTH_LONG
                             ).show()
                             finish()
+                        } else if (initialGuardianGate) {
+                            initialGuardianGate = false
+                            intent.putExtra(
+                                GuardianSessionRegistry.EXTRA_INTERNAL_NAVIGATION_TOKEN,
+                                GuardianSessionRegistry.issueInternalNavigationToken()
+                            )
+                            recreate()
                         }
                     }
                 }
@@ -339,7 +392,7 @@ class FragmentActivity : AppCompatActivity() {
         val tag = tabTags[itemId] ?: return
         val fm = supportFragmentManager
 
-          fm.popBackStackImmediate(null, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+        fm.popBackStackImmediate(null, FragmentManager.POP_BACK_STACK_INCLUSIVE)
 
         val transaction = fm.beginTransaction()
 

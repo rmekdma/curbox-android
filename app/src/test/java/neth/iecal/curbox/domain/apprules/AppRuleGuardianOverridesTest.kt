@@ -151,6 +151,144 @@ class AppRuleGuardianOverridesTest {
     }
 
     @Test
+    fun multipleSkipIntervalsRemainDurableAndDoNotReplaceEarlierApproval() {
+        val reset = now + 60 * MINUTE
+        val first = AppRuleGuardianOverrides.skipUntil(
+            AppRuleOverrideState("2026-08-17"), "rule", "2026-08-17",
+            selectedUntilMs = now + 5 * MINUTE,
+            nextResetAtMs = reset,
+            nowMs = now
+        )
+        val second = AppRuleGuardianOverrides.skipUntil(
+            first, "rule", "2026-08-17",
+            selectedUntilMs = now + 15 * MINUTE,
+            nextResetAtMs = reset,
+            nowMs = now + 10 * MINUTE
+        )
+
+        assertEquals(2, second.skips.size)
+        assertFalse(AppRuleGuardianOverrides.isSkipped(second, "rule", "2026-08-17", now + 7 * MINUTE))
+        assertTrue(AppRuleGuardianOverrides.isSkipped(second, "rule", "2026-08-17", now + 12 * MINUTE))
+    }
+
+    @Test
+    fun usageDuringAnExpiredSkipIntervalStaysExcludedFromThatRule() {
+        val state = AppRuleGuardianOverrides.skipUntil(
+            AppRuleOverrideState("2026-08-17"), "rule", "2026-08-17",
+            selectedUntilMs = now + 5 * MINUTE,
+            nextResetAtMs = now + 60 * MINUTE,
+            nowMs = now
+        )
+        val result = AppRuleEvaluator.evaluate(
+            AppRuleSnapshot(listOf(group), listOf(rule.copy(allowedMinutes = 60))),
+            "com.example.reader", "2026-08-17",
+            listOf(session(now, now + 10 * MINUTE)),
+            now + 10 * MINUTE,
+            zone,
+            overrides = state
+        )
+
+        assertEquals(5 * MINUTE, result.evaluations.single().usedMillis)
+    }
+
+    @Test
+    fun compactionMergesExpiredSkipHistoryWithoutDroppingItsExclusion() {
+        val first = AppRuleGuardianOverrides.skipUntil(
+            AppRuleOverrideState("2026-08-17"),
+            "rule",
+            "2026-08-17",
+            selectedUntilMs = now - 10 * MINUTE,
+            nextResetAtMs = now + 60 * MINUTE,
+            nowMs = now - 20 * MINUTE
+        )
+        val second = AppRuleGuardianOverrides.skipUntil(
+            first,
+            "rule",
+            "2026-08-17",
+            selectedUntilMs = now + 5 * MINUTE,
+            nextResetAtMs = now + 60 * MINUTE,
+            nowMs = now - 10 * MINUTE
+        )
+
+        val compacted = AppRuleGuardianOverrides.compact(second, "2026-08-17")
+
+        assertEquals(1, compacted.skips.size)
+        assertEquals(now - 20 * MINUTE, compacted.skips.single().skipFromMs)
+        assertEquals(now + 5 * MINUTE, compacted.skips.single().skipUntilMs)
+    }
+
+    @Test
+    fun zeroAllowanceStillExposesTheNextSkipBoundaryForRecheck() {
+        val until = now + 15 * MINUTE
+        val state = AppRuleGuardianOverrides.skipUntil(
+            AppRuleOverrideState("2026-08-17"), "rule", "2026-08-17",
+            selectedUntilMs = until,
+            nextResetAtMs = now + 60 * MINUTE,
+            nowMs = now
+        )
+
+        assertEquals(
+            until,
+            AppRuleGuardianOverrides.nextSkipBoundaryMs(state, "2026-08-17", now)
+        )
+    }
+
+    @Test
+    fun missingContributorCannotBeOpenedByGuardianGrantOrSkip() {
+        val grant = AppRuleGuardianOverrides.grant(
+            AppRuleOverrideState("2026-08-17"), "rule", "2026-08-17", 10 * MINUTE, now
+        )
+        val grantResult = AppRuleEvaluator.evaluateRule(
+            rule = rule,
+            targetPackages = setOf("com.example.reader"),
+            useDayId = "2026-08-17",
+            sessions = emptyList(),
+            nowMs = now,
+            zone = zone,
+            missingContributorGroupIds = setOf("missing"),
+            overrides = grant
+        )
+        val skip = AppRuleGuardianOverrides.skipUntil(
+            AppRuleOverrideState("2026-08-17"), "rule", "2026-08-17",
+            now + 15 * MINUTE, now + 60 * MINUTE, now
+        )
+        val skipResult = AppRuleEvaluator.evaluateRule(
+            rule = rule,
+            targetPackages = setOf("com.example.reader"),
+            useDayId = "2026-08-17",
+            sessions = emptyList(),
+            nowMs = now,
+            zone = zone,
+            missingContributorGroupIds = setOf("missing"),
+            overrides = skip
+        )
+
+        assertFalse(grantResult.isAllowed)
+        assertFalse(skipResult.isAllowed)
+    }
+
+    @Test
+    fun resetGenerationInvalidatesSameUseDayApprovals() {
+        val state = AppRuleGuardianOverrides.grant(
+            AppRuleOverrideState(
+                useDayId = "2026-08-17",
+                useDayGenerationStartedAtMs = 1L
+            ),
+            "rule", "2026-08-17", 10 * MINUTE, now,
+            useDayGenerationStartedAtMs = 1L
+        )
+        val result = AppRuleEvaluator.evaluate(
+            AppRuleSnapshot(listOf(group), listOf(rule)),
+            "com.example.reader", "2026-08-17", emptyList(), now, zone,
+            useDayGenerationStartedAtMs = 2L,
+            overrides = state
+        )
+
+        assertEquals(0L, result.evaluations.single().guardianAllowanceMillis)
+        assertFalse(result.isAllowed)
+    }
+
+    @Test
     fun inactiveWindowDoesNotSpendAProactiveGrant() {
         val state = AppRuleGuardianOverrides.grant(
             AppRuleOverrideState("2026-08-17"), "rule", "2026-08-17", 10 * MINUTE,

@@ -29,6 +29,7 @@ import neth.iecal.curbox.data.models.AntiUninstallConfig
 import neth.iecal.curbox.data.models.AntiUninstallMode
 import neth.iecal.curbox.utils.AntiUninstallManager
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import neth.iecal.curbox.utils.ViewUtils
 import java.util.concurrent.TimeUnit
 
@@ -79,6 +80,7 @@ class AntiUninstallFragment : Fragment() {
     private val adminLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
+        GuardianSessionRegistry.completeOneShotSystemResult()
         if (AntiUninstallManager.isAdminActive(requireContext())) {
             enableProtection()
         } else {
@@ -259,6 +261,10 @@ class AntiUninstallFragment : Fragment() {
                 getString(R.string.anti_uninstall_admin_explanation)
             )
         }
+        requireActivity().window.addFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE
+        )
+        GuardianSessionRegistry.markOneShotSystemResult()
         adminLauncher.launch(intent)
     }
 

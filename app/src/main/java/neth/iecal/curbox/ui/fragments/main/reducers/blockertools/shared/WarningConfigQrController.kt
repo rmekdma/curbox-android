@@ -16,6 +16,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import neth.iecal.curbox.R
 import neth.iecal.curbox.databinding.FragmentWarningConfigBinding
 import neth.iecal.curbox.ui.activity.PortraitCaptureActivity
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import java.util.UUID
 
 internal class WarningConfigQrController(
@@ -116,6 +117,8 @@ internal class WarningConfigQrController(
         options.setBeepEnabled(false)
         options.setBarcodeImageEnabled(true)
         options.setCaptureActivity(PortraitCaptureActivity::class.java)
+        fragment.requireActivity().window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        GuardianSessionRegistry.markOneShotSystemResult()
         barcodeLauncher.launch(options)
     }
 

@@ -1395,6 +1395,8 @@
     <string name="app_rules_warning_status_no_condition">Condition off. Earned %1$d minutes. Direct %2$d minutes. Remaining %3$d minutes.</string>
     <string name="guardian_approval_title">Guardian approval</string>
     <string name="guardian_approval_message">Choose one rule to approve. Other rules will still be checked.</string>
+    <string name="guardian_denial_row">%1$s
+%2$s</string>
     <string name="guardian_add_time">Add time</string>
     <string name="guardian_skip_rule">Skip this rule</string>
     <string name="guardian_minutes_hint">Minutes</string>

@@ -21,6 +21,7 @@ import neth.iecal.curbox.data.models.GrayscaleGroup
 import neth.iecal.curbox.data.models.TimeInterval
 import neth.iecal.curbox.databinding.FragmentCreateGrayscaleGroupBinding
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import java.util.UUID
 
 class CreateGrayscaleGroupFragment : Fragment() {
@@ -107,7 +108,7 @@ class CreateGrayscaleGroupFragment : Fragment() {
         binding.btnSelectApps.setOnClickListener {
             val intent = Intent(requireContext(), SelectAppsActivity::class.java)
             intent.putStringArrayListExtra("PRE_SELECTED_APPS", selectedApps)
-            selectAppsLauncher.launch(intent)
+            selectAppsLauncher.launch(GuardianSessionRegistry.attachInternalNavigationToken(intent))
         }
 
         binding.btnConfigureSchedule.setOnClickListener {

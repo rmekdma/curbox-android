@@ -31,6 +31,7 @@ import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
 import neth.iecal.curbox.databinding.DialogWarningOverlayBinding
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.FocusGoalProgress
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import java.util.Calendar
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
@@ -67,6 +68,7 @@ class WarningActivity : AppCompatActivity() {
     private val barcodeLauncher = registerForActivityResult(
         ScanContract()
     ) { result ->
+        GuardianSessionRegistry.completeOneShotSystemResult()
         if (result.contents == null) {
             Toast.makeText(this@WarningActivity, R.string.warning_cancelled, Toast.LENGTH_LONG).show()
         } else {
@@ -341,6 +343,8 @@ class WarningActivity : AppCompatActivity() {
                 options.setBeepEnabled(false)
                 options.setBarcodeImageEnabled(true)
                 options.setCaptureActivity(neth.iecal.curbox.ui.activity.PortraitCaptureActivity::class.java)
+                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                GuardianSessionRegistry.markOneShotSystemResult()
                 barcodeLauncher.launch(options)
                 return@setOnClickListener
             }

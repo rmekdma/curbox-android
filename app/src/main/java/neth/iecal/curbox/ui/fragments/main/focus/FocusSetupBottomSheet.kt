@@ -25,6 +25,7 @@ import neth.iecal.curbox.data.models.ManualFocusGroup
 import neth.iecal.curbox.databinding.DialogFocusSessionConfigBinding
 import neth.iecal.curbox.hardcoded.URL_BAR_ID_LIST
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class FocusSetupBottomSheet : BottomSheetDialogFragment() {
 
@@ -134,7 +135,7 @@ class FocusSetupBottomSheet : BottomSheetDialogFragment() {
         binding.btnSelectApps.setOnClickListener {
             val intent = Intent(requireContext(), SelectAppsActivity::class.java)
             intent.putStringArrayListExtra("PRE_SELECTED_APPS", ArrayList(viewModel.newGroupSelectedApps))
-            selectAppsLauncher.launch(intent)
+            selectAppsLauncher.launch(GuardianSessionRegistry.attachInternalNavigationToken(intent))
         }
 
         binding.btnAddWebsites.setOnClickListener {

@@ -9,6 +9,7 @@ import com.google.android.material.button.MaterialButton
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import neth.iecal.curbox.R
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 /**
  * Standalone account and sync screen, reached from the Settings tab. Lives on its
@@ -24,6 +25,7 @@ class SyncFragment : Fragment() {
     private lateinit var controller: AccountController
 
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
+        GuardianSessionRegistry.completeOneShotSystemResult()
         result.contents?.let { controller.pairWith(it) }
     }
 
@@ -33,6 +35,8 @@ class SyncFragment : Fragment() {
             requireActivity().onBackPressedDispatcher.onBackPressed()
         }
         controller = AccountController(v, this) {
+            requireActivity().window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            GuardianSessionRegistry.markOneShotSystemResult()
             scanLauncher.launch(ScanOptions().setOrientationLocked(true).setPrompt("Point at the pairing code"))
         }
         controller.bind()

@@ -224,11 +224,16 @@ class DataStoreManager(private val context: Context) {
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
             val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
-                current.appRuleOverrideState,
+                neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
+                    current.appRuleOverrideState,
+                    useDayId,
+                    current.useDayGenerationStartedAtMs
+                ),
                 ruleId,
                 useDayId,
                 saturatedMillis(durationMinutes),
-                grantedAtMs
+                grantedAtMs,
+                current.useDayGenerationStartedAtMs
             )
             changed = true
             current.copy(appRuleOverrideState = next)
@@ -251,12 +256,17 @@ class DataStoreManager(private val context: Context) {
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
             val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.skipUntil(
-                current.appRuleOverrideState,
+                neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
+                    current.appRuleOverrideState,
+                    useDayId,
+                    current.useDayGenerationStartedAtMs
+                ),
                 ruleId,
                 useDayId,
                 selectedUntilMs,
                 nextResetAtMs,
-                nowMs
+                nowMs,
+                current.useDayGenerationStartedAtMs
             )
             changed = true
             current.copy(appRuleOverrideState = next)
@@ -276,6 +286,24 @@ class DataStoreManager(private val context: Context) {
             ) return@updateData current
             changed = true
             current.copy(appRuleOverrideState = state)
+        }
+        return changed
+    }
+
+    /** Compacts the current local approval ledger without uploading or changing credentials. */
+    suspend fun compactAppRuleOverrides(nowMs: Long = System.currentTimeMillis()): Boolean {
+        var changed = false
+        settingsDataStore.updateData { current ->
+            val calculator = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime)
+            val useDayId = calculator.idAt(nowMs)
+            val compacted = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
+                current.appRuleOverrideState,
+                useDayId,
+                current.useDayGenerationStartedAtMs
+            )
+            if (compacted == current.appRuleOverrideState) return@updateData current
+            changed = true
+            current.copy(appRuleOverrideState = compacted)
         }
         return changed
     }
@@ -440,10 +468,14 @@ class DataStoreManager(private val context: Context) {
             if (it.useDayResetHour == hour && it.useDayResetMinute == minute) {
                 it
             } else {
+                val generation = System.currentTimeMillis()
                 it.copy(
                     useDayResetHour = hour,
                     useDayResetMinute = minute,
-                    useDayGenerationStartedAtMs = System.currentTimeMillis()
+                    useDayGenerationStartedAtMs = generation,
+                    appRuleOverrideState = AppRuleOverrideState(
+                        useDayGenerationStartedAtMs = generation
+                    )
                 )
             }
         }

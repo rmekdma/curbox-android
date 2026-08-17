@@ -32,6 +32,7 @@ import neth.iecal.curbox.databinding.ActivitySelectAppsBinding
 import neth.iecal.curbox.databinding.DialogAddKeywordBinding
 import neth.iecal.curbox.domain.apprules.AppRuleEssentialPackages
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class SelectAppsActivity : AppCompatActivity() {
 
@@ -75,6 +76,10 @@ class SelectAppsActivity : AppCompatActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        GuardianSessionRegistry.onCurboxActivityStarted(
+            intent.getStringExtra(GuardianSessionRegistry.EXTRA_INTERNAL_NAVIGATION_TOKEN)
+        )
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         binding = ActivitySelectAppsBinding.inflate(layoutInflater)
         setContentView(binding.root)
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, windowInsets ->
@@ -367,6 +372,20 @@ class SelectAppsActivity : AppCompatActivity() {
         fun updateData(newList: List<AppItem>) {
             apps = newList
             notifyDataSetChanged()
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!GuardianSessionRegistry.isAwaitingOneShotSystemResult()) {
+            GuardianSessionRegistry.markExternalSystemScreen()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            GuardianSessionRegistry.onCurboxActivityStopped()
         }
     }
 

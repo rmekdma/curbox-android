@@ -6,6 +6,9 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.security.SecureRandom
+import java.util.Base64
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 
 class GuardianPasswordTest {
     @Test
@@ -35,6 +38,13 @@ class GuardianPasswordTest {
                 hasPassword = true,
                 previous = GuardianFocusSurface.CURBOX_CONTENT,
                 next = GuardianFocusSurface.EXTERNAL_SYSTEM
+            )
+        )
+        assertTrue(
+            GuardianReauthPolicy.requiresReauthentication(
+                hasPassword = true,
+                previous = GuardianFocusSurface.CURBOX_CONTENT,
+                next = GuardianFocusSurface.UNKNOWN
             )
         )
         assertFalse(
@@ -75,5 +85,45 @@ class GuardianPasswordTest {
             session.transition(GuardianFocusSurface.EXTERNAL_APP, hasPassword = true)
         )
         assertFalse(session.isAuthenticated(hasPassword = true))
+    }
+
+    @Test
+    fun unsupportedOrTooFastStoredKdfIsRejectedEvenWhenVerifierMatches() {
+        val salt = ByteArray(16) { it.toByte() }
+        val derived = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1")
+            .generateSecret(PBEKeySpec("x".toCharArray(), salt, 1, GuardianPassword.KEY_BITS))
+            .encoded
+        val tampered = GuardianAuthConfig(
+            passwordSalt = Base64.getEncoder().encodeToString(salt),
+            passwordVerifier = Base64.getEncoder().encodeToString(derived),
+            kdfAlgorithm = "PBKDF2WithHmacSHA1",
+            kdfIterations = 1
+        )
+
+        assertFalse(GuardianPassword.verify("x", tampered))
+        assertTrue(GuardianPassword.createCredential("x", iterations = 1).kdfIterations >= 120_000)
+    }
+
+    @Test
+    fun internalNavigationUsesAOneShotTokenInsteadOfAnImplicitTimeGrace() {
+        val token = GuardianSessionRegistry.issueInternalNavigationToken()
+
+        assertTrue(GuardianSessionRegistry.consumeInternalNavigationToken(token))
+        assertFalse(GuardianSessionRegistry.consumeInternalNavigationToken(token))
+    }
+
+    @Test
+    fun pendingInternalNavigationSurvivesTheHostStopWithoutAGraceWindow() {
+        val session = GuardianSessionRegistry.session
+        session.clear()
+        assertTrue(session.authenticate("x", GuardianPassword.createCredential("x", iterations = 1)))
+        val token = GuardianSessionRegistry.issueInternalNavigationToken()
+
+        GuardianSessionRegistry.markExternalSystemScreen()
+        GuardianSessionRegistry.onCurboxActivityStopped()
+
+        assertTrue(session.isAuthenticated(hasPassword = true))
+        assertTrue(GuardianSessionRegistry.consumeInternalNavigationToken(token))
+        session.clear()
     }
 }

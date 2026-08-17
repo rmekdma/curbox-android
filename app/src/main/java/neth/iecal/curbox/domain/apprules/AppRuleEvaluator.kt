@@ -205,18 +205,32 @@ object AppRuleEvaluator {
         val validationErrors = missingContributorGroupIds.map { groupId ->
             "App rule ${rule.id} references a missing contributor app group $groupId"
         }
-        val activeOverrides = AppRuleGuardianOverrides.normalize(overrides, useDayId, nowMs)
+        val activeOverrides = AppRuleGuardianOverrides.normalize(
+            overrides,
+            useDayId,
+            nowMs,
+            useDayGenerationStartedAtMs
+        )
         val isSkipped = AppRuleGuardianOverrides.isSkipped(
             activeOverrides,
             rule.id,
             useDayId,
-            nowMs
+            nowMs,
+            useDayGenerationStartedAtMs
         )
         val grants = AppRuleGuardianOverrides.grantsForRule(
             activeOverrides,
             rule.id,
             useDayId,
-            nowMs
+            nowMs,
+            useDayGenerationStartedAtMs
+        )
+        val skipIntervals = AppRuleGuardianOverrides.skipsForRule(
+            activeOverrides,
+            rule.id,
+            useDayId,
+            nowMs,
+            useDayGenerationStartedAtMs
         )
         val guardianAllowanceMillis = grants.fold(0L) { total, grant ->
             safeAdd(total, grant.grantedMillis)
@@ -229,7 +243,7 @@ object AppRuleEvaluator {
                 usedMillis = 0L,
                 allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
                 remainingMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
-                isAllowed = true,
+                isAllowed = !hasMissingContributor,
                 validationErrors = validationErrors,
                 contributorUsageMillis = contributorUsageMillis,
                 conditionRequiredMillis = conditionRequiredMillis,
@@ -240,30 +254,6 @@ object AppRuleEvaluator {
                 guardianAllowanceMillis = guardianAllowanceMillis,
                 guardianRemainingMillis = guardianAllowanceMillis,
                 isSkipped = isSkipped
-            )
-        }
-
-        // A skip removes this rule from consumption for its lifetime. The global session ledger
-        // remains untouched, so another rule can still charge the same foreground minute.
-        if (isSkipped) {
-            return AppRuleEvaluation(
-                ruleId = rule.id,
-                isApplicable = true,
-                isActive = true,
-                usedMillis = 0L,
-                allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
-                remainingMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
-                isAllowed = true,
-                validationErrors = validationErrors,
-                contributorUsageMillis = contributorUsageMillis,
-                conditionRequiredMillis = conditionRequiredMillis,
-                conditionEnabled = rule.usageConditionEnabled,
-                isConditionMet = isConditionMet,
-                directAllowanceMillis = directAllowanceMillis,
-                earnedAllowanceMillis = earnedAllowanceMillis,
-                guardianAllowanceMillis = guardianAllowanceMillis,
-                guardianRemainingMillis = guardianAllowanceMillis,
-                isSkipped = true
             )
         }
 
@@ -301,9 +291,14 @@ object AppRuleEvaluator {
                 }
             }
         }.sortedBy { it.start }
-        val usedMillis = usageIntervals.sumOf { it.end - it.start }
+        val effectiveUsageIntervals = usageIntervals.flatMap { interval ->
+            subtractIntervals(interval, skipIntervals.map { skip ->
+                SessionInterval("guardian-skip", skip.skipFromMs, skip.skipUntilMs)
+            })
+        }
+        val usedMillis = effectiveUsageIntervals.sumOf { it.end - it.start }
         val allocation = allocateAllowance(
-            usageIntervals = usageIntervals,
+            usageIntervals = effectiveUsageIntervals,
             baseAllowanceMillis = allowanceMillis,
             grants = grants
         )
@@ -315,8 +310,7 @@ object AppRuleEvaluator {
             usedMillis = usedMillis,
             allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
             remainingMillis = remainingMillis,
-            isAllowed = isSkipped ||
-                (remainingMillis > 0L && (!hasMissingContributor || allocation.guardianRemainingMillis > 0L)),
+            isAllowed = !hasMissingContributor && (isSkipped || remainingMillis > 0L),
             validationErrors = validationErrors,
             contributorUsageMillis = contributorUsageMillis,
             conditionRequiredMillis = conditionRequiredMillis,
@@ -482,6 +476,30 @@ object AppRuleEvaluator {
             }
             result
         }
+
+    private fun subtractIntervals(
+        interval: SessionInterval,
+        exclusions: List<SessionInterval>
+    ): List<SessionInterval> {
+        var remaining = listOf(interval)
+        exclusions.sortedBy { it.start }.forEach { exclusion ->
+            remaining = remaining.flatMap { candidate ->
+                if (exclusion.end <= candidate.start || exclusion.start >= candidate.end) {
+                    listOf(candidate)
+                } else {
+                    buildList {
+                        if (candidate.start < exclusion.start) {
+                            add(candidate.copy(end = exclusion.start.coerceAtMost(candidate.end)))
+                        }
+                        if (exclusion.end < candidate.end) {
+                            add(candidate.copy(start = exclusion.end.coerceAtLeast(candidate.start)))
+                        }
+                    }.filter { it.start < it.end }
+                }
+            }
+        }
+        return remaining
+    }
 
     /**
      * Allocates visible foreground time in chronological order. Direct and earned allowance is

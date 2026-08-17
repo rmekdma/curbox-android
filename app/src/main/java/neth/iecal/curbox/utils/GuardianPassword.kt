@@ -1,7 +1,6 @@
 package neth.iecal.curbox.utils
 
 import neth.iecal.curbox.data.models.GuardianAuthConfig
-import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -11,6 +10,8 @@ import javax.crypto.spec.PBEKeySpec
 /** Password derivation for the local guardian credential. */
 object GuardianPassword {
     const val DEFAULT_ITERATIONS = 120_000
+    const val MIN_ITERATIONS = 120_000
+    const val MAX_ITERATIONS = 2_000_000
     const val SALT_BYTES = 16
     const val KEY_BITS = 256
     private const val ALGORITHM = "PBKDF2WithHmacSHA256"
@@ -22,7 +23,7 @@ object GuardianPassword {
     ): GuardianAuthConfig {
         if (password.isEmpty()) return GuardianAuthConfig()
         val salt = ByteArray(SALT_BYTES).also(random::nextBytes)
-        val safeIterations = iterations.coerceAtLeast(1)
+        val safeIterations = iterations.coerceIn(MIN_ITERATIONS, MAX_ITERATIONS)
         val derived = derive(password, salt, safeIterations)
         return GuardianAuthConfig(
             passwordSalt = Base64.getEncoder().encodeToString(salt),
@@ -34,14 +35,18 @@ object GuardianPassword {
 
     fun verify(password: String, config: GuardianAuthConfig): Boolean {
         if (!config.isConfigured || password.isEmpty()) return false
+        if (config.kdfAlgorithm != ALGORITHM ||
+            config.kdfIterations !in MIN_ITERATIONS..MAX_ITERATIONS
+        ) return false
         return try {
             val salt = Base64.getDecoder().decode(config.passwordSalt)
             val expected = Base64.getDecoder().decode(config.passwordVerifier)
+            if (salt.size != SALT_BYTES || expected.size != KEY_BITS / 8) return false
             val actual = derive(
                 password,
                 salt,
-                config.kdfIterations.coerceAtLeast(1),
-                config.kdfAlgorithm
+                config.kdfIterations,
+                ALGORITHM
             )
             MessageDigest.isEqual(expected, actual)
         } catch (_: IllegalArgumentException) {
@@ -115,6 +120,7 @@ class GuardianAuthSession {
 
     fun clear() {
         authenticated = false
+        currentSurface = GuardianFocusSurface.CURBOX_CONTENT
         oneShotSystemResult = false
     }
 

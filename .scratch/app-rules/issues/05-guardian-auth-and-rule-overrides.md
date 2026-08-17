@@ -8,8 +8,8 @@
 
 **Verification evidence (JBR 21, 2026-08-18):**
 
-- Focused guardian, rule override, warning selection, session, and sync isolation tests passed (15 tests).
-- `testFullDebugUnitTest`: 195 tests completed; one fixed-base failure remains at `ScriptLanguageTest > matchesRegexSupportsCommonFlags`.
+- Focused guardian, rule override, warning selection, session, and sync isolation test suites passed (24 tests across the added regression suites).
+- `testFullDebugUnitTest`: 205 tests completed; one fixed-base failure remains at `ScriptLanguageTest > matchesRegexSupportsCommonFlags`.
 - `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed.
 - `lintFullDebug` passed; the report contains existing baseline findings and no new Guardian issue.
 - No Android device or emulator was available. Device verification procedure: install the Full debug APK, set a guardian password, leave Curbox for another app and return to confirm reauthentication, trigger two simultaneous denying rules and confirm every denial is shown with one selectable approval, exercise both timed skip choices and additive time, then repeat on Play Store and F-Droid APKs while checking the Play Store manifest has no `AdminReceiver` or `NodePickerService`.

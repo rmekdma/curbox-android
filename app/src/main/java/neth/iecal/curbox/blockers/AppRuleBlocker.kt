@@ -27,6 +27,8 @@ import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
+import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
+import neth.iecal.curbox.domain.apprules.AppRuleReevaluationGate
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleReceiverLifecycle
@@ -60,6 +62,7 @@ class AppRuleBlocker {
     @Volatile private var resetTime = UseDayResetTime()
     @Volatile private var useDayGenerationStartedAtMs = 0L
     @Volatile private var overrideState = neth.iecal.curbox.data.models.AppRuleOverrideState()
+    private val reevaluationGate = AppRuleReevaluationGate()
 
     fun setup(service: BaseBlockingService) {
         setupReady = false
@@ -71,7 +74,10 @@ class AppRuleBlocker {
         packageScopeReader = AppRulePackageScopeReader.fromContext(service)
         refreshPackageScope()
         try {
-            val initialSettings = runBlocking(Dispatchers.IO) { service.dataStoreManager.settings.first() }
+            val initialSettings = runBlocking(Dispatchers.IO) {
+                service.dataStoreManager.compactAppRuleOverrides()
+                service.dataStoreManager.settings.first()
+            }
             resetTime = safeResetTime(initialSettings.useDayResetHour, initialSettings.useDayResetMinute)
             useDayGenerationStartedAtMs = initialSettings.useDayGenerationStartedAtMs
             overrideState = initialSettings.appRuleOverrideState
@@ -89,6 +95,9 @@ class AppRuleBlocker {
                     val candidate = settings.appRuleSnapshot
                     resetTime = safeResetTime(settings.useDayResetHour, settings.useDayResetMinute)
                     useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
+                    if (overrideState != settings.appRuleOverrideState) {
+                        reevaluationGate.markOverrideChanged()
+                    }
                     overrideState = settings.appRuleOverrideState
                     // A malformed value can only come from older/corrupted storage. Keep the last
                     // valid runtime snapshot rather than exposing a partial reference graph.
@@ -186,9 +195,18 @@ class AppRuleBlocker {
         val nextRemaining = evaluation.evaluations
             .filter { it.isActive && it.remainingMillis > 0L }
             .minOfOrNull { it.remainingMillis }
-        if (nextRemaining != null) scheduleRecheck(packageName, nextRemaining)
+        val nextSkipBoundary = AppRuleGuardianOverrides.nextSkipBoundaryMs(
+            overrideState,
+            useDayId,
+            now,
+            useDayGenerationStartedAtMs
+        )
+        listOfNotNull(nextRemaining, nextSkipBoundary?.minus(now)).minOrNull()?.let {
+            scheduleRecheck(packageName, it)
+        }
         if (evaluation.denyingRules.isEmpty()) return
-        if (now - lastShownAt < 1_000L) return
+        val bypassThrottle = reevaluationGate.consumeIfApplicable(evaluation.evaluations.isNotEmpty())
+        if (!bypassThrottle && now - lastShownAt < 1_000L) return
         lastShownAt = now
         showWarning(packageName, evaluation)
     }
@@ -257,6 +275,9 @@ class AppRuleBlocker {
                 try {
                     refreshPackageScope()
                     service.dataStoreManager.settings.first().let { settings ->
+                        if (overrideState != settings.appRuleOverrideState) {
+                            reevaluationGate.markOverrideChanged()
+                        }
                         overrideState = settings.appRuleOverrideState
                         settings.appRuleSnapshot.takeIf { it.isValid }?.let(snapshot::accept)
                     }

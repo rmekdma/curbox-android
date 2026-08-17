@@ -26,17 +26,40 @@ data class AppRuleGuardianGrant(
 data class AppRuleGuardianSkip(
     val ruleId: String = "",
     val useDayId: String = "",
-    val skipUntilMs: Long = 0L
+    val skipUntilMs: Long = 0L,
+    /** Start of this durable exclusion interval; old JSON defaults to the use-day start. */
+    val skipFromMs: Long = 0L
 )
 
 /** Local, multi-process-safe state for guardian approvals. */
 data class AppRuleOverrideState(
     val useDayId: String = "",
+    /** Reset-time generation that created this state. A reset edit invalidates old approvals. */
+    val useDayGenerationStartedAtMs: Long = 0L,
     val grants: List<AppRuleGuardianGrant> = emptyList(),
     val skips: List<AppRuleGuardianSkip> = emptyList()
 ) {
-    fun forUseDay(currentUseDayId: String): AppRuleOverrideState =
-        if (useDayId == currentUseDayId) this else AppRuleOverrideState(currentUseDayId)
+    /** Source compatibility for callers written against the pre-generation three-field model. */
+    constructor(
+        useDayId: String,
+        grants: List<AppRuleGuardianGrant>,
+        skips: List<AppRuleGuardianSkip>
+    ) : this(useDayId, 0L, grants, skips)
+
+    fun forUseDay(
+        currentUseDayId: String,
+        currentGenerationStartedAtMs: Long = 0L
+    ): AppRuleOverrideState =
+        if (useDayId == currentUseDayId &&
+            useDayGenerationStartedAtMs == currentGenerationStartedAtMs
+        ) {
+            this
+        } else {
+            AppRuleOverrideState(
+                useDayId = currentUseDayId,
+                useDayGenerationStartedAtMs = currentGenerationStartedAtMs
+            )
+        }
 }
 
 /** Snapshot passed to the internal guardian approval surface; it contains no mutable authority. */
