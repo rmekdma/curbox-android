@@ -135,7 +135,9 @@ data class ForegroundSession(
     val startedAtMs: Long = 0L,
     val endedAtMs: Long? = null,
     /** Nonzero only when a changed reset setting starts a new use-day instance. */
-    val useDayGenerationStartedAtMs: Long = 0L
+    val useDayGenerationStartedAtMs: Long = 0L,
+    /** False for temporary enforcement-only rows created while statistics are disabled. */
+    val statisticsTracked: Boolean = true
 )
 
 private fun newId(): String = UUID.randomUUID().toString()

@@ -19,7 +19,8 @@ interface CurrentUseDaySessionRepository {
         useDayId: String,
         packageName: String,
         startedAtMs: Long,
-        generationStartedAtMs: Long
+        generationStartedAtMs: Long,
+        statisticsTracked: Boolean = true
     ): Long = startSession(useDayId, packageName, startedAtMs)
 
     suspend fun finishSession(id: Long, endedAtMs: Long)
@@ -27,6 +28,12 @@ interface CurrentUseDaySessionRepository {
     suspend fun updateSessionEnd(id: Long, endedAtMs: Long)
 
     suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession>
+
+    /** Generation-aware read used when a reset setting starts a fresh current use day. */
+    suspend fun sessionsForUseDay(
+        useDayId: String,
+        generationStartedAtMs: Long
+    ): List<ForegroundSession> = sessionsForUseDay(useDayId)
 
     suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long)
 
@@ -39,5 +46,8 @@ interface CurrentUseDaySessionRepository {
         finishOpenSessions(useDayId, 0L)
     }
 
-    suspend fun cleanupBeforeUseDay(currentUseDayId: String) = Unit
+    suspend fun cleanupBeforeUseDay(
+        currentUseDayId: String,
+        generationStartedAtMs: Long = 0L
+    ) = Unit
 }

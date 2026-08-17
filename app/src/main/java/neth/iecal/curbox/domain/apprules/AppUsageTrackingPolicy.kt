@@ -20,28 +20,10 @@ object AppUsageTrackingPolicy {
         recordStatistics = statisticsTrackingEnabled,
         recordEnforcementLedger = hasActiveTimeBasedRules
     )
-}
 
-/** Concise public alias for callers that describe this as the tracking policy seam. */
-object TrackingPolicy {
-    fun decide(
-        statisticsTrackingEnabled: Boolean,
-        hasActiveTimeBasedRules: Boolean
-    ): AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(
-        statisticsTrackingEnabled,
-        hasActiveTimeBasedRules
-    )
+    /** A policy change is a persistence boundary so each interval keeps its old write policy. */
+    fun requiresSessionBoundary(
+        previous: AppUsageTrackingDecision,
+        next: AppUsageTrackingDecision
+    ): Boolean = previous != next
 }
-
-object UsageTrackingPolicy {
-    fun decide(
-        statisticsTrackingEnabled: Boolean,
-        hasActiveTimeBasedRules: Boolean
-    ): AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(
-        statisticsTrackingEnabled,
-        hasActiveTimeBasedRules
-    )
-}
-
-/** Compatibility spelling for callers that treat this as a policy rather than a decision. */
-typealias TrackingPolicyDecision = AppUsageTrackingDecision

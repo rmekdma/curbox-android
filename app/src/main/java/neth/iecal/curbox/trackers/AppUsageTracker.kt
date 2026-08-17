@@ -26,12 +26,14 @@ import neth.iecal.curbox.data.db.AppUsageEntity
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.AppUsageTrackingPolicy
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.ForegroundSessionBoundaryWriter
+import neth.iecal.curbox.domain.apprules.TrackedForegroundSession
 import neth.iecal.curbox.domain.apprules.VisibleApplicationPackages
 import neth.iecal.curbox.domain.apprules.VisibleApplicationWindow
+import neth.iecal.curbox.domain.apprules.VisibleApplicationSessionReconciler
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.TimeTools
-import neth.iecal.curbox.utils.UseDay
 import neth.iecal.curbox.utils.UseDayCalculator
 import neth.iecal.curbox.utils.UseDayResetTime
 import java.time.Instant
@@ -46,6 +48,7 @@ class AppUsageTracker {
 
     companion object {
         private const val HEARTBEAT_MS = 20_000L
+        private const val CLEANUP_HEARTBEAT_MS = 60_000L
         private val IGNORED_PACKAGES = setOf(Constants.SYSTEM_UI_PACKAGE_NAME)
     }
 
@@ -65,6 +68,8 @@ class AppUsageTracker {
         statisticsTrackingEnabled = true,
         hasActiveTimeBasedRules = false
     )
+    private var lastCleanupUseDayId: String? = null
+    private var lastCleanupGenerationStartedAtMs = Long.MIN_VALUE
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var screenOn = true
 
@@ -110,8 +115,13 @@ class AppUsageTracker {
             val currentUseDayId = useDayCalculator.idAt(now)
             runBlocking(Dispatchers.IO) {
                 sessionRepository.recoverOpenSessions(currentUseDayId)
-                sessionRepository.cleanupBeforeUseDay(currentUseDayId)
+                sessionRepository.cleanupBeforeUseDay(
+                    currentUseDayId,
+                    useDayGenerationStartedAtMs
+                )
             }
+            lastCleanupUseDayId = currentUseDayId
+            lastCleanupGenerationStartedAtMs = useDayGenerationStartedAtMs
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -121,6 +131,7 @@ class AppUsageTracker {
         val powerManager = service.getSystemService(Context.POWER_SERVICE) as PowerManager
         screenOn = powerManager.isInteractive
         registerScreenReceiver()
+        startCleanupHeartbeat()
         settingsJob?.cancel()
         settingsJob = scope.launch {
             try {
@@ -133,8 +144,12 @@ class AppUsageTracker {
                     mainHandler.post {
                         try {
                             val resetChanged = nextReset != resetTime
-                            val packagesToResume = if (resetChanged) {
-                                rotateForResetChange()
+                            val policyChanged = AppUsageTrackingPolicy.requiresSessionBoundary(
+                                trackingDecision,
+                                nextDecision
+                            )
+                            val packagesToResume = if (resetChanged || policyChanged) {
+                                rotateActiveSessions()
                             } else {
                                 emptyList()
                             }
@@ -142,6 +157,7 @@ class AppUsageTracker {
                             useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
                             useDayCalculator = ConfigurableUseDayCalculator(ZoneId.systemDefault(), nextReset)
                             trackingDecision = nextDecision
+                            cleanupCurrentUseDay()
                             if (packagesToResume.isNotEmpty() && screenOn && recordingEnabled) {
                                 packagesToResume.forEach {
                                     startSession(
@@ -227,31 +243,68 @@ class AppUsageTracker {
             commitSession(activeSessions.getValue(packageName), nowWall, nowElapsed)
         }
 
-        (previousPackages - nextPackages).forEach { packageName ->
-            endSession(packageName, nowWall, nowElapsed)
+        val current = activeSessions.mapValues { (_, session) ->
+            TrackedForegroundSession(
+                packageName = session.packageName,
+                sessionId = session.sessionId,
+                useDayId = session.useDayId,
+                startedAtMs = session.lastCommittedWallMs
+            )
+        }
+        val currentUseDayId = useDayCalculator.idAt(nowWall)
+        val resetRestartPackages = current.values
+            .filter { it.packageName in nextPackages && it.useDayId != currentUseDayId }
+            .mapTo(mutableSetOf()) { it.packageName }
+        val boundaryWriter = object : ForegroundSessionBoundaryWriter {
+            override suspend fun finish(session: TrackedForegroundSession, endedAtMs: Long) {
+                finishForReconciliation(session, endedAtMs)
+            }
+
+            override suspend fun start(
+                useDayId: String,
+                packageName: String,
+                startedAtMs: Long
+            ): Long = startSession(
+                packageName = packageName,
+                startedAtWallMs = startedAtMs,
+                startedAtElapsedMs = SystemClock.elapsedRealtime(),
+                recordLaunch = packageName !in resetRestartPackages,
+                useDayId = useDayId
+            )
         }
 
-        // Starts happen only after every disappearing package has been serialized and closed.
-        (nextPackages - previousPackages).forEach { packageName ->
-            startSession(packageName, nowWall, nowElapsed)
+        // The reconciler serializes all finishes before starts and keeps the complete visible set.
+        val result = runBlocking(Dispatchers.IO) {
+            VisibleApplicationSessionReconciler(
+                repository = sessionRepository,
+                useDayCalculator = useDayCalculator,
+                boundaryWriter = boundaryWriter
+            ).reconcile(
+                current = current,
+                visiblePackages = nextPackages,
+                nowMs = nowWall
+            )
         }
+        if (result.activeSessions.isEmpty()) stopHeartbeat()
+        cleanupCurrentUseDay(nowWall)
     }
 
     private fun startSession(
         packageName: String,
         startedAtWallMs: Long,
         startedAtElapsedMs: Long,
-        recordLaunch: Boolean = true
-    ) {
-        if (activeSessions.containsKey(packageName)) return
-        val useDayId = useDayCalculator.idAt(startedAtWallMs)
+        recordLaunch: Boolean = true,
+        useDayId: String = useDayCalculator.idAt(startedAtWallMs)
+    ): Long {
+        activeSessions[packageName]?.let { return it.sessionId }
         val sessionId = try {
             runBlocking(Dispatchers.IO) {
                 sessionRepository.startSessionAtGeneration(
                     useDayId,
                     packageName,
                     startedAtWallMs,
-                    useDayGenerationStartedAtMs
+                    useDayGenerationStartedAtMs,
+                    trackingDecision.recordStatistics
                 )
             }
         } catch (error: CancellationException) {
@@ -285,6 +338,36 @@ class AppUsageTracker {
             }
         }
         startHeartbeat()
+        return sessionId
+    }
+
+    private fun finishForReconciliation(
+        tracked: TrackedForegroundSession,
+        endedAtWallMs: Long
+    ) {
+        val session = activeSessions[tracked.packageName]
+        if (session == null) {
+            if (tracked.sessionId != 0L) {
+                runBlocking(Dispatchers.IO) {
+                    sessionRepository.finishSession(tracked.sessionId, endedAtWallMs)
+                }
+            }
+            return
+        }
+
+        val endWallMs = maxOf(endedAtWallMs, session.lastCommittedWallMs)
+        if (session.useDayId != useDayCalculator.idAt(endWallMs)) {
+            // The reconciler owns the reset boundary in this path. Flush only the old interval;
+            // its subsequent start callback creates exactly one row for the new use day.
+            persistInterval(session.packageName, session.lastCommittedWallMs, endWallMs)
+            persistSessionEnd(session.sessionId, endWallMs)
+            session.lastCommittedWallMs = endWallMs
+            session.lastCommittedElapsedMs = SystemClock.elapsedRealtime()
+        } else {
+            commitSession(session, endWallMs, SystemClock.elapsedRealtime())
+        }
+        activeSessions.remove(tracked.packageName)
+        if (activeSessions.isEmpty()) stopHeartbeat()
     }
 
     private fun endSession(packageName: String, endedAtWallMs: Long, endedAtElapsedMs: Long) {
@@ -310,10 +393,11 @@ class AppUsageTracker {
         val nowWall = System.currentTimeMillis()
         val nowElapsed = SystemClock.elapsedRealtime()
         activeSessions.keys.toList().forEach { endSession(it, nowWall, nowElapsed) }
+        cleanupCurrentUseDay(nowWall)
     }
 
-    /** Close the old boundary at the setting-change instant and begin a fresh session. */
-    private fun rotateForResetChange(): List<String> {
+    /** Close active rows before a reset or policy change, then optionally begin fresh rows. */
+    private fun rotateActiveSessions(): List<String> {
         if (activeSessions.isEmpty()) return emptyList()
         val nowWall = System.currentTimeMillis()
         val nowElapsed = SystemClock.elapsedRealtime()
@@ -364,7 +448,8 @@ class AppUsageTracker {
                     useDayId,
                     packageName,
                     startedAtMs,
-                    useDayGenerationStartedAtMs
+                    useDayGenerationStartedAtMs,
+                    trackingDecision.recordStatistics
                 )
             }
         } catch (error: CancellationException) {
@@ -493,6 +578,7 @@ class AppUsageTracker {
                 val nowWall = System.currentTimeMillis()
                 val nowElapsed = SystemClock.elapsedRealtime()
                 activeSessions.values.toList().forEach { commitSession(it, nowWall, nowElapsed) }
+                cleanupCurrentUseDay(nowWall)
             } catch (error: Exception) {
                 logNonFatal(error)
             }
@@ -509,6 +595,45 @@ class AppUsageTracker {
 
     private fun stopHeartbeat() {
         mainHandler.removeCallbacks(heartbeat)
+    }
+
+    private val cleanupHeartbeat = object : Runnable {
+        override fun run() {
+            try {
+                cleanupCurrentUseDay()
+            } catch (error: Exception) {
+                logNonFatal(error)
+            }
+            mainHandler.postDelayed(this, CLEANUP_HEARTBEAT_MS)
+        }
+    }
+
+    private fun startCleanupHeartbeat() {
+        mainHandler.removeCallbacks(cleanupHeartbeat)
+        mainHandler.postDelayed(cleanupHeartbeat, CLEANUP_HEARTBEAT_MS)
+    }
+
+    private fun stopCleanupHeartbeat() {
+        mainHandler.removeCallbacks(cleanupHeartbeat)
+    }
+
+    private fun cleanupCurrentUseDay(nowMs: Long = System.currentTimeMillis()) {
+        val currentUseDayId = useDayCalculator.idAt(nowMs)
+        val generation = useDayGenerationStartedAtMs
+        if (currentUseDayId == lastCleanupUseDayId &&
+            generation == lastCleanupGenerationStartedAtMs
+        ) return
+        try {
+            runBlocking(Dispatchers.IO) {
+                sessionRepository.cleanupBeforeUseDay(currentUseDayId, generation)
+            }
+            lastCleanupUseDayId = currentUseDayId
+            lastCleanupGenerationStartedAtMs = generation
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
+        }
     }
 
     private val screenReceiver = object : BroadcastReceiver() {
@@ -571,6 +696,7 @@ class AppUsageTracker {
 
     fun onDestroy() {
         stopHeartbeat()
+        stopCleanupHeartbeat()
         try {
             endAllSessions()
         } catch (error: Exception) {

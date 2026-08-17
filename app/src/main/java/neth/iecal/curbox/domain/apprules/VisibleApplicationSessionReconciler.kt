@@ -19,6 +19,16 @@ data class SessionReconciliationResult(
 )
 
 /**
+ * Persistence boundary used after the reconciler has decided which packages ended and started.
+ * The service supplies a writer that also flushes its in-memory checkpoint before the row closes.
+ */
+interface ForegroundSessionBoundaryWriter {
+    suspend fun finish(session: TrackedForegroundSession, endedAtMs: Long)
+
+    suspend fun start(useDayId: String, packageName: String, startedAtMs: Long): Long
+}
+
+/**
  * Serialized session boundary seam. It reconciles a complete package set, closes only packages
  * that disappeared, and starts new rows after all prior rows have been flushed.
  */
@@ -26,7 +36,9 @@ class VisibleApplicationSessionReconciler(
     private val repository: CurrentUseDaySessionRepository,
     private val useDayCalculator: UseDayCalculator = ConfigurableUseDayCalculator(
         zone = ZoneId.systemDefault()
-    )
+    ),
+    private val boundaryWriter: ForegroundSessionBoundaryWriter =
+        RepositoryForegroundSessionBoundaryWriter(repository)
 ) {
     suspend fun reconcile(
         current: Map<String, TrackedForegroundSession>,
@@ -47,10 +59,10 @@ class VisibleApplicationSessionReconciler(
                 } else {
                     nowMs
                 }
-                repository.finishSession(session.sessionId, endedAt)
+                boundaryWriter.finish(session, endedAt)
                 ended += packageName
                 if (packageName in visiblePackages) {
-                    val id = repository.startSession(currentUseDayId, packageName, endedAt)
+                    val id = boundaryWriter.start(currentUseDayId, packageName, endedAt)
                     next[packageName] = TrackedForegroundSession(
                         packageName,
                         id,
@@ -69,7 +81,7 @@ class VisibleApplicationSessionReconciler(
         visiblePackages.forEach { packageName ->
             if (packageName !in next) {
                 val useDayId = currentUseDayId
-                val id = repository.startSession(useDayId, packageName, nowMs)
+                val id = boundaryWriter.start(useDayId, packageName, nowMs)
                 next[packageName] = TrackedForegroundSession(packageName, id, useDayId, nowMs)
                 started += packageName
             }
@@ -78,5 +90,13 @@ class VisibleApplicationSessionReconciler(
     }
 }
 
-/** Short compatibility name for consumers that only need the current use-day seam. */
-typealias CurrentUseDayForegroundSessionReconciler = VisibleApplicationSessionReconciler
+private class RepositoryForegroundSessionBoundaryWriter(
+    private val repository: CurrentUseDaySessionRepository
+) : ForegroundSessionBoundaryWriter {
+    override suspend fun finish(session: TrackedForegroundSession, endedAtMs: Long) {
+        repository.finishSession(session.sessionId, endedAtMs)
+    }
+
+    override suspend fun start(useDayId: String, packageName: String, startedAtMs: Long): Long =
+        repository.startSession(useDayId, packageName, startedAtMs)
+}

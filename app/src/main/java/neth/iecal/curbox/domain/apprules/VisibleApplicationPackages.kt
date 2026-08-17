@@ -48,5 +48,3 @@ data class VisiblePackageDelta(
     val started: Set<String>,
     val retained: Set<String>
 )
-
-typealias VisibleApplicationPackageSet = VisibleApplicationPackages

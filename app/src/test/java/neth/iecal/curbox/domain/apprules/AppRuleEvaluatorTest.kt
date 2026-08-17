@@ -200,6 +200,19 @@ class AppRuleEvaluatorTest {
         assertEquals(5 * 60_000L, result.evaluations.single().usedMillis)
     }
 
+    @Test
+    fun enforcementLedgerStillConsumesTimeWhenStatisticsAreDisabled() {
+        val rule = rule(allowedMinutes = 1)
+        val enforcementOnlySession = session("com.example.reader", 2 * 60_000L).copy(
+            statisticsTracked = false
+        )
+
+        val result = evaluate(rule, sessions = listOf(enforcementOnlySession))
+
+        assertFalse(result.isAllowed)
+        assertEquals(2 * 60_000L, result.evaluations.single().usedMillis)
+    }
+
     private fun evaluate(
         rule: AppRule,
         sessions: List<ForegroundSession> = emptyList(),

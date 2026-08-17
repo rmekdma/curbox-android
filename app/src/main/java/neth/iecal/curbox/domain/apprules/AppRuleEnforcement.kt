@@ -31,7 +31,7 @@ class AppRuleEnforcement(
         snapshot = snapshot,
         packageName = packageName,
         useDayId = useDayId,
-        sessions = sessionRepository.sessionsForUseDay(useDayId),
+        sessions = sessionRepository.sessionsForUseDay(useDayId, useDayGenerationStartedAtMs),
         nowMs = nowMs,
         zone = zone,
         useDayCalculator = calculator,

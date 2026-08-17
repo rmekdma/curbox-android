@@ -159,6 +159,7 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
 
     fun reload() {
         viewModelScope.launch(Dispatchers.IO) {
+            dayStatsCache.clear()
             loadWeekData()
         }
     }

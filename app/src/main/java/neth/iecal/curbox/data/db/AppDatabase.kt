@@ -9,9 +9,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ReelStatsEntity::class, ReelUsageStatsEntity::class, ScrollPatternEntity::class, FocusStatsEntity::class, WebsiteStatsEntity::class, IntentLogEntity::class, AppUsageEntity::class, ForegroundSessionEntity::class, ForegroundLaunchEntity::class],
-    // v13 adds launch events alongside the reset-generation marker. The database intentionally
-    // keeps fallbackToDestructiveMigration because the app-rule rollout accepts local usage loss.
-    version = 13,
+    // v14 records whether a foreground session belongs to statistics or enforcement-only data.
+    // The database intentionally keeps fallbackToDestructiveMigration because the app-rule
+    // rollout accepts local usage loss, including this additional upgrade loss.
+    version = 14,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

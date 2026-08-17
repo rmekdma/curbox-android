@@ -42,26 +42,32 @@
 - `AppRuleEvaluator` and `AppRuleEnforcement` now accept the configurable calculator and calculate
   allowance from exact intersections of merged persisted session intervals and active rule windows.
   A reset generation marker excludes sessions from before an in-place reset edit.
-- `AppUsageTracker` reconciles the complete `AccessibilityService.windows` application package set,
-  deduplicates packages, ignores Curbox, System UI, IME, overlays and non application windows,
-  flushes removed packages before starting new ones, splits rows at reset boundaries, and closes
-  rows on screen off and normal service shutdown. `flagRetrieveInteractiveWindows` is enabled in
-  the service configuration. Reset setting resumes do not create a false launch event.
-- `AppUsageTrackingPolicy` makes the statistics versus enforcement ledger decision explicit. When
-  statistics are off and an active time rule exists, only session rows are written; aggregate and
-  launch history writes remain disabled. When neither needs tracking, active recording is stopped.
-- Room v13 adds the reset generation marker and launch ledger. Startup recovery discards open rows
-  left by a process death and cleans rows older than the current use day. The accepted destructive
-  migration policy therefore includes the additional v13 local data loss risk. Generated Room
+- `AppUsageTracker` reconciles the complete `AccessibilityService.windows` application package set
+  through `VisibleApplicationSessionReconciler`, deduplicates packages, ignores Curbox, System UI,
+  IME, overlays and non application windows, flushes removed packages before starting new ones,
+  splits rows at reset boundaries, and closes rows on screen off and normal service shutdown.
+  `flagRetrieveInteractiveWindows` is enabled in the service configuration. Reset setting resumes
+  do not create a false launch event.
+- `AppUsageTrackingPolicy` makes the statistics versus enforcement ledger decision explicit. A
+  statistics-policy transition rotates every active visible session before applying the new
+  decision. Each session row persists `statisticsTracked`, so statistics-off enforcement intervals
+  remain available to rule evaluation but never enter current statistics, group totals, history or
+  sync, even after restart. When neither needs tracking, active recording is stopped.
+- Room v14 adds the statistics policy marker to the v13 reset-generation and launch ledger. Startup
+  recovery discards open rows left by a process death and cleanup also runs on reset/generation
+  rotation, on the active-session heartbeat and on a one-minute service-lifetime cleanup heartbeat
+  so a long-lived service crossing a use-day boundary remains bounded. The accepted destructive
+  migration policy therefore includes the additional v14 local data loss risk. Generated Room
   sources for all three debug variants contain both new tables and their expected columns.
-- The settings UI exposes the global local reset time and the service and blocker both consume the
-  multi process settings flow. JVM seam tests cover configurable reset calculation, generation
-  filtering, visible package reconciliation, session finish ordering, tracking policy, repository
-  restart cleanup and storage failure recovery.
-- Focused core seam run: 19 passed, 0 failed, 0 errors and 0 skipped. A later focused regression
-  run covered 9 tests with the same 9/0/0/0 result, and the repository plus enforcement failure
-  run covered 3 tests with the same 3/0/0/0 result. The final full run was 138 tests: 137 passed,
-  1 failed, 0 errors and 0 skipped. The sole failure is
+- The settings UI exposes the global local reset time through `FragmentInfoBinding`; usage-page
+  reloads clear the day cache so a changed reset generation is reflected immediately. The service
+  and blocker both consume the multi process settings flow. JVM seam tests cover configurable reset
+  calculation, generation-aware session and launch reads, visible package reconciliation, session
+  finish ordering, tracking-policy rotation and policy markers, current-use-day aggregation and
+  exact group intersections, repository restart cleanup and storage failure recovery.
+- Final focused JBR21 seam run covered 21 tests: 21 passed, 0 failed, 0 errors and 0 skipped
+  (Room repository 3, evaluator 11, policy 3, current-use-day aggregator 3, reconciler 1).
+  The final full JBR21 run was 145 tests: 144 passed, 1 failed, 0 errors and 0 skipped. The sole failure is
   `ScriptLanguageTest.matchesRegexSupportsCommonFlags`.
 - Fixed base evidence: the same test was run at `6994bf8933b4536dde2aebdc3a0d81751e33fca4`
   in an isolated worktree and failed there as well (`ScriptError` at `ScriptLanguageTest.kt:44`),
@@ -72,3 +78,8 @@
 - `adb devices` reported no attached device or emulator. The allowed device verification procedure
   is recorded in `.scratch/app-rules/evidence/ticket-02-device-verification.md`; it covers split
   screen, window filtering, reset, screen off, restart and failure containment evidence to collect.
+- The accessibility callback retains a narrow synchronous `Dispatchers.IO` persistence handoff at
+  the reconciler boundary because the following rule decision must observe flushed prior sessions.
+  It performs only lightweight window enumeration inline, delegates Room writes to the IO dispatcher,
+  and keeps all failures inside the service's nonfatal containment path; node traversal remains in
+  the conflated background worker.

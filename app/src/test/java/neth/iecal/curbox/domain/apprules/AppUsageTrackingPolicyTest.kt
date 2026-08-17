@@ -25,4 +25,13 @@ class AppUsageTrackingPolicyTest {
         assertFalse(decision.recordEnforcementLedger)
         assertFalse(decision.shouldRecordSessions)
     }
+
+    @Test
+    fun statisticsToggleRequiresASessionBoundary() {
+        val statisticsOnly = AppUsageTrackingPolicy.decide(true, false)
+        val enforcementOnly = AppUsageTrackingPolicy.decide(false, true)
+
+        assertTrue(AppUsageTrackingPolicy.requiresSessionBoundary(statisticsOnly, enforcementOnly))
+        assertFalse(AppUsageTrackingPolicy.requiresSessionBoundary(statisticsOnly, statisticsOnly))
+    }
 }

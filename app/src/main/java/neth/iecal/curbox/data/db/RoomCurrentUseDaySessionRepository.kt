@@ -2,11 +2,13 @@ package neth.iecal.curbox.data.db
 
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.CurrentUseDayUsageRepository
+import neth.iecal.curbox.domain.apprules.ForegroundLaunch
 
 class RoomCurrentUseDaySessionRepository(
     private val dao: ForegroundSessionDao,
     private val launchDao: ForegroundLaunchDao? = null
-) : CurrentUseDaySessionRepository {
+) : CurrentUseDaySessionRepository, CurrentUseDayUsageRepository {
     override suspend fun startSession(
         useDayId: String,
         packageName: String,
@@ -23,13 +25,15 @@ class RoomCurrentUseDaySessionRepository(
         useDayId: String,
         packageName: String,
         startedAtMs: Long,
-        generationStartedAtMs: Long
+        generationStartedAtMs: Long,
+        statisticsTracked: Boolean
     ): Long = dao.insert(
         ForegroundSessionEntity(
             useDayId = useDayId,
             packageName = packageName,
             startedAtMs = startedAtMs,
-            useDayGenerationStartedAtMs = generationStartedAtMs
+            useDayGenerationStartedAtMs = generationStartedAtMs,
+            statisticsTracked = statisticsTracked
         )
     )
 
@@ -60,6 +64,22 @@ class RoomCurrentUseDaySessionRepository(
     override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> =
         dao.getForUseDay(useDayId).map(ForegroundSessionEntity::toDomain)
 
+    override suspend fun sessionsForUseDay(
+        useDayId: String,
+        generationStartedAtMs: Long
+    ): List<ForegroundSession> = dao.getForUseDaySinceGeneration(
+        useDayId,
+        generationStartedAtMs
+    ).map(ForegroundSessionEntity::toDomain)
+
+    override suspend fun launchesForUseDay(
+        useDayId: String,
+        generationStartedAtMs: Long
+    ): List<ForegroundLaunch> = launchDao?.getForUseDaySinceGeneration(
+        useDayId,
+        generationStartedAtMs
+    )?.map(ForegroundLaunchEntity::toDomain).orEmpty()
+
     override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) {
         dao.finishOpenForUseDay(useDayId, endedAtMs)
     }
@@ -68,8 +88,11 @@ class RoomCurrentUseDaySessionRepository(
         dao.discardOpenForUseDay(useDayId)
     }
 
-    override suspend fun cleanupBeforeUseDay(currentUseDayId: String) {
-        dao.deleteBeforeUseDay(currentUseDayId)
-        launchDao?.deleteBeforeUseDay(currentUseDayId)
+    override suspend fun cleanupBeforeUseDay(
+        currentUseDayId: String,
+        generationStartedAtMs: Long
+    ) {
+        dao.deleteBeforeUseDayGeneration(currentUseDayId, generationStartedAtMs)
+        launchDao?.deleteBeforeUseDayGeneration(currentUseDayId, generationStartedAtMs)
     }
 }

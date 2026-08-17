@@ -15,7 +15,8 @@ data class ForegroundSessionEntity(
     val packageName: String,
     val startedAtMs: Long,
     val endedAtMs: Long? = null,
-    val useDayGenerationStartedAtMs: Long = 0L
+    val useDayGenerationStartedAtMs: Long = 0L,
+    val statisticsTracked: Boolean = true
 )
 
 fun ForegroundSessionEntity.toDomain(): ForegroundSession = ForegroundSession(
@@ -24,7 +25,8 @@ fun ForegroundSessionEntity.toDomain(): ForegroundSession = ForegroundSession(
     packageName = packageName,
     startedAtMs = startedAtMs,
     endedAtMs = endedAtMs,
-    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+    statisticsTracked = statisticsTracked
 )
 
 fun ForegroundSession.toEntity(): ForegroundSessionEntity = ForegroundSessionEntity(
@@ -33,5 +35,6 @@ fun ForegroundSession.toEntity(): ForegroundSessionEntity = ForegroundSessionEnt
     packageName = packageName,
     startedAtMs = startedAtMs,
     endedAtMs = endedAtMs,
-    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+    statisticsTracked = statisticsTracked
 )
