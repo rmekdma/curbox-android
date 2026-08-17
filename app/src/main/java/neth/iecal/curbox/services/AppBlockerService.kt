@@ -22,6 +22,7 @@ import neth.iecal.curbox.anti_stimulants.GrayScaleFilter
 import neth.iecal.curbox.anti_stimulants.MindfulMessage
 import neth.iecal.curbox.blockers.AntiUninstallBlocker
 import neth.iecal.curbox.blockers.AppBlocker
+import neth.iecal.curbox.blockers.AppRuleBlocker
 import neth.iecal.curbox.blockers.FocusModeBlocker
 import neth.iecal.curbox.blockers.KeywordBlocker
 import neth.iecal.curbox.blockers.ReelBlocker
@@ -58,6 +59,9 @@ class AppBlockerService : BaseBlockingService() {
     private val mindfulMessage = MindfulMessage()
     private val websiteUsageTracker = WebsiteUsageTracker()
     private val appUsageTracker = AppUsageTracker()
+    private val appRuleBlocker = AppRuleBlocker()
+    private var appUsageTrackerReady = false
+    private var appRuleBlockerReady = false
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -101,10 +105,25 @@ class AppBlockerService : BaseBlockingService() {
         }
 
         try {
-            appUsageTracker.onEvent(event)
+            // Flush the previous session before evaluating the newly foregrounded package.
+            if (appUsageTrackerReady) appUsageTracker.onEvent(event)
+        } catch (t: Throwable) {
+            Log.e("Usage Tracking error", t.toString())
+            crashLogger.logNonFatalError(Exception(t))
+        }
+
+        try {
+            appRuleBlocker.doAppRuleCheck(event)
+        } catch (t: Throwable) {
+            Log.e("App rule check error", t.toString())
+            crashLogger.logNonFatalError(Exception(t))
+        }
+
+        try {
             mindfulMessage.onEvent(event)
-        } catch (error: Exception) {
-            Log.e("Usage Tracking error", error.toString())
+        } catch (t: Throwable) {
+            Log.e("Mindful message error", t.toString())
+            crashLogger.logNonFatalError(Exception(t))
         }
 
         val eventCopy = AccessibilityEvent.obtain(event)
@@ -181,11 +200,30 @@ class AppBlockerService : BaseBlockingService() {
         websiteUsageTracker.setup(this) { observation ->
             websiteObservationChannel.trySend(observation)
         }
-        appUsageTracker.setup(this)
+        try {
+            appUsageTracker.setup(this)
+            appUsageTrackerReady = true
+        } catch (t: Throwable) {
+            crashLogger.logNonFatalError(Exception(t))
+            Log.e("AppUsageTracker", "Setup failed", t)
+        }
+        try {
+            appRuleBlocker.setup(this)
+            appRuleBlockerReady = true
+        } catch (t: Throwable) {
+            crashLogger.logNonFatalError(Exception(t))
+            Log.e("AppRuleBlocker", "Setup failed", t)
+        }
         neth.iecal.curbox.utils.UsageStatsCleaner.watch(this)
 
         focusModeBlocker.setupReceivers()
         appBlocker.setupReceivers()
+        try {
+            appRuleBlocker.setupReceivers()
+        } catch (t: Throwable) {
+            crashLogger.logNonFatalError(Exception(t))
+            Log.e("AppRuleBlocker", "Receiver setup failed", t)
+        }
         reelBlocker.setupReceivers()
         keywordBlocker.setupReceivers()
         grayScaleFilter.setupReceivers()
@@ -223,6 +261,7 @@ class AppBlockerService : BaseBlockingService() {
             autoDnd.stop()
             reelBlocker.removeReceivers()
             appBlocker.onDestroy()
+            if (appRuleBlockerReady) appRuleBlocker.onDestroy()
             keywordBlocker.removeReceivers()
             grayScaleFilter.unregisterReceivers()
             if (BuildConfig.SUPPORTS_UI_HIDER) {
@@ -236,7 +275,7 @@ class AppBlockerService : BaseBlockingService() {
             reelsCountTracker.onDestroy()
             reelUsageTracker.onDestroy()
             websiteUsageTracker.onDestroy()
-            appUsageTracker.onDestroy()
+            if (appUsageTrackerReady) appUsageTracker.onDestroy()
 
             eventChannel.close()
             websiteObservationChannel.close()

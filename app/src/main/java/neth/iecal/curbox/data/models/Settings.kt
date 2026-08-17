@@ -24,5 +24,7 @@ data class Settings(
     val nextWebsiteRecheckTime: Long = 0L,
     val serviceProtectionConfig: ServiceProtectionConfig = ServiceProtectionConfig(),
     val antiUninstallConfig2: AntiUninstallConfig = AntiUninstallConfig(),
-    val settingsChangeDelayConfig2: SettingsChangeDelayConfig = SettingsChangeDelayConfig()
+    val settingsChangeDelayConfig2: SettingsChangeDelayConfig = SettingsChangeDelayConfig(),
+    /** New unified app rules. The legacy [blockedAppGroups] field remains readable for old data. */
+    val appRuleSnapshot: AppRuleSnapshot = AppRuleSnapshot()
 )

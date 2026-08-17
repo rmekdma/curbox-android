@@ -89,6 +89,7 @@ class SelectAppsActivity : AppCompatActivity() {
 
         ignoredApps = intent.getStringArrayListExtra("IGNORED_APPS")?.toHashSet() ?: HashSet()
         ignoredApps.add(packageName) // also remove curbox app from the list
+        val strictLaunchableOnly = intent.getBooleanExtra("STRICT_LAUNCHABLE_APPS", false)
 
         Log.d("pre-selected-apps", selectedAppList.toString())
 
@@ -224,8 +225,13 @@ class SelectAppsActivity : AppCompatActivity() {
                 }
             }
 
+            // A unified app group may only persist packages that are still launcher-visible.
+            // Drop stale selections before the result is returned, not just from the displayed
+            // list, so editing a group cannot silently retain an uninstalled package.
+            if (strictLaunchableOnly) selectedAppList.retainAll(installedPackages)
+
             // Add uninstalled apps from selectedAppList that aren't already included
-            selectedAppList.forEach { packageName ->
+            if (!strictLaunchableOnly) selectedAppList.forEach { packageName ->
                 if (!installedPackages.contains(packageName)) {
                     try {
                         val appInfo = packageManager.getApplicationInfo(packageName, 0)

@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppGroup
+import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.KeywordBlocker
 import neth.iecal.curbox.data.models.ManualFocusGroup
@@ -155,6 +156,26 @@ class DataStoreManager(private val context: Context) {
         updateGated(GatedSettingsField.APP_GROUPS) { newGroups }
     }
 
+    /**
+     * Writes groups and rules as one validated restriction snapshot. Invalid references are
+     * rejected before the snapshot reaches either process, so the service never observes a
+     * half-edited configuration.
+     */
+    suspend fun updateAppRuleSnapshot(snapshot: AppRuleSnapshot): Boolean {
+        val normalized = snapshot.normalized()
+        if (!normalized.isValid) return false
+        updateGated(GatedSettingsField.APP_RULES) { normalized }
+        runCatching {
+            context.sendBroadcast(
+                Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
+            )
+        }
+        return true
+    }
+
+    suspend fun updateAppRules(snapshot: AppRuleSnapshot): Boolean =
+        updateAppRuleSnapshot(snapshot)
+
     suspend fun updateManualFocusGroups(newGroup: List<ManualFocusGroup>){
         settingsDataStore.updateData { it.copy(manualFocusGroups = newGroup) }
     }
@@ -216,6 +237,7 @@ class DataStoreManager(private val context: Context) {
                 isWebsiteUsageTrackingEnabled = current.isWebsiteUsageTrackingEnabled,
                 mindfulMessageConfig = current.mindfulMessageConfig,
                 uiHiderConfig = current.uiHiderConfig,
+                appRuleSnapshot = current.appRuleSnapshot,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -599,6 +621,14 @@ class DataStoreManager(private val context: Context) {
                         object : TypeToken<List<AppGroup>>() {}.type
                     ).upgradeLegacyAppGroupConfigs(gson)
                 )
+                GatedSettingsField.APP_RULES -> settings.copy(
+                    appRuleSnapshot = gson.fromJson(
+                        valueJson,
+                        AppRuleSnapshot::class.java
+                    ).also { snapshot ->
+                        if (!snapshot.isValid) throw IllegalArgumentException("Invalid app rule snapshot")
+                    }
+                )
                 GatedSettingsField.AUTO_DND_GROUPS -> settings.copy(
                     autoDndGroups = gson.fromJson(valueJson, object : TypeToken<List<neth.iecal.curbox.data.models.AutoDndGroup>>() {}.type)
                 )
@@ -646,6 +676,7 @@ class DataStoreManager(private val context: Context) {
         runCatching {
             val value: Any = when (field) {
                 GatedSettingsField.APP_GROUPS -> settings.blockedAppGroups
+                GatedSettingsField.APP_RULES -> settings.appRuleSnapshot
                 GatedSettingsField.AUTO_DND_GROUPS -> settings.autoDndGroups
                 GatedSettingsField.REEL_BLOCKER -> settings.reelBlockerConfig
                 GatedSettingsField.KEYWORD_BLOCKER -> settings.keywordBlockerConfig

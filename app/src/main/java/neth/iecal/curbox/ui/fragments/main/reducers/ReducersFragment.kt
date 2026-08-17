@@ -19,6 +19,7 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import neth.iecal.curbox.ui.fragments.main.reducers.anti_stimulants.grayscale.GrayscaleFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appBlocker.AppBlockerGroupsFragment
+import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.AppRuleGroupsFragment
 
 class ReducersFragment : Fragment() {
     override fun onCreateView(
@@ -38,6 +39,13 @@ class ReducersFragment : Fragment() {
         appBlockerCard.setOnClickListener {
             val intent = Intent(requireContext(), FragmentActivity::class.java).apply {
                 putExtra("fragment", AppBlockerGroupsFragment.FRAGMENT_ID)
+            }
+            startActivity(intent)
+        }
+
+        view.findViewById<MaterialCardView>(R.id.card_app_rules).setOnClickListener {
+            val intent = Intent(requireContext(), FragmentActivity::class.java).apply {
+                putExtra("fragment", AppRuleGroupsFragment.FRAGMENT_ID)
             }
             startActivity(intent)
         }

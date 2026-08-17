@@ -17,8 +17,11 @@ import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.AppUsageDao
 import neth.iecal.curbox.data.db.AppUsageEntity
+import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.TimeTools
+import neth.iecal.curbox.utils.UseDay
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -32,6 +35,7 @@ class AppUsageTracker {
 
     private lateinit var service: BaseBlockingService
     private lateinit var dao: AppUsageDao
+    private lateinit var sessionRepository: CurrentUseDaySessionRepository
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
@@ -42,13 +46,27 @@ class AppUsageTracker {
     private var sessionStartElapsed = 0L
     private var sessionStartWall = 0L
     private var lastCommitElapsed = 0L
+    private var currentSessionId = 0L
+    private var currentUseDayId = ""
     private var screenOn = true
     @Volatile private var trackingEnabled = true
+    @Volatile private var enforcementLedgerRequired = false
+
+    private val recordingEnabled: Boolean
+        get() = trackingEnabled || enforcementLedgerRequired
 
     fun setup(service: BaseBlockingService) {
         this.service = service
         this.ownPackage = service.packageName
-        this.dao = AppDatabase.getInstance(service).appUsageDao()
+        val database = AppDatabase.getInstance(service)
+        this.dao = database.appUsageDao()
+        this.sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
+        runCatching {
+            val now = System.currentTimeMillis()
+            runBlocking(Dispatchers.IO) {
+                sessionRepository.finishOpenSessions(UseDay.idAt(now), now)
+            }
+        }
         val powerManager = service.getSystemService(Context.POWER_SERVICE) as PowerManager
         screenOn = powerManager.isInteractive
         registerScreenReceiver()
@@ -56,13 +74,14 @@ class AppUsageTracker {
             service.dataStoreManager.settings.collect { settings ->
                 val enabled = settings.isAppUsageTrackingEnabled
                 trackingEnabled = enabled
-                if (!enabled) mainHandler.post { discardCurrentSession() }
+                enforcementLedgerRequired = settings.appRuleSnapshot.appRules.any { it.isActive }
+                if (!recordingEnabled) mainHandler.post { discardCurrentSession() }
             }
         }
     }
 
     fun onEvent(event: AccessibilityEvent?) {
-        if (!trackingEnabled) return
+        if (!recordingEnabled) return
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         if (!screenOn) return
 
@@ -73,14 +92,21 @@ class AppUsageTracker {
         }
         val foreground = activePackage ?: event.packageName?.toString() ?: return
 
-        if (foreground.isEmpty() || foreground == ownPackage || foreground in IGNORED_PACKAGES) return
+        if (foreground.isEmpty()) return
+        if (foreground == ownPackage || foreground in IGNORED_PACKAGES) {
+            // Curbox and System UI are not billable apps. They still end the one foreground
+            // session tracked by this first slice so time is not charged while either surface
+            // is on top of the previous app.
+            endCurrentSession()
+            return
+        }
         if (foreground == currentPackage) return
 
         switchTo(foreground)
     }
 
     private fun switchTo(packageName: String) {
-        if (!trackingEnabled) return
+        if (!recordingEnabled) return
         endCurrentSession()
 
         val nowElapsed = SystemClock.elapsedRealtime()
@@ -88,21 +114,40 @@ class AppUsageTracker {
         sessionStartElapsed = nowElapsed
         sessionStartWall = System.currentTimeMillis()
         lastCommitElapsed = nowElapsed
+        currentUseDayId = UseDay.idAt(sessionStartWall)
+        currentSessionId = try {
+            runBlocking(Dispatchers.IO) {
+                sessionRepository.startSession(currentUseDayId, packageName, sessionStartWall)
+            }
+        } catch (_: Exception) {
+            0L
+        }
 
-        recordLaunch(packageName, sessionStartWall)
+        if (trackingEnabled) recordLaunch(packageName, sessionStartWall)
         startHeartbeat()
     }
 
     private fun endCurrentSession() {
         if (currentPackage == null) return
         commit(SystemClock.elapsedRealtime())
+        val sessionId = currentSessionId
+        val endedAt = System.currentTimeMillis()
+        if (sessionId != 0L) {
+            try {
+                runBlocking(Dispatchers.IO) {
+                    sessionRepository.finishSession(sessionId, endedAt)
+                }
+            } catch (_: Exception) {
+            }
+        }
         currentPackage = null
+        currentSessionId = 0L
+        currentUseDayId = ""
         stopHeartbeat()
     }
 
     private fun discardCurrentSession() {
-        currentPackage = null
-        stopHeartbeat()
+        endCurrentSession()
     }
 
     private fun commit(nowElapsed: Long) {
@@ -111,13 +156,52 @@ class AppUsageTracker {
 
         val startWall = sessionStartWall + (lastCommitElapsed - sessionStartElapsed)
         val endWall = sessionStartWall + (nowElapsed - sessionStartElapsed)
-        lastCommitElapsed = nowElapsed
+        val boundary = UseDay.windowFor(currentUseDayId).last + 1
+        // Rotate exactly at the reset instant as well. Without the equality case, a foreground
+        // app that remains open across 04:00 would keep its old use-day id until the next
+        // heartbeat or window transition.
+        if (endWall > boundary || (endWall == boundary && startWall < boundary)) {
+            persistCommit(packageName, startWall, boundary)
+            persistSessionEnd(boundary)
+            val newUseDayId = UseDay.idAt(boundary)
+            currentUseDayId = newUseDayId
+            sessionStartWall = boundary
+            sessionStartElapsed += boundary - startWall
+            lastCommitElapsed = sessionStartElapsed
+            currentSessionId = startSession(packageName, boundary, newUseDayId)
+            commit(nowElapsed)
+            return
+        }
 
+        persistCommit(packageName, startWall, endWall)
+        persistSessionEnd(endWall)
+        lastCommitElapsed = nowElapsed
+    }
+
+    private fun persistCommit(packageName: String, startWall: Long, endWall: Long) {
         val segments = splitIntoHourlySegments(startWall, endWall)
+        if (!trackingEnabled) return
         scope.launch {
-            if (!trackingEnabled) return@launch
             segments.forEach { addUsage(it.date, packageName, it.hour, it.durationMs, it.endWall) }
         }
+    }
+
+    private fun persistSessionEnd(endWall: Long) {
+        if (currentSessionId == 0L) return
+        try {
+            runBlocking(Dispatchers.IO) {
+                sessionRepository.updateSessionEnd(currentSessionId, endWall)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun startSession(packageName: String, startedAt: Long, useDayId: String): Long = try {
+        runBlocking(Dispatchers.IO) {
+            sessionRepository.startSession(useDayId, packageName, startedAt)
+        }
+    } catch (_: Exception) {
+        0L
     }
 
     private fun recordLaunch(packageName: String, wall: Long) {
@@ -183,7 +267,7 @@ class AppUsageTracker {
 
     private val heartbeat = object : Runnable {
         override fun run() {
-            if (!trackingEnabled) return
+            if (!recordingEnabled) return
             commit(SystemClock.elapsedRealtime())
             mainHandler.postDelayed(this, HEARTBEAT_MS)
         }
@@ -215,7 +299,7 @@ class AppUsageTracker {
     }
 
     private fun resumeForegroundApp() {
-        if (!trackingEnabled || !screenOn || currentPackage != null) return
+        if (!recordingEnabled || !screenOn || currentPackage != null) return
         val active = try {
             service.rootInActiveWindow?.packageName?.toString()
         } catch (_: Exception) {
@@ -236,19 +320,10 @@ class AppUsageTracker {
 
     fun onDestroy() {
         stopHeartbeat()
-        val packageName = currentPackage.takeIf { trackingEnabled }
-        if (packageName != null) {
-            val startWall = sessionStartWall + (lastCommitElapsed - sessionStartElapsed)
-            val endWall = sessionStartWall + (SystemClock.elapsedRealtime() - sessionStartElapsed)
-            val segments = splitIntoHourlySegments(startWall, endWall)
-            try {
-                runBlocking {
-                    segments.forEach { addUsage(it.date, packageName, it.hour, it.durationMs, it.endWall) }
-                }
-            } catch (_: Exception) {
-            }
+        try {
+            endCurrentSession()
+        } catch (_: Exception) {
         }
-        currentPackage = null
         try {
             service.unregisterReceiver(screenReceiver)
         } catch (_: Exception) {

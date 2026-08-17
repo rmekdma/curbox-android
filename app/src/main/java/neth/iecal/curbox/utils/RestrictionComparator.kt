@@ -6,6 +6,8 @@ import neth.iecal.curbox.data.models.AppBlockingType
 import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.data.models.AppTimeConfig
 import neth.iecal.curbox.data.models.AppUsageConfig
+import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AutoDndGroup
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.GrayscaleGroup
@@ -39,6 +41,8 @@ object RestrictionComparator {
             when (field) {
                 GatedSettingsField.APP_GROUPS ->
                     appGroups(current.blockedAppGroups, proposed.blockedAppGroups)
+                GatedSettingsField.APP_RULES ->
+                    appRuleSnapshots(current.appRuleSnapshot, proposed.appRuleSnapshot)
                 GatedSettingsField.AUTO_DND_GROUPS ->
                     autoDndGroups(current.autoDndGroups, proposed.autoDndGroups)
                 GatedSettingsField.REEL_BLOCKER ->
@@ -79,6 +83,60 @@ object RestrictionComparator {
             val n = new.find { it.id == o.id } ?: return@all false
             appGroup(o, n)
         }
+    }
+
+    /**
+     * A unified app-rule edit is stricter only when every previously active rule remains at least
+     * as restrictive. New rules are allowed because they add protection; weakening an existing
+     * rule, removing a previously covered target, or deleting it is delayed.
+     */
+    fun appRuleSnapshots(old: AppRuleSnapshot, new: AppRuleSnapshot): Boolean {
+        if (!new.isValid) return false
+        val oldGroups = old.appGroups.associateBy { it.id }
+        val newGroups = new.appGroups.associateBy { it.id }
+        val newRules = new.appRules.associateBy { it.id }
+        return old.appRules.filter { it.isActive }.all { oldRule ->
+            val newRule = newRules[oldRule.id] ?: return@all false
+            val oldGroup = oldGroups[oldRule.appGroupId] ?: return@all false
+            val newGroup = newGroups[newRule.appGroupId] ?: return@all false
+            appRule(oldRule, newRule, oldGroup.selectedPackages.toSet(), newGroup.selectedPackages.toSet())
+        }
+    }
+
+    private fun appRule(
+        old: AppRule,
+        new: AppRule,
+        oldPackages: Set<String>,
+        newPackages: Set<String>
+    ): Boolean {
+        if (!new.isActive || old.appGroupId != new.appGroupId) return false
+        // A larger target set adds protection and is safe to apply immediately. Removing a
+        // previously covered package weakens the rule and must stay behind the delay.
+        if (!newPackages.containsAll(oldPackages)) return false
+        if (new.allowedMinutes > old.allowedMinutes) return false
+        val oldCoverage = ruleCoverage(old)
+        val newCoverage = ruleCoverage(new)
+        return oldCoverage.indices.all { !oldCoverage[it] || newCoverage[it] }
+    }
+
+    private fun ruleCoverage(rule: AppRule): BooleanArray {
+        val coverage = BooleanArray(7 * 24 * 60)
+        rule.weekdays.filter { it in 0..6 }.forEach { day ->
+            val start = rule.startMinute.coerceIn(0, 1439)
+            val end = rule.endMinute.coerceIn(0, 1440)
+            if (start == end) {
+                for (minute in start until 1440) coverage[day * 1440 + minute] = true
+                val nextDay = (day + 1) % 7
+                for (minute in 0 until start) coverage[nextDay * 1440 + minute] = true
+            } else if (start < end) {
+                for (minute in start until end) coverage[day * 1440 + minute] = true
+            } else {
+                for (minute in start until 1440) coverage[day * 1440 + minute] = true
+                val nextDay = (day + 1) % 7
+                for (minute in 0 until end) coverage[nextDay * 1440 + minute] = true
+            }
+        }
+        return coverage
     }
 
     private fun appGroup(o: AppGroup, n: AppGroup): Boolean {

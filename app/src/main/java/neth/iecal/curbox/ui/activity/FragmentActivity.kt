@@ -16,6 +16,9 @@ import neth.iecal.curbox.ui.fragments.main.reducers.anti_stimulants.grayscale.Gr
 import neth.iecal.curbox.ui.fragments.main.usage.AllAppsUsageFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appBlocker.AppBlockerGroupsFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appBlocker.CreateAppGroupFragment
+import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.AppRuleGroupsFragment
+import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.CreateAppRuleFragment
+import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.CreateAppRuleGroupFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.autodnd.AutoDndFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.autodnd.CreateAutoDndGroupFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.reelBlocker.ReelBlockerFragment
@@ -93,6 +96,9 @@ class FragmentActivity : AppCompatActivity() {
             AccessibilityGuide.FRAGMENT_ID,
             AppBlockerGroupsFragment.FRAGMENT_ID,
             CreateAppGroupFragment.FRAGMENT_ID,
+            AppRuleGroupsFragment.FRAGMENT_ID,
+            CreateAppRuleGroupFragment.FRAGMENT_ID,
+            CreateAppRuleFragment.FRAGMENT_ID,
             ReelBlockerFragment.FRAGMENT_ID,
             AutoDndFragment.FRAGMENT_ID,
             CreateAutoDndGroupFragment.FRAGMENT_ID,
@@ -117,6 +123,9 @@ class FragmentActivity : AppCompatActivity() {
                     OnboardingFragment.FRAGMENT_ID -> OnboardingFragment()
                     AppBlockerGroupsFragment.FRAGMENT_ID -> AppBlockerGroupsFragment()
                     CreateAppGroupFragment.FRAGMENT_ID -> CreateAppGroupFragment()
+                    AppRuleGroupsFragment.FRAGMENT_ID -> AppRuleGroupsFragment()
+                    CreateAppRuleGroupFragment.FRAGMENT_ID -> CreateAppRuleGroupFragment()
+                    CreateAppRuleFragment.FRAGMENT_ID -> CreateAppRuleFragment()
                     ReelBlockerFragment.FRAGMENT_ID -> ReelBlockerFragment()
                     KeywordBlockerFragment.FRAGMENT_ID -> KeywordBlockerFragment()
                     CreateKeywordGroupFragment.FRAGMENT_ID -> CreateKeywordGroupFragment()
