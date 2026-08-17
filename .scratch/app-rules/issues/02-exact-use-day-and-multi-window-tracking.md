@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — 첫 번째 통합 앱 규칙 완성.
 
-**Status:** in-progress (implementation and verification complete; fixed-point review pending)
+**Status:** done
 
 - [x] 전역 사용일 복원 시각의 기본값은 현지 시각 04:00이며 보호자가 설정에서 변경할 수 있다.
 - [x] 티켓 01의 고정 04:00 사용일 ID를 유지하면서 이 티켓에서만 복원 시각을 설정 가능하게 확장한다.
@@ -65,9 +65,10 @@
   calculation, generation-aware session and launch reads, visible package reconciliation, session
   finish ordering, tracking-policy rotation and policy markers, current-use-day aggregation and
   exact group intersections, repository restart cleanup and storage failure recovery.
-- Final focused JBR21 seam run covered 21 tests: 21 passed, 0 failed, 0 errors and 0 skipped
-  (Room repository 3, evaluator 11, policy 3, current-use-day aggregator 3, reconciler 1).
-  The final full JBR21 run was 145 tests: 144 passed, 1 failed, 0 errors and 0 skipped. The sole failure is
+- Final focused JBR21 seam run covered 5 current-use-day aggregator tests: 5 passed, 0 failed,
+  0 errors and 0 skipped, including literal 10:30 to 12:00 hour buckets and the repeated fall-back
+  hour in `America/New_York`. The final proportional full JBR21 run was 147 tests: 146 passed,
+  1 failed, 0 errors and 0 skipped. The sole failure is
   `ScriptLanguageTest.matchesRegexSupportsCommonFlags`.
 - Fixed base evidence: the same test was run at `6994bf8933b4536dde2aebdc3a0d81751e33fca4`
   in an isolated worktree and failed there as well (`ScriptError` at `ScriptLanguageTest.kt:44`),

@@ -3,6 +3,7 @@ package neth.iecal.curbox.domain.apprules
 import neth.iecal.curbox.data.models.ForegroundSession
 import java.time.Instant
 import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 
 /** A launch event from the authoritative current-use-day ledger. */
 data class ForegroundLaunch(
@@ -122,7 +123,11 @@ object CurrentUseDayUsageAggregator {
         var cursor = startMs
         while (cursor < endMs) {
             val local = Instant.ofEpochMilli(cursor).atZone(zone)
-            val nextHour = local.plusHours(1).toInstant().toEpochMilli()
+            val nextHour = local
+                .truncatedTo(ChronoUnit.HOURS)
+                .plusHours(1)
+                .toInstant()
+                .toEpochMilli()
             val segmentEnd = minOf(endMs, nextHour)
             hourly[local.hour] += segmentEnd - cursor
             cursor = segmentEnd

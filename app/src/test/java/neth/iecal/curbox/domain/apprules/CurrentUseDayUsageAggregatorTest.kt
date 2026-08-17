@@ -4,6 +4,7 @@ import neth.iecal.curbox.data.models.ForegroundSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Instant
 import java.time.ZoneId
 
 class CurrentUseDayUsageAggregatorTest {
@@ -111,5 +112,48 @@ class CurrentUseDayUsageAggregatorTest {
                 nowMs = 10_000L
             )
         )
+    }
+
+    @Test
+    fun hourlyUsageUsesActualLocalHourBoundaries() {
+        val result = CurrentUseDayUsageAggregator.aggregate(
+            sessions = listOf(
+                ForegroundSession(
+                    packageName = "com.example.hourly",
+                    startedAtMs = Instant.parse("2026-08-17T10:30:00Z").toEpochMilli(),
+                    endedAtMs = Instant.parse("2026-08-17T12:00:00Z").toEpochMilli()
+                )
+            ),
+            launches = emptyList(),
+            nowMs = Instant.parse("2026-08-17T12:00:00Z").toEpochMilli(),
+            zone = ZoneId.of("UTC")
+        ).single()
+
+        val expected = LongArray(24).apply {
+            this[10] = 30 * 60_000L
+            this[11] = 60 * 60_000L
+        }
+        assertEquals(90 * 60_000L, result.totalTimeMs)
+        assertEquals(expected.toList(), result.hourlyUsage.toList())
+    }
+
+    @Test
+    fun hourlyUsageKeepsRepeatedFallBackHourInItsLocalBucket() {
+        val zone = ZoneId.of("America/New_York")
+        val result = CurrentUseDayUsageAggregator.aggregate(
+            sessions = listOf(
+                ForegroundSession(
+                    packageName = "com.example.dst",
+                    startedAtMs = Instant.parse("2026-11-01T05:30:00Z").toEpochMilli(),
+                    endedAtMs = Instant.parse("2026-11-01T07:30:00Z").toEpochMilli()
+                )
+            ),
+            launches = emptyList(),
+            nowMs = Instant.parse("2026-11-01T07:30:00Z").toEpochMilli(),
+            zone = zone
+        ).single()
+
+        assertEquals(90 * 60_000L, result.hourlyUsage[1])
+        assertEquals(30 * 60_000L, result.hourlyUsage[2])
     }
 }
