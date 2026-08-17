@@ -56,8 +56,12 @@ class AppRuleGroupsFragment : Fragment() {
         binding.groupsContainer.removeAllViews()
         binding.rulesContainer.removeAllViews()
         val errors = snapshot.validate()
-        binding.configurationStatus.visibility = if (errors.isEmpty()) View.GONE else View.VISIBLE
-        binding.configurationStatus.text = if (errors.isEmpty()) "" else {
+        val hasMissingContributors = snapshot.appRules.any {
+            snapshot.missingContributorGroupIds(it).isNotEmpty()
+        }
+        binding.configurationStatus.visibility =
+            if (errors.isEmpty() && !hasMissingContributors) View.GONE else View.VISIBLE
+        binding.configurationStatus.text = if (errors.isEmpty() && !hasMissingContributors) "" else {
             getString(R.string.app_rules_configuration_error)
         }
         binding.addRuleButton.isEnabled = errors.isEmpty()
@@ -94,21 +98,74 @@ class AppRuleGroupsFragment : Fragment() {
             groupNames.isNotEmpty() -> groupNames.joinToString()
             else -> getString(R.string.app_rules_empty_scope)
         }
-        binding.rulesContainer.addView(MaterialCardView(requireContext()).apply {
-            setContentPadding(16.dp(), 12.dp(), 16.dp(), 12.dp())
-            addView(TextView(context).apply {
-                text = getString(
+        val contributorNames = scopeContributorNames(rule, snapshot)
+        val missingContributorIds = snapshot.missingContributorGroupIds(rule)
+        val status = buildString {
+            append(
+                getString(
                     R.string.app_rules_rule_summary,
                     rule.name,
                     groupName,
                     rule.allowedMinutes
                 )
+            )
+            append("\n")
+            append(getString(R.string.app_rules_direct_summary, rule.allowedMinutes))
+            append("\n")
+            append(
+                getString(
+                    R.string.app_rules_contributor_summary,
+                    if (contributorNames.isEmpty()) {
+                        getString(R.string.app_rules_contributor_none)
+                    } else {
+                        contributorNames.joinToString()
+                    }
+                )
+            )
+            if (rule.usageConditionEnabled) {
+                append("\n")
+                append(
+                    getString(
+                        R.string.app_rules_condition_summary,
+                        rule.usageConditionMinutes
+                    )
+                )
+            }
+            append("\n")
+            append(
+                getString(
+                    R.string.app_rules_earning_summary,
+                    getString(
+                        if (rule.earnedAllowanceEnabled) {
+                            R.string.app_rules_on
+                        } else {
+                            R.string.app_rules_off
+                        }
+                    )
+                )
+            )
+            if (missingContributorIds.isNotEmpty()) {
+                append("\n")
+                append(getString(R.string.app_rules_missing_contributor))
+            }
+        }
+        binding.rulesContainer.addView(MaterialCardView(requireContext()).apply {
+            setContentPadding(16.dp(), 12.dp(), 16.dp(), 12.dp())
+            addView(TextView(context).apply {
+                text = status
                 textSize = 15f
             })
             setOnClickListener { open(CreateAppRuleFragment.FRAGMENT_ID, rule.id) }
         }, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 8.dp()
         })
+    }
+
+    private fun scopeContributorNames(
+        rule: AppRule,
+        snapshot: AppRuleSnapshot
+    ): List<String> = rule.effectiveContributorGroupIds().map { id ->
+        snapshot.appGroups.find { it.id == id }?.name ?: getString(R.string.app_rules_missing_group)
     }
 
     private fun open(fragment: String, id: String? = null) {

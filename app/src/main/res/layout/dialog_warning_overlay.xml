@@ -18,6 +18,16 @@
         android:textStyle="bold" />
 
     <TextView
+        android:id="@+id/app_rule_status"
+        style="@style/TextAppearance.Material3.BodyMedium"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:gravity="center"
+        android:visibility="gone"
+        tools:text="Condition 10 of 10 minutes. Earned 20 minutes. Direct 10 minutes. Remaining 30 minutes." />
+
+    <TextView
         android:id="@+id/proceeds_left"
         style="@style/TextAppearance.Material3.BodyMedium"
         android:layout_width="match_parent"

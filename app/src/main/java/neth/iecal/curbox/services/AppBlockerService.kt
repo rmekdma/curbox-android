@@ -105,6 +105,9 @@ class AppBlockerService : BaseBlockingService() {
         }
 
         try {
+            // AppUsageTracker.onEvent is synchronous at this seam: it checkpoints the previous
+            // foreground sessions before the rule evaluator reads them. Keep these calls ordered
+            // and independently contained so a storage failure cannot kill later events.
             // Flush the previous session before evaluating the newly foregrounded package.
             if (appUsageTrackerReady) appUsageTracker.onEvent(event)
         } catch (t: Throwable) {
@@ -113,6 +116,8 @@ class AppBlockerService : BaseBlockingService() {
         }
 
         try {
+            // This must remain after the usage flush above. Contributor earning and target
+            // consumption both use the current-use-day raw session ledger.
             appRuleBlocker.doAppRuleCheck(event)
         } catch (t: Throwable) {
             Log.e("App rule check error", t.toString())

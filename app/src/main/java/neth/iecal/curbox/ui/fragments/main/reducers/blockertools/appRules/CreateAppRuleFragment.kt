@@ -35,6 +35,7 @@ class CreateAppRuleFragment : Fragment() {
     private var groups: List<AppRuleAppGroup> = emptyList()
     private val includedChecks = linkedMapOf<String, CheckBox>()
     private val excludedChecks = linkedMapOf<String, CheckBox>()
+    private val contributorChecks = linkedMapOf<String, CheckBox>()
     private data class RangeEditor(
         val binding: ItemAppRuleTimeRangeBinding,
         var startMinute: Int,
@@ -76,8 +77,10 @@ class CreateAppRuleFragment : Fragment() {
     private fun renderGroupChecks() {
         includedChecks.clear()
         excludedChecks.clear()
+        contributorChecks.clear()
         binding.includedGroupsContainer.removeAllViews()
         binding.excludedGroupsContainer.removeAllViews()
+        binding.contributorGroupsContainer.removeAllViews()
         groups.forEach { group ->
             val included = MaterialCheckBox(requireContext()).apply {
                 text = group.name
@@ -91,6 +94,12 @@ class CreateAppRuleFragment : Fragment() {
             excludedChecks[group.id] = excluded
             binding.includedGroupsContainer.addView(included)
             binding.excludedGroupsContainer.addView(excluded)
+            val contributor = MaterialCheckBox(requireContext()).apply {
+                text = group.name
+                tag = group.id
+            }
+            contributorChecks[group.id] = contributor
+            binding.contributorGroupsContainer.addView(contributor)
         }
     }
 
@@ -107,12 +116,16 @@ class CreateAppRuleFragment : Fragment() {
     private fun populate(rule: AppRule) {
         binding.nameInput.setText(rule.name)
         binding.allowanceInput.setText(rule.allowedMinutes.toString())
+        binding.usageConditionSwitch.isChecked = rule.usageConditionEnabled
+        binding.usageConditionMinutesInput.setText(rule.usageConditionMinutes.toString())
+        binding.earnedAllowanceSwitch.isChecked = rule.earnedAllowanceEnabled
         binding.activeSwitch.isChecked = rule.isActive
         weekdayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.weekdays }
         val scope = rule.effectiveScope()
         binding.includeAllAppsSwitch.isChecked = scope.includeAllApps
         scope.includedGroupIds.forEach { includedChecks[it]?.isChecked = true }
         scope.excludedGroupIds.forEach { excludedChecks[it]?.isChecked = true }
+        rule.effectiveContributorGroupIds().forEach { contributorChecks[it]?.isChecked = true }
 
         val ranges = rule.effectiveTimeRanges()
         clearTimeRanges()
@@ -193,13 +206,17 @@ class CreateAppRuleFragment : Fragment() {
     private fun save() {
         val name = binding.nameInput.text?.toString()?.trim().orEmpty()
         val allowance = binding.allowanceInput.text?.toString()?.toLongOrNull()
+        val conditionMinutes =
+            binding.usageConditionMinutesInput.text?.toString()?.toLongOrNull() ?: 0L
         val weekdays = weekdayChecks().mapIndexedNotNull { index, check ->
             index.takeIf { check.isChecked }
         }.toSet()
         val ranges = rangeEditors.map { editor ->
             AppRuleTimeRange(editor.startMinute, editor.endMinute)
         }
-        if (name.isEmpty() || allowance == null || allowance < 0 || weekdays.isEmpty() || ranges.isEmpty()) {
+        if (name.isEmpty() || allowance == null || allowance < 0 || conditionMinutes < 0L ||
+            weekdays.isEmpty() || ranges.isEmpty()
+        ) {
             Toast.makeText(requireContext(), R.string.app_rules_complete_fields, Toast.LENGTH_SHORT).show()
             return
         }
@@ -208,6 +225,16 @@ class CreateAppRuleFragment : Fragment() {
             includedGroupIds = includedChecks.filterValues { it.isChecked }.keys,
             excludedGroupIds = excludedChecks.filterValues { it.isChecked }.keys
         )
+        val missingContributorIds = editingRule
+            ?.effectiveContributorGroupIds()
+            .orEmpty()
+            .filter { id -> groups.none { it.id == id } }
+        val contributorGroupIds = contributorChecks
+            .filterValues { it.isChecked }
+            .keys
+            .toSet() + missingContributorIds
+        val usageConditionEnabled = binding.usageConditionSwitch.isChecked
+        val earnedAllowanceEnabled = binding.earnedAllowanceSwitch.isChecked
         val firstRange = ranges.first()
         val rule = editingRule?.copy(
             name = name,
@@ -218,7 +245,11 @@ class CreateAppRuleFragment : Fragment() {
             appGroupId = "",
             allowedMinutes = allowance,
             scope = scope,
-            timeRanges = ranges
+            timeRanges = ranges,
+            contributorGroupIds = contributorGroupIds,
+            usageConditionEnabled = usageConditionEnabled,
+            usageConditionMinutes = conditionMinutes,
+            earnedAllowanceEnabled = earnedAllowanceEnabled
         ) ?: AppRule.create(
             name = name,
             weekdays = weekdays,
@@ -227,7 +258,14 @@ class CreateAppRuleFragment : Fragment() {
             appGroupId = "",
             allowedMinutes = allowance,
             isActive = binding.activeSwitch.isChecked
-        ).copy(scope = scope, timeRanges = ranges)
+        ).copy(
+            scope = scope,
+            timeRanges = ranges,
+            contributorGroupIds = contributorGroupIds,
+            usageConditionEnabled = usageConditionEnabled,
+            usageConditionMinutes = conditionMinutes,
+            earnedAllowanceEnabled = earnedAllowanceEnabled
+        )
         viewLifecycleOwner.lifecycleScope.launch {
             val current = dataStore.settingsForEditing.first().appRuleSnapshot
             val rules = current.appRules.filterNot { it.id == rule.id } + rule

@@ -139,6 +139,10 @@ class WarningActivity : AppCompatActivity() {
         }
 
         binding = DialogWarningOverlayBinding.inflate(layoutInflater)
+        intent.getStringExtra("app_rule_status")?.let { status ->
+            binding.appRuleStatus.visibility = View.VISIBLE
+            binding.appRuleStatus.text = status
+        }
         isFocusGoalRequired = warningScreenConfig.isFocusGoalRequirementEnabled
         isFocusGoalVerified = !isFocusGoalRequired
         if (isFocusGoalRequired &&

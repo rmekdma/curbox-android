@@ -76,6 +76,44 @@
             android:layout_height="wrap_content"
             android:orientation="vertical" />
 
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/app_rules_contributor_groups"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:id="@+id/contributor_groups_container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/usage_condition_switch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/app_rules_usage_condition" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/app_rules_usage_condition_minutes_hint">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/usage_condition_minutes_input"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="number" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/earned_allowance_switch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_rules_earned_allowance" />
+
         <LinearLayout
             android:id="@+id/time_ranges_container"
             android:layout_width="match_parent"

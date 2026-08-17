@@ -103,4 +103,80 @@ class AppRuleRestrictionComparatorTest {
 
         assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
     }
+
+    @Test
+    fun enablingEarnedAllowanceIsDelayed() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val old = Settings(
+            appRuleSnapshot = AppRuleSnapshot(
+                listOf(group, contributor),
+                listOf(rule.copy(contributorGroupIds = setOf(contributor.id)))
+            )
+        )
+        val proposed = old.copy(
+            appRuleSnapshot = old.appRuleSnapshot.copy(
+                appRules = listOf(old.appRuleSnapshot.appRules.single().copy(
+                    earnedAllowanceEnabled = true
+                ))
+            )
+        )
+
+        assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun loweringUsageConditionThresholdIsDelayed() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val configured = rule.copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 20
+        )
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group, contributor), listOf(configured)))
+        val proposed = old.copy(
+            appRuleSnapshot = AppRuleSnapshot(
+                listOf(group, contributor),
+                listOf(configured.copy(usageConditionMinutes = 10))
+            )
+        )
+
+        assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun addingContributorGroupIsDelayedWhenItCanEarnTime() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val secondContributor = AppRuleAppGroup("second", "Second", listOf("com.other"))
+        val configured = rule.copy(
+            contributorGroupIds = setOf(contributor.id),
+            earnedAllowanceEnabled = true
+        )
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group, contributor), listOf(configured)))
+        val proposed = old.copy(
+            appRuleSnapshot = AppRuleSnapshot(
+                listOf(group, contributor, secondContributor),
+                listOf(configured.copy(contributorGroupIds = setOf(contributor.id, secondContributor.id)))
+            )
+        )
+
+        assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun disablingEarnedAllowanceIsSameOrStricter() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val configured = rule.copy(
+            contributorGroupIds = setOf(contributor.id),
+            earnedAllowanceEnabled = true
+        )
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group, contributor), listOf(configured)))
+        val proposed = old.copy(
+            appRuleSnapshot = AppRuleSnapshot(
+                listOf(group, contributor),
+                listOf(configured.copy(earnedAllowanceEnabled = false))
+            )
+        )
+
+        assertTrue(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
 }

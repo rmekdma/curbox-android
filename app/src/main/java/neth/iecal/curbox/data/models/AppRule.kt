@@ -102,7 +102,14 @@ data class AppRule(
     /** Composite target scope introduced after the first single-group rule. */
     val scope: AppRuleScope = AppRuleScope(),
     /** Canonical semantic ranges. Empty is migrated from the legacy start/end fields. */
-    val timeRanges: List<AppRuleTimeRange> = emptyList()
+    val timeRanges: List<AppRuleTimeRange> = emptyList(),
+    /** App groups whose raw foreground usage can unlock or credit this rule. */
+    val contributorGroupIds: Set<String> = emptySet(),
+    /** When enabled, [usageConditionMinutes] must be reached before normal allowance applies. */
+    val usageConditionEnabled: Boolean = false,
+    val usageConditionMinutes: Long = 0L,
+    /** When enabled, contributor usage is added one to one after the condition is met. */
+    val earnedAllowanceEnabled: Boolean = false
 ) {
     companion object {
         fun create(
@@ -112,7 +119,11 @@ data class AppRule(
             endMinute: Int,
             appGroupId: String,
             allowedMinutes: Long,
-            isActive: Boolean = true
+            isActive: Boolean = true,
+            contributorGroupIds: Set<String> = emptySet(),
+            usageConditionEnabled: Boolean = false,
+            usageConditionMinutes: Long = 0L,
+            earnedAllowanceEnabled: Boolean = false
         ): AppRule = AppRule(
             id = newId(),
             name = name,
@@ -121,7 +132,11 @@ data class AppRule(
             startMinute = startMinute,
             endMinute = endMinute,
             appGroupId = appGroupId,
-            allowedMinutes = allowedMinutes
+            allowedMinutes = allowedMinutes,
+            contributorGroupIds = contributorGroupIds,
+            usageConditionEnabled = usageConditionEnabled,
+            usageConditionMinutes = usageConditionMinutes,
+            earnedAllowanceEnabled = earnedAllowanceEnabled
         )
     }
 
@@ -137,6 +152,33 @@ data class AppRule(
 
     fun effectiveTimeRanges(): List<AppRuleTimeRange> =
         timeRanges.ifEmpty { listOf(AppRuleTimeRange(startMinute, endMinute)) }
+
+    fun effectiveContributorGroupIds(): Set<String> = contributorGroupIds
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .toSet()
+
+    /** Compatibility aliases keep the domain vocabulary readable at call sites. */
+    val prerequisiteEnabled: Boolean
+        get() = usageConditionEnabled
+
+    val prerequisiteMinutes: Long
+        get() = usageConditionMinutes
+
+    val earningEnabled: Boolean
+        get() = earnedAllowanceEnabled
+
+    val contributorAppGroupIds: Set<String>
+        get() = contributorGroupIds
+
+    val isUsageConditionEnabled: Boolean
+        get() = usageConditionEnabled
+
+    val requiredContributorMinutes: Long
+        get() = usageConditionMinutes
+
+    val isEarnedAllowanceEnabled: Boolean
+        get() = earnedAllowanceEnabled
 }
 
 /**
@@ -169,6 +211,8 @@ data class AppRuleSnapshot(
                 } else {
                     normalizedScope
                 },
+                contributorGroupIds = rule.effectiveContributorGroupIds(),
+                usageConditionMinutes = rule.usageConditionMinutes,
                 timeRanges = rule.timeRanges.ifEmpty {
                     listOf(AppRuleTimeRange(rule.startMinute, rule.endMinute))
                 }
@@ -217,6 +261,12 @@ data class AppRuleSnapshot(
             if (rule.allowedMinutes < 0L) {
                 errors += "App rule ${rule.id} has a negative allowance"
             }
+            if (rule.usageConditionMinutes < 0L) {
+                errors += "App rule ${rule.id} has a negative usage condition"
+            }
+            if (rule.contributorGroupIds.any { it.isBlank() }) {
+                errors += "App rule ${rule.id} contains a blank contributor app group"
+            }
         }
         return errors
     }
@@ -231,6 +281,26 @@ data class AppRuleSnapshot(
             groupId in scope.includedGroupIds ||
             groupId in scope.excludedGroupIds
     }.map { it.id }
+
+    /** Contributor references are intentionally not target deletion blockers. */
+    fun contributorRuleIdsReferencing(groupId: String): List<String> = appRules.filter { rule ->
+        groupId in rule.effectiveContributorGroupIds()
+    }.map { it.id }
+
+    /** Missing contributor ids are retained so the UI can explain the repair needed. */
+    fun missingContributorGroupIds(rule: AppRule): Set<String> = rule
+        .effectiveContributorGroupIds()
+        .filterTo(linkedSetOf()) { id -> appGroups.none { it.id == id } }
+
+    fun contributorReferenceErrors(rule: AppRule): List<String> =
+        missingContributorGroupIds(rule).map { id ->
+            "App rule ${rule.id} references a missing contributor app group $id"
+        }
+
+    /** Deleting a contributor keeps the dependent id in place and therefore fails closed. */
+    fun deleteContributorGroup(groupId: String): AppRuleSnapshot = copy(
+        appGroups = appGroups.filterNot { it.id == groupId }
+    )
 
     fun canDeleteTargetGroup(groupId: String): Boolean =
         targetRuleIdsReferencing(groupId).isEmpty()

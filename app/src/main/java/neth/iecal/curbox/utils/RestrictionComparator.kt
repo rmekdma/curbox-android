@@ -7,6 +7,7 @@ import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.data.models.AppTimeConfig
 import neth.iecal.curbox.data.models.AppUsageConfig
 import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.domain.apprules.AppRuleSchedule
 import neth.iecal.curbox.data.models.AutoDndGroup
@@ -111,6 +112,7 @@ object RestrictionComparator {
         // previously covered package weakens the rule and must stay behind the delay.
         if (!appRuleScopeSameOrWider(old, new, oldGroups, newGroups)) return false
         if (new.allowedMinutes > old.allowedMinutes) return false
+        if (!appRuleContributionSameOrStricter(old, new, oldGroups, newGroups)) return false
         val oldCoverage = ruleCoverage(old)
         val newCoverage = ruleCoverage(new)
         return oldCoverage.indices.all { !oldCoverage[it] || newCoverage[it] }
@@ -145,6 +147,49 @@ object RestrictionComparator {
         val oldCoverage = ruleCoverage(old)
         val newCoverage = ruleCoverage(new)
         return oldCoverage.indices.all { !oldCoverage[it] || newCoverage[it] }
+    }
+
+    /**
+     * Contributor usage is an input that can only increase a rule's allowance or unlock it
+     * sooner. A change is immediately safe only when it removes contributor capability or makes
+     * the condition harder; anything that cannot be proven is held by the settings delay.
+     */
+    fun appRuleContributionSameOrStricter(
+        old: AppRule,
+        new: AppRule,
+        oldGroups: List<AppRuleAppGroup>,
+        newGroups: List<AppRuleAppGroup>
+    ): Boolean {
+        if (old.usageConditionEnabled) {
+            if (!new.usageConditionEnabled) return false
+            if (new.usageConditionMinutes < old.usageConditionMinutes) return false
+        } else if (new.usageConditionEnabled) {
+            return false
+        }
+        if (!old.earnedAllowanceEnabled && new.earnedAllowanceEnabled) return false
+
+        val oldDependsOnContributors = old.usageConditionEnabled || old.earnedAllowanceEnabled
+        val newDependsOnContributors = new.usageConditionEnabled || new.earnedAllowanceEnabled
+        if (!oldDependsOnContributors && !newDependsOnContributors) return true
+
+        val oldPackages = resolveContributorPackages(old, oldGroups) ?: return false
+        val newPackages = resolveContributorPackages(new, newGroups) ?: return false
+        return newPackages.all { it in oldPackages }
+    }
+
+    private fun resolveContributorPackages(
+        rule: AppRule,
+        groups: List<AppRuleAppGroup>
+    ): Set<String>? {
+        val byId = groups.associateBy { it.id.trim() }
+        val packages = linkedSetOf<String>()
+        rule.effectiveContributorGroupIds().forEach { id ->
+            val group = byId[id] ?: return null
+            group.selectedPackages.map(String::trim)
+                .filter(String::isNotEmpty)
+                .forEach(packages::add)
+        }
+        return packages
     }
 
     private fun appGroup(o: AppGroup, n: AppGroup): Boolean {

@@ -20,9 +20,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.Constants
 import neth.iecal.curbox.CrashLogger
+import neth.iecal.curbox.R
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
+import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
@@ -37,6 +39,7 @@ import neth.iecal.curbox.utils.UseDayResetTime
 class AppRuleBlocker {
     companion object {
         const val INTENT_ACTION_REFRESH_APP_RULES = "neth.iecal.curbox.refresh.app_rules"
+        private const val MILLIS_PER_MINUTE = 60_000L
     }
 
     private lateinit var service: BaseBlockingService
@@ -182,28 +185,50 @@ class AppRuleBlocker {
         val denyingRule = evaluation.denyingRules.firstOrNull() ?: return
         if (now - lastShownAt < 1_000L) return
         lastShownAt = now
-        showWarning(packageName, denyingRule.ruleId)
+        showWarning(packageName, denyingRule)
     }
 
-    private fun showWarning(packageName: String, ruleId: String) {
+    private fun showWarning(packageName: String, evaluation: AppRuleEvaluation) {
         if (!service.isDelayOver(1_000)) return
         service.pressHome()
         handler.postDelayed({
-            val intent = Intent(service, WarningActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-                putExtra("mode", Constants.WARNING_SCREEN_MODE_APP_BLOCKER)
-                putExtra("result_id", ruleId)
-                putExtra("launch_package", packageName)
-                putExtra("warning_config", Gson().toJson(AppBlockerWarningScreenConfig()))
-            }
             try {
+                val intent = Intent(service, WarningActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                    putExtra("mode", Constants.WARNING_SCREEN_MODE_APP_BLOCKER)
+                    putExtra("result_id", evaluation.ruleId)
+                    putExtra("launch_package", packageName)
+                    putExtra("app_rule_status", warningStatus(evaluation))
+                    putExtra(
+                        "warning_config",
+                        Gson().toJson(AppBlockerWarningScreenConfig())
+                    )
+                }
                 service.startActivity(intent)
             } catch (error: Exception) {
-                // The service remains alive when Android rejects an activity start from the
-                // service process. The next accessibility event will retry the decision.
+                // Keep the delayed callback contained too: formatting the breakdown and starting
+                // the activity are both optional presentation work for the service process.
                 logNonFatal(error)
             }
         }, 100L)
+    }
+
+    private fun warningStatus(evaluation: AppRuleEvaluation): String = if (evaluation.conditionEnabled) {
+        service.getString(
+            R.string.app_rules_warning_status,
+            evaluation.contributorUsageMillis / MILLIS_PER_MINUTE,
+            evaluation.conditionRequiredMillis / MILLIS_PER_MINUTE,
+            evaluation.earnedAllowanceMillis / MILLIS_PER_MINUTE,
+            evaluation.directAllowanceMillis / MILLIS_PER_MINUTE,
+            (evaluation.remainingMillis / MILLIS_PER_MINUTE).coerceAtLeast(0L)
+        )
+    } else {
+        service.getString(
+            R.string.app_rules_warning_status_no_condition,
+            evaluation.earnedAllowanceMillis / MILLIS_PER_MINUTE,
+            evaluation.directAllowanceMillis / MILLIS_PER_MINUTE,
+            (evaluation.remainingMillis / MILLIS_PER_MINUTE).coerceAtLeast(0L)
+        )
     }
 
     fun onDestroy() {

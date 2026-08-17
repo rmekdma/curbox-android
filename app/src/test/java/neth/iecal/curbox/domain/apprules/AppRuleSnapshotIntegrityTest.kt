@@ -69,4 +69,37 @@ class AppRuleSnapshotIntegrityTest {
         assertEquals(setOf(group.id), rule.scope.includedGroupIds)
         assertEquals(listOf(AppRuleTimeRange(22 * 60, 6 * 60)), rule.timeRanges)
     }
+
+    @Test
+    fun missingContributorReferencesRemainPersistableAndAreReportedForRepair() {
+        val group = AppRuleAppGroup("target", "Target", listOf("com.target"))
+        val rule = AppRule(
+            id = "rule",
+            name = "Target",
+            scope = AppRuleScope(includedGroupIds = setOf(group.id)),
+            contributorGroupIds = setOf("deleted")
+        )
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+
+        assertTrue(snapshot.isValid)
+        assertEquals(setOf("deleted"), snapshot.missingContributorGroupIds(rule))
+        assertTrue(snapshot.contributorReferenceErrors(rule).single().contains("deleted"))
+    }
+
+    @Test
+    fun deletingContributorLeavesItsReferenceInTheRule() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val target = AppRuleAppGroup("target", "Target", listOf("com.target"))
+        val rule = AppRule(
+            id = "rule",
+            name = "Target",
+            scope = AppRuleScope(includedGroupIds = setOf(target.id)),
+            contributorGroupIds = setOf(contributor.id)
+        )
+        val deleted = AppRuleSnapshot(listOf(target, contributor), listOf(rule))
+            .deleteContributorGroup(contributor.id)
+
+        assertEquals(setOf(contributor.id), deleted.appRules.single().contributorGroupIds)
+        assertTrue(deleted.isValid)
+    }
 }
