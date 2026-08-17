@@ -22,12 +22,6 @@ data class AppRulesEvaluation(
     val evaluations: List<AppRuleEvaluation>
 )
 
-object AppRuleValidator {
-    fun validate(snapshot: AppRuleSnapshot): List<String> = snapshot.validate()
-
-    fun isValid(snapshot: AppRuleSnapshot): Boolean = snapshot.isValid
-}
-
 /** Pure rule decision boundary used by both the service and JVM unit tests. */
 object AppRuleEvaluator {
 
