@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — 정확한 사용일과 다중 전면 앱 집계 완성.
 
-**Status:** review-pending
+**Status:** done
 
 - [x] 규칙의 포함 대상에는 모든 앱과 하나 이상의 앱 그룹을 함께 선택할 수 있다.
 - [x] 규칙의 제외 대상에는 하나 이상의 앱 그룹을 선택할 수 있다.
@@ -52,9 +52,10 @@
   groups screen expose invalid state and use ViewBinding plus Material controls for composite CRUD.
 - `CreateAppRuleFragment` uses the existing `MaterialTimePicker` flow and ViewBinding range rows
   with button summaries; no platform `TimePicker` remains in the rule editor. Receiver setup is
-  transactional and cleanup unregisters only registrations that completed successfully.
+  transactional, requires successful feature setup before registration, and cleanup unregisters
+  only registrations that completed successfully.
 - `AppRuleRestrictionComparatorTest` covers scope and schedule strength in both directions. The
-  focused JBR21 app-rule run covered 31 tests: 31 passed, 0 failed, 0 errors and 0 skipped. The
+  focused JBR21 app-rule run covered 32 tests: 32 passed, 0 failed, 0 errors and 0 skipped. The
   final full JBR21 run covered 160 tests: 159 passed, 1 failed, 0 errors and 0 skipped. The sole
   failure is `ScriptLanguageTest.matchesRegexSupportsCommonFlags`, also present at fixed base
   `3c6ef5d8` and unrelated to ticket 03.
