@@ -52,10 +52,12 @@ class AppRuleBlocker {
     @Volatile private var essentialPackages: Set<String> = emptySet()
     private var packageScopeReader: AppRulePackageScopeReader? = null
     private var receiverLifecycle: AppRuleReceiverLifecycle? = null
+    private var setupReady = false
     @Volatile private var resetTime = UseDayResetTime()
     @Volatile private var useDayGenerationStartedAtMs = 0L
 
     fun setup(service: BaseBlockingService) {
+        setupReady = false
         this.service = service
         crashLogger = CrashLogger(service)
         val database = AppDatabase.getInstance(service)
@@ -91,9 +93,11 @@ class AppRuleBlocker {
                 logNonFatal(error)
             }
         }
+        setupReady = true
     }
 
     fun setupReceivers() {
+        if (!setupReady) return
         val filter = IntentFilter(INTENT_ACTION_REFRESH_APP_RULES)
         val packageFilter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
@@ -102,7 +106,7 @@ class AppRuleBlocker {
             addDataScheme("package")
         }
         val lifecycle = AppRuleReceiverLifecycle(
-            listOf(
+            registrations = listOf(
                 AppRuleReceiverLifecycle.Registration(
                     register = {
                         ContextCompat.registerReceiver(
@@ -125,7 +129,8 @@ class AppRuleBlocker {
                     },
                     unregister = { service.unregisterReceiver(packageReceiver) }
                 )
-            )
+            ),
+            isReady = { setupReady }
         )
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)
         receiverLifecycle = lifecycle

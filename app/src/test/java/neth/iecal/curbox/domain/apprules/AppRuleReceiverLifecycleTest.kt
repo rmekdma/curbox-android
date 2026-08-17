@@ -6,6 +6,29 @@ import org.junit.Test
 
 class AppRuleReceiverLifecycleTest {
     @Test
+    fun notReadyRegistrationDoesNotTouchReceiversOrRequireCleanup() {
+        val events = mutableListOf<String>()
+        val lifecycle = AppRuleReceiverLifecycle(
+            registrations = listOf(
+                AppRuleReceiverLifecycle.Registration(
+                    register = { events += "register refresh" },
+                    unregister = { events += "unregister refresh" }
+                ),
+                AppRuleReceiverLifecycle.Registration(
+                    register = { events += "register package" },
+                    unregister = { events += "unregister package" }
+                )
+            ),
+            isReady = { false }
+        )
+
+        lifecycle.register()
+
+        assertEquals(emptyList<String>(), events)
+        assertEquals(emptyList<Exception>(), lifecycle.unregister())
+    }
+
+    @Test
     fun failedRegistrationUnregistersEveryReceiverThatWasRegistered() {
         val events = mutableListOf<String>()
         val lifecycle = AppRuleReceiverLifecycle(

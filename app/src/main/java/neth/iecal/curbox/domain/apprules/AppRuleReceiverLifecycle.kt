@@ -2,7 +2,8 @@ package neth.iecal.curbox.domain.apprules
 
 /** Transactional registration seam for the service's feature receivers. */
 class AppRuleReceiverLifecycle(
-    private val registrations: List<Registration>
+    private val registrations: List<Registration>,
+    private val isReady: () -> Boolean = { true }
 ) {
     class Registration(
         val register: () -> Unit,
@@ -12,6 +13,7 @@ class AppRuleReceiverLifecycle(
     private val registered = mutableListOf<Registration>()
 
     fun register() {
+        if (!isReady()) return
         try {
             registrations.forEach { registration ->
                 registration.register()
