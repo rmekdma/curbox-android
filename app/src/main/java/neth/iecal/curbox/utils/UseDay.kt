@@ -45,10 +45,11 @@ class ConfigurableUseDayCalculator(
     override val zone: ZoneId = ZoneId.systemDefault(),
     override val resetTime: UseDayResetTime = UseDayResetTime()
 ) : UseDayCalculator {
+    /** Positional convenience for callers whose first argument is the reset clock. */
     constructor(
-        resetTime: UseDayResetTime,
+        reset: UseDayResetTime,
         zone: ZoneId = ZoneId.systemDefault()
-    ) : this(zone, resetTime)
+    ) : this(zone, reset)
 
     override fun idAt(nowMs: Long): String = UseDay.idAt(nowMs, zone, resetTime)
 

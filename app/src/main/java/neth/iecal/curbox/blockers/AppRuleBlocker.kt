@@ -195,7 +195,7 @@ class AppRuleBlocker {
             val packageStillVisible = try {
                 service.windows.any { window ->
                     window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION &&
-                        window.packageName?.toString() == packageName
+                        packageNameForWindow(window) == packageName
                 }
             } catch (error: Exception) {
                 logNonFatal(error)
@@ -211,6 +211,17 @@ class AppRuleBlocker {
                 }
             }
         }, delay)
+    }
+
+    private fun packageNameForWindow(
+        window: android.view.accessibility.AccessibilityWindowInfo
+    ): String {
+        val root = window.root ?: return ""
+        return try {
+            root.packageName?.toString().orEmpty()
+        } finally {
+            root.recycle()
+        }
     }
 
     private fun logNonFatal(error: Exception) {

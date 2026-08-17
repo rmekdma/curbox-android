@@ -143,7 +143,14 @@ class AppUsageTracker {
                             useDayCalculator = ConfigurableUseDayCalculator(ZoneId.systemDefault(), nextReset)
                             trackingDecision = nextDecision
                             if (packagesToResume.isNotEmpty() && screenOn && recordingEnabled) {
-                                packagesToResume.forEach { startSession(it, System.currentTimeMillis(), SystemClock.elapsedRealtime()) }
+                                packagesToResume.forEach {
+                                    startSession(
+                                        packageName = it,
+                                        startedAtWallMs = System.currentTimeMillis(),
+                                        startedAtElapsedMs = SystemClock.elapsedRealtime(),
+                                        recordLaunch = false
+                                    )
+                                }
                             }
                             if (!recordingEnabled) endAllSessions()
                         } catch (error: Exception) {
@@ -179,7 +186,7 @@ class AppUsageTracker {
             val windows = service.windows
             val normalized = windows.map { window ->
                 VisibleApplicationWindow(
-                    packageName = window.packageName?.toString().orEmpty(),
+                    packageName = packageNameForWindow(window),
                     type = window.type,
                     // Accessibility reports application windows in the interactive list. The
                     // package set, rather than focus, determines split-screen visibility.
@@ -230,7 +237,12 @@ class AppUsageTracker {
         }
     }
 
-    private fun startSession(packageName: String, startedAtWallMs: Long, startedAtElapsedMs: Long) {
+    private fun startSession(
+        packageName: String,
+        startedAtWallMs: Long,
+        startedAtElapsedMs: Long,
+        recordLaunch: Boolean = true
+    ) {
         if (activeSessions.containsKey(packageName)) return
         val useDayId = useDayCalculator.idAt(startedAtWallMs)
         val sessionId = try {
@@ -255,7 +267,7 @@ class AppUsageTracker {
             lastCommittedWallMs = startedAtWallMs,
             lastCommittedElapsedMs = startedAtElapsedMs
         )
-        if (trackingDecision.recordStatistics) {
+        if (trackingDecision.recordStatistics && recordLaunch) {
             recordLaunch(packageName, startedAtWallMs)
             try {
                 runBlocking(Dispatchers.IO) {
@@ -523,7 +535,7 @@ class AppUsageTracker {
         if (!recordingEnabled || !screenOn) return
         try {
             val windows = service.windows.map { window ->
-                VisibleApplicationWindow(window.packageName?.toString().orEmpty(), window.type)
+                VisibleApplicationWindow(packageNameForWindow(window), window.type)
             }
             reconcileVisiblePackages(
                 VisibleApplicationPackages.fromWindows(
@@ -534,6 +546,17 @@ class AppUsageTracker {
             )
         } catch (error: Exception) {
             logNonFatal(error)
+        }
+    }
+
+    private fun packageNameForWindow(
+        window: android.view.accessibility.AccessibilityWindowInfo
+    ): String {
+        val root = window.root ?: return ""
+        return try {
+            root.packageName?.toString().orEmpty()
+        } finally {
+            root.recycle()
         }
     }
 
