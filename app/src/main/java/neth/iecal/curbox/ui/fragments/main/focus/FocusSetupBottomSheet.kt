@@ -16,7 +16,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
@@ -25,8 +24,10 @@ import neth.iecal.curbox.data.models.ManualFocusGroup
 import neth.iecal.curbox.databinding.DialogFocusSessionConfigBinding
 import neth.iecal.curbox.hardcoded.URL_BAR_ID_LIST
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
+import neth.iecal.curbox.utils.GuardianOwnedBottomSheet
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 
-class FocusSetupBottomSheet : BottomSheetDialogFragment() {
+class FocusSetupBottomSheet : GuardianOwnedBottomSheet() {
 
     private var _binding: DialogFocusSessionConfigBinding? = null
     private val binding get() = _binding!!
@@ -83,8 +84,10 @@ class FocusSetupBottomSheet : BottomSheetDialogFragment() {
         }
 
         binding.btnConfirmStart.setOnClickListener {
-            viewModel.startFocusing()
-            dismiss()
+            launchGuardianCommit {
+                viewModel.startFocusing()
+                dismiss()
+            }
         }
 
         binding.groupDropdown.setOnItemClickListener { parent, view, position, id ->
@@ -117,18 +120,24 @@ class FocusSetupBottomSheet : BottomSheetDialogFragment() {
 
         binding.btnDeleteGroup.setOnClickListener {
             val group = viewModel.selectedGroup ?: return@setOnClickListener
-            MaterialAlertDialogBuilder(requireContext())
+            val dialog = MaterialAlertDialogBuilder(requireContext())
                 .setTitle(R.string.focus_delete_group_title)
                 .setMessage(R.string.focus_delete_group_message)
                 .setPositiveButton(R.string.delete) { _, _ ->
-                    viewModel.removeGroup(group)
-                    viewModel.selectedGroup = null
-                    binding.groupDropdown.setText("", false)
-                    binding.btnEditGroup.visibility = View.GONE
-                    binding.btnDeleteGroup.visibility = View.GONE
+                    GuardianOwnedDialog.launchCommit(
+                        requireContext(),
+                        viewLifecycleOwner.lifecycleScope
+                    ) {
+                        viewModel.removeGroup(group)
+                        viewModel.selectedGroup = null
+                        binding.groupDropdown.setText("", false)
+                        binding.btnEditGroup.visibility = View.GONE
+                        binding.btnDeleteGroup.visibility = View.GONE
+                    }
                 }
                 .setNegativeButton(R.string.cancel, null)
-                .show()
+                .create()
+            GuardianOwnedDialog.show(dialog)
         }
 
         binding.btnSelectApps.setOnClickListener {
@@ -157,27 +166,39 @@ class FocusSetupBottomSheet : BottomSheetDialogFragment() {
                 
                 if (!hasBrowserSelected) {
                     if (blockMode == FocusBlockMode.BLOCK_ALL_EXCEPT_SELECTED) {
-                        MaterialAlertDialogBuilder(requireContext())
+                        val dialog = MaterialAlertDialogBuilder(requireContext())
                             .setTitle(R.string.focus_no_browser_title)
                             .setMessage(R.string.focus_no_browser_allow_message)
                             .setPositiveButton(R.string.focus_add_browser) { _, _ ->
                                 binding.btnSelectApps.performClick()
                             }
                             .setNegativeButton(R.string.focus_save_anyway) { _, _ ->
-                                saveFocusGroup(isEditing, blockMode)
+                                GuardianOwnedDialog.launchCommit(
+                                    requireContext(),
+                                    viewLifecycleOwner.lifecycleScope
+                                ) {
+                                    saveFocusGroup(isEditing, blockMode)
+                                }
                             }
-                            .show()
+                            .create()
+                        GuardianOwnedDialog.show(dialog)
                     } else {
-                        MaterialAlertDialogBuilder(requireContext())
+                        val dialog = MaterialAlertDialogBuilder(requireContext())
                             .setTitle(R.string.focus_block_notice_title)
                             .setMessage(R.string.focus_block_notice_message)
                             .setPositiveButton(R.string.focus_add_browser) { _, _ ->
                                 binding.btnSelectApps.performClick()
                             }
                             .setNegativeButton(R.string.focus_save_anyway) { _, _ ->
-                                saveFocusGroup(isEditing, blockMode)
+                                GuardianOwnedDialog.launchCommit(
+                                    requireContext(),
+                                    viewLifecycleOwner.lifecycleScope
+                                ) {
+                                    saveFocusGroup(isEditing, blockMode)
+                                }
                             }
-                            .show()
+                            .create()
+                        GuardianOwnedDialog.show(dialog)
                     }
                     return@setOnClickListener
                 }
@@ -243,15 +264,24 @@ class FocusSetupBottomSheet : BottomSheetDialogFragment() {
             true
         }
 
-        MaterialAlertDialogBuilder(requireContext())
+        val dialog = MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.focus_add_websites_title)
             .setView(view)
             .setPositiveButton(R.string.save) { _, _ ->
-                viewModel.newGroupSelectedKeywords = HashSet(tempKeywords)
-                binding.selectedWebsiteCount.text = getString(R.string.selected_count, tempKeywords.size)
+                GuardianOwnedDialog.launchCommit(
+                    requireContext(),
+                    viewLifecycleOwner.lifecycleScope
+                ) {
+                    viewModel.newGroupSelectedKeywords = HashSet(tempKeywords)
+                    binding.selectedWebsiteCount.text = getString(
+                        R.string.selected_count,
+                        tempKeywords.size
+                    )
+                }
             }
             .setNegativeButton(R.string.cancel, null)
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     inner class KeywordAdapter(private val items: MutableList<String>) : RecyclerView.Adapter<KeywordAdapter.ViewHolder>() {

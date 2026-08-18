@@ -28,6 +28,7 @@ import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.ui.activity.FragmentActivity
 import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.TemporaryDisableDialog
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.scheduleConflictsWith
 
 class AppBlockerGroupsFragment : Fragment() {
@@ -172,7 +173,7 @@ class AppBlockerGroupsFragment : Fragment() {
                         holder.switchActive.post {
                             if (pos in 0 until itemCount) notifyItemChanged(pos)
                         }
-                        MaterialAlertDialogBuilder(requireContext())
+                        val dialog = MaterialAlertDialogBuilder(requireContext())
                             .setTitle(R.string.schedule_conflict_title)
                             .setMessage(requireContext().appGroupConflictMessage(conflicts))
                             .setNegativeButton(R.string.schedule_conflict_cancel, null)
@@ -180,13 +181,19 @@ class AppBlockerGroupsFragment : Fragment() {
                                 openGroup(group.id)
                             }
                             .setPositiveButton(R.string.schedule_conflict_keep_both) { _, _ ->
-                                val currentIndex = viewModel.groups.value
-                                    .indexOfFirst { it.id == group.id }
-                                if (currentIndex != -1) {
-                                    viewModel.updateGroupActiveState(currentIndex, true)
+                                GuardianOwnedDialog.launchCommit(
+                                    requireContext(),
+                                    viewLifecycleOwner.lifecycleScope
+                                ) {
+                                    val currentIndex = viewModel.groups.value
+                                        .indexOfFirst { it.id == group.id }
+                                    if (currentIndex != -1) {
+                                        viewModel.updateGroupActiveState(currentIndex, true)
+                                    }
                                 }
                             }
-                            .show()
+                            .create()
+                        GuardianOwnedDialog.show(dialog)
                     } else {
                         viewModel.updateGroupActiveState(pos, true)
                     }

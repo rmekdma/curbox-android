@@ -17,6 +17,7 @@ object GuardianSessionRegistry {
     private var pendingInternalReturnToken: Pair<String, Long>? = null
     private var pendingOwnedTransitionToken: Pair<String, Long>? = null
     private var ownedDialogActive = false
+    private var ownedDialogDepth = 0
     private var internalChildActive = false
     private var oneShotSystemResultPending = false
 
@@ -111,6 +112,7 @@ object GuardianSessionRegistry {
         pendingInternalReturnToken = null
         pendingOwnedTransitionToken = null
         ownedDialogActive = false
+        ownedDialogDepth = 0
         internalChildActive = false
         session.transition(GuardianFocusSurface.EXTERNAL_SYSTEM, hasPassword = true)
     }
@@ -139,6 +141,7 @@ object GuardianSessionRegistry {
         pendingOwnedTransitionToken = null
         pendingInternalReturnToken = null
         ownedDialogActive = false
+        ownedDialogDepth = 0
         internalChildActive = false
         session.transition(GuardianFocusSurface.UNKNOWN, hasPassword = true)
         return true
@@ -192,16 +195,22 @@ object GuardianSessionRegistry {
 
     @Synchronized
     fun markOwnedDialogShown() {
+        ownedDialogDepth += 1
         ownedDialogActive = true
         session.transition(GuardianFocusSurface.CURBOX_DIALOG, hasPassword = true)
     }
 
     @Synchronized
     fun markOwnedDialogHidden() {
+        if (ownedDialogDepth > 0) ownedDialogDepth -= 1
+        if (ownedDialogDepth > 0) return
         pendingOwnedTransitionToken = null
         ownedDialogActive = false
         session.transition(GuardianFocusSurface.CURBOX_CONTENT, hasPassword = true)
     }
+
+    @Synchronized
+    fun isOwnedDialogActive(): Boolean = ownedDialogActive
 
     private fun Long?.orZero(): Long = this ?: 0L
 

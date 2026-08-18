@@ -53,6 +53,7 @@ import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianActivityGate
 import neth.iecal.curbox.utils.GuardianOwnedDialog
+import neth.iecal.curbox.utils.GuardianRoutePolicy
 import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class FragmentActivity : AppCompatActivity() {
@@ -117,14 +118,17 @@ class FragmentActivity : AppCompatActivity() {
             return
         }
 
-        guardianAuthConfig = if (selectedFragment != OnboardingFragment.FRAGMENT_ID) {
-            runBlocking(Dispatchers.IO) {
-                DataStoreManager(applicationContext).settings.first().guardianAuthConfig
-            }
-        } else {
-            GuardianAuthConfig()
+        guardianAuthConfig = runBlocking(Dispatchers.IO) {
+            DataStoreManager(applicationContext).settings.first().guardianAuthConfig
         }
-        if (guardianAuthConfig.isConfigured &&
+        if (GuardianRoutePolicy.requiresGate(
+                guardianConfigured = guardianAuthConfig.isConfigured,
+                route = if (selectedFragment == OnboardingFragment.FRAGMENT_ID) {
+                    GuardianRoutePolicy.Route.ONBOARDING
+                } else {
+                    GuardianRoutePolicy.Route.MANAGED
+                }
+            ) &&
             !GuardianSessionRegistry.session.isAuthenticated(hasPassword = true)
         ) {
             initialGuardianGate = true
@@ -275,9 +279,7 @@ class FragmentActivity : AppCompatActivity() {
                 isInternalActivity = internalNavigationOwner
             )
             obscureGuardianContent(invalidateAccess = invalidated)
-        } else if (hasFocus && !isFinishing && !isDestroyed &&
-            selectedFragmentId != OnboardingFragment.FRAGMENT_ID
-        ) {
+        } else if (hasFocus && !isFinishing && !isDestroyed) {
             requestGuardianAccessIfNeeded()
         }
     }
@@ -301,11 +303,9 @@ class FragmentActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (selectedFragmentId != OnboardingFragment.FRAGMENT_ID) {
-            obscureGuardianContent(invalidateAccess = false)
-            GuardianSessionRegistry.consumePendingInternalReturnHandoff()
-            requestGuardianAccessIfNeeded()
-        }
+        obscureGuardianContent(invalidateAccess = false)
+        GuardianSessionRegistry.consumePendingInternalReturnHandoff()
+        requestGuardianAccessIfNeeded()
     }
 
     private fun requestGuardianAccessIfNeeded() {

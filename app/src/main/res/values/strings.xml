@@ -1643,6 +1643,7 @@
     <string name="warning_mediastore_failed">Failed to create MediaStore entry</string>
     <string name="warning_qr_timing_title">Unlock Timing</string>
     <string name="warning_qr_timing_message">Configure the time behavior for this unlock method before continuing.</string>
+    <string name="warning_dynamic_unlock_timing">Use dynamic timing. Choose the time during unlock.</string>
     <string name="warning_qr_saved">QR Code Saved Successfully!</string>
     <string name="warning_scan_cancelled">Scan cancelled</string>
     <string name="warning_cancelled">Cancelled</string>

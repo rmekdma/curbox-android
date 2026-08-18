@@ -3,6 +3,7 @@ package neth.iecal.curbox.utils
 import android.view.View
 import android.widget.RadioGroup
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
@@ -45,8 +46,13 @@ object TemporaryDisableDialog {
                 ) {
                     customLayout.error = fragment.getString(R.string.temporary_disable_invalid)
                 } else {
-                    onConfirm(minutes)
-                    dialog.dismiss()
+                    GuardianOwnedDialog.launchCommit(
+                        fragment.requireContext(),
+                        fragment.viewLifecycleOwner.lifecycleScope
+                    ) {
+                        onConfirm(minutes)
+                        dialog.dismiss()
+                    }
                 }
             }
         }

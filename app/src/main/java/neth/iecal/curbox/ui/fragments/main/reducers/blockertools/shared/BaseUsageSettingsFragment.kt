@@ -10,13 +10,13 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppUsageConfig
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.UsageDayItem
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.UsageSettingsAdapter
+import neth.iecal.curbox.utils.GuardianOwnedBottomSheet
 
-abstract class BaseUsageSettingsFragment : BottomSheetDialogFragment() {
+abstract class BaseUsageSettingsFragment : GuardianOwnedBottomSheet() {
 
     protected open val daysOfWeek = listOf(
         "Same Limit Everyday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
@@ -43,7 +43,7 @@ abstract class BaseUsageSettingsFragment : BottomSheetDialogFragment() {
     }
 
     override fun onDismiss(dialog: DialogInterface) {
-        persistConfig()
+        launchGuardianCommit(::persistConfig)
         super.onDismiss(dialog)
     }
 

@@ -6,6 +6,28 @@ import org.junit.Test
 
 class GuardianActivityGateTest {
     @Test
+    fun configuredOnboardingRouteStillRequiresGuardianGate() {
+        assertTrue(
+            GuardianRoutePolicy.requiresGate(
+                guardianConfigured = true,
+                route = GuardianRoutePolicy.Route.ONBOARDING
+            )
+        )
+        assertTrue(
+            GuardianRoutePolicy.requiresGate(
+                guardianConfigured = true,
+                route = GuardianRoutePolicy.Route.MANAGED
+            )
+        )
+        assertFalse(
+            GuardianRoutePolicy.requiresGate(
+                guardianConfigured = false,
+                route = GuardianRoutePolicy.Route.ONBOARDING
+            )
+        )
+    }
+
+    @Test
     fun configuredContentNeedsSuccessfulReauthenticationBeforeCommit() {
         val gate = GuardianGateAccess()
 
@@ -64,6 +86,41 @@ class GuardianActivityGateTest {
         GuardianSessionRegistry.markOwnedDialogHidden()
         assertTrue(GuardianSessionRegistry.handleWindowFocusLost())
         assertFalse(session.isAuthenticated(hasPassword = true))
+        session.clear()
+    }
+
+    @Test
+    fun bottomSheetDismissalDoesNotLeaveAStaleOwnedDialogMarker() {
+        val session = GuardianSessionRegistry.session
+        session.clear()
+        assertTrue(session.authenticate("x", GuardianPassword.createCredential("x", iterations = 1)))
+
+        GuardianSessionRegistry.markOwnedDialogShown()
+        assertTrue(GuardianSessionRegistry.isOwnedDialogActive())
+        GuardianSessionRegistry.markOwnedDialogHidden()
+
+        assertFalse(GuardianSessionRegistry.isOwnedDialogActive())
+        assertTrue(GuardianSessionRegistry.handleWindowFocusLost())
+        assertFalse(session.isAuthenticated(hasPassword = true))
+        session.clear()
+    }
+
+    @Test
+    fun nestedOwnedDialogDismissalKeepsTheOuterBottomSheetOwned() {
+        val session = GuardianSessionRegistry.session
+        session.clear()
+        assertTrue(session.authenticate("x", GuardianPassword.createCredential("x", iterations = 1)))
+
+        GuardianSessionRegistry.markOwnedDialogShown()
+        GuardianSessionRegistry.markOwnedDialogShown()
+        GuardianSessionRegistry.markOwnedDialogHidden()
+
+        assertTrue(GuardianSessionRegistry.isOwnedDialogActive())
+        assertFalse(GuardianSessionRegistry.handleWindowFocusLost())
+
+        GuardianSessionRegistry.markOwnedDialogHidden()
+        assertFalse(GuardianSessionRegistry.isOwnedDialogActive())
+        assertTrue(GuardianSessionRegistry.handleWindowFocusLost())
         session.clear()
     }
 }

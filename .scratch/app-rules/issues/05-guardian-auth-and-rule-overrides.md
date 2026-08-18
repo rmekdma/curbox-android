@@ -8,11 +8,11 @@
 
 **Verification evidence (JBR 21, 2026-08-18):**
 
-- Final focused JBR21 guardian/override command passed (38 tests), covering guardian session/password, reevaluation, override calculation, warning selection, DataStore write results, sync isolation, external-return commit blocking, focus loss/gain reauthentication, successful reveal, and owned-dialog state cleanup seams.
-- `testFullDebugUnitTest`: 216 tests completed; one fixed-base failure remains at `ScriptLanguageTest > matchesRegexSupportsCommonFlags`.
-- `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed.
-- `lintFullDebug` passed; the report contains existing baseline findings and no new Guardian issue.
-- The final lifecycle fix uses a shared `GuardianActivityGate` for FragmentActivity and SelectAppsActivity, and `GuardianOwnedDialog` for guardian, configuration, and restriction-weakening dialogs. No new Guardian `SetTextI18n` finding was introduced.
+- Final focused JBR21 guardian/override command passed (41 tests), covering guardian session/password, onboarding route policy, reevaluation, override calculation, warning selection, DataStore write results, sync isolation, external-return commit blocking, focus loss/gain reauthentication, successful reveal, and owned-dialog/bottom-sheet state cleanup seams.
+- `testFullDebugUnitTest`: 219 tests completed; one fixed-base failure remains at `ScriptLanguageTest > matchesRegexSupportsCommonFlags`.
+- `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed after the final source/resource changes.
+- `lintFullDebug` passed after the final source/resource changes; the report contains existing baseline findings, no changed-file `SetTextI18n` finding, and no new Guardian issue.
+- Configured guardian credentials now gate exported onboarding routes before content creation; no-password onboarding remains auth-free. `GuardianOwnedBottomSheet` centralizes settings-sheet ownership and commit checks, while `GuardianOwnedDialog` covers nested dialogs and restriction-weakening callbacks with stale-session rejection.
 - No Android device or emulator was available. Device verification procedure: install the Full debug APK, set a guardian password, leave Curbox for another app and return to confirm reauthentication, trigger two simultaneous denying rules and confirm every denial is shown with one selectable approval, exercise both timed skip choices and additive time, then repeat on Play Store and F-Droid APKs while checking the Play Store manifest has no `AdminReceiver` or `NodePickerService`.
 - F-Droid sync route and complete locale translation coverage were not changed; they remain fixed-base or out of scope for this review fix.
 

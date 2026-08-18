@@ -18,6 +18,7 @@ import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.databinding.FragmentCreateAppRuleGroupBinding
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 
 class CreateAppRuleGroupFragment : Fragment() {
     companion object {
@@ -107,7 +108,7 @@ class CreateAppRuleGroupFragment : Fragment() {
                 requireActivity().finish()
                 return@launch
             }
-            MaterialAlertDialogBuilder(requireContext())
+            val dialog = MaterialAlertDialogBuilder(requireContext())
                 .setTitle(R.string.app_rules_group_delete_referenced_title)
                 .setMessage(getString(R.string.app_rules_group_delete_referenced_message, references.size))
                 .setItems(
@@ -116,18 +117,24 @@ class CreateAppRuleGroupFragment : Fragment() {
                         getString(R.string.app_rules_delete_dependent_rules)
                     )
                 ) { _, which ->
-                    viewLifecycleOwner.lifecycleScope.launch deleteGroup@{
-                        val latest = dataStore.settingsForEditing.first().appRuleSnapshot
-                        val updated = latest.deleteTargetGroup(
-                            group.id,
-                            removeReferences = which == 0,
-                            deleteDependentRules = which == 1
-                        ) ?: return@deleteGroup
-                        if (dataStore.updateAppRuleSnapshot(updated)) requireActivity().finish()
+                    GuardianOwnedDialog.launchCommit(
+                        requireContext(),
+                        viewLifecycleOwner.lifecycleScope
+                    ) {
+                        viewLifecycleOwner.lifecycleScope.launch deleteGroup@{
+                            val latest = dataStore.settingsForEditing.first().appRuleSnapshot
+                            val updated = latest.deleteTargetGroup(
+                                group.id,
+                                removeReferences = which == 0,
+                                deleteDependentRules = which == 1
+                            ) ?: return@deleteGroup
+                            if (dataStore.updateAppRuleSnapshot(updated)) requireActivity().finish()
+                        }
                     }
                 }
                 .setNegativeButton(R.string.cancel, null)
-                .show()
+                .create()
+            GuardianOwnedDialog.show(dialog)
         }
     }
 

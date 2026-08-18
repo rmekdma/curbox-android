@@ -59,3 +59,17 @@ class GuardianActivityGate(
     fun canCommit(hasPassword: Boolean, sessionAuthenticated: Boolean): Boolean =
         access.canCommit(hasPassword, sessionAuthenticated)
 }
+
+/** Route policy used before FragmentActivity creates any sensitive content. */
+object GuardianRoutePolicy {
+    enum class Route {
+        ONBOARDING,
+        MANAGED
+    }
+
+    /** A configured credential protects every route, including an exported onboarding route. */
+    fun requiresGate(guardianConfigured: Boolean, route: Route): Boolean = when (route) {
+        Route.ONBOARDING,
+        Route.MANAGED -> guardianConfigured
+    }
+}

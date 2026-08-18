@@ -58,15 +58,20 @@ class GuardianAuthFragment : Fragment() {
                 .setMessage(R.string.guardian_clear_password_message)
                 .setNegativeButton(R.string.cancel, null)
                 .setPositiveButton(R.string.common_continue) { _, _ ->
-                    viewLifecycleOwner.lifecycleScope.launch {
-                        val changed = dataStore.clearGuardianPassword(
-                            binding.guardianCurrentPassword.text?.toString().orEmpty()
-                        )
-                        Toast.makeText(
-                            requireContext(),
-                            if (changed) R.string.guardian_password_saved else R.string.guardian_wrong_password,
-                            Toast.LENGTH_SHORT
-                        ).show()
+                    GuardianOwnedDialog.launchCommit(
+                        requireContext(),
+                        viewLifecycleOwner.lifecycleScope
+                    ) {
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            val changed = dataStore.clearGuardianPassword(
+                                binding.guardianCurrentPassword.text?.toString().orEmpty()
+                            )
+                            Toast.makeText(
+                                requireContext(),
+                                if (changed) R.string.guardian_password_saved else R.string.guardian_wrong_password,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     }
                 }
                 .create()
