@@ -49,7 +49,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianActivityGate
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class FragmentActivity : AppCompatActivity() {
@@ -57,7 +60,8 @@ class FragmentActivity : AppCompatActivity() {
     private var guardianDialogVisible = false
     private var initialGuardianGate = false
     private var internalNavigationOwner = false
-    private var ownedDialogToken: String? = null
+    private var guardianAuthConfig = GuardianAuthConfig()
+    private var guardianActivityGate: GuardianActivityGate? = null
 
     /** Attach a one-shot handoff to every explicit Curbox child launch from this host. */
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
@@ -113,14 +117,16 @@ class FragmentActivity : AppCompatActivity() {
             return
         }
 
-        val guardianConfigured = if (selectedFragment != OnboardingFragment.FRAGMENT_ID) {
+        guardianAuthConfig = if (selectedFragment != OnboardingFragment.FRAGMENT_ID) {
             runBlocking(Dispatchers.IO) {
-                DataStoreManager(applicationContext).settings.first().guardianAuthConfig.isConfigured
+                DataStoreManager(applicationContext).settings.first().guardianAuthConfig
             }
         } else {
-            false
+            GuardianAuthConfig()
         }
-        if (guardianConfigured && !GuardianSessionRegistry.session.isAuthenticated(true)) {
+        if (guardianAuthConfig.isConfigured &&
+            !GuardianSessionRegistry.session.isAuthenticated(hasPassword = true)
+        ) {
             initialGuardianGate = true
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
             enableEdgeToEdge()
@@ -131,6 +137,10 @@ class FragmentActivity : AppCompatActivity() {
 
         enableEdgeToEdge()
         setContentView(R.layout.activity_fragment)
+        guardianActivityGate = GuardianActivityGate(
+            window,
+            findViewById(R.id.guardian_content_gate)
+        )
         if (selectedFragment == OnboardingFragment.FRAGMENT_ID) {
             revealGuardianContent()
         } else {
@@ -261,11 +271,14 @@ class FragmentActivity : AppCompatActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus && !isFinishing) {
-            obscureGuardianContent()
-            GuardianSessionRegistry.handleWindowFocusLost(
-                ownedTransitionToken = ownedDialogToken,
+            val invalidated = GuardianSessionRegistry.handleWindowFocusLost(
                 isInternalActivity = internalNavigationOwner
             )
+            obscureGuardianContent(invalidateAccess = invalidated)
+        } else if (hasFocus && !isFinishing && !isDestroyed &&
+            selectedFragmentId != OnboardingFragment.FRAGMENT_ID
+        ) {
+            requestGuardianAccessIfNeeded()
         }
     }
 
@@ -289,7 +302,7 @@ class FragmentActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (selectedFragmentId != OnboardingFragment.FRAGMENT_ID) {
-            obscureGuardianContent()
+            obscureGuardianContent(invalidateAccess = false)
             GuardianSessionRegistry.consumePendingInternalReturnHandoff()
             requestGuardianAccessIfNeeded()
         }
@@ -300,16 +313,15 @@ class FragmentActivity : AppCompatActivity() {
         guardianDialogVisible = true
         lifecycleScope.launch {
             val config = DataStoreManager(applicationContext).settings.first().guardianAuthConfig
+            guardianAuthConfig = config
             if (!config.isConfigured) {
                 guardianDialogVisible = false
-                ownedDialogToken = null
                 revealGuardianContent()
                 return@launch
             }
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
             if (GuardianSessionRegistry.session.isAuthenticated(true)) {
                 guardianDialogVisible = false
-                ownedDialogToken = null
                 revealGuardianContent()
                 return@launch
             }
@@ -317,7 +329,7 @@ class FragmentActivity : AppCompatActivity() {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
                 hint = getString(R.string.guardian_password_hint)
             }
-            MaterialAlertDialogBuilder(this@FragmentActivity)
+            val dialog = MaterialAlertDialogBuilder(this@FragmentActivity)
                 .setTitle(R.string.guardian_auth_title)
                 .setMessage(R.string.guardian_auth_message)
                 .setView(input)
@@ -329,9 +341,8 @@ class FragmentActivity : AppCompatActivity() {
                             config
                         )
                         guardianDialogVisible = false
-                        ownedDialogToken = null
-                        GuardianSessionRegistry.markOwnedDialogHidden()
                         if (!valid) {
+                            obscureGuardianContent(invalidateAccess = true)
                             android.widget.Toast.makeText(
                                 this@FragmentActivity,
                                 R.string.guardian_wrong_password,
@@ -345,31 +356,41 @@ class FragmentActivity : AppCompatActivity() {
                                 GuardianSessionRegistry.issueInternalNavigationToken()
                             )
                             recreate()
+                        } else {
+                            revealGuardianContent()
                         }
                     }
                 }
                 .setNegativeButton(R.string.cancel) { _, _ ->
                     guardianDialogVisible = false
-                    ownedDialogToken = null
-                    GuardianSessionRegistry.markOwnedDialogHidden()
+                    obscureGuardianContent(invalidateAccess = true)
                     finish()
                 }
-                .also {
-                    ownedDialogToken = GuardianSessionRegistry.issueOwnedTransitionToken()
-                }
-                .show()
+                .create()
+            GuardianOwnedDialog.show(dialog)
         }
     }
 
-    private fun obscureGuardianContent() {
+    private fun obscureGuardianContent(invalidateAccess: Boolean = false) {
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-        findViewById<android.view.View>(R.id.guardian_content_gate)?.visibility =
-            android.view.View.VISIBLE
+        guardianActivityGate?.obscure(invalidateAccess)
+            ?: findViewById<android.view.View>(R.id.guardian_content_gate)?.apply {
+                visibility = android.view.View.VISIBLE
+                isEnabled = true
+            }
     }
 
     private fun revealGuardianContent() {
-        findViewById<android.view.View>(R.id.guardian_content_gate)?.visibility =
-            android.view.View.GONE
+        val config = guardianAuthConfig
+        guardianActivityGate?.revealIfAuthorized(
+            hasPassword = config.isConfigured,
+            sessionAuthenticated = GuardianSessionRegistry.session.isAuthenticated(
+                config.isConfigured
+            )
+        ) ?: findViewById<android.view.View>(R.id.guardian_content_gate)?.apply {
+            visibility = android.view.View.GONE
+            isEnabled = false
+        }
     }
 
     private fun maybeShowTermsConsent() {
@@ -384,7 +405,7 @@ class FragmentActivity : AppCompatActivity() {
             openUrl(getString(R.string.privacy_url))
         }
 
-        MaterialAlertDialogBuilder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setView(view)
             .setCancelable(false)
             .setPositiveButton(R.string.terms_consent_agree) { _, _ ->
@@ -393,7 +414,8 @@ class FragmentActivity : AppCompatActivity() {
             .setNegativeButton(R.string.terms_consent_exit) { _, _ ->
                 finishAffinity()
             }
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     // The changelog shown here is the same file fastlane ships to the stores,
@@ -419,11 +441,12 @@ class FragmentActivity : AppCompatActivity() {
         }
         if (changelog.isEmpty()) return
 
-        MaterialAlertDialogBuilder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.whats_new_title)
             .setMessage(changelog)
             .setPositiveButton(R.string.whats_new_dismiss, null)
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     private fun openUrl(url: String) {

@@ -8,6 +8,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import neth.iecal.curbox.R
 import neth.iecal.curbox.databinding.FragmentGuardianAuthBinding
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -52,7 +53,7 @@ class GuardianAuthFragment : Fragment() {
             }
         }
         binding.guardianClearPassword.setOnClickListener {
-            MaterialAlertDialogBuilder(requireContext())
+            val dialog = MaterialAlertDialogBuilder(requireContext())
                 .setTitle(R.string.guardian_clear_password)
                 .setMessage(R.string.guardian_clear_password_message)
                 .setNegativeButton(R.string.cancel, null)
@@ -68,7 +69,8 @@ class GuardianAuthFragment : Fragment() {
                         ).show()
                     }
                 }
-                .show()
+                .create()
+            GuardianOwnedDialog.show(dialog)
         }
         return binding.root
     }

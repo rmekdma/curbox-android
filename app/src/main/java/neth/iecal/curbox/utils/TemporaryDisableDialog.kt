@@ -50,6 +50,6 @@ object TemporaryDisableDialog {
                 }
             }
         }
-        dialog.show()
+        GuardianOwnedDialog.show(dialog)
     }
 }

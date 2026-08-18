@@ -17,6 +17,7 @@ import neth.iecal.curbox.databinding.ActivityGuardianApprovalBinding
 import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 import java.time.Duration
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -77,7 +78,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             inputType = InputType.TYPE_CLASS_NUMBER
             hint = getString(R.string.guardian_minutes_hint)
         }
-        MaterialAlertDialogBuilder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.guardian_add_time)
             .setView(input)
             .setPositiveButton(R.string.common_continue) { _, _ ->
@@ -89,7 +90,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.cancel, null)
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     private fun requestSkip() {
@@ -98,14 +100,15 @@ class GuardianApprovalActivity : AppCompatActivity() {
             getString(R.string.guardian_skip_30_minutes),
             getString(R.string.guardian_skip_until_reset)
         )
-        MaterialAlertDialogBuilder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.guardian_skip_rule)
             .setSingleChoiceItems(labels, 0) { dialog, which ->
                 dialog.dismiss()
                 authenticateThen { password -> writeSkip(password, which) }
             }
             .setNegativeButton(R.string.cancel, null)
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     private fun authenticateThen(onAuthenticated: (String) -> Unit) {
@@ -117,7 +120,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             hint = getString(R.string.guardian_password_hint)
         }
-        MaterialAlertDialogBuilder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.guardian_enter_password)
             .setView(input)
             .setPositiveButton(R.string.common_continue) { _, _ ->
@@ -131,7 +134,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.cancel, null)
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     private fun writeGrant(password: String, minutes: Long) {

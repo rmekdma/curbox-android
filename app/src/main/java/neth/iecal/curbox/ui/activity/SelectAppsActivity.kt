@@ -28,10 +28,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
+import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.databinding.ActivitySelectAppsBinding
 import neth.iecal.curbox.databinding.DialogAddKeywordBinding
 import neth.iecal.curbox.domain.apprules.AppRuleEssentialPackages
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianActivityGate
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class SelectAppsActivity : AppCompatActivity() {
@@ -44,7 +47,9 @@ class SelectAppsActivity : AppCompatActivity() {
     private lateinit var binding: ActivitySelectAppsBinding
     private lateinit var selectedAppList: HashSet<String>
     private var internalNavigationOwner = false
-    private var ownedDialogToken: String? = null
+    private var guardianDialogVisible = false
+    private var guardianConfig = GuardianAuthConfig()
+    private var guardianActivityGate: GuardianActivityGate? = null
 
     private var appItemList: MutableList<AppItem> = mutableListOf()
 
@@ -84,6 +89,7 @@ class SelectAppsActivity : AppCompatActivity() {
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         binding = ActivitySelectAppsBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        guardianActivityGate = GuardianActivityGate(window, binding.guardianContentGate)
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, windowInsets ->
             val systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
@@ -273,6 +279,10 @@ class SelectAppsActivity : AppCompatActivity() {
         }
 
         binding.confirmSelection.setOnClickListener {
+            if (!canCommitSelection()) {
+                requestGuardianAccessIfNeeded()
+                return@setOnClickListener
+            }
             selectedAppList.removeAll(ignoredApps)
             val selectedAppsArrayList = ArrayList(selectedAppList)
             val resultIntent = GuardianSessionRegistry.attachInternalReturnToken(intent.apply {
@@ -387,10 +397,21 @@ class SelectAppsActivity : AppCompatActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus && !isFinishing) {
-            GuardianSessionRegistry.handleWindowFocusLost(
-                ownedTransitionToken = ownedDialogToken,
+            val invalidated = GuardianSessionRegistry.handleWindowFocusLost(
                 isInternalActivity = internalNavigationOwner
             )
+            guardianActivityGate?.obscure(invalidateAccess = invalidated)
+        } else if (hasFocus && !isFinishing && !isDestroyed) {
+            requestGuardianAccessIfNeeded()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!isFinishing && !isDestroyed) {
+            guardianActivityGate?.obscure(invalidateAccess = false)
+            GuardianSessionRegistry.consumePendingInternalReturnHandoff()
+            requestGuardianAccessIfNeeded()
         }
     }
 
@@ -401,6 +422,80 @@ class SelectAppsActivity : AppCompatActivity() {
                 isInternalActivity = internalNavigationOwner,
                 isFinishing = isFinishing
             )
+        }
+    }
+
+    private fun canCommitSelection(): Boolean {
+        val config = guardianConfig
+        return guardianActivityGate?.canCommit(
+            hasPassword = config.isConfigured,
+            sessionAuthenticated = GuardianSessionRegistry.session.isAuthenticated(config.isConfigured)
+        ) == true
+    }
+
+    private fun requestGuardianAccessIfNeeded() {
+        if (guardianDialogVisible || isFinishing || isDestroyed) return
+        guardianDialogVisible = true
+        lifecycleScope.launch {
+            val config = dataStoreManager.settings.first().guardianAuthConfig
+            guardianConfig = config
+            if (!config.isConfigured) {
+                guardianDialogVisible = false
+                guardianActivityGate?.revealIfAuthorized(
+                    hasPassword = false,
+                    sessionAuthenticated = false
+                )
+                return@launch
+            }
+
+            if (GuardianSessionRegistry.session.isAuthenticated(hasPassword = true)) {
+                guardianDialogVisible = false
+                guardianActivityGate?.revealIfAuthorized(
+                    hasPassword = true,
+                    sessionAuthenticated = true
+                )
+                return@launch
+            }
+
+            val input = android.widget.EditText(this@SelectAppsActivity).apply {
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                hint = getString(R.string.guardian_password_hint)
+            }
+            val dialog = MaterialAlertDialogBuilder(this@SelectAppsActivity)
+                .setTitle(R.string.guardian_auth_title)
+                .setMessage(R.string.guardian_auth_message)
+                .setView(input)
+                .setCancelable(false)
+                .setPositiveButton(R.string.common_continue) { _, _ ->
+                    lifecycleScope.launch {
+                        val valid = GuardianSessionRegistry.session.authenticate(
+                            input.text?.toString().orEmpty(),
+                            config
+                        )
+                        guardianDialogVisible = false
+                        if (valid) {
+                            guardianActivityGate?.revealIfAuthorized(
+                                hasPassword = true,
+                                sessionAuthenticated = true
+                            )
+                        } else {
+                            guardianActivityGate?.obscure(invalidateAccess = true)
+                            Toast.makeText(
+                                this@SelectAppsActivity,
+                                R.string.guardian_wrong_password,
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+                .setNegativeButton(R.string.cancel) { _, _ ->
+                    guardianDialogVisible = false
+                    guardianActivityGate?.obscure(invalidateAccess = true)
+                    finish()
+                }
+                .create()
+            GuardianOwnedDialog.show(dialog)
         }
     }
 
@@ -415,7 +510,7 @@ class SelectAppsActivity : AppCompatActivity() {
         val dialogBinding = DialogAddKeywordBinding.inflate(layoutInflater)
         dialogBinding.wHint.hint = getString(R.string.select_apps_custom_hint)
 
-        MaterialAlertDialogBuilder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.select_apps_add_custom_title)
             .setView(dialogBinding.root)
             .setPositiveButton(getString(R.string.add)) { dialog, _ ->
@@ -451,18 +546,12 @@ class SelectAppsActivity : AppCompatActivity() {
                         Toast.makeText(this, getString(R.string.package_already_exists), Toast.LENGTH_SHORT).show()
                     }
                 }
-                ownedDialogToken = null
-                GuardianSessionRegistry.markOwnedDialogHidden()
                 dialog.dismiss()
             }
             .setNegativeButton(getString(R.string.cancel)) { dialog, _ ->
-                ownedDialogToken = null
-                GuardianSessionRegistry.markOwnedDialogHidden()
                 dialog.dismiss()
             }
-            .also {
-                ownedDialogToken = GuardianSessionRegistry.issueOwnedTransitionToken()
-            }
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 }
