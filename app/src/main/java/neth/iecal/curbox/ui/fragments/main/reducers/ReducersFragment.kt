@@ -18,7 +18,6 @@ import neth.iecal.curbox.utils.ViewUtils
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import neth.iecal.curbox.ui.fragments.main.reducers.anti_stimulants.grayscale.GrayscaleFragment
-import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appBlocker.AppBlockerGroupsFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.AppRuleGroupsFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.advanced.GuardianAuthFragment
 
@@ -32,16 +31,13 @@ class ReducersFragment : Fragment() {
         val reelBlockerCard = view.findViewById<MaterialCardView>(R.id.card_reels_blocker)
         val keywordBlockerCard = view.findViewById<MaterialCardView>(R.id.card_keyword_blocker)
         val autoDndCard = view.findViewById<MaterialCardView>(R.id.card_autodnd)
+
+        // The old coupled AppGroup editor remains readable for API/sync compatibility, but it
+        // must not be an interactive product path after the neutral app-rule cutover.
+        appBlockerCard.isVisible = false
         
         view.findViewById<MaterialButton>(R.id.btn_help).setOnClickListener {
             ViewUtils.showHelpPopup(it, "Blocker tools and stimulation reducers help you regain focus.", "https://curbox.app/docs/reducers/overview/")
-        }
-
-        appBlockerCard.setOnClickListener {
-            val intent = Intent(requireContext(), FragmentActivity::class.java).apply {
-                putExtra("fragment", AppBlockerGroupsFragment.FRAGMENT_ID)
-            }
-            startActivity(intent)
         }
 
         view.findViewById<MaterialCardView>(R.id.card_app_rules).setOnClickListener {

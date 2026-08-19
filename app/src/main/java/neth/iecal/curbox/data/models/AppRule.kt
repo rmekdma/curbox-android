@@ -2,6 +2,25 @@ package neth.iecal.curbox.data.models
 
 import java.util.UUID
 
+/** The point at which a changed app group membership starts to have meaning. */
+enum class AppGroupEditMode {
+    NOW,
+    CURRENT_USE_DAY_START
+}
+
+/** One immutable membership version for an app group. */
+data class AppGroupMembershipVersion(
+    val effectiveFromMs: Long = Long.MIN_VALUE,
+    val selectedPackages: List<String> = emptyList()
+) {
+    fun normalized(): AppGroupMembershipVersion = copy(
+        selectedPackages = selectedPackages
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+    )
+}
+
 /**
  * A reusable app set used by the first generation of unified app rules.
  *
@@ -12,7 +31,13 @@ import java.util.UUID
 data class AppRuleAppGroup(
     val id: String = newId(),
     val name: String = "",
-    val selectedPackages: List<String> = emptyList()
+    val selectedPackages: List<String> = emptyList(),
+    /**
+     * Historical membership is kept with the group rather than inferred from today's list.
+     * Older JSON has an empty list and therefore means that [selectedPackages] was always in
+     * force.  The list is deliberately append-only apart from a current-use-day replacement.
+     */
+    val membershipHistory: List<AppGroupMembershipVersion> = emptyList()
 ) {
     companion object {
         fun create(name: String, selectedPackages: List<String>): AppRuleAppGroup =
@@ -24,6 +49,39 @@ data class AppRuleAppGroup(
     }
 
     fun copyWithNewId(): AppRuleAppGroup = copy(id = newId())
+
+    /** Returns the membership that was effective at [atMs]. */
+    fun packagesAt(atMs: Long): Set<String> {
+        val versions = normalizedMembershipHistory()
+        return versions.lastOrNull { it.effectiveFromMs <= atMs }
+            ?.selectedPackages
+            ?.toSet()
+            ?: emptySet()
+    }
+
+    /** All timestamps at which a resolver may need to split a persisted session. */
+    fun membershipBoundaries(): Set<Long> = normalizedMembershipHistory()
+        .map { it.effectiveFromMs }
+        .filter { it != Long.MIN_VALUE }
+        .toSet()
+
+    internal fun normalizedMembershipHistory(): List<AppGroupMembershipVersion> {
+        val versions = membershipHistory
+            .map(AppGroupMembershipVersion::normalized)
+            .groupBy { it.effectiveFromMs }
+            .map { (_, candidates) -> candidates.last() }
+            .sortedBy { it.effectiveFromMs }
+        return if (versions.isEmpty()) {
+            listOf(
+                AppGroupMembershipVersion(
+                    effectiveFromMs = Long.MIN_VALUE,
+                    selectedPackages = selectedPackages
+                ).normalized()
+            )
+        } else {
+            versions
+        }
+    }
 }
 
 /** A semantic active interval. Equal endpoints deliberately mean a full 24 hours. */
@@ -57,20 +115,27 @@ data class AppRuleScope(
     fun resolve(
         groups: Iterable<AppRuleAppGroup>,
         launchablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        essentialExcludedPackages: Set<String> = emptySet(),
+        /** If supplied, resolve each group as it existed at that instant. */
+        atMs: Long? = null
     ): Set<String> {
         val byId = groups.associateBy { it.id.trim() }
         val included = buildSet {
             if (includeAllApps) addAll(launchablePackages)
             includedGroupIds.forEach { id ->
-                byId[id]?.selectedPackages?.forEach { packageName ->
+                val packages = byId[id]?.let { group ->
+                    if (atMs == null) group.selectedPackages else group.packagesAt(atMs)
+                }.orEmpty()
+                packages.forEach { packageName ->
                     val normalized = packageName.trim()
                     if (normalized.isNotEmpty()) add(normalized)
                 }
             }
         }
         val excluded = excludedGroupIds.flatMap { id ->
-            byId[id]?.selectedPackages.orEmpty()
+            byId[id]?.let { group ->
+                if (atMs == null) group.selectedPackages else group.packagesAt(atMs)
+            }.orEmpty()
         }.map(String::trim).filter(String::isNotEmpty).toSet()
         val essential = essentialExcludedPackages.map(String::trim).filter(String::isNotEmpty).toSet()
         return (included - excluded - essential)
@@ -174,7 +239,11 @@ data class AppRuleSnapshot(
                 selectedPackages = group.selectedPackages
                     .map(String::trim)
                     .filter(String::isNotEmpty)
-                    .distinct()
+                    .distinct(),
+                membershipHistory = group.membershipHistory
+                    .map(AppGroupMembershipVersion::normalized)
+                    .distinctBy { it.effectiveFromMs }
+                    .sortedBy { it.effectiveFromMs }
             )
         },
         appRules = appRules.map { rule ->

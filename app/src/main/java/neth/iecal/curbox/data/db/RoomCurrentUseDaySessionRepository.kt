@@ -4,10 +4,14 @@ import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.CurrentUseDayUsageRepository
 import neth.iecal.curbox.domain.apprules.ForegroundLaunch
+import neth.iecal.curbox.domain.apprules.ForegroundUsageCheckpoint
+import androidx.room.withTransaction
 
 class RoomCurrentUseDaySessionRepository(
     private val dao: ForegroundSessionDao,
-    private val launchDao: ForegroundLaunchDao? = null
+    private val launchDao: ForegroundLaunchDao? = null,
+    private val appUsageDao: AppUsageDao? = null,
+    private val database: AppDatabase? = null
 ) : CurrentUseDaySessionRepository, CurrentUseDayUsageRepository {
     override suspend fun startSession(
         useDayId: String,
@@ -61,6 +65,43 @@ class RoomCurrentUseDaySessionRepository(
         dao.updateEnd(id, endedAtMs)
     }
 
+    override suspend fun commitSessionCheckpoint(
+        id: Long,
+        endedAtMs: Long,
+        usage: List<ForegroundUsageCheckpoint>
+    ): Boolean {
+        val usageDao = appUsageDao
+        val db = database
+        if (usageDao == null || db == null) {
+            check(dao.updateEnd(id, endedAtMs) == 1) {
+                "foreground session checkpoint row disappeared: $id"
+            }
+            return true
+        }
+        db.withTransaction {
+            usage.forEach { checkpoint ->
+                if (checkpoint.durationMs <= 0L) return@forEach
+                val existing = usageDao.get(checkpoint.date, checkpoint.packageName)
+                val hourly = parseHourly(existing?.hourlyUsage)
+                hourly[checkpoint.hour] += checkpoint.durationMs
+                usageDao.upsert(
+                    AppUsageEntity(
+                        date = checkpoint.date,
+                        packageName = checkpoint.packageName,
+                        totalTime = (existing?.totalTime ?: 0L) + checkpoint.durationMs,
+                        hourlyUsage = hourly.joinToString(","),
+                        launchCount = existing?.launchCount ?: 0,
+                        lastUsed = maxOf(existing?.lastUsed ?: 0L, checkpoint.lastUsedMs)
+                    )
+                )
+            }
+            check(dao.updateEnd(id, endedAtMs) == 1) {
+                "foreground session checkpoint row disappeared: $id"
+            }
+        }
+        return true
+    }
+
     override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> =
         dao.getForUseDay(useDayId).map(ForegroundSessionEntity::toDomain)
 
@@ -94,5 +135,14 @@ class RoomCurrentUseDaySessionRepository(
     ) {
         dao.deleteBeforeUseDayGeneration(currentUseDayId, generationStartedAtMs)
         launchDao?.deleteBeforeUseDayGeneration(currentUseDayId, generationStartedAtMs)
+    }
+
+    private fun parseHourly(value: String?): LongArray {
+        val result = LongArray(24)
+        if (value.isNullOrEmpty()) return result
+        value.split(',').take(24).forEachIndexed { index, token ->
+            result[index] = token.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+        }
+        return result
     }
 }

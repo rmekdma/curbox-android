@@ -14,8 +14,6 @@ import neth.iecal.curbox.ui.fragments.main.reducers.analytics.IntentsLogFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.anti_stimulants.grayscale.CreateGrayscaleGroupFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.anti_stimulants.grayscale.GrayscaleFragment
 import neth.iecal.curbox.ui.fragments.main.usage.AllAppsUsageFragment
-import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appBlocker.AppBlockerGroupsFragment
-import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appBlocker.CreateAppGroupFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.AppRuleGroupsFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.CreateAppRuleFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.CreateAppRuleGroupFragment
@@ -55,6 +53,9 @@ import neth.iecal.curbox.utils.GuardianActivityGate
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.GuardianRoutePolicy
 import neth.iecal.curbox.utils.GuardianSessionRegistry
+
+private const val LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID = "app_blocker_groups"
+private const val LEGACY_CREATE_APP_GROUP_FRAGMENT_ID = "create_app_group"
 
 class FragmentActivity : AppCompatActivity() {
     private var selectedFragmentId: String = AllAppsUsageFragment.FRAGMENT_ID
@@ -175,8 +176,8 @@ class FragmentActivity : AppCompatActivity() {
         when (selectedFragment) {
             OnboardingFragment.FRAGMENT_ID,
             AccessibilityGuide.FRAGMENT_ID,
-            AppBlockerGroupsFragment.FRAGMENT_ID,
-            CreateAppGroupFragment.FRAGMENT_ID,
+            LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID,
+            LEGACY_CREATE_APP_GROUP_FRAGMENT_ID,
             AppRuleGroupsFragment.FRAGMENT_ID,
             CreateAppRuleGroupFragment.FRAGMENT_ID,
             CreateAppRuleFragment.FRAGMENT_ID,
@@ -203,8 +204,9 @@ class FragmentActivity : AppCompatActivity() {
                 
                 val fragment = when (selectedFragment) {
                     OnboardingFragment.FRAGMENT_ID -> OnboardingFragment()
-                    AppBlockerGroupsFragment.FRAGMENT_ID -> AppBlockerGroupsFragment()
-                    CreateAppGroupFragment.FRAGMENT_ID -> CreateAppGroupFragment()
+                    // Keep old deep links resolvable, but never recreate the coupled editor.
+                    LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID -> AppRuleGroupsFragment()
+                    LEGACY_CREATE_APP_GROUP_FRAGMENT_ID -> CreateAppRuleGroupFragment()
                     AppRuleGroupsFragment.FRAGMENT_ID -> AppRuleGroupsFragment()
                     CreateAppRuleGroupFragment.FRAGMENT_ID -> CreateAppRuleGroupFragment()
                     CreateAppRuleFragment.FRAGMENT_ID -> CreateAppRuleFragment()

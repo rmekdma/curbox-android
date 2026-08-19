@@ -126,7 +126,6 @@ class SelectAppsActivity : AppCompatActivity() {
             lifecycleScope.launch {
                 val settings = dataStoreManager.settings.first()
                 allGroups = buildList {
-                    settings.blockedAppGroups.forEach { add(it.name to it.selectedPackages.toSet()) }
                     settings.appRuleSnapshot.appGroups.forEach { add(it.name to it.selectedPackages.toSet()) }
                     settings.manualFocusGroups.forEach { add(it.groupName to it.packages) }
                     settings.grayscaleGroups.forEach { add(it.groupName to it.packages) }

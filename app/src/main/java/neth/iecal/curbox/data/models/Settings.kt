@@ -30,6 +30,11 @@ data class Settings(
     val settingsChangeDelayConfig2: SettingsChangeDelayConfig = SettingsChangeDelayConfig(),
     /** New unified app rules. The legacy [blockedAppGroups] field remains readable for old data. */
     val appRuleSnapshot: AppRuleSnapshot = AppRuleSnapshot(),
+    /**
+     * One-way legacy cutover marker.  A default keeps JSON written before neutral app rules
+     * readable; the DataStore migration advances it after importing the old graph.
+     */
+    val appRuleMigrationVersion: Int = 0,
     /** Local clock time at which the global use day starts. */
     val useDayResetHour: Int = UseDay.DEFAULT_RESET_HOUR,
     val useDayResetMinute: Int = UseDay.DEFAULT_RESET_MINUTE,

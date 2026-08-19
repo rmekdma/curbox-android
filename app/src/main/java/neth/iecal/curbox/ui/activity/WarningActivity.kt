@@ -114,7 +114,7 @@ class WarningActivity : AppCompatActivity() {
         val warningScreenConfig = Gson().fromJson<AppBlockerWarningScreenConfig>(
             intent.getStringExtra("warning_config"),
             AppBlockerWarningScreenConfig::class.java
-        )
+        ) ?: AppBlockerWarningScreenConfig()
 
         val targetId = intent.getStringExtra("result_id") ?: ""
         var isProceedLimitExceeded = false

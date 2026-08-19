@@ -1,19 +1,25 @@
 package neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules
 
+import android.content.BroadcastReceiver
 import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
+import android.text.InputType
+import android.widget.Toast
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
@@ -30,9 +36,13 @@ import neth.iecal.curbox.databinding.FragmentAppRuleGroupsBinding
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
+import neth.iecal.curbox.domain.apprules.UsageResetUiPolicy
 import neth.iecal.curbox.ui.activity.FragmentActivity
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianOwnedDialog
+import neth.iecal.curbox.utils.UsageResetManager
+import neth.iecal.curbox.utils.UsageResetStatus
 import java.time.ZoneId
 
 /** Entry point for the first unified app-rule vertical slice. */
@@ -82,6 +92,50 @@ class AppRuleGroupsFragment : Fragment() {
                         delay(5_000L)
                     }
                 }
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ContextCompat.registerReceiver(
+            requireContext(),
+            usageResetReceiver,
+            android.content.IntentFilter(UsageResetManager.ACTION_USAGE_RESET),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    override fun onStop() {
+        runCatching { requireContext().unregisterReceiver(usageResetReceiver) }
+        super.onStop()
+    }
+
+    private val usageResetReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            if (intent?.action != UsageResetManager.ACTION_USAGE_RESET) return
+            if (!isAdded) return
+            val packages = intent.getStringArrayListExtra(UsageResetManager.EXTRA_PACKAGES).orEmpty().toSet()
+            val affectsGroupTotals = UsageResetUiPolicy.affectsGroupTotals(
+                groupPackages = latestSettings?.appRuleSnapshot?.appGroups
+                    ?.map { group -> group.selectedPackages }
+                    .orEmpty(),
+                completedPackages = packages
+            )
+            if (affectsGroupTotals) {
+                val message = if (intent.getBooleanExtra(UsageResetManager.EXTRA_RESULT_OK, false)) {
+                    R.string.usage_reset_done
+                } else {
+                    R.string.usage_reset_failed
+                }
+                Toast.makeText(
+                    requireContext(),
+                    message,
+                    if (message == R.string.usage_reset_done) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                ).show()
+            }
+            latestSettings?.let { settings ->
+                viewLifecycleOwner.lifecycleScope.launch { refresh(settings) }
             }
         }
     }
@@ -160,9 +214,68 @@ class AppRuleGroupsFragment : Fragment() {
                 textSize = 15f
             })
             setOnClickListener { open(CreateAppRuleGroupFragment.FRAGMENT_ID, group.id) }
+            setOnLongClickListener {
+                confirmGroupReset(group)
+                true
+            }
         }, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 8.dp()
         })
+    }
+
+    private fun confirmGroupReset(group: AppRuleAppGroup) {
+        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.usage_reset_group)
+            .setMessage(getString(R.string.usage_reset_group_message, group.name, group.selectedPackages.size))
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.usage_reset_confirm) { _, _ -> authenticateAndResetGroup(group) }
+            .create()
+        GuardianOwnedDialog.show(dialog)
+    }
+
+    private fun authenticateAndResetGroup(group: AppRuleAppGroup) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val hasPassword = dataStore.settings.first().guardianAuthConfig.isConfigured
+            if (!hasPassword) {
+                resetGroupWithPassword(group.id, "")
+                return@launch
+            }
+            val input = EditText(requireContext()).apply {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                hint = getString(R.string.guardian_password_hint)
+            }
+            val passwordDialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.guardian_enter_password)
+                .setView(input)
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.common_continue) { _, _ ->
+                    resetGroupWithPassword(group.id, input.text?.toString().orEmpty())
+                }
+                .create()
+            GuardianOwnedDialog.show(passwordDialog)
+        }
+    }
+
+    private fun resetGroupWithPassword(groupId: String, password: String) {
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            val outcome = UsageResetManager(requireContext()).resetGroup(groupId, password)
+            withContext(Dispatchers.Main) {
+                if (!isAdded) return@withContext
+                when (outcome.status) {
+                    // Service completion is handled by the screen-wide receiver. Do not
+                    // refresh or toast a second time when the manager observes that broadcast.
+                    UsageResetStatus.SUCCESS -> Unit
+                    UsageResetStatus.FAILED -> {
+                        if (outcome.request == null) {
+                            Toast.makeText(requireContext(), R.string.usage_reset_failed, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    UsageResetStatus.PENDING -> {
+                        Toast.makeText(requireContext(), R.string.usage_reset_pending, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
     }
 
     private fun addRule(

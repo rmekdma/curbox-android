@@ -88,14 +88,17 @@ object AppRuleEvaluator {
         }
 
         val sessionList = sessions.toList()
+        val membershipResolver = AppRuleMembershipResolver(snapshot)
+        val eventLaunchablePackages = availablePackages.ifEmpty { setOf(packageName) }
         val evaluations = snapshot.appRules
             .filter { it.isActive }
             .mapNotNull { rule ->
-                val packages = rule.effectiveScope().resolve(
-                    groups = snapshot.appGroups,
+                val packages = membershipResolver.targetPackagesAt(
+                    rule = rule,
+                    atMs = nowMs,
                     // A caller that does not have a launcher listing is still able to evaluate
                     // the event package. The service supplies the complete dynamic listing.
-                    launchablePackages = availablePackages.ifEmpty { setOf(packageName) },
+                    launchablePackages = eventLaunchablePackages,
                     essentialExcludedPackages = essentialExcludedPackages
                 )
                 if (packageName !in packages) return@mapNotNull null
@@ -111,7 +114,10 @@ object AppRuleEvaluator {
                     useDayGenerationStartedAtMs,
                     contributorResolution.packages,
                     contributorResolution.missingGroupIds,
-                    overrides
+                    overrides,
+                    membershipResolver,
+                    eventLaunchablePackages,
+                    essentialExcludedPackages
                 )
             }
         return AppRulesEvaluation(
@@ -136,8 +142,10 @@ object AppRuleEvaluator {
         overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRuleEvaluation {
         val sessionList = sessions.toList()
-        val targetPackages = rule.effectiveScope().resolve(
-            groups = snapshot.appGroups,
+        val membershipResolver = AppRuleMembershipResolver(snapshot)
+        val targetPackages = membershipResolver.targetPackagesAt(
+            rule = rule,
+            atMs = nowMs,
             launchablePackages = availablePackages,
             essentialExcludedPackages = essentialExcludedPackages
         )
@@ -153,7 +161,10 @@ object AppRuleEvaluator {
             useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
             contributorPackages = contributorResolution.packages,
             missingContributorGroupIds = contributorResolution.missingGroupIds,
-            overrides = overrides
+            overrides = overrides,
+            membershipResolver = membershipResolver,
+            membershipLaunchablePackages = availablePackages,
+            membershipEssentialExcludedPackages = essentialExcludedPackages
         )
     }
 
@@ -168,7 +179,10 @@ object AppRuleEvaluator {
         useDayGenerationStartedAtMs: Long = 0L,
         contributorPackages: Set<String> = emptySet(),
         missingContributorGroupIds: Set<String> = emptySet(),
-        overrides: AppRuleOverrideState = AppRuleOverrideState()
+        overrides: AppRuleOverrideState = AppRuleOverrideState(),
+        membershipResolver: AppRuleMembershipResolver? = null,
+        membershipLaunchablePackages: Set<String> = emptySet(),
+        membershipEssentialExcludedPackages: Set<String> = emptySet()
     ): AppRuleEvaluation {
         val activeWindow = AppRuleSchedule.activeWindow(rule, nowMs, zone)
         val sessionList = sessions.toList()
@@ -185,7 +199,15 @@ object AppRuleEvaluator {
             nowMs = nowMs,
             zone = zone,
             useDayCalculator = useDayCalculator,
-            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+            membershipPredicate = membershipResolver?.let { resolver ->
+                { packageName: String, atMs: Long ->
+                    packageName in resolver.contributorPackagesAt(rule, atMs)
+                }
+            },
+            membershipBoundaries = membershipResolver
+                ?.targetAndContributorBoundaries(rule)
+                .orEmpty()
         )
         val isConditionMet = !rule.usageConditionEnabled ||
             contributorUsageMillis >= conditionRequiredMillis
@@ -266,22 +288,26 @@ object AppRuleEvaluator {
         // A package may be represented by more than one persisted row after a process restart or
         // a visibility reconciliation. Merge its intervals first so duplicate rows cannot charge
         // the same visible package twice.
-        val intervalsByPackage = sessionList.asSequence()
-            .filter {
-                it.useDayId == useDayId &&
-                    it.packageName in targetPackages &&
-                    (useDayGenerationStartedAtMs <= 0L ||
-                        it.useDayGenerationStartedAtMs >= useDayGenerationStartedAtMs)
-            }
-            .mapNotNull { session ->
-                val end = minOf(session.endedAtMs ?: nowMs, nowMs)
-                if (end <= session.startedAtMs) {
-                    null
-                } else {
-                    SessionInterval(session.packageName, session.startedAtMs, end)
+        val intervalsByPackage = sessionIntervals(
+            sessions = sessionList,
+            useDayId = useDayId,
+            nowMs = nowMs,
+            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+            candidatePackages = targetPackages,
+            membershipPredicate = membershipResolver?.let { resolver ->
+                { packageName: String, atMs: Long ->
+                    packageName in resolver.targetPackagesAt(
+                        rule,
+                        atMs,
+                        launchablePackages = membershipLaunchablePackages,
+                        essentialExcludedPackages = membershipEssentialExcludedPackages
+                    )
                 }
-            }
-            .groupBy { it.packageName }
+            },
+            membershipBoundaries = membershipResolver
+                ?.targetAndContributorBoundaries(rule)
+                .orEmpty()
+        )
         val usageIntervals = intervalsByPackage.values.flatMap { intervals ->
             mergeIntervals(intervals).flatMap { interval ->
                 usageWindows.mapNotNull { window ->
@@ -440,26 +466,77 @@ object AppRuleEvaluator {
         nowMs: Long,
         zone: ZoneId,
         useDayCalculator: UseDayCalculator,
-        useDayGenerationStartedAtMs: Long
+        useDayGenerationStartedAtMs: Long,
+        membershipPredicate: ((String, Long) -> Boolean)? = null,
+        membershipBoundaries: Set<Long> = emptySet()
     ): Long {
-        if (packageNames.isEmpty()) return 0L
+        if (packageNames.isEmpty() && membershipPredicate == null) return 0L
         val useDayWindow = UseDay.windowFor(useDayId, zone, useDayCalculator.resetTime)
-        val intervalsByPackage = sessions.asSequence()
-            .filter {
-                it.useDayId == useDayId &&
-                    it.packageName in packageNames &&
-                    (useDayGenerationStartedAtMs <= 0L ||
-                        it.useDayGenerationStartedAtMs >= useDayGenerationStartedAtMs)
-            }
-            .mapNotNull { session ->
-                val start = maxOf(session.startedAtMs, useDayWindow.first)
-                val end = minOf(session.endedAtMs ?: nowMs, nowMs, useDayWindow.last + 1L)
-                if (end <= start) null else SessionInterval(session.packageName, start, end)
-            }
-            .groupBy { it.packageName }
+        val intervalsByPackage = sessionIntervals(
+            sessions = sessions,
+            useDayId = useDayId,
+            nowMs = nowMs,
+            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+            candidatePackages = packageNames,
+            membershipPredicate = membershipPredicate,
+            membershipBoundaries = membershipBoundaries,
+            startFloorMs = useDayWindow.first,
+            endCeilingMs = useDayWindow.last + 1L
+        )
         return intervalsByPackage.values.sumOf { intervals ->
             mergeIntervals(intervals).sumOf { it.end - it.start }
         }
+    }
+
+    /**
+     * Splits a persisted session at every membership boundary before deciding whether each piece
+     * belongs to a target or contributor. This is what makes NOW and current-use-day-start edits
+     * symmetric for additions and removals, including sessions that straddle the edit instant.
+     */
+    private fun sessionIntervals(
+        sessions: Iterable<ForegroundSession>,
+        useDayId: String,
+        nowMs: Long,
+        useDayGenerationStartedAtMs: Long,
+        candidatePackages: Set<String>,
+        membershipPredicate: ((String, Long) -> Boolean)? = null,
+        membershipBoundaries: Set<Long> = emptySet(),
+        startFloorMs: Long = Long.MIN_VALUE,
+        endCeilingMs: Long = Long.MAX_VALUE
+    ): Map<String, List<SessionInterval>> {
+        val result = linkedMapOf<String, MutableList<SessionInterval>>()
+        sessions.forEach { session ->
+            if (session.useDayId != useDayId ||
+                (useDayGenerationStartedAtMs > 0L &&
+                    session.useDayGenerationStartedAtMs < useDayGenerationStartedAtMs)
+            ) return@forEach
+            val start = maxOf(session.startedAtMs, startFloorMs)
+            val end = minOf(session.endedAtMs ?: nowMs, nowMs, endCeilingMs)
+            if (end <= start) return@forEach
+            if (membershipPredicate == null && session.packageName !in candidatePackages) {
+                return@forEach
+            }
+            val points = buildList {
+                add(start)
+                membershipBoundaries
+                    .filter { it > start && it < end }
+                    .forEach(::add)
+                add(end)
+            }.distinct().sorted()
+            points.zipWithNext().forEach { (pieceStart, pieceEnd) ->
+                if (pieceEnd <= pieceStart) return@forEach
+                val belongs = if (membershipPredicate == null) {
+                    session.packageName in candidatePackages
+                } else {
+                    membershipPredicate(session.packageName, pieceStart)
+                }
+                if (belongs) {
+                    result.getOrPut(session.packageName) { mutableListOf() }
+                        .add(SessionInterval(session.packageName, pieceStart, pieceEnd))
+                }
+            }
+        }
+        return result
     }
 
     private fun mergeIntervals(intervals: List<SessionInterval>): List<SessionInterval> =

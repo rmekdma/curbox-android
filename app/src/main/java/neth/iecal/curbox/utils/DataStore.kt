@@ -9,16 +9,21 @@ import androidx.datastore.core.DataMigration
 import androidx.datastore.core.MultiProcessDataStoreFactory
 import androidx.datastore.core.Serializer
 import com.google.gson.Gson
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppGroup
+import neth.iecal.curbox.data.models.AppGroupEditMode
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.KeywordBlocker
+import neth.iecal.curbox.data.models.LegacyAppRuleMigration
 import neth.iecal.curbox.data.models.ManualFocusGroup
 import neth.iecal.curbox.data.models.PendingSettingsChange
 import neth.iecal.curbox.data.models.Settings
@@ -27,6 +32,7 @@ import neth.iecal.curbox.data.models.SettingsChangeDelayPrefs
 import neth.iecal.curbox.data.models.upgradeLegacyAppGroupConfigs
 import neth.iecal.curbox.data.models.upgradeLegacyKeywordGroupConfigs
 import neth.iecal.curbox.data.models.upgradeLegacyConfig
+import neth.iecal.curbox.domain.apprules.AppGroupMembershipTimeline
 import neth.iecal.curbox.hardcoded.normalized
 import neth.iecal.curbox.services.TemporaryGroupDisableJob
 import java.io.File
@@ -43,7 +49,8 @@ class GsonSerializer<T>(
 
     override suspend fun readFrom(input: InputStream): T {
         return try {
-            gson.fromJson(input.readBytes().decodeToString(), type) ?: defaultValue
+            val raw = input.readBytes().decodeToString()
+            gson.fromJson(normalizeSettingsJson(raw), type) ?: defaultValue
         } catch (e: Exception) {
             e.printStackTrace()
             defaultValue
@@ -53,12 +60,135 @@ class GsonSerializer<T>(
     override suspend fun writeTo(t: T, output: OutputStream) {
         output.write(gson.toJson(t).toByteArray())
     }
+
+    /** Adds only fields introduced by the neutral rule cutover before Gson reflects Kotlin data. */
+    private fun normalizeSettingsJson(raw: String): String {
+        if (type != Settings::class.java) return raw
+        val root = JsonParser.parseString(raw).takeIf { it.isJsonObject }?.asJsonObject
+            ?: return raw
+        if (!root.has("blockedAppGroups") ||
+            root.get("blockedAppGroups").isJsonNull ||
+            !root.get("blockedAppGroups").isJsonArray
+        ) {
+            root.add("blockedAppGroups", JsonArray())
+        }
+        val snapshot = root.get("appRuleSnapshot")
+            ?.takeIf { it.isJsonObject }
+            ?.asJsonObject
+            ?: JsonObject()
+        if (!snapshot.has("appGroups") || snapshot.get("appGroups").isJsonNull) {
+            snapshot.add("appGroups", JsonArray())
+        }
+        if (!snapshot.has("appRules") || snapshot.get("appRules").isJsonNull) {
+            snapshot.add("appRules", JsonArray())
+        }
+        snapshot.add("appGroups", normalizedArray(arrayField(snapshot, "appGroups")) { group ->
+            ensureString(group, "id", "")
+            ensureString(group, "name", "")
+            ensureArray(group, "selectedPackages")
+            val history = normalizedArray(arrayField(group, "membershipHistory")) { version ->
+                ensureLong(version, "effectiveFromMs", Long.MIN_VALUE)
+                ensureArray(version, "selectedPackages")
+            }
+            group.add("membershipHistory", history)
+        })
+        snapshot.add("appRules", normalizedArray(arrayField(snapshot, "appRules")) { rule ->
+            ensureString(rule, "id", "")
+            ensureString(rule, "name", "")
+            ensureBoolean(rule, "isActive", true)
+            ensureWeekdays(rule)
+            ensureInt(rule, "startMinute", 0)
+            ensureInt(rule, "endMinute", 0)
+            ensureString(rule, "appGroupId", "")
+            ensureLong(rule, "allowedMinutes", 0L)
+            ensureBoolean(rule, "usageConditionEnabled", false)
+            ensureLong(rule, "usageConditionMinutes", 0L)
+            ensureBoolean(rule, "earnedAllowanceEnabled", false)
+            ensureArray(rule, "contributorGroupIds")
+            ensureArray(rule, "timeRanges")
+            val ranges = normalizedArray(arrayField(rule, "timeRanges")) { range ->
+                ensureInt(range, "startMinute", 0)
+                ensureInt(range, "endMinute", 0)
+            }
+            rule.add("timeRanges", ranges)
+            val scope = rule.get("scope")
+                ?.takeIf { it.isJsonObject }
+                ?.asJsonObject
+                ?: JsonObject()
+            ensureBoolean(scope, "includeAllApps", false)
+            ensureArray(scope, "includedGroupIds")
+            ensureArray(scope, "excludedGroupIds")
+            rule.add("scope", scope)
+        })
+        root.add("appRuleSnapshot", snapshot)
+        val marker = root.get("appRuleMigrationVersion")
+        if (marker == null || marker.isJsonNull ||
+            !marker.isJsonPrimitive || !marker.asJsonPrimitive.isNumber
+        ) {
+            root.addProperty("appRuleMigrationVersion", 0)
+        }
+        return root.toString()
+    }
+
+    private fun normalizedArray(
+        array: JsonArray?,
+        normalize: (JsonObject) -> Unit
+    ): JsonArray = JsonArray().also { normalized ->
+        (array ?: JsonArray()).forEach { element ->
+            if (element.isJsonObject) {
+                element.asJsonObject.also(normalize).let(normalized::add)
+            }
+        }
+    }
+
+    private fun arrayField(objectValue: JsonObject, name: String): JsonArray? =
+        objectValue.get(name)?.takeIf { it.isJsonArray }?.asJsonArray
+
+    private fun ensureArray(objectValue: JsonObject, name: String) {
+        if (!objectValue.has(name) || !objectValue.get(name).isJsonArray) {
+            objectValue.add(name, JsonArray())
+        }
+    }
+
+    private fun ensureWeekdays(objectValue: JsonObject) {
+        if (objectValue.has("weekdays") && objectValue.get("weekdays").isJsonArray) return
+        objectValue.add("weekdays", JsonArray().also { days ->
+            (0..6).forEach { day -> days.add(day) }
+        })
+    }
+
+    private fun ensureString(objectValue: JsonObject, name: String, value: String) {
+        if (!objectValue.has(name) || objectValue.get(name).isJsonNull) {
+            objectValue.addProperty(name, value)
+        }
+    }
+
+    private fun ensureBoolean(objectValue: JsonObject, name: String, value: Boolean) {
+        if (!objectValue.has(name) || objectValue.get(name).isJsonNull) {
+            objectValue.addProperty(name, value)
+        }
+    }
+
+    private fun ensureInt(objectValue: JsonObject, name: String, value: Int) {
+        if (!objectValue.has(name) || objectValue.get(name).isJsonNull) {
+            objectValue.addProperty(name, value)
+        }
+    }
+
+    private fun ensureLong(objectValue: JsonObject, name: String, value: Long) {
+        if (!objectValue.has(name) || objectValue.get(name).isJsonNull) {
+            objectValue.addProperty(name, value)
+        }
+    }
 }
 
 private class ScheduledUsageConfigMigration(
     private val gson: Gson
 ) : DataMigration<Settings> {
     override suspend fun shouldMigrate(currentData: Settings): Boolean {
+        if (currentData.appRuleMigrationVersion < LegacyAppRuleMigration.CURRENT_VERSION) {
+            return true
+        }
         if (currentData.blockedAppGroups.any { it.config == null }) return true
         if (currentData.keywordBlockerConfig.keywordGroups.any { it.config == null }) return true
         return currentData.settingsChangeDelayConfig2.pendingChanges.any {
@@ -67,28 +197,64 @@ private class ScheduledUsageConfigMigration(
     }
 
     override suspend fun migrate(currentData: Settings): Settings {
-        val upgradedPending = currentData.settingsChangeDelayConfig2.pendingChanges.map { change ->
-            when (change.field) {
-                GatedSettingsField.APP_GROUPS.name -> {
-                    val groups = parseAppGroups(change.newValueJson) ?: return@map change
-                    change.copy(
-                        newValueJson = gson.toJson(groups.upgradeLegacyAppGroupConfigs(gson))
-                    )
-                }
-                GatedSettingsField.KEYWORD_BLOCKER.name -> {
-                    val config = parseKeywordBlocker(change.newValueJson) ?: return@map change
-                    change.copy(
-                        newValueJson =
-                            gson.toJson(config.upgradeLegacyKeywordGroupConfigs(gson))
-                    )
-                }
-                else -> change
+        val now = System.currentTimeMillis()
+        val upgradedGroups = LegacyAppRuleMigration.sanitizeForMigration(
+            currentData.blockedAppGroups
+        ).upgradeLegacyAppGroupConfigs(gson)
+        val migratedSnapshot = if (
+            currentData.appRuleMigrationVersion < LegacyAppRuleMigration.CURRENT_VERSION
+        ) {
+            LegacyAppRuleMigration.migrate(upgradedGroups, currentData.appRuleSnapshot, now)
+        } else {
+            currentData.appRuleSnapshot
+        }
+
+        // updateGated keeps one pending value per field, but older versions could leave both
+        // legacy APP_GROUPS and neutral APP_RULES entries after an interrupted write.  Prefer the
+        // already-neutral entry and convert the legacy one only when it is the sole request.
+        val pendingChanges = currentData.settingsChangeDelayConfig2.pendingChanges
+        val hasNeutralPending = pendingChanges.any { it.field == GatedSettingsField.APP_RULES.name }
+        val convertedLegacyPending = pendingChanges
+            .firstOrNull { it.field == GatedSettingsField.APP_GROUPS.name }
+            ?.let { change ->
+                val groups = parseAppGroups(change.newValueJson)
+                    ?.let(LegacyAppRuleMigration::sanitizeForMigration)
+                    ?.upgradeLegacyAppGroupConfigs(gson)
+                    .orEmpty()
+                val snapshot = LegacyAppRuleMigration.replaceLegacy(groups, migratedSnapshot, now)
+                val modes = groups.mapIndexed { index, group ->
+                    LegacyAppRuleMigration.neutralGroupId(group.id, index) to AppGroupEditMode.NOW
+                }.toMap()
+                change.copy(
+                    field = GatedSettingsField.APP_RULES.name,
+                    newValueJson = gson.toJson(snapshot),
+                    appGroupEditModes = modes
+                )
             }
+        val upgradedPending = buildList {
+            pendingChanges.forEach { change ->
+                when (change.field) {
+                    GatedSettingsField.APP_GROUPS.name -> Unit
+                    GatedSettingsField.KEYWORD_BLOCKER.name -> {
+                        val config = parseKeywordBlocker(change.newValueJson)
+                            ?: return@forEach
+                        add(change.copy(
+                            newValueJson = gson.toJson(
+                                config.upgradeLegacyKeywordGroupConfigs(gson)
+                            )
+                        ))
+                    }
+                    else -> add(change)
+                }
+            }
+            if (!hasNeutralPending) convertedLegacyPending?.let(::add)
         }
         return currentData.copy(
-            blockedAppGroups = currentData.blockedAppGroups.upgradeLegacyAppGroupConfigs(gson),
+            blockedAppGroups = upgradedGroups,
             keywordBlockerConfig =
                 currentData.keywordBlockerConfig.upgradeLegacyKeywordGroupConfigs(gson),
+            appRuleSnapshot = migratedSnapshot,
+            appRuleMigrationVersion = LegacyAppRuleMigration.CURRENT_VERSION,
             settingsChangeDelayConfig2 = currentData.settingsChangeDelayConfig2.copy(
                 pendingChanges = upgradedPending
             )
@@ -99,8 +265,9 @@ private class ScheduledUsageConfigMigration(
 
     private fun pendingChangeNeedsMigration(change: PendingSettingsChange): Boolean =
         when (change.field) {
-            GatedSettingsField.APP_GROUPS.name ->
-                parseAppGroups(change.newValueJson)?.any { it.config == null } == true
+            // The legacy editor is no longer a runtime path.  Any old pending APP_GROUPS value
+            // must be converted to the neutral snapshot before the next due-apply sweep.
+            GatedSettingsField.APP_GROUPS.name -> true
             GatedSettingsField.KEYWORD_BLOCKER.name ->
                 parseKeywordBlocker(change.newValueJson)
                     ?.keywordGroups
@@ -163,10 +330,17 @@ class DataStoreManager(private val context: Context) {
      * rejected before the snapshot reaches either process, so the service never observes a
      * half-edited configuration.
      */
-    suspend fun updateAppRuleSnapshot(snapshot: AppRuleSnapshot): Boolean {
+    suspend fun updateAppRuleSnapshot(
+        snapshot: AppRuleSnapshot,
+        appGroupEditMode: AppGroupEditMode? = null
+    ): Boolean {
         val normalized = snapshot.normalized()
         if (!normalized.isValid) return false
-        updateGated(GatedSettingsField.APP_RULES) { normalized }
+        updateGated(
+            field = GatedSettingsField.APP_RULES,
+            appGroupEditMode = appGroupEditMode,
+            computeNewValue = { normalized }
+        )
         runCatching {
             context.sendBroadcast(
                 Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
@@ -705,7 +879,11 @@ class DataStoreManager(private val context: Context) {
             } else {
                 var settings = current
                 due.forEach { change ->
-                    applyPendingValue(settings, change)?.let { settings = it }
+                    applyPendingValue(
+                        settings,
+                        change,
+                        effectiveAtNowMs = now
+                    )?.let { settings = it }
                 }
                 settings.copy(settingsChangeDelayConfig2 = settings.settingsChangeDelayConfig2.copy(
                     pendingChanges = waiting
@@ -722,7 +900,11 @@ class DataStoreManager(private val context: Context) {
      * countdown ends. A stricter instant write also drops the field's pending change, because
      * that pending snapshot no longer matches what the user sees.
      */
-    private suspend fun updateGated(field: GatedSettingsField, computeNewValue: (Settings) -> Any) {
+    private suspend fun updateGated(
+        field: GatedSettingsField,
+        appGroupEditMode: AppGroupEditMode? = null,
+        computeNewValue: (Settings) -> Any
+    ) {
         var deferredUntilMs = 0L
         var hadPendingForField = false
         var tamperGated = false
@@ -736,22 +918,47 @@ class DataStoreManager(private val context: Context) {
             val delayConfig = current.settingsChangeDelayConfig2
             val existingPending = delayConfig.pendingChanges.find { it.field == field.name }
             hadPendingForField = existingPending != null
-            if (existingPending?.newValueJson == newValueJson) {
+            val pendingGroupModes = if (field == GatedSettingsField.APP_RULES) {
+                val existingPendingSnapshot = existingPending?.let { pending ->
+                    withFieldValue(current, field, pending.newValueJson)?.appRuleSnapshot
+                }
+                pendingAppGroupEditModes(
+                    previous = current.appRuleSnapshot,
+                    proposed = proposed.appRuleSnapshot,
+                    requestedMode = appGroupEditMode,
+                    existing = existingPending?.appGroupEditModes.orEmpty(),
+                    existingProposed = existingPendingSnapshot
+                )
+            } else {
+                emptyMap()
+            }
+            if (existingPending?.newValueJson == newValueJson &&
+                existingPending?.appGroupEditModes.orEmpty() == pendingGroupModes
+            ) {
                 unchangedPending = true
                 return@updateData current
             }
             val timeGateActive = delayConfig.isEnabled && delayConfig.delayMinutes > 0
             tamperGated = delayConfig.requireTamperProtectionOff && current.antiUninstallConfig2.isEnabled
+            val transactionNowMs = System.currentTimeMillis()
             if ((!timeGateActive && !tamperGated) ||
                 RestrictionComparator.isSameOrStricter(field, current, proposed)
             ) {
                 tamperGated = false
                 val proposedDelayConfig = proposed.settingsChangeDelayConfig2
-                proposed.copy(settingsChangeDelayConfig2 = proposedDelayConfig.copy(
-                    pendingChanges = proposedDelayConfig.pendingChanges.filterNot { it.field == field.name }
+                val effective = if (field == GatedSettingsField.APP_RULES &&
+                    pendingGroupModes.isNotEmpty()
+                ) {
+                    applyGroupEditEffectiveAt(proposed, current, pendingGroupModes, transactionNowMs)
+                } else {
+                    proposed
+                }
+                val effectiveDelayConfig = effective.settingsChangeDelayConfig2
+                effective.copy(settingsChangeDelayConfig2 = effectiveDelayConfig.copy(
+                    pendingChanges = effectiveDelayConfig.pendingChanges.filterNot { it.field == field.name }
                 ))
             } else {
-                val now = System.currentTimeMillis()
+                val now = transactionNowMs
                 // With no active timer, the pending value is due the instant tamper protection
                 // turns off; applyDuePendingChanges re-checks that condition on every sweep.
                 deferredUntilMs = if (timeGateActive) now + delayConfig.delayMinutes * 60_000L else now
@@ -759,7 +966,12 @@ class DataStoreManager(private val context: Context) {
                     field = field.name,
                     newValueJson = newValueJson,
                     requestedAtMs = now,
-                    appliesAtMs = deferredUntilMs
+                    appliesAtMs = deferredUntilMs,
+                    appGroupEditModes = if (field == GatedSettingsField.APP_RULES) {
+                        pendingGroupModes
+                    } else {
+                        emptyMap()
+                    }
                 )
                 current.copy(settingsChangeDelayConfig2 = delayConfig.copy(
                     pendingChanges = delayConfig.pendingChanges.filterNot { it.field == field.name } + pending
@@ -776,17 +988,82 @@ class DataStoreManager(private val context: Context) {
         }
     }
 
-    private fun applyPendingValue(settings: Settings, change: PendingSettingsChange): Settings? {
+    private fun applyPendingValue(
+        settings: Settings,
+        change: PendingSettingsChange,
+        effectiveAtNowMs: Long? = null
+    ): Settings? {
         val field = runCatching { GatedSettingsField.valueOf(change.field) }.getOrNull() ?: return null
-        return withFieldValue(settings, field, change.newValueJson)
+        val parsed = withFieldValue(settings, field, change.newValueJson) ?: return null
+        return if (field == GatedSettingsField.APP_RULES &&
+            change.appGroupEditModes.isNotEmpty() &&
+            effectiveAtNowMs != null
+        ) {
+            applyGroupEditEffectiveAt(
+                parsed,
+                settings,
+                change.appGroupEditModes,
+                effectiveAtNowMs
+            )
+        } else {
+            parsed
+        }
     }
 
     private fun overlayPendingChanges(settings: Settings): Settings {
         var displayed = settings
         settings.settingsChangeDelayConfig2.pendingChanges.forEach { change ->
+            // The editor sees the requested membership, but not a fabricated effective timestamp.
             applyPendingValue(displayed, change)?.let { displayed = it }
         }
         return displayed
+    }
+
+    private fun applyGroupEditEffectiveAt(
+        proposed: Settings,
+        previous: Settings,
+        modesByGroupId: Map<String, AppGroupEditMode>,
+        nowMs: Long
+    ): Settings {
+        val calculator = ConfigurableUseDayCalculator(resetTime = previous.useDayResetTime)
+        val effectiveAtByGroup = modesByGroupId.mapValues { (_, mode) ->
+            AppGroupMembershipTimeline.effectiveAt(mode, nowMs, calculator)
+        }
+        return proposed.copy(
+            appRuleSnapshot = AppGroupMembershipTimeline.apply(
+                previous = previous.appRuleSnapshot,
+                proposed = proposed.appRuleSnapshot,
+                effectiveAtByGroup = effectiveAtByGroup
+            )
+        )
+    }
+
+    private fun pendingAppGroupEditModes(
+        previous: AppRuleSnapshot,
+        proposed: AppRuleSnapshot,
+        requestedMode: AppGroupEditMode?,
+        existing: Map<String, AppGroupEditMode>,
+        existingProposed: AppRuleSnapshot?
+    ): Map<String, AppGroupEditMode> {
+        val previousById = previous.appGroups.associateBy { it.id }
+        val proposedById = proposed.appGroups.associateBy { it.id }
+        val changedIds = (previousById.keys + proposedById.keys).filter { id ->
+            previousById[id]?.selectedPackages?.toSet() != proposedById[id]?.selectedPackages?.toSet()
+        }.toSet()
+        val retained = existing.filterKeys { it in changedIds && it in proposedById }
+        val editedSincePending = if (existingProposed == null) {
+            changedIds
+        } else {
+            val pendingById = existingProposed.appGroups.associateBy { it.id }
+            (pendingById.keys + proposedById.keys).filter { id ->
+                pendingById[id]?.selectedPackages?.toSet() != proposedById[id]?.selectedPackages?.toSet()
+            }.toSet()
+        }
+        return if (requestedMode == null) {
+            retained
+        } else {
+            retained + editedSincePending.associateWith { requestedMode }
+        }
     }
 
     private suspend fun schedulePendingChanges() {

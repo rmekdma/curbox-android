@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppGroupEditMode
 import neth.iecal.curbox.databinding.FragmentCreateAppRuleGroupBinding
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
 import neth.iecal.curbox.utils.DataStoreManager
@@ -60,8 +61,19 @@ class CreateAppRuleGroupFragment : Fragment() {
                 putExtra(SelectAppsActivity.EXTRA_FILTER_APP_RULE_ESSENTIALS, true)
             })
         }
-        binding.saveGroupButton.setOnClickListener { save() }
+        binding.saveGroupButton.setOnClickListener { chooseEditModeAndSave() }
+        // Old shortcuts used group_id.  Resolve that deep link into the neutral editor rather
+        // than opening the removed coupled AppGroup screen.
         val id = requireActivity().intent.getStringExtra("app_rule_group_id")
+            ?: requireActivity().intent.getStringExtra("group_id")
+        if (id == null) {
+            requireActivity().intent.getStringExtra("prefill_package")
+                ?.takeIf { it.isNotBlank() }
+                ?.let {
+                    selectedPackages = arrayListOf(it)
+                    updateSelectionLabel()
+                }
+        }
         if (id != null) {
             viewLifecycleOwner.lifecycleScope.launch {
                 val group = dataStore.settingsForEditing.first().appRuleSnapshot.appGroups
@@ -77,7 +89,26 @@ class CreateAppRuleGroupFragment : Fragment() {
         }
     }
 
-    private fun save() {
+    private fun chooseEditModeAndSave() {
+        val labels = arrayOf(
+            getString(R.string.app_rules_group_apply_now),
+            getString(R.string.app_rules_group_apply_use_day_start)
+        )
+        val dialog = MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.app_rules_group_apply_title)
+            .setSingleChoiceItems(labels, 0) { dialog, which ->
+                dialog.dismiss()
+                save(
+                    if (which == 0) AppGroupEditMode.NOW
+                    else AppGroupEditMode.CURRENT_USE_DAY_START
+                )
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .create()
+        GuardianOwnedDialog.show(dialog)
+    }
+
+    private fun save(mode: AppGroupEditMode) {
         val name = binding.nameInput.text?.toString()?.trim().orEmpty()
         if (name.isEmpty() || selectedPackages.isEmpty()) {
             Toast.makeText(requireContext(), R.string.app_rules_enter_group, Toast.LENGTH_SHORT).show()
@@ -88,7 +119,7 @@ class CreateAppRuleGroupFragment : Fragment() {
             val group = editingGroup?.copy(name = name, selectedPackages = selectedPackages.distinct())
                 ?: AppRuleAppGroup.create(name, selectedPackages)
             val groups = current.appGroups.filterNot { it.id == group.id } + group
-            if (!dataStore.updateAppRuleSnapshot(current.copy(appGroups = groups))) {
+            if (!dataStore.updateAppRuleSnapshot(current.copy(appGroups = groups), mode)) {
                 Toast.makeText(requireContext(), R.string.app_rules_save_failed, Toast.LENGTH_SHORT).show()
                 return@launch
             }

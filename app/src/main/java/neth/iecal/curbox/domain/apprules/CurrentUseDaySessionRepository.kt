@@ -2,6 +2,15 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.ForegroundSession
 
+/** One exact calendar bucket written with a foreground session checkpoint. */
+data class ForegroundUsageCheckpoint(
+    val date: String,
+    val packageName: String,
+    val hour: Int,
+    val durationMs: Long,
+    val lastUsedMs: Long
+)
+
 /** Public persistence seam used by the tracker and deterministic rule evaluator. */
 interface CurrentUseDaySessionRepository {
     suspend fun startSession(useDayId: String, packageName: String, startedAtMs: Long): Long
@@ -26,6 +35,19 @@ interface CurrentUseDaySessionRepository {
     suspend fun finishSession(id: Long, endedAtMs: Long)
 
     suspend fun updateSessionEnd(id: Long, endedAtMs: Long)
+
+    /**
+     * Atomically checkpoints the session and its derived calendar buckets when supported by the
+     * backing store. Lightweight repositories retain the old close-only behavior.
+     */
+    suspend fun commitSessionCheckpoint(
+        id: Long,
+        endedAtMs: Long,
+        usage: List<ForegroundUsageCheckpoint>
+    ): Boolean {
+        updateSessionEnd(id, endedAtMs)
+        return true
+    }
 
     suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession>
 

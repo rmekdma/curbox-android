@@ -21,7 +21,6 @@ import neth.iecal.curbox.anti_stimulants.AutoDnd
 import neth.iecal.curbox.anti_stimulants.GrayScaleFilter
 import neth.iecal.curbox.anti_stimulants.MindfulMessage
 import neth.iecal.curbox.blockers.AntiUninstallBlocker
-import neth.iecal.curbox.blockers.AppBlocker
 import neth.iecal.curbox.blockers.AppRuleBlocker
 import neth.iecal.curbox.blockers.FocusModeBlocker
 import neth.iecal.curbox.blockers.KeywordBlocker
@@ -39,7 +38,6 @@ import neth.iecal.curbox.ui.overlay.ReelsOverlayManager
 @Suppress("DEPRECATION")
 class AppBlockerService : BaseBlockingService() {
 
-    private val appBlocker: AppBlocker = AppBlocker()
     private val focusModeBlocker = FocusModeBlocker()
     private val autoDnd = AutoDnd()
     private val reelBlocker = ReelBlocker()
@@ -96,7 +94,6 @@ class AppBlockerService : BaseBlockingService() {
             if (BuildConfig.SUPPORTS_ANTI_UNINSTALL) {
                 antiUninstallBlocker.doAntiUninstallCheck(event)
             }
-            appBlocker.doAppBlockerCheck(event)
             grayScaleFilter.doGrayscaleCheck(event)
             focusModeBlocker.doFocusModeCheck(event)
         } catch (t: Throwable) {
@@ -184,7 +181,6 @@ class AppBlockerService : BaseBlockingService() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onServiceConnected() {
         super.onServiceConnected()
-        appBlocker.setupAppBlocker(this)
         focusModeBlocker.setupFocusMode(this)
         autoDnd.setup(this)
         reelBlocker.setupBlocker(this)
@@ -222,7 +218,6 @@ class AppBlockerService : BaseBlockingService() {
         neth.iecal.curbox.utils.UsageStatsCleaner.watch(this)
 
         focusModeBlocker.setupReceivers()
-        appBlocker.setupReceivers()
         try {
             appRuleBlocker.setupReceivers()
         } catch (t: Throwable) {
@@ -265,7 +260,6 @@ class AppBlockerService : BaseBlockingService() {
             focusModeBlocker.removeReceivers()
             autoDnd.stop()
             reelBlocker.removeReceivers()
-            appBlocker.onDestroy()
             if (appRuleBlockerReady) appRuleBlocker.onDestroy()
             keywordBlocker.removeReceivers()
             grayScaleFilter.unregisterReceivers()

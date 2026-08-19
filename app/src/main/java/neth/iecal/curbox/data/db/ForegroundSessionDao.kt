@@ -15,6 +15,12 @@ interface ForegroundSessionDao {
     @Query("UPDATE foreground_sessions SET endedAtMs = :endedAtMs WHERE id = :id")
     suspend fun updateEnd(id: Long, endedAtMs: Long): Int
 
+    @Query("DELETE FROM foreground_sessions WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>): Int
+
+    @Query("SELECT * FROM foreground_sessions WHERE id = :id LIMIT 1")
+    suspend fun getById(id: Long): ForegroundSessionEntity?
+
     @Query("SELECT * FROM foreground_sessions WHERE useDayId = :useDayId ORDER BY startedAtMs")
     suspend fun getForUseDay(useDayId: String): List<ForegroundSessionEntity>
 
@@ -28,6 +34,15 @@ interface ForegroundSessionDao {
         useDayId: String,
         generationStartedAtMs: Long
     ): List<ForegroundSessionEntity>
+
+    @Query("""
+        UPDATE foreground_sessions
+        SET endedAtMs = :endedAtMs
+        WHERE id = :id
+          AND startedAtMs < :endedAtMs
+          AND (endedAtMs IS NULL OR endedAtMs > :endedAtMs)
+    """)
+    suspend fun cutAt(id: Long, endedAtMs: Long): Int
 
     @Query("UPDATE foreground_sessions SET endedAtMs = :endedAtMs WHERE useDayId = :useDayId AND endedAtMs IS NULL")
     suspend fun finishOpenForUseDay(useDayId: String, endedAtMs: Long): Int

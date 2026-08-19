@@ -26,6 +26,22 @@ interface AppUsageDao {
     @Upsert
     suspend fun upsert(entity: AppUsageEntity)
 
+    /** Keeps the row (and therefore lastUsed) while replacing exact derived counters. */
+    @Query("""
+        UPDATE app_usage_stats
+        SET totalTime = :totalTime,
+            hourlyUsage = :hourlyUsage,
+            launchCount = :launchCount
+        WHERE date = :date AND packageName = :packageName
+    """)
+    suspend fun updateDerivedCounters(
+        date: String,
+        packageName: String,
+        totalTime: Long,
+        hourlyUsage: String,
+        launchCount: Int
+    ): Int
+
     @Query("SELECT MIN(lastUsed) FROM app_usage_stats WHERE lastUsed > 0")
     suspend fun earliestTimestamp(): Long?
 

@@ -2,8 +2,10 @@ package neth.iecal.curbox.ui.fragments.main.usage
 
 import android.annotation.SuppressLint
 import android.appwidget.AppWidgetManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Resources
 import android.net.Uri
 import android.graphics.Bitmap
@@ -59,6 +61,7 @@ import neth.iecal.curbox.utils.GuardianSessionRegistry
 import neth.iecal.curbox.utils.PermissionUtils
 import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.UsageStatsHelper
+import neth.iecal.curbox.utils.UsageResetManager
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.ZoneId
@@ -436,6 +439,35 @@ class AllAppsUsageFragment : Fragment() {
             }
         }
 
+        override fun onStart() {
+            super.onStart()
+            if (::viewModel.isInitialized) {
+                ContextCompat.registerReceiver(
+                    requireContext(),
+                    usageResetReceiver,
+                    IntentFilter(UsageResetManager.ACTION_USAGE_RESET),
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+            }
+        }
+
+        override fun onStop() {
+            if (::viewModel.isInitialized) {
+                runCatching { requireContext().unregisterReceiver(usageResetReceiver) }
+            }
+            super.onStop()
+        }
+
+        private val usageResetReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: Intent?) {
+                if (intent?.action == UsageResetManager.ACTION_USAGE_RESET &&
+                    ::viewModel.isInitialized
+                ) {
+                    viewModel.reload()
+                }
+            }
+        }
+
         private fun generateAndExportCsv(startMs: Long, endMs: Long, mode: Int) {
             Toast.makeText(
                 requireContext(),
@@ -608,7 +640,10 @@ class AllAppsUsageFragment : Fragment() {
                         // stats don't apply here. Go straight to the website list.
                         WebsiteUsageFragment.newInstance(stats.packageName)
                     } else {
-                        AppUsageBreakdown(stats)
+                        AppUsageBreakdown(
+                            stat = stats,
+                            canResetUsage = viewModel.isCurrentCalendarDaySelected()
+                        )
                     }
                     activity?.supportFragmentManager?.beginTransaction()
                         ?.setCustomAnimations(R.anim.fade_in, R.anim.fade_out)

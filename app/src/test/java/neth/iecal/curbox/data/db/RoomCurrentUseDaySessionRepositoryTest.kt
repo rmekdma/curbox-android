@@ -2,6 +2,7 @@ package neth.iecal.curbox.data.db
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.fail
 import org.junit.Test
 
 class RoomCurrentUseDaySessionRepositoryTest {
@@ -89,6 +90,23 @@ class RoomCurrentUseDaySessionRepositoryTest {
         assertEquals(listOf(123L), launches.cleanedGenerations)
     }
 
+    @Test
+    fun checkpointRequiresAnAffectedSessionRow() = runBlocking {
+        val sessions = RecordingSessionDao().apply { updateEndResult = 0 }
+        val repository = RoomCurrentUseDaySessionRepository(sessions)
+
+        try {
+            repository.commitSessionCheckpoint(
+                id = 99L,
+                endedAtMs = 2_000L,
+                usage = emptyList()
+            )
+            fail("missing checkpoint row must fail")
+        } catch (_: IllegalStateException) {
+            // Expected. The aggregate transaction must roll back instead of silently advancing.
+        }
+    }
+
     private class RecordingSessionDao : ForegroundSessionDao {
         val inserted = mutableListOf<ForegroundSessionEntity>()
         var rows = emptyList<ForegroundSessionEntity>()
@@ -96,6 +114,7 @@ class RoomCurrentUseDaySessionRepositoryTest {
         val discardedUseDays = mutableListOf<String>()
         val cleanedBeforeUseDays = mutableListOf<String>()
         val cleanedGenerations = mutableListOf<Long>()
+        var updateEndResult = 1
 
         override suspend fun insert(session: ForegroundSessionEntity): Long {
             inserted += session
@@ -104,7 +123,12 @@ class RoomCurrentUseDaySessionRepositoryTest {
 
         override suspend fun finish(id: Long, endedAtMs: Long): Int = 1
 
-        override suspend fun updateEnd(id: Long, endedAtMs: Long): Int = 1
+        override suspend fun updateEnd(id: Long, endedAtMs: Long): Int = updateEndResult
+
+        override suspend fun deleteByIds(ids: List<Long>): Int = ids.size
+
+        override suspend fun getById(id: Long): ForegroundSessionEntity? =
+            rows.find { it.id == id }
 
         override suspend fun getForUseDay(useDayId: String): List<ForegroundSessionEntity> = emptyList()
 
@@ -118,6 +142,8 @@ class RoomCurrentUseDaySessionRepositoryTest {
                     it.useDayGenerationStartedAtMs >= generationStartedAtMs
             }
         }
+
+        override suspend fun cutAt(id: Long, endedAtMs: Long): Int = 1
 
         override suspend fun finishOpenForUseDay(useDayId: String, endedAtMs: Long): Int = 1
 
@@ -167,6 +193,8 @@ class RoomCurrentUseDaySessionRepositoryTest {
                     it.useDayGenerationStartedAtMs >= generationStartedAtMs
             }
         }
+
+        override suspend fun deleteByIds(ids: List<Long>): Int = ids.size
 
         override suspend fun deleteBeforeUseDayGeneration(
             currentUseDayId: String,

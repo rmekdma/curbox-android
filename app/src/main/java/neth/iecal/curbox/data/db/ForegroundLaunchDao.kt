@@ -23,6 +23,9 @@ interface ForegroundLaunchDao {
         generationStartedAtMs: Long
     ): List<ForegroundLaunchEntity>
 
+    @Query("DELETE FROM foreground_launch_events WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>): Int
+
     @Query("DELETE FROM foreground_launch_events WHERE useDayId < :currentUseDayId")
     suspend fun deleteBeforeUseDay(currentUseDayId: String): Int
 
