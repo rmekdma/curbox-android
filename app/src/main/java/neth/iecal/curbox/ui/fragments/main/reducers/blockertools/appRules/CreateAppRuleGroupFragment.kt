@@ -94,12 +94,15 @@ class CreateAppRuleGroupFragment : Fragment() {
             getString(R.string.app_rules_group_apply_now),
             getString(R.string.app_rules_group_apply_use_day_start)
         )
+        var selectedIndex = 0
         val dialog = MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.app_rules_group_apply_title)
-            .setSingleChoiceItems(labels, 0) { dialog, which ->
-                dialog.dismiss()
+            .setSingleChoiceItems(labels, 0) { _, which ->
+                selectedIndex = which
+            }
+            .setPositiveButton(R.string.save) { _, _ ->
                 save(
-                    if (which == 0) AppGroupEditMode.NOW
+                    if (selectedIndex == 0) AppGroupEditMode.NOW
                     else AppGroupEditMode.CURRENT_USE_DAY_START
                 )
             }

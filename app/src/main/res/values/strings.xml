@@ -1464,6 +1464,9 @@
     <string name="app_rules_off">Off</string>
     <string name="app_rules_add_time_range">Add time range</string>
     <string name="app_rules_time_ranges_summary">Time ranges: %1$s</string>
+    <string name="app_rules_selected_count">%1$s (%2$d selected)</string>
+    <string name="app_rules_selected_none">%1$s (None)</string>
+    <string name="app_rules_no_groups">No app groups available. Please create an app group first.</string>
     <string name="remove">Remove</string>
     <string name="change_delay_field_auto_dnd">Auto DND</string>
     <string name="change_delay_field_reel_blocker">Reel blocker</string>

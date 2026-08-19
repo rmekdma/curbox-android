@@ -9,7 +9,7 @@ import android.widget.CheckBox
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.checkbox.MaterialCheckBox
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.timepicker.MaterialTimePicker
 import com.google.android.material.timepicker.TimeFormat
 import kotlinx.coroutines.flow.first
@@ -22,6 +22,7 @@ import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.databinding.FragmentCreateAppRuleBinding
 import neth.iecal.curbox.databinding.ItemAppRuleTimeRangeBinding
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 
 class CreateAppRuleFragment : Fragment() {
     companion object {
@@ -33,9 +34,9 @@ class CreateAppRuleFragment : Fragment() {
     private val dataStore by lazy { DataStoreManager(requireContext().applicationContext) }
     private var editingRule: AppRule? = null
     private var groups: List<AppRuleAppGroup> = emptyList()
-    private val includedChecks = linkedMapOf<String, CheckBox>()
-    private val excludedChecks = linkedMapOf<String, CheckBox>()
-    private val contributorChecks = linkedMapOf<String, CheckBox>()
+    private val selectedIncludedGroupIds = mutableSetOf<String>()
+    private val selectedExcludedGroupIds = mutableSetOf<String>()
+    private val selectedContributorGroupIds = mutableSetOf<String>()
     private data class RangeEditor(
         val binding: ItemAppRuleTimeRangeBinding,
         var startMinute: Int,
@@ -60,46 +61,43 @@ class CreateAppRuleFragment : Fragment() {
         binding.saveRuleButton.setOnClickListener { save() }
         binding.deleteRuleButton.setOnClickListener { delete() }
 
+        binding.includeAllAppsSwitch.setOnCheckedChangeListener { _, isChecked ->
+            updateIncludeAllAppsState(isChecked)
+        }
+        binding.selectIncludedGroupsButton.setOnClickListener {
+            showGroupSelectionDialog(
+                titleRes = R.string.app_rules_include_groups,
+                selectedIds = selectedIncludedGroupIds,
+                onSelectionUpdated = { updateButtonLabels() }
+            )
+        }
+        binding.selectExcludedGroupsButton.setOnClickListener {
+            showGroupSelectionDialog(
+                titleRes = R.string.app_rules_exclude_groups,
+                selectedIds = selectedExcludedGroupIds,
+                onSelectionUpdated = { updateButtonLabels() }
+            )
+        }
+        binding.selectContributorGroupsButton.setOnClickListener {
+            showGroupSelectionDialog(
+                titleRes = R.string.app_rules_contributor_groups,
+                selectedIds = selectedContributorGroupIds,
+                onSelectionUpdated = { updateButtonLabels() }
+            )
+        }
+
         viewLifecycleOwner.lifecycleScope.launch {
             val snapshot = dataStore.settingsForEditing.first().appRuleSnapshot
             groups = snapshot.appGroups
-            renderGroupChecks()
             val id = requireActivity().intent.getStringExtra("app_rule_id")
             editingRule = snapshot.appRules.find { it.id == id }
             editingRule?.let {
                 binding.screenTitle.setText(R.string.app_rules_edit_rule)
                 populate(it)
             }
+            updateIncludeAllAppsState(binding.includeAllAppsSwitch.isChecked)
+            updateButtonLabels()
             binding.deleteRuleButton.visibility = if (editingRule == null) View.GONE else View.VISIBLE
-        }
-    }
-
-    private fun renderGroupChecks() {
-        includedChecks.clear()
-        excludedChecks.clear()
-        contributorChecks.clear()
-        binding.includedGroupsContainer.removeAllViews()
-        binding.excludedGroupsContainer.removeAllViews()
-        binding.contributorGroupsContainer.removeAllViews()
-        groups.forEach { group ->
-            val included = MaterialCheckBox(requireContext()).apply {
-                text = group.name
-                tag = group.id
-            }
-            val excluded = MaterialCheckBox(requireContext()).apply {
-                text = group.name
-                tag = group.id
-            }
-            includedChecks[group.id] = included
-            excludedChecks[group.id] = excluded
-            binding.includedGroupsContainer.addView(included)
-            binding.excludedGroupsContainer.addView(excluded)
-            val contributor = MaterialCheckBox(requireContext()).apply {
-                text = group.name
-                tag = group.id
-            }
-            contributorChecks[group.id] = contributor
-            binding.contributorGroupsContainer.addView(contributor)
         }
     }
 
@@ -123,22 +121,72 @@ class CreateAppRuleFragment : Fragment() {
         weekdayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.weekdays }
         val scope = rule.effectiveScope()
         binding.includeAllAppsSwitch.isChecked = scope.includeAllApps
-        scope.includedGroupIds.forEach { includedChecks[it]?.isChecked = true }
-        scope.excludedGroupIds.forEach { excludedChecks[it]?.isChecked = true }
-        rule.effectiveContributorGroupIds().forEach { contributorChecks[it]?.isChecked = true }
-        missingContributorGroupIdsForEditor(rule, groups.map { it.id }.toSet()).forEach { id ->
-            val missing = MaterialCheckBox(requireContext()).apply {
-                text = getString(R.string.app_rules_missing_contributor_item, id)
-                isChecked = true
-                tag = id
-            }
-            contributorChecks[id] = missing
-            binding.contributorGroupsContainer.addView(missing)
-        }
+        selectedIncludedGroupIds.clear()
+        selectedIncludedGroupIds.addAll(scope.includedGroupIds)
+        selectedExcludedGroupIds.clear()
+        selectedExcludedGroupIds.addAll(scope.excludedGroupIds)
+        selectedContributorGroupIds.clear()
+        selectedContributorGroupIds.addAll(rule.effectiveContributorGroupIds())
+        updateIncludeAllAppsState(scope.includeAllApps)
+        updateButtonLabels()
 
         val ranges = rule.effectiveTimeRanges()
         clearTimeRanges()
         ranges.forEach(::addTimeRange)
+    }
+
+    private fun updateIncludeAllAppsState(includeAll: Boolean) {
+        binding.includedGroupsSection.visibility = if (includeAll) View.GONE else View.VISIBLE
+    }
+
+    private fun updateButtonLabels() {
+        updateButtonLabel(
+            binding.selectIncludedGroupsButton,
+            R.string.app_rules_include_groups,
+            selectedIncludedGroupIds.size
+        )
+        updateButtonLabel(
+            binding.selectExcludedGroupsButton,
+            R.string.app_rules_exclude_groups,
+            selectedExcludedGroupIds.size
+        )
+        updateButtonLabel(
+            binding.selectContributorGroupsButton,
+            R.string.app_rules_contributor_groups,
+            selectedContributorGroupIds.size
+        )
+    }
+
+    private fun updateButtonLabel(button: com.google.android.material.button.MaterialButton, titleRes: Int, count: Int) {
+        val title = getString(titleRes)
+        button.text = if (count > 0) {
+            getString(R.string.app_rules_selected_count, title, count)
+        } else {
+            getString(R.string.app_rules_selected_none, title)
+        }
+    }
+
+    private fun showGroupSelectionDialog(
+        titleRes: Int,
+        selectedIds: MutableSet<String>,
+        onSelectionUpdated: () -> Unit
+    ) {
+        if (groups.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.app_rules_no_groups, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val names = groups.map { it.name }.toTypedArray()
+        val checkedItems = groups.map { selectedIds.contains(it.id) }.toBooleanArray()
+        val dialog = MaterialAlertDialogBuilder(requireContext())
+            .setTitle(titleRes)
+            .setMultiChoiceItems(names, checkedItems) { _, which, isChecked ->
+                val groupId = groups[which].id
+                if (isChecked) selectedIds.add(groupId) else selectedIds.remove(groupId)
+            }
+            .setPositiveButton(R.string.save) { _, _ -> onSelectionUpdated() }
+            .setNegativeButton(R.string.cancel, null)
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     private fun clearTimeRanges() {
@@ -231,12 +279,10 @@ class CreateAppRuleFragment : Fragment() {
         }
         val scope = AppRuleScope(
             includeAllApps = binding.includeAllAppsSwitch.isChecked,
-            includedGroupIds = includedChecks.filterValues { it.isChecked }.keys,
-            excludedGroupIds = excludedChecks.filterValues { it.isChecked }.keys
+            includedGroupIds = if (binding.includeAllAppsSwitch.isChecked) emptySet() else selectedIncludedGroupIds.toSet(),
+            excludedGroupIds = selectedExcludedGroupIds.toSet()
         )
-        val contributorGroupIds = contributorGroupIdsFromEditorChecks(
-            contributorChecks.mapValues { (_, check) -> check.isChecked }
-        )
+        val contributorGroupIds = selectedContributorGroupIds.toSet()
         val usageConditionEnabled = binding.usageConditionSwitch.isChecked
         val earnedAllowanceEnabled = binding.earnedAllowanceSwitch.isChecked
         val firstRange = ranges.first()
@@ -291,9 +337,6 @@ class CreateAppRuleFragment : Fragment() {
     }
 
     override fun onDestroyView() {
-        includedChecks.clear()
-        excludedChecks.clear()
-        contributorChecks.clear()
         super.onDestroyView()
         _binding = null
         rangeEditors.clear()
