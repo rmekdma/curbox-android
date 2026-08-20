@@ -4,11 +4,10 @@
 
 **Blocked by:** 03 — App Group Edit Immediate Service Synchronization
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Extend AppRule data model and JSON serialization with backward-compatible fields for total condition minutes and per-contributor-group condition minutes map.
-- [ ] Update AppRuleEvaluator to enforce that total contributor usage meets the total threshold (if > 0) AND each individual contributor group with a specified threshold meets its requirement.
-- [ ] Update CreateAppRuleFragment UI to provide a total usage condition input field alongside individual condition input fields for each selected contributor group (treating empty/zero as unconstrained).
-- [ ] Maintain earned allowance compatibility when usage conditions are satisfied.
-- [ ] Add comprehensive unit tests covering all matrix combinations of total-only, per-group-only, combined total and per-group, and unconstrained conditions.
-
+- [x] Extend AppRule data model and JSON serialization with backward-compatible fields for total condition minutes and per-contributor-group condition minutes map.
+- [x] Update AppRuleEvaluator to enforce that total contributor usage meets the total threshold (if > 0) AND each individual contributor group with a specified threshold meets its requirement.
+- [x] Update CreateAppRuleFragment UI to provide a total usage condition input field alongside individual condition input fields for each selected contributor group (treating empty/zero as unconstrained).
+- [x] Maintain earned allowance compatibility when usage conditions are satisfied.
+- [x] Add comprehensive unit tests covering all matrix combinations of total-only, per-group-only, combined total and per-group, and unconstrained conditions.

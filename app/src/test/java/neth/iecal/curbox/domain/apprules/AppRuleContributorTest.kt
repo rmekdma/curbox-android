@@ -198,6 +198,29 @@ class AppRuleContributorTest {
     }
 
     @Test
+    fun totalOnlyConditionEnforcesOverallUsageAcrossContributorsWithoutPerGroupConstraints() {
+        val edu1 = AppRuleAppGroup("group_edu_1", "Edu 1", listOf("com.edu.app1"))
+        val edu2 = AppRuleAppGroup("group_edu_2", "Edu 2", listOf("com.edu.app2"))
+        val rule = rule(allowedMinutes = 20).copy(
+            usageConditionEnabled = true,
+            usageConditionMinutes = 30L,
+            contributorGroupIds = setOf(edu1.id, edu2.id),
+            contributorGroupConditionMinutes = emptyMap()
+        )
+        val groups = listOf(target, edu1, edu2)
+
+        // Total is 10 + 15 = 25m < 30m -> blocked
+        val r1 = evaluate(rule, listOf(session("com.edu.app1", 10), session("com.edu.app2", 15)), groups)
+        assertFalse(r1.isAllowed)
+        assertEquals(0L, r1.evaluations.single().allowanceMillis)
+
+        // Total is 20 + 15 = 35m >= 30m -> allowed
+        val r2 = evaluate(rule, listOf(session("com.edu.app1", 20), session("com.edu.app2", 15)), groups)
+        assertTrue(r2.isAllowed)
+        assertEquals(20 * MINUTE, r2.evaluations.single().allowanceMillis)
+    }
+
+    @Test
     fun perGroupConditionEnforcesIndividualGroupThresholds() {
         val mathGroup = AppRuleAppGroup("math", "Math", listOf("com.math"))
         val readingGroup = AppRuleAppGroup("reading", "Reading", listOf("com.reading"))

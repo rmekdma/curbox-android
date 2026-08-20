@@ -301,7 +301,7 @@ class CreateAppRuleFragment : Fragment() {
 
     private fun renderRangeSummary() {
         val summary = rangeEditors.joinToString { editor ->
-            " to "
+            "${formatMinute(editor.startMinute)} to ${formatMinute(editor.endMinute)}"
         }
         binding.timeRangesSummary.text = getString(R.string.app_rules_time_ranges_summary, summary)
     }

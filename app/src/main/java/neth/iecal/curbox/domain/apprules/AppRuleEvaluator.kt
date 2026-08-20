@@ -213,7 +213,7 @@ object AppRuleEvaluator {
                 ?.targetAndContributorBoundaries(rule)
                 .orEmpty()
         )
-        val groupConditions = rule.effectiveContributorGroupConditionMinutes()
+        val groupConditions = rule.effectiveContributorGroupConditionMinutes().filterKeys { it in rule.effectiveContributorGroupIds() }
         val groupConditionsMet = if (!rule.usageConditionEnabled) {
             true
         } else {
