@@ -295,7 +295,7 @@ class AppRuleBlocker {
     private fun checkCurrentlyVisibleApplications() {
         if (!::service.isInitialized) return
         try {
-            val visiblePackages = service.windows
+            val visiblePackages = (service.windows ?: emptyList())
                 .filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
                 .map { packageNameForWindow(it) }
                 .filter { it.isNotBlank() }

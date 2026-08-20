@@ -341,12 +341,7 @@ class DataStoreManager(private val context: Context) {
             appGroupEditMode = appGroupEditMode,
             computeNewValue = { normalized }
         )
-        runCatching {
-            context.sendBroadcast(
-                Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
-                    .setPackage(context.packageName)
-            )
-        }
+        sendAppRuleRefreshBroadcast()
         return true
     }
 
@@ -658,12 +653,7 @@ class DataStoreManager(private val context: Context) {
                 )
             }
         }
-        runCatching {
-            context.sendBroadcast(
-                Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
-                    .setPackage(context.packageName)
-            )
-        }
+        sendAppRuleRefreshBroadcast()
     }
 
     suspend fun updateUseDayResetMinutes(minutesSinceMidnight: Int) {
