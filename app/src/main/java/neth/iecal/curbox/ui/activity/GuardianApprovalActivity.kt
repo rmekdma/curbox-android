@@ -1,6 +1,10 @@
 package neth.iecal.curbox.ui.activity
 
 import android.content.Intent
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import android.os.Bundle
 import android.text.InputType
 import android.widget.EditText
@@ -34,9 +38,23 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         binding = ActivityGuardianApprovalBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
+            val systemBars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
+            )
+            view.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            insets
+        }
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                navigateHomeAndFinish()
+            }
+        })
         denials = runCatching {
             Gson().fromJson<List<AppRuleGuardianDenial>>(
                 intent.getStringExtra(EXTRA_DENIALS).orEmpty(),
@@ -71,6 +89,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         binding.approvalAddTime.setOnClickListener { requestGrant() }
         binding.approvalSkipRule.setOnClickListener { requestSkip() }
+        binding.approvalCancel.setOnClickListener { navigateHomeAndFinish() }
     }
 
     private fun requestGrant() {
@@ -172,6 +191,15 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 if (success) finishAndLaunch() else toast(R.string.guardian_write_failed)
             }
         }
+    }
+
+    private fun navigateHomeAndFinish() {
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        startActivity(intent)
+        finishAffinity()
     }
 
     private fun finishAndLaunch() {
