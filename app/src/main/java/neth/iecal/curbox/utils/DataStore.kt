@@ -884,14 +884,18 @@ class DataStoreManager(private val context: Context) {
         }
         schedulePendingChanges()
         if (appliedAny) {
-            runCatching {
-                context.sendBroadcast(
-                    Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
-                        .setPackage(context.packageName)
-                )
-            }
+            sendAppRuleRefreshBroadcast()
         }
         return appliedAny
+    }
+
+    private fun sendAppRuleRefreshBroadcast() {
+        runCatching {
+            context.sendBroadcast(
+                Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
+                    .setPackage(context.packageName)
+            )
+        }
     }
 
     /**

@@ -16,6 +16,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
+import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.ServiceProtectionManager
 import kotlin.lazy
@@ -23,7 +24,7 @@ import kotlin.lazy
 @SuppressLint("AccessibilityPolicy")
 open class BaseBlockingService : AccessibilityService() {
 
-    val dataStoreManager  by lazy {
+    val dataStoreManager by lazy {
         DataStoreManager(this)
     }
 
@@ -109,6 +110,30 @@ open class BaseBlockingService : AccessibilityService() {
             startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(notificationId, notification)
+        }
+    }
+
+    fun updateForegroundNotification(model: LiveRuleNotificationModel) {
+        try {
+            val channelId = "blocking_service_channel"
+            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            val builder = NotificationCompat.Builder(this, channelId)
+                .setContentTitle(model.title)
+                .setContentText(model.collapsedText)
+                .setSmallIcon(R.drawable.icon)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setOngoing(true)
+
+            if (model.expandedLines.size > 1) {
+                builder.setStyle(NotificationCompat.BigTextStyle().bigText(model.expandedText))
+            } else if (model.expandedLines.size == 1) {
+                builder.setStyle(NotificationCompat.BigTextStyle().bigText(model.collapsedText))
+            }
+
+            val notification = builder.build()
+            val notificationId = this.javaClass.simpleName.hashCode()
+            notificationManager.notify(notificationId, notification)
+        } catch (_: Exception) {
         }
     }
 

@@ -14,8 +14,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.Constants
@@ -28,11 +30,15 @@ import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
+import neth.iecal.curbox.domain.apprules.AppRuleMembershipResolver
 import neth.iecal.curbox.domain.apprules.AppRuleReevaluationGate
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleReceiverLifecycle
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
+import neth.iecal.curbox.domain.apprules.LiveRuleNotificationFormatter
+import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
+import neth.iecal.curbox.domain.apprules.LiveRuleNotificationStateCalculator
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.ui.activity.WarningActivity
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
@@ -53,6 +59,7 @@ class AppRuleBlocker {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val handler = Handler(Looper.getMainLooper())
     private var settingsJob: kotlinx.coroutines.Job? = null
+    private var notificationTickJob: kotlinx.coroutines.Job? = null
     private var lastShownAt = 0L
     @Volatile private var launchablePackages: Set<String> = emptySet()
     @Volatile private var essentialPackages: Set<String> = emptySet()
@@ -63,6 +70,8 @@ class AppRuleBlocker {
     @Volatile private var useDayGenerationStartedAtMs = 0L
     @Volatile private var overrideState = neth.iecal.curbox.data.models.AppRuleOverrideState()
     private val reevaluationGate = AppRuleReevaluationGate()
+    @Volatile private var lastPostedNotificationModel: LiveRuleNotificationModel? = null
+    @Volatile private var currentForegroundPackage: String? = null
 
     fun setup(service: BaseBlockingService) {
         setupReady = false
@@ -102,6 +111,7 @@ class AppRuleBlocker {
                     // A malformed value can only come from older/corrupted storage. Keep the last
                     // valid runtime snapshot rather than exposing a partial reference graph.
                     snapshot.accept(candidate)
+                    updateLiveNotification()
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -110,6 +120,8 @@ class AppRuleBlocker {
             }
         }
         setupReady = true
+        startNotificationTicker()
+        updateLiveNotification()
     }
 
     fun setupReceivers() {
@@ -161,6 +173,9 @@ class AppRuleBlocker {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val packageName = event.packageName?.toString().orEmpty()
         if (packageName.isBlank()) return
+        currentForegroundPackage = packageName
+        updateLiveNotification(packageName)
+
         val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
         if (packageName in evaluationEssentialPackages) return
 
@@ -209,6 +224,94 @@ class AppRuleBlocker {
         if (!bypassThrottle && now - lastShownAt < 1_000L) return
         lastShownAt = now
         showWarning(packageName, evaluation)
+    }
+
+    private fun startNotificationTicker() {
+        notificationTickJob?.cancel()
+        notificationTickJob = scope.launch {
+            while (isActive) {
+                delay(MILLIS_PER_MINUTE)
+                try {
+                    updateLiveNotification()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    logNonFatal(error)
+                }
+            }
+        }
+    }
+
+    fun updateLiveNotification(foregroundPackage: String? = null) {
+        if (!setupReady || !::service.isInitialized) return
+        val currentSnapshot = snapshot.snapshot()
+        val now = System.currentTimeMillis()
+        val calculator = ConfigurableUseDayCalculator(resetTime = resetTime)
+        val useDayId = calculator.idAt(now)
+        val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
+
+        val defaultTitle = service.getString(
+            R.string.blocking_service_notification_title,
+            service::class.simpleName
+        )
+        val defaultText = service.getString(R.string.blocking_service_notification_text)
+
+        val model = try {
+            runBlocking(Dispatchers.IO) {
+                val sessions = sessionRepository.sessionsForUseDay(useDayId)
+                val items = LiveRuleNotificationStateCalculator.computeNotificationItems(
+                    snapshot = currentSnapshot,
+                    sessions = sessions,
+                    useDayId = useDayId,
+                    nowMs = now,
+                    zone = java.time.ZoneId.systemDefault(),
+                    useDayCalculator = calculator,
+                    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+                    availablePackages = launchablePackages,
+                    essentialExcludedPackages = evaluationEssentialPackages,
+                    overrides = overrideState
+                )
+                val membershipResolver = AppRuleMembershipResolver(currentSnapshot)
+                LiveRuleNotificationStateCalculator.buildNotificationModel(
+                    items = items,
+                    defaultTitle = defaultTitle,
+                    defaultText = defaultText,
+                    formatter = { item ->
+                        LiveRuleNotificationFormatter.formatRuleStatus(
+                            context = service,
+                            ruleName = item.ruleName,
+                            usedMinutes = item.usedMinutes,
+                            totalAllowedMinutes = item.totalAllowedMinutes,
+                            guardianExtraMinutes = item.guardianExtraMinutes
+                        )
+                    },
+                    foregroundPackage = foregroundPackage ?: currentForegroundPackage,
+                    rulePackageResolver = { ruleId ->
+                        val rule = currentSnapshot.appRules.find { it.id == ruleId }
+                        if (rule != null) {
+                            membershipResolver.targetPackagesAt(
+                                rule = rule,
+                                atMs = now,
+                                launchablePackages = launchablePackages,
+                                essentialExcludedPackages = evaluationEssentialPackages
+                            )
+                        } else {
+                            emptySet()
+                        }
+                    }
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
+            return
+        }
+
+        if (model != lastPostedNotificationModel) {
+            lastPostedNotificationModel = model
+            service.updateForegroundNotification(model)
+        }
     }
 
     private fun showWarning(packageName: String, evaluation: neth.iecal.curbox.domain.apprules.AppRulesEvaluation) {
@@ -260,6 +363,7 @@ class AppRuleBlocker {
 
     fun onDestroy() {
         settingsJob?.cancel()
+        notificationTickJob?.cancel()
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)
@@ -283,6 +387,7 @@ class AppRuleBlocker {
                     overrideState = settings.appRuleOverrideState
                     settings.appRuleSnapshot.takeIf { it.isValid }?.let(snapshot::accept)
                     handler.post { checkCurrentlyVisibleApplications() }
+                    updateLiveNotification()
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
@@ -318,6 +423,7 @@ class AppRuleBlocker {
         override fun onReceive(context: Context?, intent: Intent?) {
             // A new launchable app is part of an all-apps scope without requiring a rule edit.
             refreshPackageScope()
+            updateLiveNotification()
         }
     }
 
