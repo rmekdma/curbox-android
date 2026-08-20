@@ -315,31 +315,26 @@ class AppRuleBlocker {
 
     private fun showWarning(packageName: String, evaluation: neth.iecal.curbox.domain.apprules.AppRulesEvaluation) {
         if (!service.isDelayOver(1_000)) return
-        service.pressHome()
-        handler.postDelayed({
-            try {
-                val denialRows = evaluation.denyingRules.map { denial ->
-                    val rule = snapshot.snapshot().appRules.find { it.id == denial.ruleId }
-                    AppRuleGuardianDenial(
-                        ruleId = denial.ruleId,
-                        ruleName = rule?.name ?: denial.ruleId,
-                        reason = warningStatus(denial)
-                    )
-                }
-                val intent = Intent(service, WarningActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-                    putExtra("mode", Constants.WARNING_SCREEN_MODE_APP_BLOCKER)
-                    putExtra("launch_package", packageName)
-                    putExtra("app_rule_guardian", true)
-                    putExtra("app_rule_denials_json", Gson().toJson(denialRows))
-                }
-                service.startActivity(intent)
-            } catch (error: Exception) {
-                // Keep the delayed callback contained too: formatting the breakdown and starting
-                // the activity are both optional presentation work for the service process.
-                logNonFatal(error)
+        try {
+            val denialRows = evaluation.denyingRules.map { denial ->
+                val rule = snapshot.snapshot().appRules.find { it.id == denial.ruleId }
+                AppRuleGuardianDenial(
+                    ruleId = denial.ruleId,
+                    ruleName = rule?.name ?: denial.ruleId,
+                    reason = warningStatus(denial)
+                )
             }
-        }, 100L)
+            val intent = Intent(service, WarningActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                putExtra("mode", Constants.WARNING_SCREEN_MODE_APP_BLOCKER)
+                putExtra("launch_package", packageName)
+                putExtra("app_rule_guardian", true)
+                putExtra("app_rule_denials_json", Gson().toJson(denialRows))
+            }
+            service.startActivity(intent)
+        } catch (error: Exception) {
+            logNonFatal(error)
+        }
     }
 
     private fun warningStatus(evaluation: AppRuleEvaluation): String = if (evaluation.conditionEnabled) {
