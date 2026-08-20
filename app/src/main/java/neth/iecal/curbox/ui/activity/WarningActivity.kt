@@ -14,6 +14,10 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import androidx.appcompat.app.AlertDialog
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -49,7 +53,6 @@ import neth.iecal.curbox.anti_stimulants.MindfulMessage
 class WarningActivity : AppCompatActivity() {
 
     private var proceedTimer: CountDownTimer? = null
-    private var dialog: AlertDialog? = null
 
     private var vibrator: Vibrator? = null
 
@@ -96,6 +99,7 @@ class WarningActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
 
         // Unified app-rule approvals use the warning entry point so the service cannot expose a
         // second external approval route. The approval activity remains internal and receives the
@@ -153,6 +157,15 @@ class WarningActivity : AppCompatActivity() {
         }
 
         binding = DialogWarningOverlayBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, windowInsets ->
+            val insets = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
+            )
+            view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
+            windowInsets
+        }
+
         intent.getStringExtra("app_rule_status")?.let { status ->
             binding.appRuleStatus.visibility = View.VISIBLE
             binding.appRuleStatus.text = status
@@ -168,8 +181,18 @@ class WarningActivity : AppCompatActivity() {
         val isHomePressRequested = intent.getBooleanExtra("is_press_home", false)
         binding.minsPicker.setValue(3)
         binding.minsPicker.minValue = 2
-        val isDialogCancelable =
-            mode != Constants.WARNING_SCREEN_MODE_APP_BLOCKER || isHomePressRequested
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (mode == Constants.WARNING_SCREEN_MODE_APP_BLOCKER || mode == Constants.WARNING_SCREEN_MODE_KEYWORD_BLOCKER || isHomePressRequested) {
+                    val intent = Intent(Intent.ACTION_MAIN)
+                    intent.addCategory(Intent.CATEGORY_HOME)
+                    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(intent)
+                }
+                finishAffinity()
+            }
+        })
 
         if (warningScreenConfig.isProceedDisabled || isProceedLimitExceeded) {
             binding.btnProceed.visibility = View.GONE
@@ -290,13 +313,7 @@ class WarningActivity : AppCompatActivity() {
                 }.start()
         }
 
-        dialog = MaterialAlertDialogBuilder(this)
-            .setView(binding.root)
-            .setCancelable(isDialogCancelable)
-            .setOnCancelListener {
-                finishAffinity()
-            }
-            .show()
+
 
         binding.warningMsg.text = warningScreenConfig.message
 
@@ -317,7 +334,6 @@ class WarningActivity : AppCompatActivity() {
                 intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(intent)
             }
-            dialog?.dismiss()
             finishAffinity()
         }
 
@@ -451,7 +467,6 @@ class WarningActivity : AppCompatActivity() {
                     }
             }
 
-            dialog?.dismiss()
             finishAffinity()
         }
     }
@@ -676,7 +691,6 @@ class WarningActivity : AppCompatActivity() {
         stopNfcUnlockScan()
         proceedTimer?.cancel()
         vibrator?.cancel()
-        dialog?.dismiss()
     }
 
     private fun sendRefreshRequest(id: String, action: String, time: Int) {
