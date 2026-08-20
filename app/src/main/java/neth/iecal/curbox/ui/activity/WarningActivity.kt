@@ -184,13 +184,7 @@ class WarningActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (mode == Constants.WARNING_SCREEN_MODE_APP_BLOCKER || mode == Constants.WARNING_SCREEN_MODE_KEYWORD_BLOCKER || isHomePressRequested) {
-                    val intent = Intent(Intent.ACTION_MAIN)
-                    intent.addCategory(Intent.CATEGORY_HOME)
-                    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    startActivity(intent)
-                }
-                finishAffinity()
+                exitWarningScreen(mode, isHomePressRequested)
             }
         })
 
@@ -328,13 +322,7 @@ class WarningActivity : AppCompatActivity() {
         }
 
         binding.btnCancel.setOnClickListener {
-            if (mode == Constants.WARNING_SCREEN_MODE_APP_BLOCKER || mode == Constants.WARNING_SCREEN_MODE_KEYWORD_BLOCKER || isHomePressRequested) {
-                val intent = Intent(Intent.ACTION_MAIN)
-                intent.addCategory(Intent.CATEGORY_HOME)
-                intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(intent)
-            }
-            finishAffinity()
+            exitWarningScreen(mode, isHomePressRequested)
         }
 
         binding.btnProceed.setOnClickListener {
@@ -691,6 +679,17 @@ class WarningActivity : AppCompatActivity() {
         stopNfcUnlockScan()
         proceedTimer?.cancel()
         vibrator?.cancel()
+    }
+
+    private fun exitWarningScreen(mode: Int, isHomePressRequested: Boolean) {
+        if (mode == Constants.WARNING_SCREEN_MODE_APP_BLOCKER || mode == Constants.WARNING_SCREEN_MODE_KEYWORD_BLOCKER || isHomePressRequested) {
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            startActivity(intent)
+        }
+        finishAffinity()
     }
 
     private fun sendRefreshRequest(id: String, action: String, time: Int) {
