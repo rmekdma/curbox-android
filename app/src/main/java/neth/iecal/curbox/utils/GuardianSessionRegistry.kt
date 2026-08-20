@@ -1,9 +1,12 @@
 package neth.iecal.curbox.utils
 
+import android.app.Activity
+import android.app.Application
 import android.content.Intent
+import android.os.Bundle
 import java.util.UUID
 
-/** Process-local session and explicit handoff tokens for Curbox-owned activities. */
+/** Process-local session and foreground lifecycle tracking for Curbox-owned activities. */
 object GuardianSessionRegistry {
     const val EXTRA_INTERNAL_NAVIGATION_TOKEN =
         "neth.iecal.curbox.extra.INTERNAL_NAVIGATION_TOKEN"
@@ -20,6 +23,54 @@ object GuardianSessionRegistry {
     private var ownedDialogDepth = 0
     private var internalChildActive = false
     private var oneShotSystemResultPending = false
+    private var startedCurboxActivityCount = 0
+
+    @Synchronized
+    fun initLifecycleCallbacks(application: Application) {
+        application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+
+            override fun onActivityStarted(activity: Activity) {
+                if (isCurboxActivity(activity)) {
+                    GuardianSessionRegistry.onActivityStarted(isCurboxActivity = true)
+                }
+            }
+
+            override fun onActivityResumed(activity: Activity) {}
+
+            override fun onActivityPaused(activity: Activity) {}
+
+            override fun onActivityStopped(activity: Activity) {
+                if (isCurboxActivity(activity)) {
+                    GuardianSessionRegistry.onActivityStopped(isCurboxActivity = true)
+                }
+            }
+
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
+    }
+
+    private fun isCurboxActivity(activity: Activity): Boolean =
+        activity.packageName == activity.applicationContext.packageName
+
+    @Synchronized
+    fun onActivityStarted(isCurboxActivity: Boolean = true) {
+        if (!isCurboxActivity) return
+        startedCurboxActivityCount++
+        session.transition(GuardianFocusSurface.CURBOX_CONTENT, hasPassword = true)
+    }
+
+    @Synchronized
+    fun onActivityStopped(isCurboxActivity: Boolean = true) {
+        if (!isCurboxActivity) return
+        startedCurboxActivityCount = (startedCurboxActivityCount - 1).coerceAtLeast(0)
+        discardExpiredTokens()
+        if (startedCurboxActivityCount == 0 && !oneShotSystemResultPending) {
+            session.transition(GuardianFocusSurface.EXTERNAL_APP, hasPassword = true)
+        }
+    }
 
     @Synchronized
     fun issueInternalNavigationToken(): String {
@@ -98,6 +149,7 @@ object GuardianSessionRegistry {
             return true
         }
         if (!isInternalActivity && internalChildActive) return true
+        if (startedCurboxActivityCount > 0) return true
         internalChildActive = false
         session.transition(GuardianFocusSurface.EXTERNAL_APP, hasPassword = true)
         return false
@@ -212,6 +264,19 @@ object GuardianSessionRegistry {
     @Synchronized
     fun isOwnedDialogActive(): Boolean = ownedDialogActive
 
+    @Synchronized
+    fun resetForTest() {
+        session.clear()
+        pendingInternalToken = null
+        pendingInternalReturnToken = null
+        pendingOwnedTransitionToken = null
+        ownedDialogActive = false
+        ownedDialogDepth = 0
+        internalChildActive = false
+        oneShotSystemResultPending = false
+        startedCurboxActivityCount = 0
+    }
+
     private fun Long?.orZero(): Long = this ?: 0L
 
     private fun Pair<String, Long>.isStillValid(): Boolean = second >= System.currentTimeMillis()
@@ -223,3 +288,4 @@ object GuardianSessionRegistry {
         if (pendingOwnedTransitionToken?.second.orZero() < now) pendingOwnedTransitionToken = null
     }
 }
+
