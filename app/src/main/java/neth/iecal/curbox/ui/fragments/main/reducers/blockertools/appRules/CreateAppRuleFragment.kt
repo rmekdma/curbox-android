@@ -7,6 +7,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.CheckBox
 import android.widget.Toast
+import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -20,6 +21,7 @@ import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.databinding.FragmentCreateAppRuleBinding
+import neth.iecal.curbox.databinding.ItemAppRuleGroupConditionBinding
 import neth.iecal.curbox.databinding.ItemAppRuleTimeRangeBinding
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
@@ -37,6 +39,8 @@ class CreateAppRuleFragment : Fragment() {
     private val selectedIncludedGroupIds = mutableSetOf<String>()
     private val selectedExcludedGroupIds = mutableSetOf<String>()
     private val selectedContributorGroupIds = mutableSetOf<String>()
+    private val contributorGroupConditionMinutesMap = mutableMapOf<String, Long>()
+
     private data class RangeEditor(
         val binding: ItemAppRuleTimeRangeBinding,
         var startMinute: Int,
@@ -64,6 +68,9 @@ class CreateAppRuleFragment : Fragment() {
         binding.includeAllAppsSwitch.setOnCheckedChangeListener { _, isChecked ->
             updateIncludeAllAppsState(isChecked)
         }
+        binding.usageConditionSwitch.setOnCheckedChangeListener { _, isChecked ->
+            updateUsageConditionState(isChecked)
+        }
         binding.selectIncludedGroupsButton.setOnClickListener {
             showGroupSelectionDialog(
                 titleRes = R.string.app_rules_include_groups,
@@ -82,7 +89,10 @@ class CreateAppRuleFragment : Fragment() {
             showGroupSelectionDialog(
                 titleRes = R.string.app_rules_contributor_groups,
                 selectedIds = selectedContributorGroupIds,
-                onSelectionUpdated = { updateButtonLabels() }
+                onSelectionUpdated = {
+                    updateButtonLabels()
+                    renderContributorGroupConditionInputs()
+                }
             )
         }
 
@@ -96,7 +106,9 @@ class CreateAppRuleFragment : Fragment() {
                 populate(it)
             }
             updateIncludeAllAppsState(binding.includeAllAppsSwitch.isChecked)
+            updateUsageConditionState(binding.usageConditionSwitch.isChecked)
             updateButtonLabels()
+            renderContributorGroupConditionInputs()
             binding.deleteRuleButton.visibility = if (editingRule == null) View.GONE else View.VISIBLE
         }
     }
@@ -115,7 +127,13 @@ class CreateAppRuleFragment : Fragment() {
         binding.nameInput.setText(rule.name)
         binding.allowanceInput.setText(rule.allowedMinutes.toString())
         binding.usageConditionSwitch.isChecked = rule.usageConditionEnabled
-        binding.usageConditionMinutesInput.setText(rule.usageConditionMinutes.toString())
+        if (rule.usageConditionMinutes > 0L) {
+            binding.usageConditionMinutesInput.setText(rule.usageConditionMinutes.toString())
+        } else {
+            binding.usageConditionMinutesInput.setText("")
+        }
+        contributorGroupConditionMinutesMap.clear()
+        contributorGroupConditionMinutesMap.putAll(rule.effectiveContributorGroupConditionMinutes())
         binding.earnedAllowanceSwitch.isChecked = rule.earnedAllowanceEnabled
         binding.activeSwitch.isChecked = rule.isActive
         weekdayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.weekdays }
@@ -128,7 +146,9 @@ class CreateAppRuleFragment : Fragment() {
         selectedContributorGroupIds.clear()
         selectedContributorGroupIds.addAll(rule.effectiveContributorGroupIds())
         updateIncludeAllAppsState(scope.includeAllApps)
+        updateUsageConditionState(rule.usageConditionEnabled)
         updateButtonLabels()
+        renderContributorGroupConditionInputs()
 
         val ranges = rule.effectiveTimeRanges()
         clearTimeRanges()
@@ -137,6 +157,42 @@ class CreateAppRuleFragment : Fragment() {
 
     private fun updateIncludeAllAppsState(includeAll: Boolean) {
         binding.includedGroupsSection.visibility = if (includeAll) View.GONE else View.VISIBLE
+    }
+
+    private fun updateUsageConditionState(enabled: Boolean) {
+        binding.usageConditionSection.visibility = if (enabled) View.VISIBLE else View.GONE
+    }
+
+    private fun renderContributorGroupConditionInputs() {
+        binding.contributorGroupConditionsContainer.removeAllViews()
+        val groupsById = groups.associateBy { it.id }
+        selectedContributorGroupIds.forEach { groupId ->
+            val groupName = groupsById[groupId]?.name?.ifBlank { groupId } ?: groupId
+            val itemBinding = ItemAppRuleGroupConditionBinding.inflate(
+                LayoutInflater.from(requireContext()),
+                binding.contributorGroupConditionsContainer,
+                false
+            )
+            itemBinding.groupConditionInputLayout.hint = getString(
+                R.string.app_rules_group_condition_minutes_hint,
+                groupName
+            )
+            val currentMinutes = contributorGroupConditionMinutesMap[groupId] ?: 0L
+            if (currentMinutes > 0L) {
+                itemBinding.groupConditionMinutesInput.setText(currentMinutes.toString())
+            } else {
+                itemBinding.groupConditionMinutesInput.setText("")
+            }
+            itemBinding.groupConditionMinutesInput.doAfterTextChanged { text ->
+                val minutes = text?.toString()?.trim()?.toLongOrNull() ?: 0L
+                if (minutes > 0L) {
+                    contributorGroupConditionMinutesMap[groupId] = minutes
+                } else {
+                    contributorGroupConditionMinutesMap.remove(groupId)
+                }
+            }
+            binding.contributorGroupConditionsContainer.addView(itemBinding.root)
+        }
     }
 
     private fun updateButtonLabels() {
@@ -245,7 +301,7 @@ class CreateAppRuleFragment : Fragment() {
 
     private fun renderRangeSummary() {
         val summary = rangeEditors.joinToString { editor ->
-            "${formatMinute(editor.startMinute)} to ${formatMinute(editor.endMinute)}"
+            " to "
         }
         binding.timeRangesSummary.text = getString(R.string.app_rules_time_ranges_summary, summary)
     }
@@ -263,15 +319,15 @@ class CreateAppRuleFragment : Fragment() {
     private fun save() {
         val name = binding.nameInput.text?.toString()?.trim().orEmpty()
         val allowance = binding.allowanceInput.text?.toString()?.toLongOrNull()
-        val conditionMinutes =
-            binding.usageConditionMinutesInput.text?.toString()?.toLongOrNull() ?: 0L
+        val totalConditionMinutes =
+            binding.usageConditionMinutesInput.text?.toString()?.trim()?.toLongOrNull() ?: 0L
         val weekdays = weekdayChecks().mapIndexedNotNull { index, check ->
             index.takeIf { check.isChecked }
         }.toSet()
         val ranges = rangeEditors.map { editor ->
             AppRuleTimeRange(editor.startMinute, editor.endMinute)
         }
-        if (name.isEmpty() || allowance == null || allowance < 0 || conditionMinutes < 0L ||
+        if (name.isEmpty() || allowance == null || allowance < 0 || totalConditionMinutes < 0L ||
             weekdays.isEmpty() || ranges.isEmpty()
         ) {
             Toast.makeText(requireContext(), R.string.app_rules_complete_fields, Toast.LENGTH_SHORT).show()
@@ -283,6 +339,9 @@ class CreateAppRuleFragment : Fragment() {
             excludedGroupIds = selectedExcludedGroupIds.toSet()
         )
         val contributorGroupIds = selectedContributorGroupIds.toSet()
+        val cleanedGroupConditionMinutes = contributorGroupConditionMinutesMap
+            .filterKeys { it in contributorGroupIds }
+            .filterValues { it > 0L }
         val usageConditionEnabled = binding.usageConditionSwitch.isChecked
         val earnedAllowanceEnabled = binding.earnedAllowanceSwitch.isChecked
         val firstRange = ranges.first()
@@ -298,7 +357,8 @@ class CreateAppRuleFragment : Fragment() {
             timeRanges = ranges,
             contributorGroupIds = contributorGroupIds,
             usageConditionEnabled = usageConditionEnabled,
-            usageConditionMinutes = conditionMinutes,
+            usageConditionMinutes = totalConditionMinutes,
+            contributorGroupConditionMinutes = cleanedGroupConditionMinutes,
             earnedAllowanceEnabled = earnedAllowanceEnabled
         ) ?: AppRule.create(
             name = name,
@@ -313,7 +373,8 @@ class CreateAppRuleFragment : Fragment() {
             timeRanges = ranges,
             contributorGroupIds = contributorGroupIds,
             usageConditionEnabled = usageConditionEnabled,
-            usageConditionMinutes = conditionMinutes,
+            usageConditionMinutes = totalConditionMinutes,
+            contributorGroupConditionMinutes = cleanedGroupConditionMinutes,
             earnedAllowanceEnabled = earnedAllowanceEnabled
         )
         viewLifecycleOwner.lifecycleScope.launch {
@@ -351,3 +412,11 @@ internal fun missingContributorGroupIdsForEditor(
 internal fun contributorGroupIdsFromEditorChecks(
     checks: Map<String, Boolean>
 ): Set<String> = checks.filterValues { it }.keys
+
+internal fun parseGroupConditionInputs(
+    inputs: Map<String, String>,
+    selectedGroupIds: Set<String>
+): Map<String, Long> = inputs
+    .filterKeys { it in selectedGroupIds }
+    .mapValues { it.value.trim().toLongOrNull() ?: 0L }
+    .filterValues { it > 0L }

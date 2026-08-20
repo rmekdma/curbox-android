@@ -1446,7 +1446,9 @@
     <string name="app_rules_exclude_groups">Exclude app groups</string>
     <string name="app_rules_contributor_groups">Contributor app groups</string>
     <string name="app_rules_usage_condition">Require usage condition</string>
-    <string name="app_rules_usage_condition_minutes_hint">Condition minutes</string>
+    <string name="app_rules_usage_condition_minutes_hint">Total condition minutes</string>
+    <string name="app_rules_total_usage_condition_minutes_hint">Total condition minutes</string>
+    <string name="app_rules_group_condition_minutes_hint">%1$s condition minutes</string>
     <string name="app_rules_earned_allowance">Add earned allowance</string>
     <string name="app_rules_missing_contributor">Missing contributor app group. Fix this rule.</string>
     <string name="app_rules_missing_contributor_item">Missing contributor group: %1$s. Uncheck to remove it.</string>

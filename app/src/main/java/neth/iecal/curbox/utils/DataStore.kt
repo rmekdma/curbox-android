@@ -103,6 +103,14 @@ class GsonSerializer<T>(
             ensureLong(rule, "allowedMinutes", 0L)
             ensureBoolean(rule, "usageConditionEnabled", false)
             ensureLong(rule, "usageConditionMinutes", 0L)
+            val groupConditions = rule.get("contributorGroupConditionMinutes")?.takeIf { it.isJsonObject }?.asJsonObject ?: JsonObject()
+            val normalizedGroupConditions = JsonObject()
+            groupConditions.entrySet().forEach { (key, value) ->
+                if (key.isNotBlank() && value.isJsonPrimitive && value.asJsonPrimitive.isNumber) {
+                    normalizedGroupConditions.addProperty(key.trim(), value.asLong.coerceAtLeast(0L))
+                }
+            }
+            rule.add("contributorGroupConditionMinutes", normalizedGroupConditions)
             ensureBoolean(rule, "earnedAllowanceEnabled", false)
             ensureArray(rule, "contributorGroupIds")
             ensureArray(rule, "timeRanges")

@@ -168,6 +168,14 @@ object RestrictionComparator {
         if (old.usageConditionEnabled) {
             if (!new.usageConditionEnabled) return false
             if (new.usageConditionMinutes < old.usageConditionMinutes) return false
+            val oldGroupConds = old.effectiveContributorGroupConditionMinutes()
+            val newGroupConds = new.effectiveContributorGroupConditionMinutes()
+            for ((groupId, oldMins) in oldGroupConds) {
+                if (oldMins > 0L) {
+                    val newMins = newGroupConds[groupId] ?: 0L
+                    if (newMins < oldMins) return false
+                }
+            }
         } else if (new.usageConditionEnabled) {
             return false
         }

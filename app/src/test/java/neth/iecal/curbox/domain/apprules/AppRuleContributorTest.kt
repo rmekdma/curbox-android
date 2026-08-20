@@ -197,6 +197,109 @@ class AppRuleContributorTest {
         assertEquals(15 * MINUTE, evaluation.remainingMillis)
     }
 
+    @Test
+    fun perGroupConditionEnforcesIndividualGroupThresholds() {
+        val mathGroup = AppRuleAppGroup("math", "Math", listOf("com.math"))
+        val readingGroup = AppRuleAppGroup("reading", "Reading", listOf("com.reading"))
+        val rule = rule(allowedMinutes = 15).copy(
+            contributorGroupIds = setOf(mathGroup.id, readingGroup.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 0L,
+            contributorGroupConditionMinutes = mapOf(
+                mathGroup.id to 10L,
+                readingGroup.id to 20L
+            )
+        )
+        val groups = listOf(target, mathGroup, readingGroup)
+
+        // Only math satisfies
+        val r1 = evaluate(rule, listOf(session("com.math", 10), session("com.reading", 15)), groups)
+        assertFalse(r1.isAllowed)
+        assertEquals(0L, r1.evaluations.single().allowanceMillis)
+
+        // Only reading satisfies
+        val r2 = evaluate(rule, listOf(session("com.math", 5), session("com.reading", 20)), groups)
+        assertFalse(r2.isAllowed)
+        assertEquals(0L, r2.evaluations.single().allowanceMillis)
+
+        // Both satisfy
+        val r3 = evaluate(rule, listOf(session("com.math", 10), session("com.reading", 20)), groups)
+        assertTrue(r3.isAllowed)
+        assertEquals(15 * MINUTE, r3.evaluations.single().allowanceMillis)
+    }
+
+    @Test
+    fun combinedTotalAndPerGroupRequiresBothToSatisfy() {
+        val mathGroup = AppRuleAppGroup("math", "Math", listOf("com.math"))
+        val readingGroup = AppRuleAppGroup("reading", "Reading", listOf("com.reading"))
+        val rule = rule(allowedMinutes = 20).copy(
+            contributorGroupIds = setOf(mathGroup.id, readingGroup.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 35L,
+            contributorGroupConditionMinutes = mapOf(
+                mathGroup.id to 10L,
+                readingGroup.id to 10L
+            )
+        )
+        val groups = listOf(target, mathGroup, readingGroup)
+
+        // Individual groups met (10 + 10 = 20), but total 20 < 35
+        val r1 = evaluate(rule, listOf(session("com.math", 10), session("com.reading", 10)), groups)
+        assertFalse(r1.isAllowed)
+        assertEquals(0L, r1.evaluations.single().allowanceMillis)
+
+        // Total met (35), but math is 5 < 10 (reading is 30)
+        val r2 = evaluate(rule, listOf(session("com.math", 5), session("com.reading", 30)), groups)
+        assertFalse(r2.isAllowed)
+        assertEquals(0L, r2.evaluations.single().allowanceMillis)
+
+        // Both individual and total met (math 15 >= 10, reading 20 >= 10, total 35 >= 35)
+        val r3 = evaluate(rule, listOf(session("com.math", 15), session("com.reading", 20)), groups)
+        assertTrue(r3.isAllowed)
+        assertEquals(20 * MINUTE, r3.evaluations.single().allowanceMillis)
+    }
+
+    @Test
+    fun unconstrainedConditionAllowsImmediateDirectAllowance() {
+        val rule = rule(allowedMinutes = 10).copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 0L,
+            contributorGroupConditionMinutes = mapOf(contributor.id to 0L)
+        )
+
+        val result = evaluate(rule, sessions = emptyList())
+        assertTrue(result.isAllowed)
+        assertEquals(10 * MINUTE, result.evaluations.single().allowanceMillis)
+    }
+
+    @Test
+    fun earnedAllowanceWithPerGroupConditionUnlocksAndCreditsAllContributorTime() {
+        val mathGroup = AppRuleAppGroup("math", "Math", listOf("com.math"))
+        val readingGroup = AppRuleAppGroup("reading", "Reading", listOf("com.reading"))
+        val rule = rule(allowedMinutes = 10).copy(
+            contributorGroupIds = setOf(mathGroup.id, readingGroup.id),
+            usageConditionEnabled = true,
+            contributorGroupConditionMinutes = mapOf(
+                mathGroup.id to 15L
+            ),
+            earnedAllowanceEnabled = true
+        )
+        val groups = listOf(target, mathGroup, readingGroup)
+
+        // Before math meets condition (math 10, reading 20, total 30)
+        val before = evaluate(rule, listOf(session("com.math", 10), session("com.reading", 20)), groups)
+        assertFalse(before.isAllowed)
+        assertEquals(0L, before.evaluations.single().allowanceMillis)
+        assertEquals(0L, before.evaluations.single().earnedAllowanceMillis)
+
+        // After math meets condition (math 15, reading 20, total 35) -> credits 10 direct + 35 earned = 45 mins
+        val after = evaluate(rule, listOf(session("com.math", 15), session("com.reading", 20)), groups)
+        assertTrue(after.isAllowed)
+        assertEquals(35 * MINUTE, after.evaluations.single().earnedAllowanceMillis)
+        assertEquals(45 * MINUTE, after.evaluations.single().allowanceMillis)
+    }
+
     private fun evaluate(
         rule: AppRule,
         sessions: List<ForegroundSession>,

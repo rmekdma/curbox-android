@@ -92,6 +92,8 @@ class AppRuleMembershipResolver(private val snapshot: AppRuleSnapshot) {
         atMs = atMs
     )
 
+    fun packagesForGroupAt(groupId: String, atMs: Long): Set<String> = groupsById[groupId.trim()]?.packagesAt(atMs).orEmpty().map(String::trim).filter(String::isNotEmpty).toSet()
+
     fun contributorPackagesAt(
         rule: neth.iecal.curbox.data.models.AppRule,
         atMs: Long

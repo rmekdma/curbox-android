@@ -173,6 +173,8 @@ data class AppRule(
     /** When enabled, [usageConditionMinutes] must be reached before normal allowance applies. */
     val usageConditionEnabled: Boolean = false,
     val usageConditionMinutes: Long = 0L,
+    /** Per contributor group condition minutes. Zero or missing indicates unconstrained. */
+    val contributorGroupConditionMinutes: Map<String, Long> = emptyMap(),
     /** When enabled, contributor usage is added one to one after the condition is met. */
     val earnedAllowanceEnabled: Boolean = false
 ) {
@@ -188,6 +190,7 @@ data class AppRule(
             contributorGroupIds: Set<String> = emptySet(),
             usageConditionEnabled: Boolean = false,
             usageConditionMinutes: Long = 0L,
+            contributorGroupConditionMinutes: Map<String, Long> = emptyMap(),
             earnedAllowanceEnabled: Boolean = false
         ): AppRule = AppRule(
             id = newId(),
@@ -201,6 +204,7 @@ data class AppRule(
             contributorGroupIds = contributorGroupIds,
             usageConditionEnabled = usageConditionEnabled,
             usageConditionMinutes = usageConditionMinutes,
+            contributorGroupConditionMinutes = contributorGroupConditionMinutes,
             earnedAllowanceEnabled = earnedAllowanceEnabled
         )
     }
@@ -222,6 +226,12 @@ data class AppRule(
         .map(String::trim)
         .filter(String::isNotEmpty)
         .toSet()
+
+    fun effectiveContributorGroupConditionMinutes(): Map<String, Long> =
+        contributorGroupConditionMinutes
+            .mapKeys { it.key.trim() }
+            .filterKeys { it.isNotEmpty() }
+            .mapValues { it.value.coerceAtLeast(0L) }
 }
 
 /**
@@ -260,6 +270,7 @@ data class AppRuleSnapshot(
                 },
                 contributorGroupIds = rule.effectiveContributorGroupIds(),
                 usageConditionMinutes = rule.usageConditionMinutes,
+                contributorGroupConditionMinutes = rule.effectiveContributorGroupConditionMinutes(),
                 timeRanges = rule.timeRanges.ifEmpty {
                     listOf(AppRuleTimeRange(rule.startMinute, rule.endMinute))
                 }
@@ -310,6 +321,11 @@ data class AppRuleSnapshot(
             }
             if (rule.usageConditionMinutes < 0L) {
                 errors += "App rule ${rule.id} has a negative usage condition"
+            }
+            rule.contributorGroupConditionMinutes.forEach { (groupId, minutes) ->
+                if (minutes < 0L) {
+                    errors += "App rule ${rule.id} has a negative contributor group usage condition for group $groupId"
+                }
             }
             if (rule.contributorGroupIds.any { it.isBlank() }) {
                 errors += "App rule ${rule.id} contains a blank contributor app group"
@@ -395,3 +411,4 @@ data class ForegroundSession(
 )
 
 private fun newId(): String = UUID.randomUUID().toString()
+

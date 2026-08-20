@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.SystemClock
@@ -17,6 +19,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
+import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.ServiceProtectionManager
 import kotlin.lazy
@@ -146,7 +149,7 @@ open class BaseBlockingService : AccessibilityService() {
             val notificationId = this.javaClass.simpleName.hashCode()
             notificationManager.notify(notificationId, notification)
         } catch (error: Exception) {
-            CrashLogger.logNonFatalError(error)
+            CrashLogger(this).logNonFatalError(error)
         }
     }
 

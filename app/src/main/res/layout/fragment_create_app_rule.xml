@@ -123,17 +123,30 @@
             android:layout_marginTop="8dp"
             android:text="@string/app_rules_usage_condition" />
 
-        <com.google.android.material.textfield.TextInputLayout
+        <LinearLayout
+            android:id="@+id/usage_condition_section"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="@string/app_rules_usage_condition_minutes_hint">
+            android:orientation="vertical">
 
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/usage_condition_minutes_input"
+            <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="number" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:hint="@string/app_rules_total_usage_condition_minutes_hint">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/usage_condition_minutes_input"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="number" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <LinearLayout
+                android:id="@+id/contributor_group_conditions_container"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </LinearLayout>
 
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/earned_allowance_switch"

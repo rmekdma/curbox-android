@@ -125,6 +125,44 @@ class AppRuleRestrictionComparatorTest {
     }
 
     @Test
+    fun loweringPerGroupUsageConditionThresholdIsDelayed() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val configured = rule.copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            contributorGroupConditionMinutes = mapOf(contributor.id to 20L)
+        )
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group, contributor), listOf(configured)))
+        val proposed = old.copy(
+            appRuleSnapshot = AppRuleSnapshot(
+                listOf(group, contributor),
+                listOf(configured.copy(contributorGroupConditionMinutes = mapOf(contributor.id to 10L)))
+            )
+        )
+
+        assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun raisingPerGroupUsageConditionThresholdIsSameOrStricter() {
+        val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
+        val configured = rule.copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            contributorGroupConditionMinutes = mapOf(contributor.id to 10L)
+        )
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group, contributor), listOf(configured)))
+        val proposed = old.copy(
+            appRuleSnapshot = AppRuleSnapshot(
+                listOf(group, contributor),
+                listOf(configured.copy(contributorGroupConditionMinutes = mapOf(contributor.id to 20L)))
+            )
+        )
+
+        assertTrue(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
     fun loweringUsageConditionThresholdIsDelayed() {
         val contributor = AppRuleAppGroup("contributor", "Contributor", listOf("com.source"))
         val configured = rule.copy(
