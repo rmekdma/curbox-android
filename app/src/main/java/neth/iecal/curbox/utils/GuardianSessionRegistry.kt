@@ -181,6 +181,7 @@ object GuardianSessionRegistry {
         ) return false
         if (!isInternalActivity && internalChildActive) return false
         if (ownedDialogActive) return false
+        if (startedCurboxActivityCount > 0) return false
         val owned = ownedTransitionToken != null &&
             pendingOwnedTransitionToken?.first == ownedTransitionToken &&
             pendingOwnedTransitionToken?.second.orZero() >= System.currentTimeMillis()

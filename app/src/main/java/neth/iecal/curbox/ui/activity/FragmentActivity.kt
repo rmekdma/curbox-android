@@ -140,13 +140,20 @@ class FragmentActivity : AppCompatActivity() {
             return
         }
 
+        initActivityContent(savedInstanceState)
+    }
+
+    private fun initActivityContent(savedInstanceState: Bundle?) {
+        initialGuardianGate = false
         enableEdgeToEdge()
         setContentView(R.layout.activity_fragment)
         guardianActivityGate = GuardianActivityGate(
             window,
             findViewById(R.id.guardian_content_gate)
         )
-        if (selectedFragment == OnboardingFragment.FRAGMENT_ID) {
+        if (selectedFragmentId == OnboardingFragment.FRAGMENT_ID) {
+            revealGuardianContent()
+        } else if (GuardianSessionRegistry.session.isAuthenticated(hasPassword = true)) {
             revealGuardianContent()
         } else {
             obscureGuardianContent()
@@ -173,7 +180,7 @@ class FragmentActivity : AppCompatActivity() {
             insets
         }
 
-        when (selectedFragment) {
+        when (selectedFragmentId) {
             OnboardingFragment.FRAGMENT_ID,
             AccessibilityGuide.FRAGMENT_ID,
             LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID,
@@ -202,7 +209,7 @@ class FragmentActivity : AppCompatActivity() {
                 // Hide bottom nav for these standalone fragments
                 bottomNav.visibility = android.view.View.GONE
                 
-                val fragment = when (selectedFragment) {
+                val fragment = when (selectedFragmentId) {
                     OnboardingFragment.FRAGMENT_ID -> OnboardingFragment()
                     // Keep old deep links resolvable, but never recreate the coupled editor.
                     LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID -> AppRuleGroupsFragment()
@@ -276,12 +283,7 @@ class FragmentActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus && !isFinishing) {
-            val invalidated = GuardianSessionRegistry.handleWindowFocusLost(
-                isInternalActivity = internalNavigationOwner
-            )
-            obscureGuardianContent(invalidateAccess = invalidated)
-        } else if (hasFocus && !isFinishing && !isDestroyed) {
+        if (hasFocus && !isFinishing && !isDestroyed) {
             requestGuardianAccessIfNeeded()
         }
     }
@@ -305,9 +307,12 @@ class FragmentActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        obscureGuardianContent(invalidateAccess = false)
-        GuardianSessionRegistry.consumePendingInternalReturnHandoff()
-        requestGuardianAccessIfNeeded()
+        if (GuardianSessionRegistry.session.isAuthenticated(hasPassword = true)) {
+            revealGuardianContent()
+        } else {
+            obscureGuardianContent(invalidateAccess = false)
+            requestGuardianAccessIfNeeded()
+        }
     }
 
     private fun requestGuardianAccessIfNeeded() {
@@ -324,7 +329,11 @@ class FragmentActivity : AppCompatActivity() {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
             if (GuardianSessionRegistry.session.isAuthenticated(true)) {
                 guardianDialogVisible = false
-                revealGuardianContent()
+                if (initialGuardianGate) {
+                    initActivityContent(null)
+                } else {
+                    revealGuardianContent()
+                }
                 return@launch
             }
             val input = EditText(this@FragmentActivity).apply {
@@ -352,12 +361,7 @@ class FragmentActivity : AppCompatActivity() {
                             ).show()
                             finish()
                         } else if (initialGuardianGate) {
-                            initialGuardianGate = false
-                            intent.putExtra(
-                                GuardianSessionRegistry.EXTRA_INTERNAL_NAVIGATION_TOKEN,
-                                GuardianSessionRegistry.issueInternalNavigationToken()
-                            )
-                            recreate()
+                            initActivityContent(null)
                         } else {
                             revealGuardianContent()
                         }

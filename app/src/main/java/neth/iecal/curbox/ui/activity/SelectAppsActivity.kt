@@ -395,12 +395,7 @@ class SelectAppsActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus && !isFinishing) {
-            val invalidated = GuardianSessionRegistry.handleWindowFocusLost(
-                isInternalActivity = internalNavigationOwner
-            )
-            guardianActivityGate?.obscure(invalidateAccess = invalidated)
-        } else if (hasFocus && !isFinishing && !isDestroyed) {
+        if (hasFocus && !isFinishing && !isDestroyed) {
             requestGuardianAccessIfNeeded()
         }
     }
@@ -408,9 +403,15 @@ class SelectAppsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (!isFinishing && !isDestroyed) {
-            guardianActivityGate?.obscure(invalidateAccess = false)
-            GuardianSessionRegistry.consumePendingInternalReturnHandoff()
-            requestGuardianAccessIfNeeded()
+            if (GuardianSessionRegistry.session.isAuthenticated(hasPassword = true)) {
+                guardianActivityGate?.revealIfAuthorized(
+                    hasPassword = guardianConfig.isConfigured,
+                    sessionAuthenticated = true
+                )
+            } else {
+                guardianActivityGate?.obscure(invalidateAccess = false)
+                requestGuardianAccessIfNeeded()
+            }
         }
     }
 
