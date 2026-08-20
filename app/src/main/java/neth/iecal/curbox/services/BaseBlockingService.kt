@@ -117,12 +117,24 @@ open class BaseBlockingService : AccessibilityService() {
         try {
             val channelId = "blocking_service_channel"
             val notificationManager = getSystemService(NOTIFICATION_SERVICE) as? NotificationManager ?: return
+
+            val intent = Intent(this, neth.iecal.curbox.ui.activity.FragmentActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                intent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
             val builder = NotificationCompat.Builder(this, channelId)
                 .setContentTitle(model.title)
                 .setContentText(model.collapsedText)
                 .setSmallIcon(R.drawable.icon)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setOngoing(true)
+                .setContentIntent(pendingIntent)
 
             if (model.expandedLines.size > 1) {
                 builder.setStyle(NotificationCompat.BigTextStyle().bigText(model.expandedText))
@@ -133,7 +145,8 @@ open class BaseBlockingService : AccessibilityService() {
             val notification = builder.build()
             val notificationId = this.javaClass.simpleName.hashCode()
             notificationManager.notify(notificationId, notification)
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            CrashLogger.logNonFatalError(error)
         }
     }
 

@@ -244,20 +244,20 @@ class AppRuleBlocker {
 
     fun updateLiveNotification(foregroundPackage: String? = null) {
         if (!setupReady || !::service.isInitialized) return
-        val currentSnapshot = snapshot.snapshot()
-        val now = System.currentTimeMillis()
-        val calculator = ConfigurableUseDayCalculator(resetTime = resetTime)
-        val useDayId = calculator.idAt(now)
-        val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
+        scope.launch(Dispatchers.IO) {
+            try {
+                val currentSnapshot = snapshot.snapshot()
+                val now = System.currentTimeMillis()
+                val calculator = ConfigurableUseDayCalculator(resetTime = resetTime)
+                val useDayId = calculator.idAt(now)
+                val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
 
-        val defaultTitle = service.getString(
-            R.string.blocking_service_notification_title,
-            service::class.simpleName
-        )
-        val defaultText = service.getString(R.string.blocking_service_notification_text)
+                val defaultTitle = service.getString(
+                    R.string.blocking_service_notification_title,
+                    service::class.simpleName
+                )
+                val defaultText = service.getString(R.string.blocking_service_notification_text)
 
-        val model = try {
-            runBlocking(Dispatchers.IO) {
                 val sessions = sessionRepository.sessionsForUseDay(useDayId)
                 val items = LiveRuleNotificationStateCalculator.computeNotificationItems(
                     snapshot = currentSnapshot,
@@ -272,7 +272,7 @@ class AppRuleBlocker {
                     overrides = overrideState
                 )
                 val membershipResolver = AppRuleMembershipResolver(currentSnapshot)
-                LiveRuleNotificationStateCalculator.buildNotificationModel(
+                val model = LiveRuleNotificationStateCalculator.buildNotificationModel(
                     items = items,
                     defaultTitle = defaultTitle,
                     defaultText = defaultText,
@@ -300,17 +300,16 @@ class AppRuleBlocker {
                         }
                     }
                 )
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            logNonFatal(error)
-            return
-        }
 
-        if (model != lastPostedNotificationModel) {
-            lastPostedNotificationModel = model
-            service.updateForegroundNotification(model)
+                if (model != lastPostedNotificationModel) {
+                    lastPostedNotificationModel = model
+                    service.updateForegroundNotification(model)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logNonFatal(error)
+            }
         }
     }
 
