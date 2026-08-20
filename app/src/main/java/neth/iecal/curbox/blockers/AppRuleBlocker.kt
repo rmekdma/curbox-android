@@ -274,19 +274,43 @@ class AppRuleBlocker {
             scope.launch {
                 try {
                     refreshPackageScope()
-                    service.dataStoreManager.settings.first().let { settings ->
-                        if (overrideState != settings.appRuleOverrideState) {
-                            reevaluationGate.markOverrideChanged()
-                        }
-                        overrideState = settings.appRuleOverrideState
-                        settings.appRuleSnapshot.takeIf { it.isValid }?.let(snapshot::accept)
+                    val settings = service.dataStoreManager.settings.first()
+                    resetTime = safeResetTime(settings.useDayResetHour, settings.useDayResetMinute)
+                    useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
+                    if (overrideState != settings.appRuleOverrideState) {
+                        reevaluationGate.markOverrideChanged()
                     }
+                    overrideState = settings.appRuleOverrideState
+                    settings.appRuleSnapshot.takeIf { it.isValid }?.let(snapshot::accept)
+                    handler.post { checkCurrentlyVisibleApplications() }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
                     logNonFatal(error)
                 }
             }
+        }
+    }
+
+    private fun checkCurrentlyVisibleApplications() {
+        if (!::service.isInitialized) return
+        try {
+            val visiblePackages = service.windows
+                .filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+                .map { packageNameForWindow(it) }
+                .filter { it.isNotBlank() }
+                .distinct()
+            for (pkg in visiblePackages) {
+                val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+                event.packageName = pkg
+                try {
+                    doAppRuleCheck(event)
+                } finally {
+                    event.recycle()
+                }
+            }
+        } catch (error: Exception) {
+            logNonFatal(error)
         }
     }
 

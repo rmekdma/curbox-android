@@ -330,12 +330,12 @@ class DataStoreManager(private val context: Context) {
      * rejected before the snapshot reaches either process, so the service never observes a
      * half-edited configuration.
      */
-    suspend fun updateAppRuleSnapshot(
-        snapshot: AppRuleSnapshot,
-        appGroupEditMode: AppGroupEditMode? = null
-    ): Boolean {
-        val normalized = snapshot.normalized()
-        if (!normalized.isValid) return false
+   suspend fun updateAppRuleSnapshot(
+       snapshot: AppRuleSnapshot,
+       appGroupEditMode: AppGroupEditMode? = null
+   ): Boolean {
+       val normalized = snapshot.normalized()
+       if (!normalized.isValid) return false
         updateGated(
             field = GatedSettingsField.APP_RULES,
             appGroupEditMode = appGroupEditMode,
@@ -344,6 +344,7 @@ class DataStoreManager(private val context: Context) {
         runCatching {
             context.sendBroadcast(
                 Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
+                    .setPackage(context.packageName)
             )
         }
         return true
@@ -660,6 +661,7 @@ class DataStoreManager(private val context: Context) {
         runCatching {
             context.sendBroadcast(
                 Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
+                    .setPackage(context.packageName)
             )
         }
     }
@@ -891,6 +893,14 @@ class DataStoreManager(private val context: Context) {
             }
         }
         schedulePendingChanges()
+        if (appliedAny) {
+            runCatching {
+                context.sendBroadcast(
+                    Intent(neth.iecal.curbox.blockers.AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
+                        .setPackage(context.packageName)
+                )
+            }
+        }
         return appliedAny
     }
 
