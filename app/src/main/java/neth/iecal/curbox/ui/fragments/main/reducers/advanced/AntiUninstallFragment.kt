@@ -29,6 +29,8 @@ import neth.iecal.curbox.data.models.AntiUninstallConfig
 import neth.iecal.curbox.data.models.AntiUninstallMode
 import neth.iecal.curbox.utils.AntiUninstallManager
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianOwnedDialog
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import neth.iecal.curbox.utils.ViewUtils
 import java.util.concurrent.TimeUnit
 
@@ -79,6 +81,7 @@ class AntiUninstallFragment : Fragment() {
     private val adminLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
+        GuardianSessionRegistry.completeOneShotSystemResult()
         if (AntiUninstallManager.isAdminActive(requireContext())) {
             enableProtection()
         } else {
@@ -259,6 +262,10 @@ class AntiUninstallFragment : Fragment() {
                 getString(R.string.anti_uninstall_admin_explanation)
             )
         }
+        requireActivity().window.addFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE
+        )
+        GuardianSessionRegistry.markOneShotSystemResult()
         adminLauncher.launch(intent)
     }
 
@@ -291,20 +298,40 @@ class AntiUninstallFragment : Fragment() {
                     Toast.makeText(requireContext(), R.string.anti_uninstall_wrong_password, Toast.LENGTH_SHORT).show()
                 }
             }
-            AntiUninstallMode.TIMED -> MaterialAlertDialogBuilder(requireContext())
-                .setTitle(R.string.anti_uninstall_turn_off)
-                .setMessage(resources.getQuantityString(
-                    R.plurals.anti_uninstall_timed_confirm, latestConfig.timedUnlockDays, latestConfig.timedUnlockDays
-                ))
-                .setNegativeButton(R.string.anti_uninstall_cancel, null)
-                .setPositiveButton(R.string.anti_uninstall_start) { _, _ -> startUnlockRequest() }
-                .show()
-            AntiUninstallMode.COOLDOWN -> MaterialAlertDialogBuilder(requireContext())
-                .setTitle(R.string.anti_uninstall_turn_off)
-                .setMessage(R.string.anti_uninstall_cooldown_confirm)
-                .setNegativeButton(R.string.anti_uninstall_cancel, null)
-                .setPositiveButton(R.string.anti_uninstall_start) { _, _ -> startUnlockRequest() }
-                .show()
+            AntiUninstallMode.TIMED -> {
+                val dialog = MaterialAlertDialogBuilder(requireContext())
+                    .setTitle(R.string.anti_uninstall_turn_off)
+                    .setMessage(resources.getQuantityString(
+                        R.plurals.anti_uninstall_timed_confirm,
+                        latestConfig.timedUnlockDays,
+                        latestConfig.timedUnlockDays
+                    ))
+                    .setNegativeButton(R.string.anti_uninstall_cancel, null)
+                    .setPositiveButton(R.string.anti_uninstall_start) { _, _ ->
+                        GuardianOwnedDialog.launchCommit(
+                            requireContext(),
+                            viewLifecycleOwner.lifecycleScope,
+                            ::startUnlockRequest
+                        )
+                    }
+                    .create()
+                GuardianOwnedDialog.show(dialog)
+            }
+            AntiUninstallMode.COOLDOWN -> {
+                val dialog = MaterialAlertDialogBuilder(requireContext())
+                    .setTitle(R.string.anti_uninstall_turn_off)
+                    .setMessage(R.string.anti_uninstall_cooldown_confirm)
+                    .setNegativeButton(R.string.anti_uninstall_cancel, null)
+                    .setPositiveButton(R.string.anti_uninstall_start) { _, _ ->
+                        GuardianOwnedDialog.launchCommit(
+                            requireContext(),
+                            viewLifecycleOwner.lifecycleScope,
+                            ::startUnlockRequest
+                        )
+                    }
+                    .create()
+                GuardianOwnedDialog.show(dialog)
+            }
         }
     }
 
@@ -332,7 +359,7 @@ class AntiUninstallFragment : Fragment() {
         val passwordField = dialogView.findViewById<TextInputEditText>(R.id.input_password)
         val confirmField = dialogView.findViewById<TextInputEditText>(R.id.input_confirm)
 
-        MaterialAlertDialogBuilder(requireContext())
+        val dialog = MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.anti_uninstall_set_password_title)
             .setView(dialogView)
             .setNegativeButton(R.string.anti_uninstall_cancel, null)
@@ -344,10 +371,16 @@ class AntiUninstallFragment : Fragment() {
                         Toast.makeText(requireContext(), R.string.anti_uninstall_password_too_short, Toast.LENGTH_SHORT).show()
                     password != confirm ->
                         Toast.makeText(requireContext(), R.string.anti_uninstall_password_mismatch, Toast.LENGTH_SHORT).show()
-                    else -> onPassword(AntiUninstallManager.hashPassword(password))
+                    else -> GuardianOwnedDialog.launchCommit(
+                        requireContext(),
+                        viewLifecycleOwner.lifecycleScope
+                    ) {
+                        onPassword(AntiUninstallManager.hashPassword(password))
+                    }
                 }
             }
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     private fun showVerifyPasswordDialog(onPassword: (password: String) -> Unit) {
@@ -356,14 +389,20 @@ class AntiUninstallFragment : Fragment() {
         // Only a single field is needed to confirm an existing password.
         dialogView.findViewById<TextInputLayout>(R.id.input_layout_confirm).isVisible = false
 
-        MaterialAlertDialogBuilder(requireContext())
+        val dialog = MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.anti_uninstall_enter_password_title)
             .setView(dialogView)
             .setNegativeButton(R.string.anti_uninstall_cancel, null)
             .setPositiveButton(R.string.anti_uninstall_turn_off) { _, _ ->
-                onPassword(passwordField.text?.toString().orEmpty())
+                GuardianOwnedDialog.launchCommit(
+                    requireContext(),
+                    viewLifecycleOwner.lifecycleScope
+                ) {
+                    onPassword(passwordField.text?.toString().orEmpty())
+                }
             }
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 
     private fun formatRemaining(millis: Long): String {

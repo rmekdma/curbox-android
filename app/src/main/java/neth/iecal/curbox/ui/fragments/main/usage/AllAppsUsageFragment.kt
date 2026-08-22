@@ -2,8 +2,10 @@ package neth.iecal.curbox.ui.fragments.main.usage
 
 import android.annotation.SuppressLint
 import android.appwidget.AppWidgetManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Resources
 import android.net.Uri
 import android.graphics.Bitmap
@@ -55,9 +57,11 @@ import neth.iecal.curbox.ui.widgets.ReelsWidgetProvider
 import neth.iecal.curbox.ui.widgets.ScreentimeWidgetProvider
 import neth.iecal.curbox.utils.ColorUtils
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import neth.iecal.curbox.utils.PermissionUtils
 import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.UsageStatsHelper
+import neth.iecal.curbox.utils.UsageResetManager
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.ZoneId
@@ -94,6 +98,7 @@ class AllAppsUsageFragment : Fragment() {
 
         private val createCsvLauncher =
             registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+                GuardianSessionRegistry.completeOneShotSystemResult()
                 uri?.let {
                     lifecycleScope.launch(Dispatchers.IO) {
                         try {
@@ -434,6 +439,35 @@ class AllAppsUsageFragment : Fragment() {
             }
         }
 
+        override fun onStart() {
+            super.onStart()
+            if (::viewModel.isInitialized) {
+                ContextCompat.registerReceiver(
+                    requireContext(),
+                    usageResetReceiver,
+                    IntentFilter(UsageResetManager.ACTION_USAGE_RESET),
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+            }
+        }
+
+        override fun onStop() {
+            if (::viewModel.isInitialized) {
+                runCatching { requireContext().unregisterReceiver(usageResetReceiver) }
+            }
+            super.onStop()
+        }
+
+        private val usageResetReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: Intent?) {
+                if (intent?.action == UsageResetManager.ACTION_USAGE_RESET &&
+                    ::viewModel.isInitialized
+                ) {
+                    viewModel.reload()
+                }
+            }
+        }
+
         private fun generateAndExportCsv(startMs: Long, endMs: Long, mode: Int) {
             Toast.makeText(
                 requireContext(),
@@ -518,6 +552,10 @@ class AllAppsUsageFragment : Fragment() {
 
                 withContext(Dispatchers.Main) {
                     val name = "UsageData_${dateFormat.format(Date(startMs))}.csv"
+                    requireActivity().window.addFlags(
+                        android.view.WindowManager.LayoutParams.FLAG_SECURE
+                    )
+                    GuardianSessionRegistry.markOneShotSystemResult()
                     createCsvLauncher.launch(name)
                 }
             }
@@ -602,7 +640,10 @@ class AllAppsUsageFragment : Fragment() {
                         // stats don't apply here. Go straight to the website list.
                         WebsiteUsageFragment.newInstance(stats.packageName)
                     } else {
-                        AppUsageBreakdown(stats)
+                        AppUsageBreakdown(
+                            stat = stats,
+                            canResetUsage = viewModel.isCurrentCalendarDaySelected()
+                        )
                     }
                     activity?.supportFragmentManager?.beginTransaction()
                         ?.setCustomAnimations(R.anim.fade_in, R.anim.fade_out)

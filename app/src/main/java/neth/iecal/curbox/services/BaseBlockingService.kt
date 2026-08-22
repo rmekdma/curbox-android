@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.SystemClock
@@ -16,6 +18,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
+import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
+import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.ServiceProtectionManager
 import kotlin.lazy
@@ -23,7 +27,7 @@ import kotlin.lazy
 @SuppressLint("AccessibilityPolicy")
 open class BaseBlockingService : AccessibilityService() {
 
-    val dataStoreManager  by lazy {
+    val dataStoreManager by lazy {
         DataStoreManager(this)
     }
 
@@ -109,6 +113,43 @@ open class BaseBlockingService : AccessibilityService() {
             startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(notificationId, notification)
+        }
+    }
+
+    fun updateForegroundNotification(model: LiveRuleNotificationModel) {
+        try {
+            val channelId = "blocking_service_channel"
+            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as? NotificationManager ?: return
+
+            val intent = Intent(this, neth.iecal.curbox.ui.activity.FragmentActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                intent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
+            val builder = NotificationCompat.Builder(this, channelId)
+                .setContentTitle(model.title)
+                .setContentText(model.collapsedText)
+                .setSmallIcon(R.drawable.icon)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setOngoing(true)
+                .setContentIntent(pendingIntent)
+
+            if (model.expandedLines.size > 1) {
+                builder.setStyle(NotificationCompat.BigTextStyle().bigText(model.expandedText))
+            } else if (model.expandedLines.size == 1) {
+                builder.setStyle(NotificationCompat.BigTextStyle().bigText(model.collapsedText))
+            }
+
+            val notification = builder.build()
+            val notificationId = this.javaClass.simpleName.hashCode()
+            notificationManager.notify(notificationId, notification)
+        } catch (error: Exception) {
+            CrashLogger(this).logNonFatalError(error)
         }
     }
 

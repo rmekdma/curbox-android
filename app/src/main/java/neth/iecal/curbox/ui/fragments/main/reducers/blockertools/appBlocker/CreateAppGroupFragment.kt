@@ -22,6 +22,7 @@ import neth.iecal.curbox.data.models.AppGroupConfig
 import neth.iecal.curbox.databinding.FragmentCreateAppGroupBinding
 import neth.iecal.curbox.ui.activity.SelectAppsActivity
 import neth.iecal.curbox.utils.scheduleConflictsWith
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 import java.util.UUID
 
 class CreateAppGroupFragment : Fragment() {
@@ -173,7 +174,7 @@ class CreateAppGroupFragment : Fragment() {
 
         val conflicts = newGroup.scheduleConflictsWith(viewModel.groups.value)
         if (!skipConflictCheck && conflicts.isNotEmpty()) {
-            MaterialAlertDialogBuilder(requireContext())
+            val dialog = MaterialAlertDialogBuilder(requireContext())
                 .setTitle(R.string.schedule_conflict_title)
                 .setMessage(requireContext().appGroupConflictMessage(conflicts))
                 .setNegativeButton(R.string.schedule_conflict_edit_apps) { _, _ ->
@@ -183,9 +184,15 @@ class CreateAppGroupFragment : Fragment() {
                     openScheduleEditor()
                 }
                 .setPositiveButton(R.string.schedule_conflict_keep_both) { _, _ ->
-                    saveGroup(skipConflictCheck = true)
+                    GuardianOwnedDialog.launchCommit(
+                        requireContext(),
+                        viewLifecycleOwner.lifecycleScope
+                    ) {
+                        saveGroup(skipConflictCheck = true)
+                    }
                 }
-                .show()
+                .create()
+            GuardianOwnedDialog.show(dialog)
             return
         }
 

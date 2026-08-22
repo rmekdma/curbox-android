@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:id="@+id/guardian_auth_root"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="32dp">
+
+        <TextView
+            android:id="@+id/guardian_settings_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/guardian_settings_title"
+            android:textAppearance="?attr/textAppearanceHeadlineSmall" />
+
+        <TextView
+            android:id="@+id/guardian_settings_description"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="24dp"
+            android:text="@string/guardian_settings_description"
+            android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+        <EditText
+            android:id="@+id/guardian_current_password"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:autofillHints="password"
+            android:hint="@string/guardian_current_password_hint"
+            android:inputType="textPassword" />
+
+        <EditText
+            android:id="@+id/guardian_new_password"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:autofillHints="newPassword"
+            android:hint="@string/guardian_new_password_hint"
+            android:inputType="textPassword" />
+
+        <EditText
+            android:id="@+id/guardian_confirm_password"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:autofillHints="newPassword"
+            android:hint="@string/guardian_confirm_password_hint"
+            android:inputType="textPassword" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/guardian_save_password"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/guardian_save_password" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/guardian_clear_password"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/guardian_clear_password" />
+    </LinearLayout>
+</ScrollView>

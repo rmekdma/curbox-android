@@ -24,6 +24,7 @@ import neth.iecal.curbox.data.models.KeywordGroup
 import neth.iecal.curbox.data.models.ScheduledUsageConfig
 import neth.iecal.curbox.databinding.FragmentCreateKeywordGroupBinding
 import neth.iecal.curbox.utils.KeywordFileCodec
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
@@ -48,10 +49,12 @@ class CreateKeywordGroupFragment : Fragment() {
     private var existingGroupId: String? = null
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        GuardianSessionRegistry.completeOneShotSystemResult()
         uri?.let { importKeywordsFromFile(it) }
     }
 
     private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri: Uri? ->
+        GuardianSessionRegistry.completeOneShotSystemResult()
         uri?.let { exportKeywordsToFile(it) }
     }
 
@@ -155,11 +158,15 @@ class CreateKeywordGroupFragment : Fragment() {
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 R.id.action_import -> {
+                    requireActivity().window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                    GuardianSessionRegistry.markOneShotSystemResult()
                     importLauncher.launch("text/plain")
                     true
                 }
                 R.id.action_export -> {
                     val fileName = "keywords_${binding.etGroupName.text.toString().ifEmpty { "group" }}.txt"
+                    requireActivity().window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                    GuardianSessionRegistry.markOneShotSystemResult()
                     exportLauncher.launch(fileName)
                     true
                 }

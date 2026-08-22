@@ -7,12 +7,14 @@ import android.util.Log
 import neth.iecal.curbox.BuildConfig
 import neth.iecal.curbox.anti_stimulants.GrayScaleFilter
 import neth.iecal.curbox.blockers.AppBlocker
+import neth.iecal.curbox.blockers.AppRuleBlocker
 import neth.iecal.curbox.blockers.FocusModeBlocker
 import neth.iecal.curbox.blockers.KeywordBlocker
 import neth.iecal.curbox.blockers.ReelBlocker
 import neth.iecal.curbox.blockers.uihider.UiHider
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.FocusStatsEntity
+import neth.iecal.curbox.data.models.LegacyAppRuleMigration
 import neth.iecal.curbox.hardcoded.allScripts
 import neth.iecal.curbox.trackers.ReelsCountTracker
 import neth.iecal.curbox.utils.DataStoreManager
@@ -101,12 +103,38 @@ object CurboxApiCommands {
 
     private suspend fun setAppBlockerGroup(context: Context, dataStore: DataStoreManager, groupId: String, enable: Boolean) {
         val settings = dataStore.settings.first()
-        if (settings.blockedAppGroups.none { it.id == groupId }) return
-        val updated = settings.blockedAppGroups.map {
-            if (it.id == groupId) it.copy(isActive = enable) else it
+        val snapshot = settings.appRuleSnapshot
+        val neutralId = if (groupId.startsWith("legacy-app-group:")) groupId else LegacyAppRuleMigration.neutralGroupId(groupId)
+        val matchesNeutral = snapshot.appGroups.any { it.id == groupId || it.id == neutralId }
+        if (matchesNeutral) {
+            val updatedRules = snapshot.appRules.map { rule ->
+                if (ruleTargetsGroup(rule, groupId, neutralId)) {
+                    rule.copy(isActive = enable)
+                } else rule
+            }
+            val updatedSnapshot = snapshot.copy(appRules = updatedRules)
+            dataStore.updateAppRuleSnapshot(updatedSnapshot)
         }
-        dataStore.updateAppGroups(updated)
-        broadcast(context, AppBlocker.INTENT_ACTION_REFRESH_APP_BLOCKER)
+        if (settings.blockedAppGroups.any { it.id == groupId }) {
+            val updated = settings.blockedAppGroups.map {
+                if (it.id == groupId) it.copy(isActive = enable) else it
+            }
+            dataStore.updateAppGroups(updated)
+            broadcast(context, AppBlocker.INTENT_ACTION_REFRESH_APP_BLOCKER)
+        }
+    }
+
+    private fun ruleTargetsGroup(rule: neth.iecal.curbox.data.models.AppRule, groupId: String, neutralId: String): Boolean {
+        val rawTargets = setOf(groupId, neutralId, groupId.removePrefix("legacy-app-group:"), neutralId.removePrefix("legacy-app-group:"))
+        val ruleGroupIds = buildSet {
+            add(rule.appGroupId)
+            add(rule.appGroupId.removePrefix("legacy-app-group:"))
+            rule.effectiveScope().includedGroupIds.forEach {
+                add(it)
+                add(it.removePrefix("legacy-app-group:"))
+            }
+        }
+        return ruleGroupIds.any { it.isNotBlank() && it in rawTargets }
     }
 
     private suspend fun setKeywordBlocker(context: Context, dataStore: DataStoreManager, enable: Boolean) {
@@ -214,13 +242,31 @@ object CurboxApiCommands {
                 )
             }
 
-            ApiList.APP_BLOCKER_GROUPS -> settings.blockedAppGroups.map { g ->
-                linkedMapOf(
-                    "id" to g.id,
-                    "name" to g.name,
-                    "isActive" to g.isActive,
-                    "apps" to g.selectedPackages.size
-                )
+            ApiList.APP_BLOCKER_GROUPS -> {
+                val snapshot = settings.appRuleSnapshot
+                if (snapshot.appGroups.isNotEmpty()) {
+                    snapshot.appGroups.map { g ->
+                        val matchingRules = snapshot.appRules.filter { r ->
+                            r.appGroupId == g.id || r.effectiveScope().includedGroupIds.contains(g.id)
+                        }
+                        val isActive = if (matchingRules.isEmpty()) true else matchingRules.any { it.isActive }
+                        linkedMapOf(
+                            "id" to g.id,
+                            "name" to g.name,
+                            "isActive" to isActive,
+                            "apps" to g.selectedPackages.size
+                        )
+                    }
+                } else {
+                    settings.blockedAppGroups.map { g ->
+                        linkedMapOf(
+                            "id" to g.id,
+                            "name" to g.name,
+                            "isActive" to g.isActive,
+                            "apps" to g.selectedPackages.size
+                        )
+                    }
+                }
             }
 
             ApiList.KEYWORD_GROUPS -> settings.keywordBlockerConfig.keywordGroups.map { g ->

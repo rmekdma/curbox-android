@@ -7,8 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.ui.views.WeeklyBarGraphView
@@ -104,87 +106,129 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
     // same ViewModel instance already has data loaded. Guard against redoing
     // that first-time setup, which would otherwise re-flash the loading overlay.
     private var hasLoadedOnce = false
+    private var loadJob: Job? = null
+    private var loadGeneration = 0L
+    private val _loadedStatsDate = MutableLiveData<LocalDate?>(null)
 
     fun initialize() {
         if (hasLoadedOnce) return
         hasLoadedOnce = true
-        viewModelScope.launch(Dispatchers.IO) {
+        launchLatestLoad { generation ->
             getDefaultLauncherPackageName(getApplication<Application>().packageManager)?.let {
                 ignoredPackages.add(it)
             }
             val datastore = DataStoreManager(getApplication())
             ignoredPackages.addAll(datastore.settings.first().usageTrackerIgnoredApps)
-            loadWeekData()
-            refreshSyncedUsage()
+            loadWeekData(generation)
+            refreshSyncedUsage(generation)
         }
     }
 
     // Usage records never send a push to this device, so the freshest usage from
     // other devices only arrives when we ask. Pull once when the screen opens,
     // then reload with whatever came in.
-    private suspend fun refreshSyncedUsage() {
+    private suspend fun refreshSyncedUsage(generation: Long) {
         val provider = neth.iecal.curbox.data.sync.SyncGateway.provider
         if (!provider.isAvailable) return
         runCatching { provider.refresh() }
-        loadWeekData()
+        loadWeekData(generation)
     }
 
     fun goToPreviousWeek() {
         _weekOffset.value = (_weekOffset.value ?: 0) - 1
-        viewModelScope.launch(Dispatchers.IO) {
-            loadWeekData()
-        }
+        _loadedStatsDate.value = null
+        launchLatestLoad { generation -> loadWeekData(generation) }
     }
 
     fun goToNextWeek() {
         val current = _weekOffset.value ?: 0
         if (current < 0) {
             _weekOffset.value = current + 1
-            viewModelScope.launch(Dispatchers.IO) {
-                loadWeekData()
-            }
+            _loadedStatsDate.value = null
+            launchLatestLoad { generation -> loadWeekData(generation) }
         }
     }
 
     fun selectDay(index: Int) {
         _selectedDayIndex.value = index
-        viewModelScope.launch(Dispatchers.IO) {
-            withContext(Dispatchers.Main) { _isLoading.value = true }
+        _loadedStatsDate.value = null
+        launchLatestLoad { generation ->
+            withContext(Dispatchers.Main) {
+                if (!isCurrentLoad(generation)) return@withContext
+                _isLoading.value = true
+            }
             val weekStart = getWeekStart(_weekOffset.value ?: 0)
             val selectedDate = weekStart.plusDays(index.toLong())
-            loadDayStats(selectedDate)
-            withContext(Dispatchers.Main) { _isLoading.value = false }
+            loadDayStats(selectedDate, generation)
+            withContext(Dispatchers.Main) {
+                if (isCurrentLoad(generation)) _isLoading.value = false
+            }
         }
     }
 
     fun reload() {
-        viewModelScope.launch(Dispatchers.IO) {
-            loadWeekData()
+        _loadedStatsDate.value = null
+        launchLatestLoad { generation ->
+            dayStatsCache.clear()
+            loadWeekData(generation)
         }
+    }
+
+    /** Current-use-day reset is destructive; only the present calendar-day screen may expose it. */
+    fun isCurrentCalendarDaySelected(): Boolean {
+        val index = _selectedDayIndex.value ?: return false
+        val weekStart = getWeekStart(_weekOffset.value ?: 0)
+        val selectedDate = weekStart.plusDays(index.toLong())
+        return selectedDate == LocalDate.now() && _loadedStatsDate.value == selectedDate
     }
 
     // A user asked refresh: drop the cached day stats so the system's freshest
     // usage is read again, pull the latest usage from other devices, then reload.
     // Unlike reload() this always shows the loading overlay so the tap has visible feedback.
     fun refresh() {
-        viewModelScope.launch(Dispatchers.IO) {
-            withContext(Dispatchers.Main) { _isLoading.value = true }
+        _loadedStatsDate.value = null
+        launchLatestLoad { generation ->
+            withContext(Dispatchers.Main) {
+                if (!isCurrentLoad(generation)) return@withContext
+                _isLoading.value = true
+            }
             dayStatsCache.clear()
             val provider = neth.iecal.curbox.data.sync.SyncGateway.provider
             if (provider.isAvailable) runCatching { provider.refresh() }
-            loadWeekData()
-            withContext(Dispatchers.Main) { _isLoading.value = false }
+            loadWeekData(generation)
+            withContext(Dispatchers.Main) {
+                if (isCurrentLoad(generation)) _isLoading.value = false
+            }
         }
     }
 
-    private suspend fun loadWeekData() {
+    private fun launchLatestLoad(block: suspend (Long) -> Unit) {
+        val generation = ++loadGeneration
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                block(generation)
+            } catch (error: CancellationException) {
+                throw error
+            }
+        }
+    }
+
+    private fun isCurrentLoad(generation: Long): Boolean = generation == loadGeneration
+
+    private suspend fun loadWeekData(generation: Long) {
         // Only show the full-screen loading overlay when there's nothing on
         // screen yet. Reloads triggered by revisiting this screen (returning
         // from AppUsageBreakdown, resuming the app) already have data to show
         // while they refresh in the background, so flashing the overlay for
         // those is just an annoying flicker rather than useful feedback.
         val silent = _selectedDayStats.value != null
-        if (!silent) withContext(Dispatchers.Main) { _isLoading.value = true }
+        if (!silent) {
+            withContext(Dispatchers.Main) {
+                if (!isCurrentLoad(generation)) return@withContext
+                _isLoading.value = true
+            }
+        }
 
         val offset = withContext(Dispatchers.Main) { _weekOffset.value ?: 0 }
         val weekStart = getWeekStart(offset)
@@ -194,6 +238,7 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
         val isCurrentWeek = offset == 0
 
         withContext(Dispatchers.Main) {
+            if (!isCurrentLoad(generation)) return@withContext
             _canGoNext.value = offset < 0
 
             val startLabel = weekStart.format(dayLabelFormatter)
@@ -207,6 +252,7 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
         var todayIndex = -1
 
         for (i in 0..6) {
+            if (!isCurrentLoad(generation)) return
             val date = weekStart.plusDays(i.toLong())
             val isFuture = date.isAfter(today)
 
@@ -228,18 +274,23 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
         val defaultSelected = if (isCurrentWeek && todayIndex >= 0) todayIndex else 6
 
         withContext(Dispatchers.Main) {
+            if (!isCurrentLoad(generation)) return@withContext
             _weeklyData.value = dayDataList
             _selectedDayIndex.value = defaultSelected
         }
 
         // Load stats for the selected day
         val selectedDate = weekStart.plusDays(defaultSelected.toLong())
-        loadDayStats(selectedDate)
+        loadDayStats(selectedDate, generation)
 
-        if (!silent) withContext(Dispatchers.Main) { _isLoading.value = false }
+        if (!silent) {
+            withContext(Dispatchers.Main) {
+                if (isCurrentLoad(generation)) _isLoading.value = false
+            }
+        }
     }
 
-    private suspend fun loadDayStats(date: LocalDate) {
+    private suspend fun loadDayStats(date: LocalDate, generation: Long) {
         // Fold in app usage synced from the user's other Android devices, summed
         // per app so each row shows combined time across every device. Empty on
         // F-Droid and when nothing has synced.
@@ -290,11 +341,13 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
         val total = statsOut.sumOf { it.totalTime }
 
         withContext(Dispatchers.Main) {
+            if (!isCurrentLoad(generation)) return@withContext
             _selectedDayStats.value = statsOut
             _selectedDayWebsiteStats.value = websiteOut
             _selectedDayReelUsageStats.value = reelUsageStats
             _totalTime.value = total
             _dateSublabel.value = sublabel
+            _loadedStatsDate.value = date
         }
     }
 

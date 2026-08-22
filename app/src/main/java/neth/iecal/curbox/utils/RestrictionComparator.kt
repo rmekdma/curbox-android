@@ -6,6 +6,10 @@ import neth.iecal.curbox.data.models.AppBlockingType
 import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.data.models.AppTimeConfig
 import neth.iecal.curbox.data.models.AppUsageConfig
+import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.domain.apprules.AppRuleSchedule
 import neth.iecal.curbox.data.models.AutoDndGroup
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.GrayscaleGroup
@@ -34,11 +38,18 @@ object RestrictionComparator {
 
     private val gson = Gson()
 
+    private data class ContributorPackageResolution(
+        val packages: Set<String>,
+        val hasMissingGroup: Boolean
+    )
+
     fun isSameOrStricter(field: GatedSettingsField, current: Settings, proposed: Settings): Boolean {
         return try {
             when (field) {
                 GatedSettingsField.APP_GROUPS ->
                     appGroups(current.blockedAppGroups, proposed.blockedAppGroups)
+                GatedSettingsField.APP_RULES ->
+                    appRuleSnapshots(current.appRuleSnapshot, proposed.appRuleSnapshot)
                 GatedSettingsField.AUTO_DND_GROUPS ->
                     autoDndGroups(current.autoDndGroups, proposed.autoDndGroups)
                 GatedSettingsField.REEL_BLOCKER ->
@@ -79,6 +90,129 @@ object RestrictionComparator {
             val n = new.find { it.id == o.id } ?: return@all false
             appGroup(o, n)
         }
+    }
+
+    /**
+     * A unified app-rule edit is stricter only when every previously active rule remains at least
+     * as restrictive. New rules are allowed because they add protection; weakening an existing
+     * rule, removing a previously covered target, or deleting it is delayed.
+     */
+    fun appRuleSnapshots(old: AppRuleSnapshot, new: AppRuleSnapshot): Boolean {
+        if (!old.isValid || !new.isValid) return false
+        val newRules = new.appRules.associateBy { it.id }
+        return old.appRules.filter { it.isActive }.all { oldRule ->
+            val newRule = newRules[oldRule.id] ?: return@all false
+            appRule(oldRule, newRule, old.appGroups, new.appGroups)
+        }
+    }
+
+    private fun appRule(
+        old: AppRule,
+        new: AppRule,
+        oldGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>,
+        newGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>
+    ): Boolean {
+        if (!new.isActive) return false
+        // A wider target set adds protection and is safe to apply immediately. Removing a
+        // previously covered package weakens the rule and must stay behind the delay.
+        if (!appRuleScopeSameOrWider(old, new, oldGroups, newGroups)) return false
+        if (new.allowedMinutes > old.allowedMinutes) return false
+        if (!appRuleContributionSameOrStricter(old, new, oldGroups, newGroups)) return false
+        val oldCoverage = ruleCoverage(old)
+        val newCoverage = ruleCoverage(new)
+        return oldCoverage.indices.all { !oldCoverage[it] || newCoverage[it] }
+    }
+
+    /** Public seam used by tests and settings editors to classify scope-only edits. */
+    fun appRuleScopeSameOrWider(
+        old: AppRule,
+        new: AppRule,
+        oldGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>,
+        newGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>
+    ): Boolean {
+        val knownPackages = (oldGroups + newGroups)
+            .flatMap { it.selectedPackages }
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toSet()
+        val oldPackages = old.effectiveScope().resolve(oldGroups, knownPackages)
+        val newPackages = new.effectiveScope().resolve(newGroups, knownPackages)
+        // A dynamic all-apps scope includes future launchable packages. A finite replacement can
+        // never be proven to retain that future coverage, even when current package sets match.
+        if (old.effectiveScope().includeAllApps && !new.effectiveScope().includeAllApps) return false
+        return newPackages.containsAll(oldPackages)
+    }
+
+    private fun ruleCoverage(rule: AppRule): BooleanArray {
+        return AppRuleSchedule.weeklyCoverage(rule)
+    }
+
+    /** Public schedule seam: every previously restricted minute must remain covered. */
+    fun appRuleScheduleSameOrWider(old: AppRule, new: AppRule): Boolean {
+        val oldCoverage = ruleCoverage(old)
+        val newCoverage = ruleCoverage(new)
+        return oldCoverage.indices.all { !oldCoverage[it] || newCoverage[it] }
+    }
+
+    /**
+     * Contributor usage is an input that can only increase a rule's allowance or unlock it
+     * sooner. A change is immediately safe only when it removes contributor capability or makes
+     * the condition harder; anything that cannot be proven is held by the settings delay.
+     */
+    fun appRuleContributionSameOrStricter(
+        old: AppRule,
+        new: AppRule,
+        oldGroups: List<AppRuleAppGroup>,
+        newGroups: List<AppRuleAppGroup>
+    ): Boolean {
+        if (old.usageConditionEnabled) {
+            if (!new.usageConditionEnabled) return false
+            if (new.usageConditionMinutes < old.usageConditionMinutes) return false
+            val oldGroupConds = old.effectiveContributorGroupConditionMinutes()
+            val newGroupConds = new.effectiveContributorGroupConditionMinutes()
+            for ((groupId, oldMins) in oldGroupConds) {
+                if (oldMins > 0L) {
+                    val newMins = newGroupConds[groupId] ?: 0L
+                    if (newMins < oldMins) return false
+                }
+            }
+        } else if (new.usageConditionEnabled) {
+            return false
+        }
+        if (!old.earnedAllowanceEnabled && new.earnedAllowanceEnabled) return false
+
+        val oldDependsOnContributors = old.usageConditionEnabled || old.earnedAllowanceEnabled
+        val newDependsOnContributors = new.usageConditionEnabled || new.earnedAllowanceEnabled
+        if (!oldDependsOnContributors && !newDependsOnContributors) return true
+
+        val oldResolution = resolveContributorPackages(old, oldGroups)
+        val newResolution = resolveContributorPackages(new, newGroups)
+        // A newly missing contributor cannot unlock or earn time, so preserving its stale ID is
+        // an immediate strengthening. Repairing an old missing reference restores capability and
+        // must wait behind the settings delay.
+        if (newResolution.hasMissingGroup) return true
+        if (oldResolution.hasMissingGroup) return false
+        return newResolution.packages.all { it in oldResolution.packages }
+    }
+
+    private fun resolveContributorPackages(
+        rule: AppRule,
+        groups: List<AppRuleAppGroup>
+    ): ContributorPackageResolution {
+        val byId = groups.associateBy { it.id.trim() }
+        val packages = linkedSetOf<String>()
+        var hasMissingGroup = false
+        rule.effectiveContributorGroupIds().forEach { id ->
+            val group = byId[id]
+            if (group == null) {
+                hasMissingGroup = true
+            } else {
+                group.selectedPackages.map(String::trim)
+                    .filter(String::isNotEmpty)
+                    .forEach(packages::add)
+            }
+        }
+        return ContributorPackageResolution(packages, hasMissingGroup)
     }
 
     private fun appGroup(o: AppGroup, n: AppGroup): Boolean {

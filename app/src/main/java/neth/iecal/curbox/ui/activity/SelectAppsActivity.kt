@@ -28,14 +28,28 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
+import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.databinding.ActivitySelectAppsBinding
 import neth.iecal.curbox.databinding.DialogAddKeywordBinding
+import neth.iecal.curbox.domain.apprules.AppRuleEssentialPackages
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianActivityGate
+import neth.iecal.curbox.utils.GuardianOwnedDialog
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class SelectAppsActivity : AppCompatActivity() {
 
+    companion object {
+        const val EXTRA_FILTER_APP_RULE_ESSENTIALS = "FILTER_APP_RULE_ESSENTIALS"
+        const val EXTRA_STRICT_LAUNCHABLE_APPS = "STRICT_LAUNCHABLE_APPS"
+    }
+
     private lateinit var binding: ActivitySelectAppsBinding
     private lateinit var selectedAppList: HashSet<String>
+    private var internalNavigationOwner = false
+    private var guardianDialogVisible = false
+    private var guardianConfig = GuardianAuthConfig()
+    private var guardianActivityGate: GuardianActivityGate? = null
 
     private var appItemList: MutableList<AppItem> = mutableListOf()
 
@@ -69,8 +83,13 @@ class SelectAppsActivity : AppCompatActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        internalNavigationOwner = GuardianSessionRegistry.onCurboxActivityStarted(
+            intent.getStringExtra(GuardianSessionRegistry.EXTRA_INTERNAL_NAVIGATION_TOKEN)
+        )
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         binding = ActivitySelectAppsBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        guardianActivityGate = GuardianActivityGate(window, binding.guardianContentGate)
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, windowInsets ->
             val systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
@@ -88,7 +107,12 @@ class SelectAppsActivity : AppCompatActivity() {
             intent.getStringArrayListExtra("PRE_SELECTED_APPS")?.toHashSet() ?: HashSet()
 
         ignoredApps = intent.getStringArrayListExtra("IGNORED_APPS")?.toHashSet() ?: HashSet()
-        ignoredApps.add(packageName) // also remove curbox app from the list
+        // App rule groups opt into this stricter picker policy. Other callers retain their
+        // historical picker behavior and may still pass their own IGNORED_APPS set.
+        if (intent.getBooleanExtra(EXTRA_FILTER_APP_RULE_ESSENTIALS, false)) {
+            ignoredApps.addAll(AppRuleEssentialPackages.fromContext(this).all)
+        }
+        val strictLaunchableOnly = intent.getBooleanExtra(EXTRA_STRICT_LAUNCHABLE_APPS, false)
 
         Log.d("pre-selected-apps", selectedAppList.toString())
 
@@ -102,7 +126,7 @@ class SelectAppsActivity : AppCompatActivity() {
             lifecycleScope.launch {
                 val settings = dataStoreManager.settings.first()
                 allGroups = buildList {
-                    settings.blockedAppGroups.forEach { add(it.name to it.selectedPackages.toSet()) }
+                    settings.appRuleSnapshot.appGroups.forEach { add(it.name to it.selectedPackages.toSet()) }
                     settings.manualFocusGroups.forEach { add(it.groupName to it.packages) }
                     settings.grayscaleGroups.forEach { add(it.groupName to it.packages) }
                 }
@@ -148,6 +172,7 @@ class SelectAppsActivity : AppCompatActivity() {
                             val packages = allGroups.getOrNull(menuItem.itemId - 2000)?.second
                             if (packages != null) {
                                 selectedAppList.addAll(packages)
+                                selectedAppList.removeAll(ignoredApps)
                                 val slist = sortSelectedItemsToTop(appItemList)
                                 (binding.appList.adapter as ApplicationAdapter).updateData(slist)
                                 updateSelectAllButton()
@@ -161,6 +186,7 @@ class SelectAppsActivity : AppCompatActivity() {
                                     selectedAppList.add(item.packageName)
                                 }
                             }
+                            selectedAppList.removeAll(ignoredApps)
                             val slist = sortSelectedItemsToTop(appItemList)
                             (binding.appList.adapter as ApplicationAdapter).updateData(slist)
                             updateSelectAllButton()
@@ -224,8 +250,13 @@ class SelectAppsActivity : AppCompatActivity() {
                 }
             }
 
+            // A unified app group may only persist packages that are still launcher-visible.
+            // Drop stale selections before the result is returned, not just from the displayed
+            // list, so editing a group cannot silently retain an uninstalled package.
+            if (strictLaunchableOnly) selectedAppList.retainAll(installedPackages)
+
             // Add uninstalled apps from selectedAppList that aren't already included
-            selectedAppList.forEach { packageName ->
+            if (!strictLaunchableOnly) selectedAppList.forEach { packageName ->
                 if (!installedPackages.contains(packageName)) {
                     try {
                         val appInfo = packageManager.getApplicationInfo(packageName, 0)
@@ -247,10 +278,15 @@ class SelectAppsActivity : AppCompatActivity() {
         }
 
         binding.confirmSelection.setOnClickListener {
-            val selectedAppsArrayList = ArrayList(selectedAppList)
-            val resultIntent = intent.apply {
-                putStringArrayListExtra("SELECTED_APPS", selectedAppsArrayList)
+            if (!canCommitSelection()) {
+                requestGuardianAccessIfNeeded()
+                return@setOnClickListener
             }
+            selectedAppList.removeAll(ignoredApps)
+            val selectedAppsArrayList = ArrayList(selectedAppList)
+            val resultIntent = GuardianSessionRegistry.attachInternalReturnToken(intent.apply {
+                putStringArrayListExtra("SELECTED_APPS", selectedAppsArrayList)
+            })
             setResult(RESULT_OK, resultIntent)
             finish()
         }
@@ -350,6 +386,119 @@ class SelectAppsActivity : AppCompatActivity() {
         }
     }
 
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!GuardianSessionRegistry.isAwaitingOneShotSystemResult()) {
+            GuardianSessionRegistry.markExternalSystemScreen()
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && !isFinishing && !isDestroyed) {
+            requestGuardianAccessIfNeeded()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!isFinishing && !isDestroyed) {
+            if (GuardianSessionRegistry.session.isAuthenticated(hasPassword = true)) {
+                guardianActivityGate?.revealIfAuthorized(
+                    hasPassword = guardianConfig.isConfigured,
+                    sessionAuthenticated = true
+                )
+            } else {
+                guardianActivityGate?.obscure(invalidateAccess = false)
+                requestGuardianAccessIfNeeded()
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            GuardianSessionRegistry.onCurboxActivityStopped(
+                isInternalActivity = internalNavigationOwner,
+                isFinishing = isFinishing
+            )
+        }
+    }
+
+    private fun canCommitSelection(): Boolean {
+        val config = guardianConfig
+        return guardianActivityGate?.canCommit(
+            hasPassword = config.isConfigured,
+            sessionAuthenticated = GuardianSessionRegistry.session.isAuthenticated(config.isConfigured)
+        ) == true
+    }
+
+    private fun requestGuardianAccessIfNeeded() {
+        if (guardianDialogVisible || isFinishing || isDestroyed) return
+        guardianDialogVisible = true
+        lifecycleScope.launch {
+            val config = dataStoreManager.settings.first().guardianAuthConfig
+            guardianConfig = config
+            if (!config.isConfigured) {
+                guardianDialogVisible = false
+                guardianActivityGate?.revealIfAuthorized(
+                    hasPassword = false,
+                    sessionAuthenticated = false
+                )
+                return@launch
+            }
+
+            if (GuardianSessionRegistry.session.isAuthenticated(hasPassword = true)) {
+                guardianDialogVisible = false
+                guardianActivityGate?.revealIfAuthorized(
+                    hasPassword = true,
+                    sessionAuthenticated = true
+                )
+                return@launch
+            }
+
+            val input = android.widget.EditText(this@SelectAppsActivity).apply {
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                hint = getString(R.string.guardian_password_hint)
+            }
+            val dialog = MaterialAlertDialogBuilder(this@SelectAppsActivity)
+                .setTitle(R.string.guardian_auth_title)
+                .setMessage(R.string.guardian_auth_message)
+                .setView(input)
+                .setCancelable(false)
+                .setPositiveButton(R.string.common_continue) { _, _ ->
+                    lifecycleScope.launch {
+                        val valid = GuardianSessionRegistry.session.authenticate(
+                            input.text?.toString().orEmpty(),
+                            config
+                        )
+                        guardianDialogVisible = false
+                        if (valid) {
+                            guardianActivityGate?.revealIfAuthorized(
+                                hasPassword = true,
+                                sessionAuthenticated = true
+                            )
+                        } else {
+                            guardianActivityGate?.obscure(invalidateAccess = true)
+                            Toast.makeText(
+                                this@SelectAppsActivity,
+                                R.string.guardian_wrong_password,
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+                .setNegativeButton(R.string.cancel) { _, _ ->
+                    guardianDialogVisible = false
+                    guardianActivityGate?.obscure(invalidateAccess = true)
+                    finish()
+                }
+                .create()
+            GuardianOwnedDialog.show(dialog)
+        }
+    }
+
 
     data class AppItem(
         val packageName: String,
@@ -361,7 +510,7 @@ class SelectAppsActivity : AppCompatActivity() {
         val dialogBinding = DialogAddKeywordBinding.inflate(layoutInflater)
         dialogBinding.wHint.hint = getString(R.string.select_apps_custom_hint)
 
-        MaterialAlertDialogBuilder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.select_apps_add_custom_title)
             .setView(dialogBinding.root)
             .setPositiveButton(getString(R.string.add)) { dialog, _ ->
@@ -402,6 +551,7 @@ class SelectAppsActivity : AppCompatActivity() {
             .setNegativeButton(getString(R.string.cancel)) { dialog, _ ->
                 dialog.dismiss()
             }
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 }

@@ -721,7 +721,7 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
     }
 
     private fun normalize(s: Settings): Settings =
-        s.copy(
+        neth.iecal.curbox.data.models.SettingsSyncBoundary.forUpload(s).copy(
             blockedAppGroups = s.blockedAppGroups.map { it.copy(temporarilyDisabledUntilMs = 0L) },
             activeManualFocusGroupId = Pair(null, 0L),
             reelBlockerConfig = s.reelBlockerConfig.copy(temporarilyDisabledUntilMs = 0L),
@@ -734,6 +734,8 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
             manualFocusGroups = emptyList(),
             antiUninstallConfig2 = s.antiUninstallConfig2.copy(unlockRequestedAtMs = 0L),
             serviceProtectionConfig = s.serviceProtectionConfig.copy(appBlockerLastAliveMs = 0L),
+            // Guardian credentials and rule approvals are device local. Never upload either the
+            // verifier or a pending local exception to the encrypted shared config record.
             settingsChangeDelayConfig2 = s.settingsChangeDelayConfig2.copy(pendingChanges = emptyList()),
         )
 

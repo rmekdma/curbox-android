@@ -132,6 +132,14 @@
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/reset_usage_button"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/usage_reset_app" />
+
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/block_app_card"
             style="@style/Widget.Material3.CardView.Outlined"

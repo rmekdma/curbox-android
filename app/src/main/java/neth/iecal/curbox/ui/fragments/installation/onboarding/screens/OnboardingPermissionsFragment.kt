@@ -25,22 +25,22 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
 import neth.iecal.curbox.databinding.FragmentOnboardingPermissionsBinding
-import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
-import neth.iecal.curbox.data.models.AppGroup
-import neth.iecal.curbox.data.models.AppGroupConfig
-import neth.iecal.curbox.data.models.AppTimeConfig
-import neth.iecal.curbox.data.models.AppUsageConfig
+import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.services.AppBlockerService
 import neth.iecal.curbox.ui.activity.FragmentActivity
 import neth.iecal.curbox.ui.fragments.installation.onboarding.OnboardingViewModel
-import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appBlocker.AppBlockerSettingViewModel
 import neth.iecal.curbox.ui.fragments.main.usage.AllAppsUsageFragment
+import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.PermissionUtils
 import neth.iecal.curbox.utils.ZipUtils
 import neth.iecal.curbox.utils.ZipUtils.unzipSharedPreferencesFromUri
-import java.util.UUID
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class OnboardingPermissionsFragment : Fragment() {
 
@@ -48,10 +48,10 @@ class OnboardingPermissionsFragment : Fragment() {
     private val binding get() = _binding!!
 
     private val onboardingViewModel: OnboardingViewModel by activityViewModels()
-    private val appBlockerViewModel: AppBlockerSettingViewModel by activityViewModels()
 
     private val notificationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+            GuardianSessionRegistry.completeOneShotSystemResult()
             updatePermissionsState()
         }
 
@@ -65,6 +65,7 @@ class OnboardingPermissionsFragment : Fragment() {
 
     private val restorePicker: ActivityResultLauncher<Intent> =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            GuardianSessionRegistry.completeOneShotSystemResult()
             result.data?.data?.let { uri ->
                 val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
                 activity?.contentResolver?.takePersistableUriPermission(uri, takeFlags)
@@ -105,34 +106,40 @@ class OnboardingPermissionsFragment : Fragment() {
             )
             
             val pkg = packageMap[targetApp]
-            if (pkg != null) {
-                val usageConfig = AppUsageConfig(
-                    isDailyUniform = true,
-                    uniformLimit = limit,
-                    dailyLimits = LongArray(7) { limit }
-                )
-                val newGroup = AppGroup(
-                    id = UUID.randomUUID().toString(),
-                    name = getString(R.string.onboarding_app_limit_group_name, targetApp),
-                    selectedPackages = listOf(pkg),
-                    config = AppGroupConfig(
-                        schedule = AppTimeConfig.allDay(),
-                        usage = usageConfig
-                    ),
-                    isActive = true,
-                    warningScreenConfig = AppBlockerWarningScreenConfig()
-                )
-                appBlockerViewModel.addGroup(newGroup)
-            }
+            val dataStore = DataStoreManager(requireContext().applicationContext)
+            lifecycleScope.launch {
+                if (pkg != null) {
+                    val newGroup = AppRuleAppGroup.create(
+                        name = getString(R.string.onboarding_app_limit_group_name, targetApp),
+                        selectedPackages = listOf(pkg)
+                    )
+                    val newRule = AppRule.create(
+                        name = newGroup.name,
+                        weekdays = (0..6).toSet(),
+                        startMinute = 0,
+                        endMinute = 0,
+                        appGroupId = newGroup.id,
+                        allowedMinutes = limit,
+                        isActive = true
+                    )
+                    val current = dataStore.settingsForEditing.first().appRuleSnapshot
+                    dataStore.updateAppRuleSnapshot(
+                        current.copy(
+                            appGroups = current.appGroups + newGroup,
+                            appRules = current.appRules + newRule
+                        )
+                    )
+                }
 
-            val sharedPreferences =
-                requireContext().getSharedPreferences("AppPreferences", Context.MODE_PRIVATE)
-            sharedPreferences.edit().putBoolean("isFirstLaunchComplete", true).apply()
+                val sharedPreferences =
+                    requireContext().getSharedPreferences("AppPreferences", Context.MODE_PRIVATE)
+                sharedPreferences.edit().putBoolean("isFirstLaunchComplete", true).apply()
 
-            val intent = Intent(requireContext(), FragmentActivity::class.java).apply {
-                putExtra("fragment", AllAppsUsageFragment.FRAGMENT_ID)
+                val intent = Intent(requireContext(), FragmentActivity::class.java).apply {
+                    putExtra("fragment", AllAppsUsageFragment.FRAGMENT_ID)
+                }
+                startActivity(intent)
             }
-            startActivity(intent)
         }
 
         binding.overlayPermRoot.setOnClickListener {
@@ -157,6 +164,8 @@ class OnboardingPermissionsFragment : Fragment() {
                     rationale = getString(R.string.onboarding_perm_notif_rationale),
                     openSourceExplanation = getString(R.string.onboarding_perm_notif_opensource)
                 ) {
+                    requireActivity().window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                    GuardianSessionRegistry.markOneShotSystemResult()
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
             }

@@ -7,12 +7,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.fragment.app.activityViewModels
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import neth.iecal.curbox.data.models.ReelCountConfig
 import neth.iecal.curbox.databinding.FragmentReelBlockerCountSettingsBinding
 import neth.iecal.curbox.databinding.ItemDayCountLimitBinding
+import neth.iecal.curbox.utils.GuardianOwnedBottomSheet
 
-class ReelBlockerCountSettingsFragment : BottomSheetDialogFragment() {
+class ReelBlockerCountSettingsFragment : GuardianOwnedBottomSheet() {
 
     private var _binding: FragmentReelBlockerCountSettingsBinding? = null
     private val binding get() = _binding!!
@@ -42,8 +42,10 @@ class ReelBlockerCountSettingsFragment : BottomSheetDialogFragment() {
         }
 
         binding.btnSave.setOnClickListener {
-            saveSettings()
-            dismiss()
+            launchGuardianCommit {
+                saveSettings()
+                dismiss()
+            }
         }
 
         loadExistingSettings()

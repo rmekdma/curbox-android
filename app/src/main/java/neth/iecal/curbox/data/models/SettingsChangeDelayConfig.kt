@@ -7,6 +7,7 @@ package neth.iecal.curbox.data.models
  */
 enum class GatedSettingsField {
     APP_GROUPS,
+    APP_RULES,
     AUTO_DND_GROUPS,
     REEL_BLOCKER,
     KEYWORD_BLOCKER,
@@ -28,7 +29,13 @@ data class PendingSettingsChange(
     val field: String = "",
     val newValueJson: String = "",
     val requestedAtMs: Long = 0L,
-    val appliesAtMs: Long = 0L
+    val appliesAtMs: Long = 0L,
+    /**
+     * Group membership edits retain only their semantic choice while waiting.  A single pending
+     * app-rule snapshot may contain several group edits, so the mode is keyed by group id rather
+     * than being a single value that silently overwrites the other edits.
+     */
+    val appGroupEditModes: Map<String, AppGroupEditMode> = emptyMap()
 )
 
 /**

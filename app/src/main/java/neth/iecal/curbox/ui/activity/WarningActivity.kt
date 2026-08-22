@@ -14,6 +14,10 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import androidx.appcompat.app.AlertDialog
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -31,6 +35,7 @@ import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
 import neth.iecal.curbox.databinding.DialogWarningOverlayBinding
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.FocusGoalProgress
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import java.util.Calendar
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
@@ -48,7 +53,6 @@ import neth.iecal.curbox.anti_stimulants.MindfulMessage
 class WarningActivity : AppCompatActivity() {
 
     private var proceedTimer: CountDownTimer? = null
-    private var dialog: AlertDialog? = null
 
     private var vibrator: Vibrator? = null
 
@@ -67,6 +71,7 @@ class WarningActivity : AppCompatActivity() {
     private val barcodeLauncher = registerForActivityResult(
         ScanContract()
     ) { result ->
+        GuardianSessionRegistry.completeOneShotSystemResult()
         if (result.contents == null) {
             Toast.makeText(this@WarningActivity, R.string.warning_cancelled, Toast.LENGTH_LONG).show()
         } else {
@@ -94,13 +99,26 @@ class WarningActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        // Unified app-rule approvals use the warning entry point so the service cannot expose a
+        // second external approval route. The approval activity remains internal and receives the
+        // immutable list of denying rules only after this in-app handoff.
+        if (intent.getBooleanExtra("app_rule_guardian", false)) {
+            startActivity(Intent(this, GuardianApprovalActivity::class.java).apply {
+                putExtra("app_rule_denials_json", intent.getStringExtra("app_rule_denials_json"))
+                putExtra("launch_package", intent.getStringExtra("launch_package"))
+            })
+            finish()
+            return
+        }
 
         val mode = intent.getIntExtra("mode", 0)
 
         val warningScreenConfig = Gson().fromJson<AppBlockerWarningScreenConfig>(
             intent.getStringExtra("warning_config"),
             AppBlockerWarningScreenConfig::class.java
-        )
+        ) ?: AppBlockerWarningScreenConfig()
 
         val targetId = intent.getStringExtra("result_id") ?: ""
         var isProceedLimitExceeded = false
@@ -139,6 +157,19 @@ class WarningActivity : AppCompatActivity() {
         }
 
         binding = DialogWarningOverlayBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, windowInsets ->
+            val insets = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
+            )
+            view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
+            windowInsets
+        }
+
+        intent.getStringExtra("app_rule_status")?.let { status ->
+            binding.appRuleStatus.visibility = View.VISIBLE
+            binding.appRuleStatus.text = status
+        }
         isFocusGoalRequired = warningScreenConfig.isFocusGoalRequirementEnabled
         isFocusGoalVerified = !isFocusGoalRequired
         if (isFocusGoalRequired &&
@@ -150,8 +181,12 @@ class WarningActivity : AppCompatActivity() {
         val isHomePressRequested = intent.getBooleanExtra("is_press_home", false)
         binding.minsPicker.setValue(3)
         binding.minsPicker.minValue = 2
-        val isDialogCancelable =
-            mode != Constants.WARNING_SCREEN_MODE_APP_BLOCKER || isHomePressRequested
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                exitWarningScreen(mode, isHomePressRequested)
+            }
+        })
 
         if (warningScreenConfig.isProceedDisabled || isProceedLimitExceeded) {
             binding.btnProceed.visibility = View.GONE
@@ -272,13 +307,7 @@ class WarningActivity : AppCompatActivity() {
                 }.start()
         }
 
-        dialog = MaterialAlertDialogBuilder(this)
-            .setView(binding.root)
-            .setCancelable(isDialogCancelable)
-            .setOnCancelListener {
-                finishAffinity()
-            }
-            .show()
+
 
         binding.warningMsg.text = warningScreenConfig.message
 
@@ -293,14 +322,7 @@ class WarningActivity : AppCompatActivity() {
         }
 
         binding.btnCancel.setOnClickListener {
-            if (mode == Constants.WARNING_SCREEN_MODE_APP_BLOCKER || mode == Constants.WARNING_SCREEN_MODE_KEYWORD_BLOCKER || isHomePressRequested) {
-                val intent = Intent(Intent.ACTION_MAIN)
-                intent.addCategory(Intent.CATEGORY_HOME)
-                intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(intent)
-            }
-            dialog?.dismiss()
-            finishAffinity()
+            exitWarningScreen(mode, isHomePressRequested)
         }
 
         binding.btnProceed.setOnClickListener {
@@ -325,6 +347,8 @@ class WarningActivity : AppCompatActivity() {
                 options.setBeepEnabled(false)
                 options.setBarcodeImageEnabled(true)
                 options.setCaptureActivity(neth.iecal.curbox.ui.activity.PortraitCaptureActivity::class.java)
+                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                GuardianSessionRegistry.markOneShotSystemResult()
                 barcodeLauncher.launch(options)
                 return@setOnClickListener
             }
@@ -431,7 +455,6 @@ class WarningActivity : AppCompatActivity() {
                     }
             }
 
-            dialog?.dismiss()
             finishAffinity()
         }
     }
@@ -656,7 +679,17 @@ class WarningActivity : AppCompatActivity() {
         stopNfcUnlockScan()
         proceedTimer?.cancel()
         vibrator?.cancel()
-        dialog?.dismiss()
+    }
+
+    private fun exitWarningScreen(mode: Int, isHomePressRequested: Boolean) {
+        if (mode == Constants.WARNING_SCREEN_MODE_APP_BLOCKER || mode == Constants.WARNING_SCREEN_MODE_KEYWORD_BLOCKER || isHomePressRequested) {
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            startActivity(intent)
+        }
+        finishAffinity()
     }
 
     private fun sendRefreshRequest(id: String, action: String, time: Int) {

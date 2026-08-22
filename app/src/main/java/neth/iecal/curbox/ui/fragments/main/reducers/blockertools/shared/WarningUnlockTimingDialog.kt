@@ -5,10 +5,12 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.slider.Slider
 import com.google.android.material.switchmaterial.SwitchMaterial
 import neth.iecal.curbox.R
+import neth.iecal.curbox.utils.GuardianOwnedDialog
 
 internal class WarningUnlockTimingDialog(
     private val fragment: Fragment,
@@ -25,7 +27,7 @@ internal class WarningUnlockTimingDialog(
             setPadding(48, 24, 48, 24)
         }
         val switchDynamic = SwitchMaterial(context).apply {
-            text = "Use dynamic timing (User selects time during unlock)"
+            setText(R.string.warning_dynamic_unlock_timing)
             isChecked = true
         }
         val pickerInnerContainer = LinearLayout(context).apply {
@@ -39,7 +41,7 @@ internal class WarningUnlockTimingDialog(
             }
         }
         val timeLabel = TextView(context).apply {
-            text = "Fixed unlock duration: 5 mins"
+            text = fragment.getString(R.string.warning_fixed_unlock_duration_lower, 5)
             setPadding(8, 8, 8, 8)
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -70,16 +72,22 @@ internal class WarningUnlockTimingDialog(
         pickerContainer.addView(switchDynamic)
         pickerContainer.addView(pickerInnerContainer)
 
-        MaterialAlertDialogBuilder(context)
+        val dialog = MaterialAlertDialogBuilder(context)
             .setTitle(R.string.warning_qr_timing_title)
             .setMessage(R.string.warning_qr_timing_message)
             .setView(pickerContainer)
             .setPositiveButton(R.string.common_continue) { _, _ ->
                 val duration =
                     if (switchDynamic.isChecked) -1L else slider.value.toLong() * 60_000L
-                onConfigured(duration)
+                GuardianOwnedDialog.launchCommit(
+                    context,
+                    fragment.viewLifecycleOwner.lifecycleScope
+                ) {
+                    onConfigured(duration)
+                }
             }
             .setNegativeButton(R.string.cancel, null)
-            .show()
+            .create()
+        GuardianOwnedDialog.show(dialog)
     }
 }

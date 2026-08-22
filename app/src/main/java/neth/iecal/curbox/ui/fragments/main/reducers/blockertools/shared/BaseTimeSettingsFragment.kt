@@ -10,7 +10,6 @@ import android.widget.CompoundButton
 import android.widget.Toast
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.timepicker.MaterialTimePicker
 import com.google.android.material.timepicker.TimeFormat
@@ -23,8 +22,9 @@ import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.DayItem
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.TimeIntervalAdapter
 import neth.iecal.curbox.utils.hasOverlappingTimeRanges
 import neth.iecal.curbox.utils.isAllDaySchedule
+import neth.iecal.curbox.utils.GuardianOwnedBottomSheet
 
-abstract class BaseTimeSettingsFragment : BottomSheetDialogFragment() {
+abstract class BaseTimeSettingsFragment : GuardianOwnedBottomSheet() {
 
     private enum class ScheduleMode {
         AllDay,
@@ -97,7 +97,7 @@ abstract class BaseTimeSettingsFragment : BottomSheetDialogFragment() {
     }
 
     override fun onDismiss(dialog: DialogInterface) {
-        persistSettings()
+        launchGuardianCommit(::persistSettings)
         super.onDismiss(dialog)
     }
 

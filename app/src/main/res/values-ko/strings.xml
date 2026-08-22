@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_rules_notification_rule_status">[%1$s] %2$d분 사용 / %3$d분 허용%4$s</string>
+    <string name="app_rules_notification_guardian_extra"> (추가 %1$d분 포함)</string>
+</resources>
