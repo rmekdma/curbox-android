@@ -6,8 +6,6 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.EditText
-import android.text.InputType
 import android.widget.Toast
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -19,7 +17,6 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
@@ -228,37 +225,14 @@ class AppRuleGroupsFragment : Fragment() {
             .setTitle(R.string.usage_reset_group)
             .setMessage(getString(R.string.usage_reset_group_message, group.name, group.selectedPackages.size))
             .setNegativeButton(R.string.cancel, null)
-            .setPositiveButton(R.string.usage_reset_confirm) { _, _ -> authenticateAndResetGroup(group) }
+            .setPositiveButton(R.string.usage_reset_confirm) { _, _ -> resetGroupUsage(group.id) }
             .create()
         GuardianOwnedDialog.show(dialog)
     }
 
-    private fun authenticateAndResetGroup(group: AppRuleAppGroup) {
-        viewLifecycleOwner.lifecycleScope.launch {
-            val hasPassword = dataStore.settings.first().guardianAuthConfig.isConfigured
-            if (!hasPassword) {
-                resetGroupWithPassword(group.id, "")
-                return@launch
-            }
-            val input = EditText(requireContext()).apply {
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                hint = getString(R.string.guardian_password_hint)
-            }
-            val passwordDialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
-                .setTitle(R.string.guardian_enter_password)
-                .setView(input)
-                .setNegativeButton(R.string.cancel, null)
-                .setPositiveButton(R.string.common_continue) { _, _ ->
-                    resetGroupWithPassword(group.id, input.text?.toString().orEmpty())
-                }
-                .create()
-            GuardianOwnedDialog.show(passwordDialog)
-        }
-    }
-
-    private fun resetGroupWithPassword(groupId: String, password: String) {
+    private fun resetGroupUsage(groupId: String) {
         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-            val outcome = UsageResetManager(requireContext()).resetGroup(groupId, password)
+            val outcome = UsageResetManager(requireContext()).resetGroup(groupId)
             withContext(Dispatchers.Main) {
                 if (!isAdded) return@withContext
                 when (outcome.status) {

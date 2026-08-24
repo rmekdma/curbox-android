@@ -9,9 +9,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
-import android.widget.EditText
 import android.widget.Toast
-import android.text.InputType
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
@@ -29,7 +27,6 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
 import neth.iecal.curbox.R
 import neth.iecal.curbox.databinding.FragmentAppUsageBreakdownBinding
 import neth.iecal.curbox.domain.apprules.UsageResetUiPolicy
@@ -37,7 +34,6 @@ import neth.iecal.curbox.ui.activity.FragmentActivity
 import neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules.CreateAppRuleGroupFragment
 import neth.iecal.curbox.ui.fragments.main.reducers.anti_stimulants.grayscale.CreateGrayscaleGroupFragment
 import neth.iecal.curbox.utils.TimeTools
-import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.UsageResetManager
 import neth.iecal.curbox.utils.UsageResetStatus
@@ -155,34 +151,14 @@ class AppUsageBreakdown(
             .setTitle(R.string.usage_reset_app)
             .setMessage(R.string.usage_reset_app_message)
             .setNegativeButton(R.string.cancel, null)
-            .setPositiveButton(R.string.usage_reset_confirm) { _, _ -> authenticateAndReset() }
+            .setPositiveButton(R.string.usage_reset_confirm) { _, _ -> resetUsage() }
             .create()
         GuardianOwnedDialog.show(dialog)
     }
 
-    private fun authenticateAndReset() {
+    private fun resetUsage() {
         if (!ensureResetEligible()) return
-        viewLifecycleOwner.lifecycleScope.launch {
-            val dataStore = DataStoreManager(requireContext().applicationContext)
-            val hasPassword = dataStore.settings.first().guardianAuthConfig.isConfigured
-            if (!hasPassword) {
-                resetWithPassword("")
-                return@launch
-            }
-            val input = EditText(requireContext()).apply {
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                hint = getString(R.string.guardian_password_hint)
-            }
-            val passwordDialog = MaterialAlertDialogBuilder(requireContext())
-                .setTitle(R.string.guardian_enter_password)
-                .setView(input)
-                .setNegativeButton(R.string.cancel, null)
-                .setPositiveButton(R.string.common_continue) { _, _ ->
-                    resetWithPassword(input.text?.toString().orEmpty())
-                }
-                .create()
-            GuardianOwnedDialog.show(passwordDialog)
-        }
+        resetAppUsage()
     }
 
     private fun isResetCurrentlyEligible(): Boolean =
@@ -251,15 +227,15 @@ class AppUsageBreakdown(
         runCatching { parentFragmentManager.popBackStackImmediate() }
     }
 
-    private fun resetWithPassword(password: String) {
+    private fun resetAppUsage() {
         if (!ensureResetEligible()) return
         // Set this before entering the manager so a timeout or stopped completion can converge
         // through onStart even when the UI receiver was not registered for the broadcast.
         resetRequested = true
         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-            val outcome = UsageResetManager(requireContext()).resetApp(stat.packageName, password)
-            launch(Dispatchers.Main) {
-                if (!isAdded) return@launch
+            val outcome = UsageResetManager(requireContext()).resetApp(stat.packageName)
+            launch(Dispatchers.Main) mainLaunch@{
+                if (!isAdded) return@mainLaunch
                 when (outcome.status) {
                     // The screen-wide completion receiver owns service results. Keeping this
                     // branch silent prevents the manager receiver and UI receiver from acting

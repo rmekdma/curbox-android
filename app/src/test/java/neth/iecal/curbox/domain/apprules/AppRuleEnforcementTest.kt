@@ -47,6 +47,48 @@ class AppRuleEnforcementTest {
     }
 
     @Test
+    fun threeUnmetContributorGroupConditionsOnlyDenyInsideTheActiveRange() = runBlocking {
+        val target = AppRuleAppGroup("target", "Target", listOf("com.example.target"))
+        val contributors = (1..3).map { index ->
+            AppRuleAppGroup("condition-$index", "Condition $index", listOf("com.example.condition$index"))
+        }
+        val rule = AppRule(
+            id = "rule",
+            name = "Three conditions",
+            weekdays = setOf(1),
+            startMinute = 9 * 60,
+            endMinute = 16 * 60,
+            scope = neth.iecal.curbox.data.models.AppRuleScope.forGroup(target.id),
+            allowedMinutes = 30,
+            contributorGroupIds = contributors.mapTo(linkedSetOf()) { it.id },
+            usageConditionEnabled = true,
+            contributorGroupConditionMinutes = contributors.associate { it.id to 10L }
+        )
+        val now = java.time.Instant.parse("2026-08-17T10:30:00Z").toEpochMilli()
+        val repository = FakeSessionRepository(emptyList())
+
+        val result = AppRuleEnforcement(repository, ZoneId.of("UTC")).check(
+            snapshot = AppRuleSnapshot(listOf(target) + contributors, listOf(rule)),
+            packageName = "com.example.target",
+            useDayId = "2026-08-17",
+            nowMs = now
+        )
+
+        assertFalse(result.isAllowed)
+        assertTrue(result.denyingRules.single().conditionEnabled)
+
+        val afterRange = AppRuleEnforcement(repository, ZoneId.of("UTC")).check(
+            snapshot = AppRuleSnapshot(listOf(target) + contributors, listOf(rule)),
+            packageName = "com.example.target",
+            useDayId = "2026-08-17",
+            nowMs = java.time.Instant.parse("2026-08-17T16:55:00Z").toEpochMilli()
+        )
+
+        assertTrue(afterRange.isAllowed)
+        assertTrue(afterRange.denyingRules.isEmpty())
+    }
+
+    @Test
     fun storageFailureDoesNotAbortTheNextEnforcementDecision() = runBlocking {
         val group = AppRuleAppGroup("group", "Reader", listOf("com.example.reader"))
         val rule = AppRule(

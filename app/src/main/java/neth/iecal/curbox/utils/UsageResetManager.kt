@@ -9,20 +9,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
-import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.domain.apprules.UsageResetRequest
 import neth.iecal.curbox.domain.apprules.UsageResetDelta
 import neth.iecal.curbox.domain.apprules.UsageResetResult
 import java.util.UUID
-
-/**
- * Reset authorization is deliberately stateless. A reset is a destructive, one-shot action, so
- * an authenticated guardian screen session must never satisfy a later reset request.
- */
-object UsageResetAuthorization {
-    fun accepts(config: GuardianAuthConfig, rawPassword: String): Boolean =
-        !config.isConfigured || GuardianPassword.verify(rawPassword, config)
-}
 
 /** Process boundary used by the UI.  The service owns the Room transaction and session writer. */
 fun interface UsageResetCommandSender {
@@ -41,7 +31,7 @@ data class UsageResetOutcome(
     val result: UsageResetResult? = null
 )
 
-/** Guardian-authorized entry point for immediate app and group usage reset commands. */
+/** Entry point for immediate app and group usage reset commands. */
 class UsageResetManager(
     context: Context,
     private val commandSender: UsageResetCommandSender =
@@ -52,17 +42,14 @@ class UsageResetManager(
 
     suspend fun resetApp(
         packageName: String,
-        guardianPassword: String = "",
         resetAtMs: Long = System.currentTimeMillis()
     ): UsageResetOutcome = resetPackages(
         packageNames = setOf(packageName.trim()).filter(String::isNotEmpty).toSet(),
-        guardianPassword = guardianPassword,
         resetAtMs = resetAtMs
     )
 
     suspend fun resetGroup(
         groupId: String,
-        guardianPassword: String = "",
         resetAtMs: Long = System.currentTimeMillis()
     ): UsageResetOutcome {
         val settings = try {
@@ -76,12 +63,11 @@ class UsageResetManager(
             .find { it.id == groupId }
             ?.packagesAt(resetAtMs)
             .orEmpty()
-        return resetPackages(packages, guardianPassword, resetAtMs, settings)
+        return resetPackages(packages, resetAtMs, settings)
     }
 
     private suspend fun resetPackages(
         packageNames: Set<String>,
-        guardianPassword: String,
         resetAtMs: Long,
         knownSettings: neth.iecal.curbox.data.models.Settings? = null
     ): UsageResetOutcome {
@@ -91,9 +77,6 @@ class UsageResetManager(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            return UsageResetOutcome(UsageResetStatus.FAILED)
-        }
-        if (!UsageResetAuthorization.accepts(settings.guardianAuthConfig, guardianPassword)) {
             return UsageResetOutcome(UsageResetStatus.FAILED)
         }
         val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
