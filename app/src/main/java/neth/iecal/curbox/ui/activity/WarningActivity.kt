@@ -101,18 +101,6 @@ class WarningActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Unified app-rule approvals use the warning entry point so the service cannot expose a
-        // second external approval route. The approval activity remains internal and receives the
-        // immutable list of denying rules only after this in-app handoff.
-        if (intent.getBooleanExtra("app_rule_guardian", false)) {
-            startActivity(Intent(this, GuardianApprovalActivity::class.java).apply {
-                putExtra("app_rule_denials_json", intent.getStringExtra("app_rule_denials_json"))
-                putExtra("launch_package", intent.getStringExtra("launch_package"))
-            })
-            finish()
-            return
-        }
-
         val mode = intent.getIntExtra("mode", 0)
 
         val warningScreenConfig = Gson().fromJson<AppBlockerWarningScreenConfig>(

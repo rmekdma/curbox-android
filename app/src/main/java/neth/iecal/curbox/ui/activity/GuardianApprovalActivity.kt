@@ -193,6 +193,13 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            finish()
+        }
+    }
+
     private fun navigateHomeAndFinish() {
         val intent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_HOME)

@@ -40,7 +40,7 @@ import neth.iecal.curbox.domain.apprules.LiveRuleNotificationFormatter
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationStateCalculator
 import neth.iecal.curbox.services.BaseBlockingService
-import neth.iecal.curbox.ui.activity.WarningActivity
+import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDayResetTime
 
@@ -324,12 +324,10 @@ class AppRuleBlocker {
                     reason = warningStatus(denial)
                 )
             }
-            val intent = Intent(service, WarningActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-                putExtra("mode", Constants.WARNING_SCREEN_MODE_APP_BLOCKER)
-                putExtra("launch_package", packageName)
-                putExtra("app_rule_guardian", true)
-                putExtra("app_rule_denials_json", Gson().toJson(denialRows))
+            val intent = Intent(service, AppRuleWarningRoute.activityClass()).apply {
+                flags = AppRuleWarningRoute.launchFlags()
+                putExtra(GuardianApprovalActivity.EXTRA_PACKAGE, packageName)
+                putExtra(GuardianApprovalActivity.EXTRA_DENIALS, Gson().toJson(denialRows))
             }
             service.startActivity(intent)
         } catch (error: Exception) {

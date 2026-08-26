@@ -43,6 +43,7 @@
 
         <activity
             android:name=".ui.activity.GuardianApprovalActivity"
+            android:launchMode="singleTop"
             android:excludeFromRecents="true"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
