@@ -674,6 +674,18 @@ class WarningActivity : AppCompatActivity() {
         stopNfcUnlockScan()
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (WarningActivityStopPolicy.shouldFinish(
+                isChangingConfigurations = isChangingConfigurations,
+                isAwaitingOneShotSystemResult =
+                    GuardianSessionRegistry.isAwaitingOneShotSystemResult()
+            )
+        ) {
+            finish()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         stopNfcUnlockScan()
