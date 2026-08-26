@@ -1,0 +1,3 @@
+FIXES:
+• Prevent duplicate app rule lock screens.
+• Recover sync credentials after an Android backup restore.
