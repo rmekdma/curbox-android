@@ -5,14 +5,34 @@ import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.google.gson.Gson
+import neth.iecal.curbox.blockers.AppRuleBlocker
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class GuardianApprovalActivityLifecycleTest {
+    @Test
+    fun repeatedDenialReusesTheVisibleApprovalScreen() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val firstIntent = approvalIntent()
+        assertEquals(0, firstIntent.flags and Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        ActivityScenario.launch<GuardianApprovalActivity>(firstIntent).use { scenario ->
+            lateinit var original: GuardianApprovalActivity
+            scenario.onActivity { original = it }
+
+            instrumentation.targetContext.startActivity(approvalIntent())
+            instrumentation.waitForIdleSync()
+
+            scenario.onActivity { approval ->
+                assertSame(original, approval)
+            }
+        }
+    }
+
     @Test
     fun approvalIsFinishedAfterItLeavesTheForeground() {
         ActivityScenario.launch<GuardianApprovalActivity>(approvalIntent()).use { scenario ->
@@ -44,9 +64,10 @@ class GuardianApprovalActivityLifecycleTest {
                 reason = "Daily limit reached"
             )
         )
-        return Intent(context, GuardianApprovalActivity::class.java).apply {
-            putExtra(GuardianApprovalActivity.EXTRA_PACKAGE, context.packageName)
-            putExtra(GuardianApprovalActivity.EXTRA_DENIALS, Gson().toJson(denials))
-        }
+        return AppRuleBlocker.createGuardianApprovalIntent(
+            context = context,
+            packageName = context.packageName,
+            denials = denials
+        )
     }
 }

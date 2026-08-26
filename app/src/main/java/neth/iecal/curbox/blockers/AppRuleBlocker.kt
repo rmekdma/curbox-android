@@ -49,6 +49,16 @@ class AppRuleBlocker {
     companion object {
         const val INTENT_ACTION_REFRESH_APP_RULES = "neth.iecal.curbox.refresh.app_rules"
         private const val MILLIS_PER_MINUTE = 60_000L
+
+        internal fun createGuardianApprovalIntent(
+            context: Context,
+            packageName: String,
+            denials: List<AppRuleGuardianDenial>
+        ): Intent = Intent(context, GuardianApprovalActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            putExtra(GuardianApprovalActivity.EXTRA_PACKAGE, packageName)
+            putExtra(GuardianApprovalActivity.EXTRA_DENIALS, Gson().toJson(denials))
+        }
     }
 
     private lateinit var service: BaseBlockingService
@@ -324,12 +334,9 @@ class AppRuleBlocker {
                     reason = warningStatus(denial)
                 )
             }
-            val intent = Intent(service, AppRuleWarningRoute.activityClass()).apply {
-                flags = AppRuleWarningRoute.launchFlags()
-                putExtra(GuardianApprovalActivity.EXTRA_PACKAGE, packageName)
-                putExtra(GuardianApprovalActivity.EXTRA_DENIALS, Gson().toJson(denialRows))
-            }
-            service.startActivity(intent)
+            service.startActivity(
+                createGuardianApprovalIntent(service, packageName, denialRows)
+            )
         } catch (error: Exception) {
             logNonFatal(error)
         }

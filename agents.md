@@ -144,7 +144,7 @@ Feature broadcasts use companion constants such as `AppBlocker.INTENT_ACTION_REF
 - `hardcoded/`: all per app view IDs and configuration. Do not inline these values in feature code.
 - `api/`: the exported AIDL service, user approval flow, and auth store. Keep responses consistent with flavor flags. See `CURBOX_API.md` and the `:apitester` client.
 
-User facing blocking screens go through `ui/activity/WarningActivity` with the appropriate `Constants.WARNING_SCREEN_MODE_*` value.
+User facing blocking screens go through `ui/activity/WarningActivity` with the appropriate `Constants.WARNING_SCREEN_MODE_*` value. App rule guardian approvals are the exception: `AppRuleBlocker` opens the internal `GuardianApprovalActivity` directly so one denial produces only one lock activity.
 
 ### Service protection
 
@@ -195,6 +195,21 @@ Update the entity and DAO, register them in `AppDatabase`, and bump the database
 
 Use the check that matches the change. Documentation only changes do not need a Gradle build.
 
+### Windows build environment
+
+- Run Gradle with JBR 21 at `C:\Users\DELL\.jdks\jbr-21.0.11`. The project's source and bytecode target remains Java 8; the Gradle build JVM is JBR 21.
+- The machine-wide Java 25 installation is incompatible with the current Android build and fails during Gradle configuration with an error containing the Java version, such as `25.0.3`.
+- `local.properties` must point `sdk.dir` to `C:\Users\DELL\AppData\Local\Android\Sdk`.
+- A fresh Gradle setup needs network access to download the Gradle 8.13 distribution and missing dependencies.
+
+Set the JBR for the current PowerShell process before running Gradle:
+
+```powershell
+$env:JAVA_HOME = 'C:\Users\DELL\.jdks\jbr-21.0.11'
+& "$env:JAVA_HOME\bin\java.exe" -version
+.\gradlew.bat testFullDebugUnitTest
+```
+
 ```bash
 ./gradlew testFullDebugUnitTest
 ./gradlew assembleFullDebug
@@ -202,6 +217,19 @@ Use the check that matches the change. Documentation only changes do not need a 
 ./gradlew assembleFdroidDebug
 ./gradlew installAndGrantAccessibilityFullDebug
 ```
+
+Release APK commands and outputs:
+
+| Variant | Command | Unsigned output |
+| --- | --- | --- |
+| Full | `.\gradlew.bat assembleFullRelease` | `app/build/outputs/apk/full/release/app-full-release-unsigned.apk` |
+| Play Store | `.\gradlew.bat assemblePlaystoreRelease` | `app/build/outputs/apk/playstore/release/app-playstore-release-unsigned.apk` |
+| F-Droid | `.\gradlew.bat assembleFdroidRelease` | `app/build/outputs/apk/fdroid/release/app-fdroid-universal-release-unsigned.apk` |
+
+- Treat only `*Release` tasks as release artifacts. Debug APKs use the `.debug` application ID suffix, the `Debug Curbox` label, and `application-debuggable`; never publish one as a release APK.
+- Release tasks currently produce unsigned APKs. Verify signing before describing an APK as installable or publishing it without an `unsigned` warning.
+- Before publishing a Full APK, inspect `app/build/outputs/apk/full/release/output-metadata.json`. It must report `variantName` as `fullRelease` and a version name ending in `-full`.
+- File size alone does not identify a flavor. The v4.0.1 GitHub assets were debug builds and are larger than equivalent release builds.
 
 - `testFullDebugUnitTest` includes `CryptoBoxTest` and UI hider `ScriptLanguageTest`.
 - Build all three flavors after changing shared source, source sets, manifests, BuildConfig gates, or optional feature wiring.
