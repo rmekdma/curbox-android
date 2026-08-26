@@ -1,0 +1,2 @@
+FIXES:
+• The lock screen no longer returns after an app restriction ends.
