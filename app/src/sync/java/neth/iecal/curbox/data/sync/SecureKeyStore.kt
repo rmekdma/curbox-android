@@ -1,18 +1,31 @@
 package neth.iecal.curbox.data.sync
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.util.UUID
+import javax.crypto.AEADBadTagException
 
 class SecureKeyStore(context: Context) {
-    private val prefs = run {
+    private val prefs = try {
+        createEncryptedPreferences(context)
+    } catch (error: Exception) {
+        if (!error.isEncryptedPreferencesAuthenticationFailure() ||
+            !context.deleteSharedPreferences(PREFERENCES_NAME)
+        ) {
+            throw error
+        }
+        createEncryptedPreferences(context)
+    }
+
+    private fun createEncryptedPreferences(context: Context): SharedPreferences {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
-        EncryptedSharedPreferences.create(
+        return EncryptedSharedPreferences.create(
             context,
-            "curbox_sync_secrets",
+            PREFERENCES_NAME,
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
@@ -94,4 +107,12 @@ class SecureKeyStore(context: Context) {
             cachedDeviceId = null
         }
     }
+
+    private companion object {
+        const val PREFERENCES_NAME = "curbox_sync_secrets"
+    }
 }
+
+internal fun Throwable.isEncryptedPreferencesAuthenticationFailure(): Boolean =
+    generateSequence(this) { it.cause }
+        .any { it is AEADBadTagException }
