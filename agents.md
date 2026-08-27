@@ -195,12 +195,22 @@ Update the entity and DAO, register them in `AppDatabase`, and bump the database
 
 Use the check that matches the change. Documentation only changes do not need a Gradle build.
 
-### Windows build environment
+```bash
+./gradlew testFullDebugUnitTest
+./gradlew assembleFullDebug
+./gradlew assemblePlaystoreDebug
+./gradlew assembleFdroidDebug
+./gradlew installAndGrantAccessibilityFullDebug
+```
 
-- Run Gradle with JBR 21 at `C:\Users\DELL\.jdks\jbr-21.0.11`. The project's source and bytecode target remains Java 8; the Gradle build JVM is JBR 21.
-- The machine-wide Java 25 installation is incompatible with the current Android build and fails during Gradle configuration with an error containing the Java version, such as `25.0.3`.
-- `local.properties` must point `sdk.dir` to `C:\Users\DELL\AppData\Local\Android\Sdk`.
-- A fresh Gradle setup needs network access to download the Gradle 8.13 distribution and missing dependencies.
+- `testFullDebugUnitTest` includes `CryptoBoxTest` and UI hider `ScriptLanguageTest`.
+- Build all three flavors after changing shared source, source sets, manifests, BuildConfig gates, or optional feature wiring.
+- Use the install task only when an emulator or device is available. It installs, grants accessibility through adb, and launches Debug Curbox.
+- Lint does not abort builds, so inspect relevant warnings rather than treating a successful build as proof that lint is clean.
+- Debug builds use the `.debug` application ID suffix and the name `Debug Curbox`.
+- If a relevant check cannot run, say why in the handoff.
+
+### Windows build environment
 
 Set the JBR for the current PowerShell process before running Gradle:
 
@@ -208,14 +218,6 @@ Set the JBR for the current PowerShell process before running Gradle:
 $env:JAVA_HOME = 'C:\Users\DELL\.jdks\jbr-21.0.11'
 & "$env:JAVA_HOME\bin\java.exe" -version
 .\gradlew.bat testFullDebugUnitTest
-```
-
-```bash
-./gradlew testFullDebugUnitTest
-./gradlew assembleFullDebug
-./gradlew assemblePlaystoreDebug
-./gradlew assembleFdroidDebug
-./gradlew installAndGrantAccessibilityFullDebug
 ```
 
 Release APK commands and outputs:
@@ -226,17 +228,13 @@ Release APK commands and outputs:
 | Play Store | `.\gradlew.bat assemblePlaystoreRelease` | `app/build/outputs/apk/playstore/release/app-playstore-release-unsigned.apk` |
 | F-Droid | `.\gradlew.bat assembleFdroidRelease` | `app/build/outputs/apk/fdroid/release/app-fdroid-universal-release-unsigned.apk` |
 
+- Upload only the Full Release APK. Do not upload Play Store or F-Droid APKs.
+- Use a semver version name in the form `v<major>.<minor>.<patch>` and name the uploaded APK `curbox-<version>-full.apk` (for example, `curbox-v4.0.4-full.apk`).
+- Upload the APK file directly to GitHub. Do not use CI for APK uploads.
 - Treat only `*Release` tasks as release artifacts. Debug APKs use the `.debug` application ID suffix, the `Debug Curbox` label, and `application-debuggable`; never publish one as a release APK.
 - Release tasks currently produce unsigned APKs. Verify signing before describing an APK as installable or publishing it without an `unsigned` warning.
-- Before publishing a Full APK, inspect `app/build/outputs/apk/full/release/output-metadata.json`. It must report `variantName` as `fullRelease` and a version name ending in `-full`.
+- Before publishing a Full APK, inspect `app/build/outputs/apk/full/release/output-metadata.json`. It must report `variantName` as `fullRelease` and a version name matching `v<major>.<minor>.<patch>`.
 - File size alone does not identify a flavor. The v4.0.1 GitHub assets were debug builds and are larger than equivalent release builds.
-
-- `testFullDebugUnitTest` includes `CryptoBoxTest` and UI hider `ScriptLanguageTest`.
-- Build all three flavors after changing shared source, source sets, manifests, BuildConfig gates, or optional feature wiring.
-- Use the install task only when an emulator or device is available. It installs, grants accessibility through adb, and launches Debug Curbox.
-- Lint does not abort builds, so inspect relevant warnings rather than treating a successful build as proof that lint is clean.
-- Debug builds use the `.debug` application ID suffix and the name `Debug Curbox`.
-- If a relevant check cannot run, say why in the handoff.
 
 ## Reference docs
 
