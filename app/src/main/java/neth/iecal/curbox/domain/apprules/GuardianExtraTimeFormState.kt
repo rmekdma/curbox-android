@@ -11,18 +11,10 @@ data class GuardianExtraTimeFormState private constructor(
         get() = currentTotalMinutes.toString()
 
     fun editAdditionalMinutes(text: String): GuardianExtraTimeFormState {
-        val parsed = text.toLongOrNull()
-        val preview = parsed
-            ?.takeIf { it > 0L }
-            ?.takeIf { it <= MAX_GRANT_MINUTES }
-            ?.let { additionalMinutes ->
-                if (currentTotalMinutes <= Long.MAX_VALUE - additionalMinutes) {
-                    (currentTotalMinutes + additionalMinutes)
-                        .takeIf { it <= MAX_GRANT_MINUTES }
-                } else {
-                    null
-                }
-            }
+        val preview = when (val validation = validateAdditionalMinutes(text)) {
+            is AdditionalMinutesValidation.Valid -> validation.totalMinutes
+            is AdditionalMinutesValidation.Invalid -> null
+        }
 
         return copy(
             additionalMinutesText = text,
@@ -31,36 +23,55 @@ data class GuardianExtraTimeFormState private constructor(
         )
     }
 
-    fun submit(): GuardianExtraTimeSubmission {
-        val additionalMinutes = additionalMinutesText.toLongOrNull()
-            ?.takeIf { it > 0L }
-            ?: return GuardianExtraTimeSubmission.Invalid(
+    fun submit(): GuardianExtraTimeSubmission = when (
+        val validation = validateAdditionalMinutes(additionalMinutesText)
+    ) {
+        is AdditionalMinutesValidation.Valid -> GuardianExtraTimeSubmission.Valid(
+            additionalMinutes = validation.additionalMinutes,
+            totalMinutes = validation.totalMinutes
+        )
+
+        is AdditionalMinutesValidation.Invalid -> GuardianExtraTimeSubmission.Invalid(
+            error = validation.error
+        )
+    }
+
+    private fun validateAdditionalMinutes(text: String): AdditionalMinutesValidation {
+        val additionalMinutes = text.toLongOrNull()
+            ?: return AdditionalMinutesValidation.Invalid(
                 GuardianExtraTimeValidationError.INVALID_MINUTES
             )
-
+        if (additionalMinutes <= 0L) {
+            return AdditionalMinutesValidation.Invalid(
+                GuardianExtraTimeValidationError.INVALID_MINUTES
+            )
+        }
         if (additionalMinutes > MAX_GRANT_MINUTES) {
-            return GuardianExtraTimeSubmission.Invalid(
+            return AdditionalMinutesValidation.Invalid(
                 GuardianExtraTimeValidationError.DURATION_OVERFLOW
             )
         }
-
         if (currentTotalMinutes > Long.MAX_VALUE - additionalMinutes) {
-            return GuardianExtraTimeSubmission.Invalid(
+            return AdditionalMinutesValidation.Invalid(
                 GuardianExtraTimeValidationError.TOTAL_OVERFLOW
             )
         }
 
         val totalMinutes = currentTotalMinutes + additionalMinutes
         if (totalMinutes > MAX_GRANT_MINUTES) {
-            return GuardianExtraTimeSubmission.Invalid(
+            return AdditionalMinutesValidation.Invalid(
                 GuardianExtraTimeValidationError.DURATION_OVERFLOW
             )
         }
+        return AdditionalMinutesValidation.Valid(additionalMinutes, totalMinutes)
+    }
 
-        return GuardianExtraTimeSubmission.Valid(
-            additionalMinutes = additionalMinutes,
-            totalMinutes = totalMinutes
-        )
+    private sealed class AdditionalMinutesValidation {
+        data class Valid(val additionalMinutes: Long, val totalMinutes: Long) :
+            AdditionalMinutesValidation()
+
+        data class Invalid(val error: GuardianExtraTimeValidationError) :
+            AdditionalMinutesValidation()
     }
 
     companion object {

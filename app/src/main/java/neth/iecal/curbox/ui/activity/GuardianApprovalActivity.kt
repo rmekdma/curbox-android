@@ -102,6 +102,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun requestGrant() {
+        if (grantInProgress) return
         val ruleId = selectedRuleId ?: return
         lifecycleScope.launch {
             val currentTotalMinutes = try {
@@ -135,7 +136,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun showGrantDialog(ruleId: String, currentTotalMinutes: Long) {
-        grantInProgress = false
         val dialogBinding = DialogGuardianExtraTimeBinding.inflate(layoutInflater)
         dialogBinding.currentTotal.text = getString(
             R.string.guardian_current_total,
@@ -187,9 +187,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
                             android.content.DialogInterface.BUTTON_POSITIVE
                         ).isEnabled = false
                         dialog.dismiss()
-                        authenticateThen { password ->
-                            writeGrant(password, ruleId, submission.additionalMinutes)
-                        }
+                        authenticateThen(
+                            onAuthenticated = { password ->
+                                writeGrant(password, ruleId, submission.additionalMinutes)
+                            },
+                            onCancelled = { grantInProgress = false }
+                        )
                     }
                 }
             }
@@ -207,14 +210,17 @@ class GuardianApprovalActivity : AppCompatActivity() {
             .setTitle(R.string.guardian_skip_rule)
             .setSingleChoiceItems(labels, 0) { dialog, which ->
                 dialog.dismiss()
-                authenticateThen { password -> writeSkip(password, which) }
+                authenticateThen(onAuthenticated = { password -> writeSkip(password, which) })
             }
             .setNegativeButton(R.string.cancel, null)
             .create()
         GuardianOwnedDialog.show(dialog)
     }
 
-    private fun authenticateThen(onAuthenticated: (String) -> Unit) {
+    private fun authenticateThen(
+        onAuthenticated: (String) -> Unit,
+        onCancelled: () -> Unit = {}
+    ) {
         if (!hasPassword) {
             onAuthenticated("")
             return
@@ -232,12 +238,14 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     if (dataStore.guardianPasswordIsValid(password)) {
                         onAuthenticated(password)
                     } else {
+                        onCancelled()
                         toast(R.string.guardian_wrong_password)
                     }
                 }
             }
-            .setNegativeButton(R.string.cancel, null)
+            .setNegativeButton(R.string.cancel) { _, _ -> onCancelled() }
             .create()
+        dialog.setOnCancelListener { onCancelled() }
         GuardianOwnedDialog.show(dialog)
     }
 
