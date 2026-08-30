@@ -117,11 +117,19 @@ data class AppRuleScope(
         launchablePackages: Set<String> = emptySet(),
         essentialExcludedPackages: Set<String> = emptySet(),
         /** If supplied, resolve each group as it existed at that instant. */
-        atMs: Long? = null
+        atMs: Long? = null,
+        /** A currently observed package may be missing from a stale LauncherApps listing. */
+        foregroundPackageFallback: String? = null
     ): Set<String> {
         val byId = groups.associateBy { it.id.trim() }
         val included = buildSet {
-            if (includeAllApps) addAll(launchablePackages)
+            if (includeAllApps) {
+                addAll(launchablePackages)
+                foregroundPackageFallback
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?.let(::add)
+            }
             includedGroupIds.forEach { id ->
                 val packages = byId[id]?.let { group ->
                     if (atMs == null) group.selectedPackages else group.packagesAt(atMs)

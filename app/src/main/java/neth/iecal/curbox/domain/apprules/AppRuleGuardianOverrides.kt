@@ -177,9 +177,11 @@ object AppRuleGuardianOverrides {
         state: AppRuleOverrideState,
         useDayId: String,
         nowMs: Long,
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        ruleIds: Set<String>? = null
     ): Long? = normalize(state, useDayId, nowMs, useDayGenerationStartedAtMs).skips
         .asSequence()
+        .filter { ruleIds == null || it.ruleId in ruleIds }
         .flatMap { skip -> sequenceOf(skip.skipFromMs, skip.skipUntilMs) }
         .filter { it > nowMs }
         .minOrNull()

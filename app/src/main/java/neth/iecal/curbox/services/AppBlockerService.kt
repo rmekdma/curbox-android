@@ -115,7 +115,7 @@ class AppBlockerService : BaseBlockingService() {
         try {
             // This must remain after the usage flush above. Contributor earning and target
             // consumption both use the current-use-day raw session ledger.
-            appRuleBlocker.doAppRuleCheck(event)
+            if (appRuleBlockerReady) appRuleBlocker.doAppRuleCheck(event)
         } catch (t: Throwable) {
             Log.e("App rule check error", t.toString())
             crashLogger.logNonFatalError(Exception(t))
@@ -214,6 +214,9 @@ class AppBlockerService : BaseBlockingService() {
         } catch (t: Throwable) {
             crashLogger.logNonFatalError(Exception(t))
             Log.e("AppRuleBlocker", "Setup failed", t)
+            // setup may have started its settings collector before a later initialization step
+            // failed. Stop that partial instance even though the ready flag was not published.
+            runCatching { appRuleBlocker.onDestroy() }
         }
         neth.iecal.curbox.utils.UsageStatsCleaner.watch(this)
 
@@ -255,30 +258,47 @@ class AppBlockerService : BaseBlockingService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-
-            focusModeBlocker.removeReceivers()
-            autoDnd.stop()
-            reelBlocker.removeReceivers()
+        // Each feature owns independent receiver and worker state. Keep one faulty cleanup from
+        // skipping the app-rule scheduler, channels, or the remaining service components.
+        cleanupFeature("AppRuleBlocker") {
             if (appRuleBlockerReady) appRuleBlocker.onDestroy()
-            keywordBlocker.removeReceivers()
-            grayScaleFilter.unregisterReceivers()
-            if (BuildConfig.SUPPORTS_UI_HIDER) {
-                uiHider.removeReceivers()
-                nodePicker.removeReceivers()
-            }
-            if (BuildConfig.SUPPORTS_ANTI_UNINSTALL) {
-                antiUninstallBlocker.onDestroy()
-            }
-            mindfulMessage.onDestroy()
-            reelsCountTracker.onDestroy()
-            reelUsageTracker.onDestroy()
-            websiteUsageTracker.onDestroy()
-            if (appUsageTrackerReady) appUsageTracker.onDestroy()
+        }
+        cleanupFeature("FocusModeBlocker") { focusModeBlocker.removeReceivers() }
+        cleanupFeature("AutoDnd") { autoDnd.stop() }
+        cleanupFeature("ReelBlocker") { reelBlocker.removeReceivers() }
+        cleanupFeature("KeywordBlocker") { keywordBlocker.removeReceivers() }
+        cleanupFeature("GrayScaleFilter") { grayScaleFilter.unregisterReceivers() }
+        if (BuildConfig.SUPPORTS_UI_HIDER) {
+            cleanupFeature("UiHider") { uiHider.removeReceivers() }
+            cleanupFeature("NodePicker") { nodePicker.removeReceivers() }
+        }
+        if (BuildConfig.SUPPORTS_ANTI_UNINSTALL) {
+            cleanupFeature("AntiUninstallBlocker") { antiUninstallBlocker.onDestroy() }
+        }
+        cleanupFeature("MindfulMessage") { mindfulMessage.onDestroy() }
+        cleanupFeature("ReelsCountTracker") { reelsCountTracker.onDestroy() }
+        cleanupFeature("ReelUsageTracker") { reelUsageTracker.onDestroy() }
+        cleanupFeature("WebsiteUsageTracker") { websiteUsageTracker.onDestroy() }
+        if (appUsageTrackerReady) {
+            cleanupFeature("AppUsageTracker") { appUsageTracker.onDestroy() }
+        }
+        cleanupFeature("EventChannel") { eventChannel.close() }
+        cleanupFeature("WebsiteObservationChannel") { websiteObservationChannel.close() }
+        cleanupFeature("ServiceScope") { serviceScope.cancel() }
+    }
 
-            eventChannel.close()
-            websiteObservationChannel.close()
-            serviceScope.cancel()
-        }catch (_: Exception){}
+    private fun cleanupFeature(name: String, action: () -> Unit) {
+        try {
+            action()
+        } catch (error: Throwable) {
+            runCatching {
+                if (::crashLogger.isInitialized) {
+                    crashLogger.logNonFatalError(
+                        if (error is Exception) error else Exception(error)
+                    )
+                }
+            }
+            Log.e("AppBlockerService", "$name cleanup failed", error)
+        }
     }
 }

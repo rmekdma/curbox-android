@@ -2,6 +2,8 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleGuardianGrant
+import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.ForegroundSession
@@ -27,6 +29,84 @@ class AppRuleEvaluatorTest {
 
         assertFalse(result.isAllowed)
         assertEquals(0L, result.denyingRules.single().remainingMillis)
+    }
+
+    @Test
+    fun allAppsRuleIncludesForegroundPackageWhenLauncherListingOmitsIt() {
+        val allAppsRule = AppRule(
+            id = "global",
+            name = "All apps lockdown",
+            weekdays = setOf(1),
+            startMinute = 9 * 60,
+            endMinute = 17 * 60,
+            scope = AppRuleScope(includeAllApps = true),
+            allowedMinutes = 0
+        )
+
+        val result = AppRuleEvaluator.evaluate(
+            snapshot = AppRuleSnapshot(appRules = listOf(allAppsRule)),
+            packageName = "com.example.reader",
+            useDayId = "2026-08-17",
+            sessions = emptyList(),
+            nowMs = now,
+            zone = zone,
+            // A launcher snapshot can be non-empty while omitting the package currently in the
+            // foreground. That package must still be evaluated by an all-apps rule.
+            availablePackages = setOf("com.example.other")
+        )
+
+        assertFalse(result.isAllowed)
+        assertEquals(listOf("global"), result.denyingRules.map { it.ruleId })
+    }
+
+    @Test
+    fun allAppsDenialStillWinsWhenAnotherRuleHasGuardianAllowance() {
+        val targetRule = AppRule(
+            id = "target",
+            name = "Target allowance",
+            weekdays = setOf(1),
+            startMinute = 9 * 60,
+            endMinute = 17 * 60,
+            scope = AppRuleScope.forGroup(group.id),
+            allowedMinutes = 0
+        )
+        val globalRule = AppRule(
+            id = "global",
+            name = "All apps lockdown",
+            weekdays = setOf(1),
+            startMinute = 9 * 60,
+            endMinute = 17 * 60,
+            scope = AppRuleScope(includeAllApps = true),
+            allowedMinutes = 0
+        )
+        val useDayId = "2026-08-17"
+        val result = AppRuleEvaluator.evaluate(
+            snapshot = AppRuleSnapshot(
+                appGroups = listOf(group),
+                appRules = listOf(targetRule, globalRule)
+            ),
+            packageName = "com.example.reader",
+            useDayId = useDayId,
+            sessions = listOf(session("com.example.reader", 2 * 60_000L)),
+            nowMs = now,
+            zone = zone,
+            // The non-empty launcher listing omits the app currently being used.
+            availablePackages = setOf("com.example.other"),
+            overrides = AppRuleOverrideState(
+                useDayId = useDayId,
+                grants = listOf(
+                    AppRuleGuardianGrant(
+                        ruleId = targetRule.id,
+                        useDayId = useDayId,
+                        grantedAtMs = now - 60_000L,
+                        grantedMillis = 10 * 60_000L
+                    )
+                )
+            )
+        )
+
+        assertFalse(result.isAllowed)
+        assertEquals(listOf("global"), result.denyingRules.map { it.ruleId })
     }
 
     @Test
@@ -268,6 +348,33 @@ class AppRuleEvaluatorTest {
             now,
             zone,
             availablePackages = setOf("com.android.systemui", "com.example.reader"),
+            essentialExcludedPackages = setOf("com.android.systemui")
+        )
+
+        assertTrue(result.isAllowed)
+        assertTrue(result.evaluations.isEmpty())
+    }
+
+    @Test
+    fun foregroundPackageAddedForAllAppsIsStillRemovedWhenItIsEssential() {
+        val allAppsRule = AppRule(
+            id = "global",
+            name = "All apps lockdown",
+            weekdays = setOf(1),
+            startMinute = 9 * 60,
+            endMinute = 17 * 60,
+            scope = AppRuleScope(includeAllApps = true),
+            allowedMinutes = 0
+        )
+
+        val result = AppRuleEvaluator.evaluate(
+            snapshot = AppRuleSnapshot(appRules = listOf(allAppsRule)),
+            packageName = "com.android.systemui",
+            useDayId = "2026-08-17",
+            sessions = emptyList(),
+            nowMs = now,
+            zone = zone,
+            availablePackages = setOf("com.example.reader"),
             essentialExcludedPackages = setOf("com.android.systemui")
         )
 

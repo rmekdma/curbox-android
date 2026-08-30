@@ -1,0 +1,723 @@
+package neth.iecal.curbox.blockers
+
+import android.content.Context
+import android.content.Intent
+import android.os.SystemClock
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityWindowInfo
+import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleOverrideState
+import neth.iecal.curbox.data.models.AppRuleScope
+import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.Settings
+import neth.iecal.curbox.data.models.ForegroundSession
+import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
+import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
+import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
+import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
+import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
+import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
+
+/** Regression coverage for foreground app-rule checks and their recheck boundaries. */
+@RunWith(AndroidJUnit4::class)
+class AppRuleBlockerRecheckTest {
+    @Test
+    fun activeZeroAllowanceRuleStartsGuardianApprovalForCurrentPackage() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+        event.packageName = PACKAGE
+        blocker.doAppRuleCheck(event)
+        event.recycle()
+
+        assertTrue("active zero allowance rule must open approval", service.startedActivities.isNotEmpty())
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun screenOnDefersGuardianUntilUserPresent() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        // SCREEN_ON may arrive before the keyguard has delivered USER_PRESENT. No guardian may
+        // be launched in that interval, even if the last app event is delivered again.
+        setField(blocker, "screenOnAwaitingUserPresent", true)
+        sendWindowEvent(blocker)
+        assertTrue("screen-on must wait for USER_PRESENT", service.startedActivities.isEmpty())
+
+        setField(blocker, "screenOnAwaitingUserPresent", false)
+        sendWindowEvent(blocker)
+        assertTrue("the app must be checked after USER_PRESENT", service.startedActivities.isNotEmpty())
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun positiveGuardianRemainderSchedulesARecheckWithoutAnotherWindowEvent() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        val repository = EmptySessionRepository()
+        val now = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(now)
+        val overrideState = AppRuleGuardianOverrides.grant(
+            AppRuleOverrideState(useDayId),
+            "target",
+            useDayId,
+            grantedMillis = 3_000L,
+            grantedAtMs = now
+        )
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        setField(blocker, "overrideState", overrideState)
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithTargetAllowance())
+
+        sendWindowEvent(blocker)
+        coordinator.accept(snapshotWithGlobalDeny())
+        // The production scheduler keeps a one second minimum delay, so allow the scheduled
+        // callback and its bounded visibility retries to run before asserting the read.
+        SystemClock.sleep(4_000L)
+
+        assertTrue(
+            "a positive guardian remainder must schedule a foreground recheck",
+            service.windowsReads > 0
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun allAppsRuleEvaluatesCurrentPackageWhenLauncherListingOmitsIt() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        val repository = EmptySessionRepository()
+        val launchablePackages = setOf("com.example.other")
+        val packageReader = AppRulePackageScopeReader(
+            launchableReader = { launchablePackages },
+            essentialReader = { emptySet() }
+        )
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "packageScopeReader", packageReader)
+        invokePrivate(blocker, "refreshPackageScope")
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        sendWindowEvent(blocker)
+        assertTrue(
+            "an all-apps rule must include the current package even when the launcher listing omits it",
+            service.startedActivities.isNotEmpty()
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun scheduledRecheckReevaluatesGlobalDenialAfterTargetUsageAndGuardianExtra() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        var windowSnapshotReads = 0
+        blocker.applicationWindowSnapshotProvider = {
+            windowSnapshotReads++
+            AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(OTHER_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = false
+            )
+        }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+        }
+        val now = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(now)
+        val repository = EmptySessionRepository(
+            sessions = listOf(
+                ForegroundSession(
+                    useDayId = useDayId,
+                    packageName = PACKAGE,
+                    // Consume the full direct allowance so the guardian remainder is what keeps
+                    // this package open during the first check.
+                    startedAtMs = now - 60_000L,
+                    endedAtMs = now
+                )
+            )
+        )
+        val overrideState = AppRuleGuardianOverrides.grant(
+            AppRuleOverrideState(useDayId),
+            "target",
+            useDayId,
+            // Keep a short but real guardian remainder so the initial target rule is allowed and
+            // the scheduled callback later reevaluates the newly active global denial.
+            grantedMillis = 2_000L,
+            grantedAtMs = now
+        )
+        val packageReader = AppRulePackageScopeReader(
+            launchableReader = { setOf("com.example.other") },
+            essentialReader = { emptySet() }
+        )
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "packageScopeReader", packageReader)
+        setField(blocker, "overrideState", overrideState)
+        invokePrivate(blocker, "refreshPackageScope")
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithSpentTargetAllowance())
+
+        // The target rule has consumed its direct allowance, but its guardian remainder keeps the
+        // app open. A global rule is added while the same app remains visible and no new window
+        // event is delivered. The handler callback must perform the real re-evaluation.
+        sendWindowEvent(blocker)
+        assertTrue("the target rule's guardian remainder must keep the app open", service.startedActivities.isEmpty())
+        assertTrue(
+            "initial guardian remainder must schedule a callback " +
+                "(scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
+            (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+        )
+        coordinator.accept(snapshotWithTargetAndGlobalDeny())
+        SystemClock.sleep(5_000L)
+
+        assertTrue(
+            "the scheduled recheck must open approval for the newly active global denial " +
+                "(windowsReads=${service.windowsReads}, " +
+                "current=${getField(blocker, "currentForegroundPackage")}, " +
+                "scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
+            service.startedActivities.isNotEmpty()
+        )
+        val intent = service.startedActivities.last()
+        val denials = intent.getStringExtra(GuardianApprovalActivity.EXTRA_DENIALS).orEmpty()
+        assertTrue("unexpected denial payload: $denials", denials.contains("global"))
+        assertTrue(windowSnapshotReads >= 2)
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun scheduledRecheckDoesNotLockAfterARealForegroundSwitch() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        val now = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(now)
+        val repository = EmptySessionRepository(
+            sessions = listOf(
+                ForegroundSession(
+                    useDayId = useDayId,
+                    packageName = PACKAGE,
+                    startedAtMs = now - 60_000L,
+                    endedAtMs = now
+                )
+            )
+        )
+        val overrideState = AppRuleGuardianOverrides.grant(
+            AppRuleOverrideState(useDayId),
+            "target",
+            useDayId,
+            grantedMillis = 2_000L,
+            grantedAtMs = now
+        )
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+        setField(blocker, "overrideState", overrideState)
+        blocker.applicationWindowSnapshotProvider = {
+            AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(OTHER_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = false
+            )
+        }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = OTHER_PACKAGE)
+        }
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithSpentTargetAllowance())
+
+        // A remains allowed only by the short guardian remainder, so its boundary is scheduled.
+        sendWindowEvent(blocker, PACKAGE)
+        // The real event for B is stronger than the last A event, even if the window provider is
+        // empty during the transition. The old A callback must not show a stale lock screen.
+        sendWindowEvent(blocker, OTHER_PACKAGE)
+        SystemClock.sleep(4_000L)
+
+        assertTrue(
+            "a scheduled callback for an old foreground app must not lock after switching apps",
+            service.startedActivities.isEmpty()
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun essentialOverlayClearsForegroundEvidenceAndDoesNotStartGuardianTwice() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        // The first real denial opens the guardian. Its own package is an essential overlay and
+        // must suspend the old target foreground evidence before any queued callback can run.
+        sendWindowEvent(blocker, PACKAGE)
+        assertTrue(service.startedActivities.size == 1)
+        sendWindowEvent(blocker, service.packageName)
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        SystemClock.sleep(2_000L)
+
+        assertTrue(
+            "an essential overlay must not trigger a second guardian from stale target evidence",
+            service.startedActivities.size == 1
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun recentForegroundEvidenceSurvivesAStaleOtherApplicationWindow() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        blocker.applicationWindowSnapshotProvider = {
+            AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(OTHER_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = false
+            )
+        }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+        }
+        val now = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(now)
+        val repository = EmptySessionRepository(
+            sessions = listOf(
+                ForegroundSession(
+                    useDayId = useDayId,
+                    packageName = PACKAGE,
+                    startedAtMs = now - 60_000L,
+                    // Keep the session open so the delayed check consumes the guardian remainder
+                    // just as it would while the user remains in the app.
+                    endedAtMs = null
+                )
+            )
+        )
+        val overrideState = AppRuleGuardianOverrides.grant(
+            AppRuleOverrideState(useDayId),
+            "target",
+            useDayId,
+            grantedMillis = 2_000L,
+            grantedAtMs = now
+        )
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(OTHER_PACKAGE))
+        setField(blocker, "overrideState", overrideState)
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithSpentTargetAllowance())
+
+        // The target was the last real foreground event, but the OEM window list now omits it.
+        // A null active root must use the short recent-evidence window to run the real denial.
+        sendWindowEvent(blocker, PACKAGE)
+        assertTrue(
+            "the target allowance boundary must be scheduled before visibility recovery " +
+                "(scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
+            (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+        )
+        SystemClock.sleep(4_500L)
+
+        assertTrue(
+            "a recent target event must not lose its expiration check to a stale other-app window " +
+                "(activities=${service.startedActivities.size}, windowsReads=${service.windowsReads}, " +
+                "current=${getField(blocker, "currentForegroundPackage")}, " +
+                "evidenceAt=${getField(blocker, "currentForegroundEvidenceAtElapsedMs")}, " +
+                "nowElapsed=${SystemClock.elapsedRealtime()}, " +
+                "suspended=${getField(blocker, "foregroundEvidenceSuspended")}, " +
+                "scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).values})",
+            service.startedActivities.isNotEmpty()
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun recentForegroundEvidenceSurvivesWindowProviderException() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        blocker.applicationWindowSnapshotProvider = {
+            error("transient OEM window provider failure")
+        }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+        }
+        val now = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(now)
+        val repository = EmptySessionRepository(
+            sessions = listOf(
+                ForegroundSession(
+                    useDayId = useDayId,
+                    packageName = PACKAGE,
+                    startedAtMs = now - 60_000L,
+                    // The open session models the app remaining in the foreground while the
+                    // guardian remainder expires.
+                    endedAtMs = null
+                )
+            )
+        )
+        val overrideState = AppRuleGuardianOverrides.grant(
+            AppRuleOverrideState(useDayId),
+            "target",
+            useDayId,
+            grantedMillis = 2_000L,
+            grantedAtMs = now
+        )
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(OTHER_PACKAGE))
+        setField(blocker, "overrideState", overrideState)
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithSpentTargetAllowance())
+
+        // The application window provider fails for every bounded read and the active root is
+        // unavailable. Recent real foreground evidence must still complete this boundary check.
+        sendWindowEvent(blocker, PACKAGE)
+        SystemClock.sleep(4_500L)
+
+        assertTrue(
+            "a provider exception must not lose the target expiration check",
+            service.startedActivities.isNotEmpty()
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun reconnectEvaluatesKnownApplicationWindowsWithoutForegroundOrActiveRoot() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        blocker.applicationWindowSnapshotProvider = {
+            AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = false
+            )
+        }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        // Model a fresh service connection: no event-derived package and no root, only known
+        // application windows returned by AccessibilityService.getWindows().
+        setField(blocker, "currentForegroundPackage", null)
+        invokePrivate(blocker, "checkCurrentlyVisibleApplications")
+
+        assertTrue(
+            "known application windows must be checked after reconnect",
+            service.startedActivities.isNotEmpty()
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun splitScreenKnownWindowsKeepIndependentBoundaryJobsWhenOneRootIsUnknown() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker()
+        blocker.applicationWindowSnapshotProvider = {
+            // Model a split-screen snapshot where B has a readable root and A's root is null.
+            AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(OTHER_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = true,
+                applicationWindowCount = 2
+            )
+        }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithSplitAllowances())
+
+        // A delivered event establishes the recent foreground evidence. The reconciliation must
+        // still evaluate B from the partial split-screen window list and retain both keyed jobs.
+        sendWindowEvent(blocker, PACKAGE)
+        invokePrivate(blocker, "checkCurrentlyVisibleApplications")
+
+        val scheduledPackages = (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
+            .map { it.toString() }
+            .toSet()
+        assertTrue(
+            "the current split-screen package must retain its boundary",
+            PACKAGE in scheduledPackages
+        )
+        assertTrue(
+            "the known second split-screen package must get its own boundary",
+            OTHER_PACKAGE in scheduledPackages
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun unrelatedSettingsEmissionKeepsExistingBoundaryJob() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val blocker = AppRuleBlocker()
+        val snapshot = snapshotWithTargetAllowance()
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshot)
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 10_000L, 20_000L, 0L)
+        val before = (getField(blocker, "scheduledRechecks") as Map<*, *>).size
+        val changed = invokePrivateResult(
+            blocker,
+            "applySettingsSnapshot",
+            Settings(appRuleSnapshot = snapshot, isReelCounterOn = false)
+        ) as Boolean
+
+        assertTrue("an unrelated DataStore emission must not invalidate a boundary job", !changed)
+        assertTrue(
+            "the existing app boundary must remain scheduled",
+            (getField(blocker, "scheduledRechecks") as Map<*, *>).size == before
+        )
+        blocker.onDestroy()
+    }
+
+    private fun snapshotWithGlobalDeny(): AppRuleSnapshot {
+        val target = AppRuleAppGroup("target", "Target", listOf(PACKAGE))
+        return AppRuleSnapshot(
+            appGroups = listOf(target),
+            appRules = listOf(
+                AppRule(
+                    id = "global",
+                    name = "Global lockdown",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope(includeAllApps = true),
+                    allowedMinutes = 0
+                )
+            )
+        )
+    }
+
+    private fun snapshotWithTargetAllowance(): AppRuleSnapshot {
+        val target = AppRuleAppGroup("target", "Target", listOf(PACKAGE))
+        return AppRuleSnapshot(
+            appGroups = listOf(target),
+            appRules = listOf(
+                AppRule(
+                    id = "target",
+                    name = "Target allowance",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope.forGroup(target.id),
+                    allowedMinutes = 0
+                )
+            )
+        )
+    }
+
+    private fun snapshotWithTargetAndGlobalDeny(): AppRuleSnapshot {
+        val target = AppRuleAppGroup("target", "Target", listOf(PACKAGE))
+        return AppRuleSnapshot(
+            appGroups = listOf(target),
+            appRules = listOf(
+                AppRule(
+                    id = "target",
+                    name = "Target allowance",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope.forGroup(target.id),
+                    allowedMinutes = 1
+                ),
+                AppRule(
+                    id = "global",
+                    name = "Global lockdown",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope(includeAllApps = true),
+                    allowedMinutes = 0
+                )
+            )
+        )
+    }
+
+    private fun snapshotWithSpentTargetAllowance(): AppRuleSnapshot {
+        val target = AppRuleAppGroup("target", "Target", listOf(PACKAGE))
+        return AppRuleSnapshot(
+            appGroups = listOf(target),
+            appRules = listOf(
+                AppRule(
+                    id = "target",
+                    name = "Target allowance",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope.forGroup(target.id),
+                    allowedMinutes = 1
+                )
+            )
+        )
+    }
+
+    private fun snapshotWithSplitAllowances(): AppRuleSnapshot {
+        val target = AppRuleAppGroup("target", "Target", listOf(PACKAGE))
+        val other = AppRuleAppGroup("other", "Other", listOf(OTHER_PACKAGE))
+        return AppRuleSnapshot(
+            appGroups = listOf(target, other),
+            appRules = listOf(
+                AppRule(
+                    id = "target",
+                    name = "Target allowance",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope.forGroup(target.id),
+                    allowedMinutes = 1
+                ),
+                AppRule(
+                    id = "other",
+                    name = "Other allowance",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope.forGroup(other.id),
+                    allowedMinutes = 1
+                )
+            )
+        )
+    }
+
+    private class RecordingService : BaseBlockingService() {
+        val startedActivities = mutableListOf<Intent>()
+        var windowsReads = 0
+        var visibleWindows: List<AccessibilityWindowInfo> = emptyList()
+
+        fun attach(context: Context) {
+            attachBaseContext(context)
+        }
+
+        override fun startActivity(intent: Intent) {
+            startedActivities += intent
+        }
+
+        override fun getWindows(): MutableList<AccessibilityWindowInfo> {
+            windowsReads++
+            return visibleWindows.toMutableList()
+        }
+    }
+
+    private class EmptySessionRepository(
+        private val sessions: List<ForegroundSession> = emptyList()
+    ) : CurrentUseDaySessionRepository {
+        override suspend fun startSession(useDayId: String, packageName: String, startedAtMs: Long) = 1L
+        override suspend fun finishSession(id: Long, endedAtMs: Long) = Unit
+        override suspend fun updateSessionEnd(id: Long, endedAtMs: Long) = Unit
+        override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> = sessions
+        override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) = Unit
+    }
+
+    private object InstrumentationContext {
+        val context: Context
+            get() = androidx.test.platform.app.InstrumentationRegistry
+                .getInstrumentation()
+                .targetContext
+    }
+
+    private fun setField(target: Any, name: String, value: Any?) {
+        target.javaClass.getDeclaredField(name).apply {
+            isAccessible = true
+            set(target, value)
+        }
+    }
+
+    private fun getField(target: Any, name: String): Any? =
+        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+
+    private fun invokePrivate(target: Any, name: String, vararg args: Any?) {
+        val method = target.javaClass.declaredMethods.first { it.name == name && it.parameterTypes.size == args.size }
+        method.isAccessible = true
+        method.invoke(target, *args)
+    }
+
+    private fun invokePrivateResult(target: Any, name: String, vararg args: Any?): Any? {
+        val method = target.javaClass.declaredMethods.first { it.name == name && it.parameterTypes.size == args.size }
+        method.isAccessible = true
+        return method.invoke(target, *args)
+    }
+
+    private fun sendWindowEvent(blocker: AppRuleBlocker, packageName: String = PACKAGE) {
+        val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+        event.packageName = packageName
+        blocker.doAppRuleCheck(event)
+        event.recycle()
+    }
+
+    private companion object {
+        const val PACKAGE = "com.example.reader"
+        const val OTHER_PACKAGE = "com.example.other"
+    }
+}
