@@ -2,4 +2,11 @@
 <resources>
     <string name="app_rules_notification_rule_status">[%1$s] %2$d분 사용 / %3$d분 허용%4$s</string>
     <string name="app_rules_notification_guardian_extra"> (추가 %1$d분 포함)</string>
+    <string name="guardian_add_time">추가 시간 변경</string>
+    <string name="guardian_extra_minutes">추가 시간</string>
+    <string name="guardian_total_extra_minutes">총 추가 시간</string>
+    <string name="guardian_current_total">현재 총 추가 시간 %1$d분</string>
+    <string name="guardian_apply">적용</string>
+    <string name="guardian_minutes_hint">분</string>
+    <string name="guardian_invalid_minutes">양수인 분을 입력해 주세요.</string>
 </resources>

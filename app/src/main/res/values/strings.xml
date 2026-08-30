@@ -1411,10 +1411,14 @@
     <string name="guardian_approval_message">Choose one rule to approve. Other rules will still be checked.</string>
     <string name="guardian_denial_row">%1$s
 %2$s</string>
-    <string name="guardian_add_time">Add time</string>
+    <string name="guardian_add_time">Change extra time</string>
     <string name="guardian_skip_rule">Skip this rule</string>
     <string name="guardian_minutes_hint">Minutes</string>
     <string name="guardian_invalid_minutes">Enter a positive number of minutes.</string>
+    <string name="guardian_extra_minutes">Extra time</string>
+    <string name="guardian_total_extra_minutes">Total extra time</string>
+    <string name="guardian_current_total">Current total extra time: %1$d minutes</string>
+    <string name="guardian_apply">Apply</string>
     <string name="guardian_enter_password">Enter guardian password</string>
     <string name="guardian_password_hint">Password</string>
     <string name="guardian_wrong_password">That password is wrong.</string>

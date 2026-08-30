@@ -394,8 +394,12 @@ class DataStoreManager(private val context: Context) {
         durationMinutes: Long,
         grantedAtMs: Long = System.currentTimeMillis()
     ): Boolean {
-        if (durationMinutes <= 0L || ruleId.isBlank() || useDayId.isBlank()) return false
-        val grantedMillis = saturatedMillis(durationMinutes)
+        if (durationMinutes <= 0L ||
+            durationMinutes > Long.MAX_VALUE / 60_000L ||
+            ruleId.isBlank() ||
+            useDayId.isBlank()
+        ) return false
+        val grantedMillis = durationMinutes * 60_000L
         val updated = settingsDataStore.updateData { current ->
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
@@ -830,9 +834,6 @@ class DataStoreManager(private val context: Context) {
         } else {
             System.currentTimeMillis() + durationMinutes.coerceIn(1L, 43_200L) * 60_000L
         }
-
-    private fun saturatedMillis(minutes: Long): Long =
-        if (minutes > Long.MAX_VALUE / 60_000L) Long.MAX_VALUE else minutes * 60_000L
 
     private fun earliestTemporaryDisable(settings: Settings): Long? {
         val deadlines = buildList {

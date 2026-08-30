@@ -6,7 +6,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import android.os.Bundle
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.Toast
@@ -18,11 +20,17 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.databinding.ActivityGuardianApprovalBinding
+import neth.iecal.curbox.databinding.DialogGuardianExtraTimeBinding
+import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeFormState
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeSubmission
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeValidationError
 import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import java.time.Duration
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -35,6 +43,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var denials: List<AppRuleGuardianDenial> = emptyList()
     private var selectedRuleId: String? = null
     private var hasPassword = false
+    private var grantInProgress = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,23 +102,98 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun requestGrant() {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-            hint = getString(R.string.guardian_minutes_hint)
+        val ruleId = selectedRuleId ?: return
+        lifecycleScope.launch {
+            val currentTotalMinutes = try {
+                withContext(Dispatchers.IO) { readCurrentGrantTotalMinutes(ruleId) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                return@launch
+            }
+
+            if (selectedRuleId != ruleId) {
+                requestGrant()
+                return@launch
+            }
+            showGrantDialog(ruleId, currentTotalMinutes)
         }
+    }
+
+    private suspend fun readCurrentGrantTotalMinutes(ruleId: String): Long {
+        val settings = dataStore.settings.first()
+        val now = System.currentTimeMillis()
+        val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
+        val useDayId = calculator.idAt(now)
+        return AppRuleGuardianOverrides.grantMillisForRule(
+            state = settings.appRuleOverrideState,
+            ruleId = ruleId,
+            useDayId = useDayId,
+            nowMs = now,
+            useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
+        ) / GuardianExtraTimeFormState.MILLIS_PER_MINUTE
+    }
+
+    private fun showGrantDialog(ruleId: String, currentTotalMinutes: Long) {
+        grantInProgress = false
+        val dialogBinding = DialogGuardianExtraTimeBinding.inflate(layoutInflater)
+        dialogBinding.currentTotal.text = getString(
+            R.string.guardian_current_total,
+            currentTotalMinutes
+        )
+        dialogBinding.totalMinutesInput.hint = currentTotalMinutes.toString()
+
+        var formState = GuardianExtraTimeFormState.initial(currentTotalMinutes)
+        var updatingDerivedValue = false
+        dialogBinding.additionalMinutesInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+
+            override fun afterTextChanged(editable: Editable?) {
+                if (updatingDerivedValue) return
+                formState = formState.editAdditionalMinutes(editable?.toString().orEmpty())
+                dialogBinding.additionalMinutesLayout.error = null
+                updatingDerivedValue = true
+                dialogBinding.totalMinutesInput.setText(formState.totalMinutesText)
+                updatingDerivedValue = false
+            }
+        })
+
         val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.guardian_add_time)
-            .setView(input)
-            .setPositiveButton(R.string.common_continue) { _, _ ->
-                val minutes = input.text.toString().toLongOrNull() ?: 0L
-                if (minutes <= 0L) {
-                    toast(R.string.guardian_invalid_minutes)
-                } else {
-                    authenticateThen { password -> writeGrant(password, minutes) }
-                }
-            }
+            .setView(dialogBinding.root)
+            .setPositiveButton(R.string.guardian_apply, null)
             .setNegativeButton(R.string.cancel, null)
             .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+                if (grantInProgress) return@setOnClickListener
+                when (val submission = formState.submit()) {
+                    is GuardianExtraTimeSubmission.Invalid -> {
+                        dialogBinding.additionalMinutesLayout.error = getString(
+                            when (submission.error) {
+                                GuardianExtraTimeValidationError.INVALID_MINUTES,
+                                GuardianExtraTimeValidationError.DURATION_OVERFLOW,
+                                GuardianExtraTimeValidationError.TOTAL_OVERFLOW ->
+                                    R.string.guardian_invalid_minutes
+                            }
+                        )
+                    }
+
+                    is GuardianExtraTimeSubmission.Valid -> {
+                        grantInProgress = true
+                        dialog.getButton(
+                            android.content.DialogInterface.BUTTON_POSITIVE
+                        ).isEnabled = false
+                        dialog.dismiss()
+                        authenticateThen { password ->
+                            writeGrant(password, ruleId, submission.additionalMinutes)
+                        }
+                    }
+                }
+            }
+        }
         GuardianOwnedDialog.show(dialog)
     }
 
@@ -157,16 +241,26 @@ class GuardianApprovalActivity : AppCompatActivity() {
         GuardianOwnedDialog.show(dialog)
     }
 
-    private fun writeGrant(password: String, minutes: Long) {
-        val ruleId = selectedRuleId ?: return
+    private fun writeGrant(password: String, ruleId: String, minutes: Long) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val settings = dataStore.settings.first()
-            val now = System.currentTimeMillis()
-            val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
-            val useDayId = calculator.idAt(now)
-            val success = dataStore.grantAppRuleTime(password, ruleId, useDayId, minutes, now)
+            val success = try {
+                val settings = dataStore.settings.first()
+                val now = System.currentTimeMillis()
+                val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
+                val useDayId = calculator.idAt(now)
+                dataStore.grantAppRuleTime(password, ruleId, useDayId, minutes, now)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                false
+            }
             withContext(kotlinx.coroutines.Dispatchers.Main) {
-                if (success) finishAndLaunch() else toast(R.string.guardian_write_failed)
+                if (success) {
+                    finishAndLaunch()
+                } else {
+                    grantInProgress = false
+                    toast(R.string.guardian_write_failed)
+                }
             }
         }
     }
