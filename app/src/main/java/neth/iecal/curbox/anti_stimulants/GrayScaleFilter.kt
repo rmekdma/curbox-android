@@ -126,9 +126,11 @@ class GrayScaleFilter : BaseBlocker() {
                         val currentPackage = service.rootInActiveWindow?.packageName?.toString()
                         if (currentPackage != null) {
                             lastPackageName = null // Reset to force re-check
+                            @Suppress("DEPRECATION")
                             val dummyEvent = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
                             dummyEvent.packageName = currentPackage
                             doGrayscaleCheck(dummyEvent)
+                            @Suppress("DEPRECATION")
                             dummyEvent.recycle()
                         }
                     } catch (e: Exception) {

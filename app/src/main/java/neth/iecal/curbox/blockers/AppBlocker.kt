@@ -268,9 +268,11 @@ class AppBlocker : BaseBlocker() {
                             Log.d("AppBlocker", "Forcing re-check for current package: $currentPackage")
                             lastPackage = "" // Reset lastPackage to ensure doAppBlockerCheck doesn't return early
                             // Construct a dummy event to trigger the check
+                            @Suppress("DEPRECATION")
                             val dummyEvent = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
                             dummyEvent.packageName = currentPackage
                             doAppBlockerCheck(dummyEvent)
+                            @Suppress("DEPRECATION")
                             dummyEvent.recycle()
                         }
                     } catch (e: Exception) {
@@ -383,9 +385,11 @@ class AppBlocker : BaseBlocker() {
                 val currentPackage = service.rootInActiveWindow?.packageName?.toString()
                 if (currentPackage != null) {
                     lastPackage = ""
+                    @Suppress("DEPRECATION")
                     val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
                     event.packageName = currentPackage
                     doAppBlockerCheck(event)
+                    @Suppress("DEPRECATION")
                     event.recycle()
                 }
             } catch (e: Exception) {

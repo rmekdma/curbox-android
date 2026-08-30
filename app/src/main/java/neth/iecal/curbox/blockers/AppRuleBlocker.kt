@@ -405,12 +405,12 @@ class AppRuleBlocker {
                 .filter { it.isNotBlank() }
                 .distinct()
             for (pkg in visiblePackages) {
-                val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+                val event = obtainWindowStateEvent()
                 event.packageName = pkg
                 try {
                     doAppRuleCheck(event)
                 } finally {
-                    event.recycle()
+                    recycleAccessibilityEvent(event)
                 }
             }
         } catch (error: Exception) {
@@ -462,12 +462,12 @@ class AppRuleBlocker {
                 false
             }
             if (packageStillVisible) {
-                val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+                val event = obtainWindowStateEvent()
                 event.packageName = packageName
                 try {
                     doAppRuleCheck(event)
                 } finally {
-                    event.recycle()
+                    recycleAccessibilityEvent(event)
                 }
             }
         }, delay)
@@ -480,8 +480,18 @@ class AppRuleBlocker {
         return try {
             root.packageName?.toString().orEmpty()
         } finally {
+            @Suppress("DEPRECATION")
             root.recycle()
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun obtainWindowStateEvent(): AccessibilityEvent =
+        AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+
+    @Suppress("DEPRECATION")
+    private fun recycleAccessibilityEvent(event: AccessibilityEvent) {
+        event.recycle()
     }
 
     private fun logNonFatal(error: Exception) {
