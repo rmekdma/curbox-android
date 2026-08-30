@@ -7,6 +7,7 @@
     <string name="guardian_total_extra_minutes">총 추가 시간</string>
     <string name="guardian_current_total">현재 총 추가 시간 %1$d분</string>
     <string name="guardian_apply">적용</string>
+    <string name="guardian_total_not_greater">총 추가 시간은 현재 값보다 커야 해요.</string>
     <string name="guardian_minutes_hint">분</string>
     <string name="guardian_invalid_minutes">양수인 분을 입력해 주세요.</string>
 </resources>

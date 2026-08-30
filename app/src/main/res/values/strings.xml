@@ -1419,6 +1419,7 @@
     <string name="guardian_total_extra_minutes">Total extra time</string>
     <string name="guardian_current_total">Current total extra time: %1$d minutes</string>
     <string name="guardian_apply">Apply</string>
+    <string name="guardian_total_not_greater">Total extra time must be greater than the current value.</string>
     <string name="guardian_enter_password">Enter guardian password</string>
     <string name="guardian_password_hint">Password</string>
     <string name="guardian_wrong_password">That password is wrong.</string>

@@ -23,6 +23,7 @@ import neth.iecal.curbox.databinding.ActivityGuardianApprovalBinding
 import neth.iecal.curbox.databinding.DialogGuardianExtraTimeBinding
 import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeFormState
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeInputSource
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeSubmission
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeValidationError
 import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
@@ -142,9 +143,25 @@ class GuardianApprovalActivity : AppCompatActivity() {
             currentTotalMinutes
         )
         dialogBinding.totalMinutesInput.hint = currentTotalMinutes.toString()
-
+        dialogBinding.totalMinutesInput.setSelectAllOnFocus(true)
         var formState = GuardianExtraTimeFormState.initial(currentTotalMinutes)
         var updatingDerivedValue = false
+        var totalPlaceholderWasFocused = false
+        dialogBinding.totalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) return@setOnFocusChangeListener
+            if (!totalPlaceholderWasFocused) {
+                totalPlaceholderWasFocused = true
+                if (dialogBinding.totalMinutesInput.text.isNullOrEmpty()) {
+                    dialogBinding.totalMinutesInput.hint = null
+                }
+            }
+            if (!updatingDerivedValue) {
+                formState = formState.editTotalMinutes(
+                    dialogBinding.totalMinutesInput.text?.toString().orEmpty()
+                )
+            }
+        }
+
         dialogBinding.additionalMinutesInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
 
@@ -154,8 +171,24 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 if (updatingDerivedValue) return
                 formState = formState.editAdditionalMinutes(editable?.toString().orEmpty())
                 dialogBinding.additionalMinutesLayout.error = null
+                dialogBinding.totalMinutesLayout.error = null
                 updatingDerivedValue = true
                 dialogBinding.totalMinutesInput.setText(formState.totalMinutesText)
+                updatingDerivedValue = false
+            }
+        })
+        dialogBinding.totalMinutesInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+
+            override fun afterTextChanged(editable: Editable?) {
+                if (updatingDerivedValue) return
+                formState = formState.editTotalMinutes(editable?.toString().orEmpty())
+                dialogBinding.additionalMinutesLayout.error = null
+                dialogBinding.totalMinutesLayout.error = null
+                updatingDerivedValue = true
+                dialogBinding.additionalMinutesInput.setText(formState.additionalMinutesText)
                 updatingDerivedValue = false
             }
         })
@@ -171,8 +204,17 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 if (grantInProgress) return@setOnClickListener
                 when (val submission = formState.submit()) {
                     is GuardianExtraTimeSubmission.Invalid -> {
-                        dialogBinding.additionalMinutesLayout.error = getString(
+                        val errorLayout = if (
+                            formState.activeSource == GuardianExtraTimeInputSource.TOTAL_MINUTES
+                        ) {
+                            dialogBinding.totalMinutesLayout
+                        } else {
+                            dialogBinding.additionalMinutesLayout
+                        }
+                        errorLayout.error = getString(
                             when (submission.error) {
+                                GuardianExtraTimeValidationError.TOTAL_NOT_GREATER ->
+                                    R.string.guardian_total_not_greater
                                 GuardianExtraTimeValidationError.INVALID_MINUTES,
                                 GuardianExtraTimeValidationError.DURATION_OVERFLOW,
                                 GuardianExtraTimeValidationError.TOTAL_OVERFLOW ->

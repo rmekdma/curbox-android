@@ -31,6 +31,98 @@ class GuardianExtraTimeFormStateTest {
     }
 
     @Test
+    fun totalMinutesPreviewDerivesThePositiveAdditionalMinutes() {
+        val state = GuardianExtraTimeFormState.initial(30L)
+            .editTotalMinutes("45")
+
+        assertEquals("45", state.totalMinutesText)
+        assertEquals("15", state.additionalMinutesText)
+        assertEquals(45L, state.previewTotalMinutes)
+        assertEquals(
+            GuardianExtraTimeSubmission.Valid(additionalMinutes = 15L, totalMinutes = 45L),
+            state.submit()
+        )
+    }
+
+    @Test
+    fun switchingInputSourcesRecomputesOnlyFromTheMostRecentEdit() {
+        val fromAdditional = GuardianExtraTimeFormState.initial(30L)
+            .editAdditionalMinutes("10")
+        val fromTotal = fromAdditional.editTotalMinutes("50")
+        val switchedBack = fromTotal.editAdditionalMinutes("5")
+
+        assertEquals("50", fromTotal.totalMinutesText)
+        assertEquals("20", fromTotal.additionalMinutesText)
+        assertEquals("35", switchedBack.totalMinutesText)
+        assertEquals("5", switchedBack.additionalMinutesText)
+        assertEquals(
+            GuardianExtraTimeSubmission.Valid(additionalMinutes = 5L, totalMinutes = 35L),
+            switchedBack.submit()
+        )
+    }
+
+    @Test
+    fun equalOrSmallerTotalLeavesDerivedAdditionalMinutesBlank() {
+        listOf("30", "29").forEach { input ->
+            val state = GuardianExtraTimeFormState.initial(30L)
+                .editTotalMinutes(input)
+
+            assertEquals(input, state.totalMinutesText)
+            assertEquals("", state.additionalMinutesText)
+            assertEquals(
+                GuardianExtraTimeSubmission.Invalid(
+                    GuardianExtraTimeValidationError.TOTAL_NOT_GREATER
+                ),
+                state.submit()
+            )
+        }
+    }
+
+    @Test
+    fun invalidTotalInputLeavesDerivedAdditionalMinutesBlank() {
+        listOf("", "0", "not a number", "9223372036854775808").forEach { input ->
+            val result = GuardianExtraTimeFormState.initial(30L)
+                .editTotalMinutes(input)
+
+            assertEquals("", result.additionalMinutesText)
+            assertEquals(
+                GuardianExtraTimeSubmission.Invalid(
+                    GuardianExtraTimeValidationError.INVALID_MINUTES
+                ),
+                result.submit()
+            )
+        }
+    }
+
+    @Test
+    fun totalDurationOverflowIsRejectedBeforeSubmission() {
+        val result = GuardianExtraTimeFormState.initial(30L)
+            .editTotalMinutes((GuardianExtraTimeFormState.MAX_GRANT_MINUTES + 1L).toString())
+
+        assertEquals("", result.additionalMinutesText)
+        assertEquals(
+            GuardianExtraTimeSubmission.Invalid(
+                GuardianExtraTimeValidationError.DURATION_OVERFLOW
+            ),
+            result.submit()
+        )
+    }
+
+    @Test
+    fun largestRepresentableTotalRemainsAvailableWithoutAProductMaximum() {
+        val result = GuardianExtraTimeFormState.initial(30L)
+            .editTotalMinutes(GuardianExtraTimeFormState.MAX_GRANT_MINUTES.toString())
+
+        assertEquals(
+            GuardianExtraTimeSubmission.Valid(
+                additionalMinutes = GuardianExtraTimeFormState.MAX_GRANT_MINUTES - 30L,
+                totalMinutes = GuardianExtraTimeFormState.MAX_GRANT_MINUTES
+            ),
+            result.submit()
+        )
+    }
+
+    @Test
     fun blankZeroMalformedAndUnrepresentableMinutesAreRejected() {
         val inputs = listOf("", "0", "not a number", "9223372036854775808")
 
