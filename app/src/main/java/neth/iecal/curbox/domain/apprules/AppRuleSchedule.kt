@@ -39,6 +39,39 @@ object AppRuleSchedule {
         return activeWindows(rule, nowMs, zone).firstOrNull()
     }
 
+    /**
+     * Returns the next schedule boundary after [nowMs]. A boundary is either when one of the
+     * rule's ranges starts or ends. The window immediately before today is included because an
+     * overnight range can end today even though it started yesterday.
+     */
+    fun nextBoundaryAfter(
+        rule: AppRule,
+        nowMs: Long,
+        zone: ZoneId
+    ): Long? {
+        if (rule.weekdays.any { it !in 0..6 }) return null
+        if (rule.effectiveTimeRanges().any { range ->
+                range.startMinute !in 0 until 24 * 60 || range.endMinute !in 0..24 * 60
+            }) {
+            return null
+        }
+
+        val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
+        // Span more than two weekly cycles so a real end boundary is not mistaken for the end
+        // of the search horizon when a rule is active only once per week.
+        val windows = (-1L..15L)
+            .flatMap { offset -> windowsForAnchor(rule, today.plusDays(offset), zone) }
+        val horizonEnd = windows.maxOfOrNull { it.endMs } ?: return null
+        return merge(windows)
+            .asSequence()
+            .flatMap { window -> sequenceOf(window.startMs, window.endMs) }
+            .filter { it > nowMs }
+            // Do not treat the end of the search horizon as a real boundary when the rule stays
+            // active continuously through it (for example an all day rule on every weekday).
+            .filter { it < horizonEnd }
+            .minOrNull()
+    }
+
     /** Returns the merged active intervals that fall inside one current use day. */
     fun usageWindowsForUseDay(
         rule: AppRule,

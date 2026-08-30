@@ -3,6 +3,7 @@ package neth.iecal.curbox.domain.apprules
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppRuleScopeTest {
@@ -25,5 +26,25 @@ class AppRuleScopeTest {
         )
 
         assertEquals(setOf("com.settings", "com.future"), resolved)
+    }
+
+    @Test
+    fun foregroundFallbackOnlyExpandsAnAllAppsScope() {
+        val group = AppRuleAppGroup("group", "Group", listOf("com.reader"))
+        val fallback = "com.current"
+
+        val groupResolved = AppRuleScope.forGroup(group.id).resolve(
+            groups = listOf(group),
+            launchablePackages = setOf("com.launchable"),
+            foregroundPackageFallback = fallback
+        )
+        val allAppsResolved = AppRuleScope.allApps().resolve(
+            groups = listOf(group),
+            launchablePackages = setOf("com.launchable"),
+            foregroundPackageFallback = fallback
+        )
+
+        assertEquals(setOf("com.reader"), groupResolved)
+        assertTrue(fallback in allAppsResolved)
     }
 }

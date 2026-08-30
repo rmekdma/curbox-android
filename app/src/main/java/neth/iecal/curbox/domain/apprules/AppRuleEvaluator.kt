@@ -90,17 +90,19 @@ object AppRuleEvaluator {
 
         val sessionList = sessions.toList()
         val membershipResolver = AppRuleMembershipResolver(snapshot)
-        val eventLaunchablePackages = availablePackages.ifEmpty { setOf(packageName) }
+        // LauncherApps can omit the package that is currently visible (for example while an OEM
+        // launcher refreshes its list). Pass that event package as an all-apps-only fallback so a
+        // non-empty but stale listing cannot make an otherwise applicable rule disappear without
+        // expanding explicit group scopes or the launchable package contract.
         val evaluations = snapshot.appRules
             .filter { it.isActive }
             .mapNotNull { rule ->
                 val packages = membershipResolver.targetPackagesAt(
                     rule = rule,
                     atMs = nowMs,
-                    // A caller that does not have a launcher listing is still able to evaluate
-                    // the event package. The service supplies the complete dynamic listing.
-                    launchablePackages = eventLaunchablePackages,
-                    essentialExcludedPackages = essentialExcludedPackages
+                    launchablePackages = availablePackages,
+                    essentialExcludedPackages = essentialExcludedPackages,
+                    foregroundPackageFallback = packageName
                 )
                 if (packageName !in packages) return@mapNotNull null
                 val contributorResolution = resolveContributors(snapshot, rule)
@@ -118,8 +120,9 @@ object AppRuleEvaluator {
                     contributorResolution.missingGroupIds,
                     overrides,
                     membershipResolver,
-                    eventLaunchablePackages,
-                    essentialExcludedPackages
+                    availablePackages,
+                    essentialExcludedPackages,
+                    packageName
                 )
             }
         return AppRulesEvaluation(
@@ -186,7 +189,8 @@ object AppRuleEvaluator {
         overrides: AppRuleOverrideState = AppRuleOverrideState(),
         membershipResolver: AppRuleMembershipResolver? = null,
         membershipLaunchablePackages: Set<String> = emptySet(),
-        membershipEssentialExcludedPackages: Set<String> = emptySet()
+        membershipEssentialExcludedPackages: Set<String> = emptySet(),
+        membershipForegroundPackageFallback: String? = null
     ): AppRuleEvaluation {
         val activeWindow = AppRuleSchedule.activeWindow(rule, nowMs, zone)
         val sessionList = sessions.toList()
@@ -329,7 +333,8 @@ object AppRuleEvaluator {
                         rule,
                         atMs,
                         launchablePackages = membershipLaunchablePackages,
-                        essentialExcludedPackages = membershipEssentialExcludedPackages
+                        essentialExcludedPackages = membershipEssentialExcludedPackages,
+                        foregroundPackageFallback = membershipForegroundPackageFallback
                     )
                 }
             },

@@ -84,12 +84,14 @@ class AppRuleMembershipResolver(private val snapshot: AppRuleSnapshot) {
         rule: neth.iecal.curbox.data.models.AppRule,
         atMs: Long,
         launchablePackages: Set<String> = emptySet(),
-        essentialExcludedPackages: Set<String> = emptySet()
+        essentialExcludedPackages: Set<String> = emptySet(),
+        foregroundPackageFallback: String? = null
     ): Set<String> = rule.effectiveScope().resolve(
         groups = snapshot.appGroups,
         launchablePackages = launchablePackages,
         essentialExcludedPackages = essentialExcludedPackages,
-        atMs = atMs
+        atMs = atMs,
+        foregroundPackageFallback = foregroundPackageFallback
     )
 
     fun packagesForGroupAt(groupId: String, atMs: Long): Set<String> = groupsById[groupId.trim()]?.packagesAt(atMs).orEmpty().map(String::trim).filter(String::isNotEmpty).toSet()
