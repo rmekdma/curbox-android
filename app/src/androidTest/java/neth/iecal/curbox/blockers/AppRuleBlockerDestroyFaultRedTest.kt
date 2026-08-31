@@ -56,8 +56,8 @@ class AppRuleBlockerDestroyFaultRedTest {
             "the race must start from a session written through the durable fake repository"
         }
 
-        val scheduler = RecordingScheduler()
-        val visibleCallbacks = RecordingHandlerCallbacks()
+        val scheduler = RecordingCallbacks()
+        val visibleCallbacks = RecordingCallbacks()
         val evaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
         val notificationPostings = CopyOnWriteArrayList<LiveRuleNotificationModel>()
         val notificationPostEntered = CountDownLatch(1)
@@ -774,7 +774,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         }
     }
 
-    private class RecordingScheduler {
+    private class RecordingCallbacks {
         private val pending = CopyOnWriteArrayList<Runnable>()
         private val removedCallbacks = AtomicInteger(0)
         private val deliveredCallbacks = AtomicInteger(0)
@@ -783,37 +783,13 @@ class AppRuleBlockerDestroyFaultRedTest {
         val removedCount: Int get() = removedCallbacks.get()
         val deliveredCount: Int get() = deliveredCallbacks.get()
 
-        fun post(runnable: Runnable, delayMillis: Long): Boolean {
+        fun post(runnable: Runnable, _delayMillis: Long): Boolean {
             pending += runnable
             return true
         }
 
         fun remove(runnable: Runnable) {
             if (pending.remove(runnable)) removedCallbacks.incrementAndGet()
-        }
-
-        fun deliverPending() {
-            pending.toList().forEach { runnable ->
-                if (pending.remove(runnable)) {
-                    deliveredCallbacks.incrementAndGet()
-                    runnable.run()
-                }
-            }
-        }
-    }
-
-    private class RecordingHandlerCallbacks {
-        private val pending = CopyOnWriteArrayList<Runnable>()
-        private val removedCallbacks = AtomicInteger(0)
-        private val deliveredCallbacks = AtomicInteger(0)
-
-        val pendingCount: Int get() = pending.size
-        val removedCount: Int get() = removedCallbacks.get()
-        val deliveredCount: Int get() = deliveredCallbacks.get()
-
-        fun post(runnable: Runnable, delayMillis: Long): Boolean {
-            pending += runnable
-            return true
         }
 
         fun removeAll() {
