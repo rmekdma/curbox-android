@@ -273,12 +273,12 @@ sequence, invariant를 실행하는 순서와 검증 checklist만 제공한다. 
 
 #### 1.0 Shared value-level seam
 
-두 module이 사용하는 관찰 입력은 다음의 Android-free `ForegroundObservationSource`
-`interface`에서 생성한다. 이 `interface`의 유일한 operation은
-`capture(trigger: ObservationTrigger)`이며, trigger와 반환값 모두 immutable value다.
-connection마다 하나인 `ConnectionScopedSourceOrderSequencer`가 ordering identity의 유일한
-allocator다. 이 interface는 `nextSourceOrderIdentity(): SourceOrderIdentity`와
-`nextRuntimeRevision(): RuntimeRevision` 두 operation만 제공한다. `SourceOrderIdentity`와
+두 module이 사용하는 관찰 입력은 Android-free `ForegroundObservationSource`에서 생성한다.
+`ForegroundObservationSource`는 별도의 interface이며 정확히 하나의 operation인
+`capture(...)`만 제공한다. capture의 입력과 반환값은 모두 immutable value다.
+`ConnectionScopedSourceOrderSequencer`는 이 source와 분리된 connection-scoped allocator
+interface이며, 정확히 두 operation인 `nextSourceOrderIdentity(): SourceOrderIdentity`와
+`nextRuntimeRevision(): RuntimeRevision`만 제공한다. `SourceOrderIdentity`와
 `RuntimeRevision`은 typealias가 아닌 서로 다른 real value type이며, 두 domain의 raw numeric
 value를 서로 비교하지 않는다. `LifecycleGeneration`도 이 둘과 구별되는 typealias가 아닌 real
 value type이며, lifecycle owner가 setup/reconnect/destroy 경계에서 발급한다.
