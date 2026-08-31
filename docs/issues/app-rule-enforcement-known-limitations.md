@@ -67,7 +67,8 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Mitigation or decision needed:** 승인된 표의 13개 행과 `AR002-R01`부터 `AR002-R13`까지의
   mapping을 Phase 0 deterministic test와 Phase 1 foreground evidence module의 동일 계약으로
   구현한다. R5에는 승인된 A안을 사용하고 B는 오차단과 제한 누락의 tradeoff를 기록한 비활성
-  대안으로만 남긴다.
+  대안으로만 남긴다. R6는 이전 후보가 없는 최초 관찰에서도 확실한 비필수 active root를
+  첫 후보로 평가하며, 이전 후보가 있을 때만 stale 이전 package와의 전환을 판정한다.
 - **Approval evidence:** parent replied `A` on 2026-08-31, approving the full 13-row matrix and
   selecting R5 option A.
 
