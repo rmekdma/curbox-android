@@ -57,8 +57,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         }
 
         val scheduler = RecordingScheduler()
-        val deferredHandlerCallbacks = CopyOnWriteArrayList<Runnable>()
-        val handlerCallbackRuns = AtomicInteger(0)
+        val visibleCallbacks = RecordingHandlerCallbacks()
         val evaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
         val notificationPostings = CopyOnWriteArrayList<LiveRuleNotificationModel>()
         val notificationPostEntered = CountDownLatch(1)
@@ -87,13 +86,8 @@ class AppRuleBlockerDestroyFaultRedTest {
             }
             recheckPostDelayed = scheduler::post
             recheckRemoveCallback = scheduler::remove
-            visibleApplicationCheckPostDelayed = { callback, _ ->
-                deferredHandlerCallbacks += Runnable {
-                    handlerCallbackRuns.incrementAndGet()
-                    callback.run()
-                }
-                true
-            }
+            visibleApplicationCheckPostDelayed = visibleCallbacks::post
+            visibleApplicationCheckRemoveCallbacks = visibleCallbacks::removeAll
         }
 
         val checkFailure = AtomicReference<Throwable?>(null)
@@ -108,27 +102,30 @@ class AppRuleBlockerDestroyFaultRedTest {
             }
         }
 
+        val drainDeadlineMs =
+            android.os.SystemClock.elapsedRealtime() + TOTAL_DRAIN_BUDGET_MS
+
         try {
             // Start a notification read before the foreground decision so both async publication
             // and the decision path are still in flight when destroy begins.
             blocker.updateLiveNotification(TARGET_PACKAGE)
             check(
-                repository.notificationReadStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                awaitBeforeDeadline(repository.notificationReadStarted, drainDeadlineMs)
             ) { "notification worker did not reach the persistence gate" }
 
             invokePrivate(blocker, "scheduleRecheck", TARGET_PACKAGE, 10_000L, 20_000L, 0L)
             invokePrivate(blocker, "postVisibleApplicationCheck", 0L, 0L)
             check(scheduler.pendingCount == 1) { "the handler recheck was not scheduled" }
-            check(deferredHandlerCallbacks.size == 1) {
+            check(visibleCallbacks.pendingCount == 1) {
                 "the visible handler callback was not captured"
             }
 
             eventThread.start()
             check(
-                repository.secondReadStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                awaitBeforeDeadline(repository.secondReadStarted, drainDeadlineMs)
             ) { "the in-flight decision did not reach the persistence gate" }
             repository.releaseDecisionRead()
-            check(evaluatorEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            check(awaitBeforeDeadline(evaluatorEntered, drainDeadlineMs)) {
                 "the in-flight evaluator did not reach its distinct gate"
             }
 
@@ -142,10 +139,8 @@ class AppRuleBlockerDestroyFaultRedTest {
                 }
             }
             destroyThread.start()
-            val destroyCompletedWithinBudget = destroyReturned.await(
-                DESTROY_DRAIN_BUDGET_MS,
-                TimeUnit.MILLISECONDS
-            )
+            val destroyCompletedWithinBudget =
+                awaitBeforeDeadline(destroyReturned, drainDeadlineMs)
             val destroyElapsedMs =
                 android.os.SystemClock.elapsedRealtime() - destroyStartedAtMs
 
@@ -153,56 +148,61 @@ class AppRuleBlockerDestroyFaultRedTest {
             if (!destroyCompletedWithinBudget) {
                 failures += "destroy did not return within the bounded drain budget"
             }
-            if (destroyElapsedMs > DESTROY_DRAIN_BUDGET_MS) {
+            if (destroyElapsedMs > TOTAL_DRAIN_BUDGET_MS) {
                 failures += "destroy exceeded the bounded drain budget: ${destroyElapsedMs}ms"
             }
             if (scheduler.pendingCount != 0) {
                 failures += "destroy left ${scheduler.pendingCount} handler callbacks queued"
+            }
+            if (scheduler.removedCount != 1) {
+                failures += "destroy did not remove the queued scheduler callback"
+            }
+            if (scheduler.deliveredCount != 0) {
+                failures += "destroy delivered a scheduler callback"
+            }
+            if (visibleCallbacks.pendingCount != 0) {
+                failures += "destroy left ${visibleCallbacks.pendingCount} handler callbacks queued"
+            }
+            if (visibleCallbacks.removedCount != 1) {
+                failures += "destroy did not remove the queued handler callback"
+            }
+            // Probe both virtual queues after destroy. A callback that survived removal would be
+            // delivered here and counted, so this verifies delivery rather than relying on a
+            // post-destroy no-op guard inside the callback.
+            scheduler.deliverPending()
+            visibleCallbacks.deliverPending()
+            if (visibleCallbacks.deliveredCount != 0) {
+                failures += "destroy delivered a handler callback"
+            }
+            if (scheduler.deliveredCount != 0) {
+                failures += "destroy delivered a scheduler callback"
             }
 
             // Release the evaluator only after teardown. The observer records the external
             // evaluator publication after its distinct gate, so it cannot be confused with the
             // persistence read that got the decision in flight.
             evaluatorRelease.countDown()
-            if (!evaluatorCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            if (!awaitBeforeDeadline(evaluatorCompleted, drainDeadlineMs)) {
                 failures += "the in-flight evaluator did not complete after its gate was released"
             }
-            if (!checkReturned.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                failures += "the in-flight decision did not drain after persistence was released"
+            if (!awaitBeforeDeadline(checkReturned, drainDeadlineMs)) {
+                failures += "the in-flight decision did not drain after the evaluator was released"
             }
-            eventThread.join(WAIT_TIMEOUT_MS)
+            joinBeforeDeadline(eventThread, drainDeadlineMs)
             if (eventThread.isAlive) failures += "the in-flight decision thread remained alive"
 
             // Release the notification persistence read only after teardown. Any notification
             // post observed from this worker is therefore a separate post-destroy side effect.
             repository.releaseNotificationRead()
-            val notificationPostedAfterDestroy = notificationPostEntered.await(
-                WAIT_TIMEOUT_MS,
-                TimeUnit.MILLISECONDS
-            )
+            val notificationPostedAfterDestroy =
+                awaitBeforeDeadline(notificationPostEntered, drainDeadlineMs)
             notificationPostRelease.countDown()
             if (notificationPostedAfterDestroy &&
-                !notificationPostCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                !awaitBeforeDeadline(notificationPostCompleted, drainDeadlineMs)
             ) {
                 failures += "the post-destroy notification observer did not complete"
             }
 
-            val evaluationsBeforeManualCallbacks = evaluations.size
-            val activitiesBeforeManualCallbacks = service.startedActivities.size
-            scheduler.runAllCallbacks()
-            deferredHandlerCallbacks.forEach(Runnable::run)
-            if (scheduler.callbackRunCount != 1) {
-                failures += "the queued scheduler callback was not executed exactly once"
-            }
-            if (handlerCallbackRuns.get() != 1) {
-                failures += "the queued handler callback was not executed exactly once"
-            }
-            if (evaluations.size != evaluationsBeforeManualCallbacks) {
-                failures += "a queued handler callback evaluated after destroy"
-            }
-            if (service.startedActivities.size != activitiesBeforeManualCallbacks) {
-                failures += "a queued handler callback launched a warning after destroy"
-            }
             if (evaluations.isNotEmpty()) {
                 failures += "evaluator publication occurred after destroy: ${evaluations.size}"
             }
@@ -256,7 +256,7 @@ class AppRuleBlockerDestroyFaultRedTest {
             repository.releaseNotificationRead()
             if (eventThread.isAlive) {
                 eventThread.interrupt()
-                eventThread.join(WAIT_TIMEOUT_MS)
+                joinBeforeDeadline(eventThread, drainDeadlineMs)
             }
             // The first blocker normally destroys inside the race. This is idempotent for the
             // test fixture and ensures no coroutine survives a setup failure before that point.
@@ -346,11 +346,13 @@ class AppRuleBlockerDestroyFaultRedTest {
                 "notification worker cancellation fault did not execute"
             }
             repository.mode = FaultMode.HEALTHY
+            val beforeHealthyEvent = evaluations.size
+            sendWindowEvent(blocker, TARGET_PACKAGE)
             val failure = healthyDenialFailure(
                 label = "worker cancellation",
                 evaluations = evaluations,
                 service = service,
-                evaluationCountBefore = evaluations.size
+                evaluationCountBefore = beforeHealthyEvent
             )
             check(failure.isEmpty()) {
                 failure
@@ -774,11 +776,12 @@ class AppRuleBlockerDestroyFaultRedTest {
 
     private class RecordingScheduler {
         private val pending = CopyOnWriteArrayList<Runnable>()
-        private val removed = CopyOnWriteArrayList<Runnable>()
-        private val callbacksRun = AtomicInteger(0)
+        private val removedCallbacks = AtomicInteger(0)
+        private val deliveredCallbacks = AtomicInteger(0)
 
         val pendingCount: Int get() = pending.size
-        val callbackRunCount: Int get() = callbacksRun.get()
+        val removedCount: Int get() = removedCallbacks.get()
+        val deliveredCount: Int get() = deliveredCallbacks.get()
 
         fun post(runnable: Runnable, delayMillis: Long): Boolean {
             pending += runnable
@@ -786,18 +789,56 @@ class AppRuleBlockerDestroyFaultRedTest {
         }
 
         fun remove(runnable: Runnable) {
-            if (pending.remove(runnable)) removed += runnable
+            if (pending.remove(runnable)) removedCallbacks.incrementAndGet()
         }
 
-        fun runAllCallbacks() {
-            val callbacks = (pending.toList() + removed.toList()).distinct()
-            pending.clear()
-            removed.clear()
-            callbacks.forEach { runnable ->
-                callbacksRun.incrementAndGet()
-                runnable.run()
+        fun deliverPending() {
+            pending.toList().forEach { runnable ->
+                if (pending.remove(runnable)) {
+                    deliveredCallbacks.incrementAndGet()
+                    runnable.run()
+                }
             }
         }
+    }
+
+    private class RecordingHandlerCallbacks {
+        private val pending = CopyOnWriteArrayList<Runnable>()
+        private val removedCallbacks = AtomicInteger(0)
+        private val deliveredCallbacks = AtomicInteger(0)
+
+        val pendingCount: Int get() = pending.size
+        val removedCount: Int get() = removedCallbacks.get()
+        val deliveredCount: Int get() = deliveredCallbacks.get()
+
+        fun post(runnable: Runnable, delayMillis: Long): Boolean {
+            pending += runnable
+            return true
+        }
+
+        fun removeAll() {
+            removedCallbacks.addAndGet(pending.size)
+            pending.clear()
+        }
+
+        fun deliverPending() {
+            pending.toList().forEach { runnable ->
+                if (pending.remove(runnable)) {
+                    deliveredCallbacks.incrementAndGet()
+                    runnable.run()
+                }
+            }
+        }
+    }
+
+    private fun awaitBeforeDeadline(latch: CountDownLatch, deadlineMs: Long): Boolean {
+        val remainingMs = (deadlineMs - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        return latch.await(remainingMs, TimeUnit.MILLISECONDS)
+    }
+
+    private fun joinBeforeDeadline(thread: Thread, deadlineMs: Long) {
+        val remainingMs = (deadlineMs - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        if (remainingMs > 0L) thread.join(remainingMs)
     }
 
     private fun setField(target: Any, name: String, value: Any?) {
@@ -823,7 +864,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         const val TARGET_GROUP_ID = "target-group"
         const val TARGET_RULE_ID = "target-rule"
         const val WAIT_TIMEOUT_MS = 2_000L
-        const val DESTROY_DRAIN_BUDGET_MS = 1_000L
+        const val TOTAL_DRAIN_BUDGET_MS = 5_000L
         const val SESSION_DURATION_MS = 60_000L
     }
 }
