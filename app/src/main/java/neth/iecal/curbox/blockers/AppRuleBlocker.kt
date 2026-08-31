@@ -150,6 +150,11 @@ class AppRuleBlocker {
     internal var elapsedRealtimeMsProvider: () -> Long = { SystemClock.elapsedRealtime() }
     internal var recheckPostDelayed: ((Runnable, Long) -> Boolean)? = null
     internal var recheckRemoveCallback: ((Runnable) -> Unit)? = null
+    /** Temporary seam for deterministic wake-reconciliation contract tests. */
+    internal var visibleApplicationCheckPostDelayed: ((Runnable, Long) -> Boolean)? = null
+    /** Temporary seams for deterministic screen and keyguard recovery contract tests. */
+    internal var screenInteractiveProvider: (() -> Boolean)? = null
+    internal var keyguardLockedProvider: (() -> Boolean)? = null
     internal var evaluationResultObserver: ((AppRulesEvaluation) -> Unit)? = null
 
     fun setup(service: BaseBlockingService) {
@@ -898,24 +903,29 @@ class AppRuleBlocker {
         connectionGeneration: Long = lifecycleGeneration.get()
     ) {
         if (!isReadyForChecks(connectionGeneration)) return
-        try {
-            handler.postDelayed({
-                try {
-                    if (isReadyForChecks(connectionGeneration) && isScreenReadyForChecks()) {
-                        checkCurrentlyVisibleApplications()
-                    }
-                } catch (error: Throwable) {
-                    // Handler callbacks have no coroutine parent to contain a feature failure.
-                    logNonFatal(error)
+        val callback = Runnable {
+            try {
+                if (isReadyForChecks(connectionGeneration) && isScreenReadyForChecks()) {
+                    checkCurrentlyVisibleApplications()
                 }
-            }, delayMillis.coerceAtLeast(0L))
+            } catch (error: Throwable) {
+                // Handler callbacks have no coroutine parent to contain a feature failure.
+                logNonFatal(error)
+            }
+        }
+        try {
+            visibleApplicationCheckPostDelayed?.invoke(
+                callback,
+                delayMillis.coerceAtLeast(0L)
+            ) ?: handler.postDelayed(callback, delayMillis.coerceAtLeast(0L))
         } catch (error: Throwable) {
             logNonFatal(error)
         }
     }
 
     private fun isScreenInteractive(): Boolean = try {
-        (service.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive ?: true
+        screenInteractiveProvider?.invoke()
+            ?: ((service.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive ?: true)
     } catch (error: CancellationException) {
         throw error
     } catch (error: Throwable) {
@@ -924,8 +934,9 @@ class AppRuleBlocker {
     }
 
     private fun isDeviceKeyguardLocked(): Boolean = try {
-        (service.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)
-            ?.isKeyguardLocked == true
+        keyguardLockedProvider?.invoke()
+            ?: ((service.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)
+                ?.isKeyguardLocked == true)
     } catch (error: Throwable) {
         logNonFatal(error)
         false
