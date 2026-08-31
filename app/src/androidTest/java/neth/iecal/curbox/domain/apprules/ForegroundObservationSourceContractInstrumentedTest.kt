@@ -12,17 +12,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ForegroundObservationSourceContractInstrumentedTest {
     @Test
     fun defaultErrorReporterPersistsProviderFailuresThroughCrashLogger() {
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
-        val service = AttachedThrowingAccessibilityService().apply {
+        val marker = "ticket08-default-reporter-${UUID.randomUUID()}"
+        val service = AttachedThrowingAccessibilityService(marker).apply {
             attachTo(targetContext)
         }
         val logFile = File(targetContext.filesDir, "crash_log.txt")
-        val existingLog = logFile.takeIf(File::exists)?.readBytes()
+        val logBefore = logFile.takeIf(File::exists)?.readText().orEmpty()
+        assertTrue("the per-test marker must be absent before capture", !logBefore.contains(marker))
         val callbackEvent = callbackEvent("com.example.reader", eventTime = 9_000L)
 
         try {
@@ -33,15 +36,10 @@ class ForegroundObservationSourceContractInstrumentedTest {
                 displayStateProvider = { DisplayState.UNLOCKED }
             ).captureEvent(callbackEvent, trigger("com.example.reader"))
 
-            assertTrue(logFile.exists())
-            assertTrue(logFile.readText().contains("Non-Fatal Error"))
+            val logAfter = logFile.takeIf(File::exists)?.readText().orEmpty()
+            assertTrue("the default reporter must persist the per-test marker", logAfter.contains(marker))
         } finally {
             callbackEvent.recycle()
-            if (existingLog == null) {
-                logFile.delete()
-            } else {
-                logFile.writeBytes(existingLog)
-            }
         }
     }
 
@@ -317,7 +315,9 @@ class ForegroundObservationSourceContractInstrumentedTest {
             throw IllegalStateException("windows provider failed")
     }
 
-    private class AttachedThrowingAccessibilityService : AccessibilityService() {
+    private class AttachedThrowingAccessibilityService(
+        private val marker: String
+    ) : AccessibilityService() {
         fun attachTo(context: Context) {
             attachBaseContext(context)
         }
@@ -327,9 +327,9 @@ class ForegroundObservationSourceContractInstrumentedTest {
         override fun onInterrupt() = Unit
 
         override fun getRootInActiveWindow(): AccessibilityNodeInfo? =
-            throw IllegalStateException("root provider failed")
+            throw IllegalStateException("root provider failed: $marker")
 
         override fun getWindows(): MutableList<AccessibilityWindowInfo> =
-            throw IllegalStateException("windows provider failed")
+            throw IllegalStateException("windows provider failed: $marker")
     }
 }
