@@ -241,6 +241,443 @@ parent는 2026-08-31에 `A`로 전체 13개 행과 R5 A안을 승인했다. 따�
   아니며, private method 호출 순서나 private field를 직접 검증하는 테스트는 계약 테스트로
   분류하지 않는다.
 
+## Phase 1/2 architecture contract — PROPOSED / NOT YET APPROVED
+
+**상태:** `PROPOSED / NOT YET APPROVED`
+
+이 section은 ticket 02부터 06까지의 Phase 0 RED 증거를 구현 가능한 구조 계약으로 번역한
+승인 초안이다. 2026-08-31에 승인된 foreground evidence policy matrix와 R5 A 선택은
+제품 정책의 근거로 사용하지만, 이 architecture contract의 승인 근거로 사용하지 않는다.
+아직 사용자 architecture 승인 메시지는 기록하지 않았다. 이 계약이 명시적으로 승인되기
+전에는 production implementation, Room, Gradle, exported API를 변경하지 않는다.
+
+이 설계에서 `module`, `interface`, `implementation`, `seam`, `adapter`, `depth`, `leverage`,
+`locality`는 codebase-design vocabulary의 뜻으로 사용한다. `ForegroundEvidenceModule`과
+`SerializedDecisionWorker`는 각각 작은 `interface` 뒤에 정책 복잡성과 순서 복잡성을 숨기는
+deep `module`이다. 두 module의 이름은 approval draft를 위한 제안 이름이며, 승인 전에는
+concrete class나 package를 선결정하지 않는다.
+
+### 1. 설계 경계와 최소 interface
+
+#### 1.0 Shared value-level seam
+
+두 module이 받는 값은 다음의 Android-free `ForegroundObservationSource` `interface`에서
+생성한다. 이 `interface`의 유일한 operation은 `capture(trigger: ObservationTrigger)`이며,
+trigger와 반환값 모두 immutable value다. platform event object는 이 `interface`를 통과하지
+않고 production `adapter`의 내부 implementation에만 존재한다.
+
+| Value | Exact shape | Invariant |
+| --- | --- | --- |
+| `ObservationTrigger` | `kind`, nullable normalized `eventPackage`, `requestedAtWallMs`, `requestedAtElapsedMs` | `kind`는 `REAL_EVENT`, `SYNTHETIC_RECHECK`, `REFRESH`, `RECONNECT`, `SCREEN_WAKE`, `USER_PRESENT` 중 하나이며, `REAL_EVENT` 이외에는 event package가 없어도 된다. |
+| `ForegroundObservationSource.capture` | `ObservationTrigger`를 받아 `ForegroundObservation` 반환 | capture는 blocking persistence/evaluator를 수행하지 않으며, 반환된 value는 source 밖에서 변이되지 않는다. |
+| `ForegroundObservation` | 아래 1.1의 immutable value | source는 한 capture 안에서 wall/elapsed 시각, root, window, display 사실을 서로 다른 시점에 재조회해 혼합하지 않는다. |
+
+`ForegroundObservationSource`는 evidence policy를 해석하지 않는다. source는 framework 사실을
+value로 옮기고, `ForegroundEvidenceModule`이 그 value를 policy evidence로 분류한다. 따라서
+production과 deterministic 두 `adapter`는 같은 source `interface`를 만족하지만 policy
+branch를 각각 복제하지 않는다.
+
+#### 1.1 ForegroundEvidenceModule
+
+`ForegroundEvidenceModule`의 외부 `interface`는 다음 한 동작만 제공한다.
+
+| Operation | Input | Output | Side effect |
+| --- | --- | --- | --- |
+| `classify` | immutable `ForegroundObservation` value | immutable `ForegroundEvidenceResult` value | 없음 |
+
+`classify`의 호출은 하나의 owner가 같은 lifecycle generation 안에서 순서대로 수행한다.
+module `implementation`은 마지막 실제 foreground event, essential overlay로 인한 suspension,
+그리고 evidence TTL 같은 policy state를 interface 뒤에 보관할 수 있다. caller는 그 private
+state를 읽거나 쓰지 않고, lifecycle generation이 바뀌면 새 generation의 첫 observation을
+전달한다.
+
+`ForegroundObservation`의 value-level shape은 다음과 같다. 모든 package set은 공백 package를
+제거하고 중복을 제거한 불변 집합이어야 하며, 시간은 음수가 아니어야 한다.
+
+| Field | Value shape | Invariant |
+| --- | --- | --- |
+| `lifecycleGeneration` | monotonic `Long` | 이전 연결의 observation과 현재 연결의 observation을 섞지 않는다. |
+| `capturedAtWallMs` | `Long` | rule boundary와 use-day 계산의 기준 시각이다. |
+| `capturedAtElapsedMs` | `Long` | evidence TTL과 monotonic deadline의 기준 시각이다. |
+| `signalKind` | `REAL_EVENT`, `SYNTHETIC_RECHECK`, `REFRESH`, `RECONNECT`, `SCREEN_WAKE`, `USER_PRESENT` 중 하나 | `REAL_EVENT`만 실제 foreground evidence의 TTL을 새로 시작할 수 있다. synthetic observation은 TTL을 갱신하지 않는다. |
+| `eventPackage` | nullable normalized package value | `REAL_EVENT`가 아니면 null이어도 된다. blank package는 null로 정규화한다. |
+| `activeRoot` | `packageName`과 `readState`를 가진 value. `readState`는 `AVAILABLE`, `EMPTY`, `FAILED` 중 하나 | `FAILED`와 `EMPTY`를 같은 확실한 nonessential root 증거로 취급하지 않는다. |
+| `applicationWindows` | normalized package set, `applicationWindowCount`, `unknownPackageCount`, `readState`, `freshness`를 가진 value. `freshness`는 `FRESH` 또는 `STALE` | application window는 package별로 deduplicate한다. unknown package slot은 버리지 않고 partial evidence로 표시한다. |
+| `displayState` | `SCREEN_OFF`, `UNLOCKED`, `KEYGUARD` 중 하나 | `SCREEN_OFF`에서는 application을 visible candidate로 만들지 않는다. `KEYGUARD`에서는 새 block/allow 결정을 만들지 않는다. |
+| `essentialPackages` | immutable package set | own package, System UI, launcher, IME, guardian 등 현재 scope의 essential package를 포함한다. |
+| `visibleApplicationPackages` | immutable package set | session reconciliation에 사용할 직접 식별 package만 담는다. `UNKNOWN` fallback package를 이 집합에 합성하지 않는다. |
+
+`ForegroundEvidenceResult`는 policy branch를 caller에게 재노출하지 않고 다음 value만 제공한다.
+
+| Field | Value shape | Invariant |
+| --- | --- | --- |
+| `lifecycleGeneration` | `Long` | input generation을 그대로 반영한다. 다른 generation의 caller가 결과를 publish할 수 없다. |
+| `packages` | deterministic order의 `List<PackageEvidence>` | 같은 package는 한 번만 나타난다. package가 특정되지 않은 `UNKNOWN` 상태를 임의 package로 만들지 않는다. |
+| `PackageEvidence.packageName` | normalized package value | blank가 아니다. |
+| `PackageEvidence.classification` | `VISIBLE`, `NOT_VISIBLE`, `UNKNOWN` 중 하나 | 승인된 R1부터 R13의 의미만 사용한다. |
+| `PackageEvidence.basis` | `DIRECT_WINDOW`, `ACTIVE_ROOT`, `RECENT_REAL_EVENT`, `CONTRADICTORY_ROOT`, `ESSENTIAL_OVERLAY`, `KEYGUARD`, `SCREEN_OFF`, `NO_RELIABLE_EVIDENCE` 중 하나 | basis는 관찰된 사실의 설명이며 scheduler나 persistence 명령이 아니다. |
+| `PackageEvidence.ttlAction` | `RENEW`, `PRESERVE`, `DO_NOT_RENEW` 중 하나 | 직접 실제 증거만 `RENEW`할 수 있다. synthetic fallback과 stale/empty/failed provider는 TTL을 갱신하지 않는다. |
+| `PackageEvidence.decisionEligibility` | `EVALUATE`, `DEFER`, `DO_NOT_EVALUATE` 중 하나 | `DEFER`는 새 decision을 만들지 않는다. R5 A의 bounded fallback만 evaluator 입력이 될 수 있다. |
+| `followUp` | `NONE`, `BOUNDED_EVIDENCE_RETRY`, `WAIT_FOR_RELIABLE_EVIDENCE`, `WAIT_FOR_USER_PRESENT` 중 하나와 evidence deadline value | module은 필요한 evidence와 최대 허용 시각만 보고한다. timer를 post하거나 sleep하거나 persistence를 호출하지 않는다. |
+
+`EvidenceFollowUp`의 정확한 value shape은 다음과 같다.
+
+| Field | Value shape | Invariant |
+| --- | --- | --- |
+| `kind` | `NONE`, `BOUNDED_EVIDENCE_RETRY`, `WAIT_FOR_RELIABLE_EVIDENCE`, `WAIT_FOR_USER_PRESENT` 중 하나 | `NONE` 이외의 값은 worker가 다음 observation을 얻어야 함을 뜻할 뿐, module이 scheduling operation을 수행한다는 뜻이 아니다. |
+| `deadlineElapsedMs` | nullable nonnegative `Long` | bounded retry와 user-present recovery는 유한 deadline을 갖고, reliable evidence를 기다리는 R8/R11은 finite package decision deadline을 발명하지 않는다. |
+| `waitFor` | `NONE`, `APPLICATION_EVIDENCE`, `USER_PRESENT` 중 하나 | `kind`와 모순되는 wait target을 만들지 않는다. |
+| `retryAttempt` | `0` 이상의 `Int` | attempt 증가와 실제 delay 선택은 worker/scheduler가 소유하며 module result가 임의로 증가시키지 않는다. |
+
+`followUp`의 deadline은 scheduling policy의 입력 사실이지 scheduling ownership이 아니다.
+retry attempt, wall-to-monotonic 변환, Handler post, wake 재계산은 `SerializedDecisionWorker`
+implementation이 소유한다. 따라서 evidence module은 evidence classification에는 깊지만
+scheduler에는 shallow pass-through가 되지 않는다.
+
+#### 1.2 SerializedDecisionWorker
+
+`SerializedDecisionWorker`의 최소 외부 `interface`는 request handoff와 lifecycle stop이다.
+두 operation은 Android, Room, Handler, `Job`, `CoroutineScope`, `Continuation` 또는 다른
+coroutine implementation type을 노출하지 않는다.
+
+| Operation | Input | Output | Contract |
+| --- | --- | --- | --- |
+| `submit` | immutable `DecisionRequest` value | `SubmissionResult` value | 호출자는 기다리지 않는다. request는 하나의 serialized queue owner에게 한 번만 전달된다. |
+| `stop` | immutable `DrainRequest` value | immutable `DrainResult` value | stop 시점부터 새 request를 받지 않고, 하나의 end-to-end deadline 안에서 drain 또는 recovery 판정을 반환한다. |
+
+`DecisionRequest`의 value-level shape은 다음과 같다.
+
+| Field | Value shape | Invariant |
+| --- | --- | --- |
+| `requestSequence` | connection 안에서 증가하는 `Long` | queue가 event와 wake request의 source order를 재구성할 수 있다. sequence를 재사용하지 않는다. |
+| `lifecycleGeneration` | `Long` | setup, reconnect, destroy가 바뀔 때 증가한다. 이전 연결의 decision과 effect는 새 연결에 유효하지 않다. |
+| `runtimeGeneration` | `Long` | accepted snapshot, override, reset input의 publication generation이다. stale runtime은 최신 runtime을 되돌리지 않는다. |
+| `reason` | `REAL_EVENT`, `RECHECK`, `REFRESH`, `RECONNECT`, `SCREEN_WAKE`, `USER_PRESENT` 중 하나 | reason은 관찰 경로만 설명하며 제품 정책을 새로 만들지 않는다. |
+| `observation` | 위의 immutable `ForegroundObservation` value | request 수락 뒤 caller가 변이시키지 않는다. |
+| `runtime` | immutable `RuleRuntimeSnapshot` value | normalized rule snapshot, use-day reset value, use-day generation start, guardian override state, launchable package set, essential package set을 함께 캡처한다. snapshot과 관련 clock/override 입력을 분리해서 읽지 않는다. |
+
+`RuleRuntimeSnapshot`의 정확한 value shape은 다음과 같다.
+
+| Field | Value shape | Invariant |
+| --- | --- | --- |
+| `snapshot` | complete normalized app-rule snapshot value | invalid snapshot은 request에 들어오지 않으며, snapshot의 rule/group 관계는 capture 시점에 일관된다. |
+| `resetTime` | `hour`와 `minute`를 가진 use-day reset value | snapshot과 같은 runtime generation에서 해석한다. |
+| `useDayGenerationStartedAtMs` | nonnegative `Long` | reset generation이 바뀌면 runtime generation과 함께 교체한다. |
+| `overrideState` | immutable guardian override value | decision이 다른 generation의 override를 섞지 않는다. |
+| `launchablePackages` | immutable normalized package set | all-apps scope 계산에 사용하며 evidence classification을 대신하지 않는다. |
+| `essentialPackages` | immutable normalized package set | observation의 essential package 사실과 같은 capture generation으로 전달한다. |
+| `runtimeGeneration` | strictly increasing `Long` | snapshot, reset, override와 generation은 atomic publication 단위다. |
+
+`SubmissionResult`는 `ACCEPTED`, `REJECTED_NOT_READY`, `REJECTED_STALE` 중 하나다. rejection은
+service를 종료시키지 않으며, rejected request의 event 또는 framework object 소유권은 caller가
+즉시 정리한다.
+
+worker의 value-level output은 private implementation state가 아니라 `DecisionOutcome`으로
+관찰한다. `DecisionOutcome`은 request와 두 generation, package별 `decision` value,
+`commitStatus`, `followUp`, `publicationStatus`를 가진다. `publicationStatus`는
+`PUBLISHED`, `DEFERRED`, `DROPPED_STALE`, `RECOVERABLE_FAILURE` 중 하나이며, output sink는
+이 value를 전달받을 뿐 Android activity나 Room row를 interface에 넣지 않는다.
+
+`DecisionOutcome`의 정확한 value shape은 다음과 같다.
+
+| Field | Value shape | Invariant |
+| --- | --- | --- |
+| `requestSequence` | source request의 `Long` | 어떤 outcome도 다른 request sequence를 참조하지 않는다. |
+| `lifecycleGeneration` | `Long` | input request의 lifecycle generation을 반영한다. |
+| `runtimeGeneration` | `Long` | evaluator가 사용한 runtime generation을 반영한다. |
+| `packageDecisions` | deterministic order의 `List<PackageDecision>` | package별 최대 하나이며, `EVALUATE`된 package만 포함한다. |
+| `PackageDecision.packageName` | normalized package value | blank가 아니다. |
+| `PackageDecision.isAllowed` | `Boolean` | 기존 evaluator 결과를 그대로 반영하며, worker가 product meaning을 재해석하지 않는다. |
+| `PackageDecision.denyingRuleIds` | immutable rule ID list | allow인 decision에는 비어 있고, denial이면 evaluator가 보고한 denial만 담는다. |
+| `commitStatus` | `NOT_REQUIRED`, `COMMITTED`, `FAILED`, `RECOVERY_REQUIRED` 중 하나 | `COMMITTED`가 아니면 evaluator decision을 publish하지 않는다. |
+| `followUp` | `EvidenceFollowUp` value | retry timing과 scheduler post는 outcome value를 소비하는 worker implementation의 책임이다. |
+| `publicationStatus` | `PUBLISHED`, `DEFERRED`, `DROPPED_STALE`, `RECOVERABLE_FAILURE` 중 하나 | stale generation은 `DROPPED_STALE`이며 activity/notification/recheck를 publish하지 않는다. |
+
+worker implementation에 주입되는 output sink의 internal `interface`는
+`publish(outcome: DecisionOutcome)` 한 operation만 가진다. production sink는 outcome을
+main-thread effect로 변환하고 deterministic sink는 value와 generation을 기록한다. 이 sink는
+`SerializedDecisionWorker`의 public contract가 아니며 Android effect type은 그 implementation
+안에만 남는다.
+
+`DrainRequest`는 `requestedAtElapsedMs`, `deadlineElapsedMs`, `reason`을 가진다.
+`DrainResult`는 `completed`, `timedOut`, `remainingWork`, `durableRecoveryRequired`와
+`completedAtElapsedMs`를 가진다. deadline은 stage마다 다시 시작하지 않는 하나의 total
+deadline이다. 5초와 2초 중 어떤 값을 사용할지는 아래 decision table에서 `PROPOSED / UNRESOLVED`
+로 남긴다.
+
+| Drain value | Exact shape | Invariant |
+| --- | --- | --- |
+| `DrainRequest.requestedAtElapsedMs` | nonnegative `Long` | stop acceptance 시각이며 deadline 계산의 시작점이다. |
+| `DrainRequest.deadlineElapsedMs` | `Long` greater than or equal to requested time | persistence, evaluator, scheduler cleanup이 공유하는 absolute end point다. |
+| `DrainRequest.reason` | `DESTROY`, `RECONNECT`, `REPLACEMENT` 중 하나 | reason은 lifecycle 원인만 설명하며 drain policy의 product meaning을 바꾸지 않는다. |
+| `DrainResult.completed` | `Boolean` | true이면 deadline 전에 accepted work가 종료됐음을 뜻한다. |
+| `DrainResult.timedOut` | `Boolean` | true이면 deadline 도달 뒤 남은 work가 있거나 종료를 확인하지 못했음을 뜻한다. |
+| `DrainResult.remainingWork` | nonnegative `Int` | timeout 뒤 detached work를 숨기지 않고 reconnect recovery 판단에 사용한다. |
+| `DrainResult.durableRecoveryRequired` | `Boolean` | true이면 다음 lifecycle generation이 durable open row/state를 recovery해야 한다. |
+| `DrainResult.completedAtElapsedMs` | nonnegative `Long` | requested deadline 이후를 completed로 보고하지 않는다. |
+
+### 2. Ownership table
+
+| Owner | Owns | Must not own |
+| --- | --- | --- |
+| 기존 accessibility host | lifecycle callback, 다른 blocker의 기존 fan-out, setup/reconnect/destroy 진입 순서 | Room read/write, evaluator 호출, evidence policy branch, decision queue의 별도 복제 |
+| `ForegroundObservationSource` seam의 caller | event와 framework snapshot을 immutable value로 캡처하고 한 번 submit | policy에 따라 package를 block/allow하거나 session을 persistence하지 않음 |
+| `ForegroundEvidenceModule` implementation | active root/window/event의 의미 해석, essential filtering, stale/partial/split-screen/keyguard/screen-off classification, TTL와 evidence follow-up fact | timer post, retry sleep, Room, session writer, evaluator, activity/notification |
+| `SerializedDecisionWorker` implementation | request sequence, runtime publication ordering, evidence module 호출, visible session reconciliation, flush/commit, evaluator, recheck planning, latest-generation 검증 | Android object 보관, Handler callback에서 직접 DB 작업, caller별 별도 queue, 제품 의미를 policy matrix 밖에서 변경 |
+| session persistence implementation | worker가 지정한 serialized session boundary와 checkpoint를 durable하게 commit | worker 순서 밖에서 독립적으로 rule decision을 실행 |
+| scheduler implementation | worker가 정한 evidence retry와 wall-clock boundary를 monotonic deadline으로 변환하고 wake 때 재계산 | Room read/write, evaluator, activity launch, stale generation callback의 재예약 |
+| effect publisher implementation | 최신 generation이 확인된 `DecisionOutcome`을 main-thread activity/notification effect로 변환 | stale outcome publish, evaluator 재실행, policy branch 복제 |
+| `AppUsageTracker`의 Phase 2 caller 역할 | visible package observation을 한 번의 serialized handoff로 전달 | handoff 이후 visible reconciliation, `runBlocking` persistence, decision queue와 별도 순서 만들기 |
+
+핵심 ownership은 `SerializedDecisionWorker` 하나다. request가 worker에 수락된 뒤에는
+다음 순서를 다른 owner가 가로채지 않는다.
+
+`visible reconciliation → all required session flush/commit → rule decision → next-plan
+calculation → latest-generation side effect`.
+
+이 순서는 단순 호출 순서가 아니라 `SerializedDecisionWorker` interface의 ordering
+invariant다. session commit이 성공적으로 관찰되기 전에는 evaluator와 `nextPlan`을 실행하지
+않는다. decision이 stale이면 side effect와 stale recheck 재예약을 모두 버린다.
+
+### 3. Ordered lifecycle sequence
+
+1. **Setup:** 새 `lifecycleGeneration`을 발급하고 이전 generation의 request, scheduler
+   callback, effect publication을 invalidate한다. runtime snapshot은 완전한 value로 한 번
+   캡처하고, receiver는 setup-ready 이후에만 등록한다.
+2. **Capture:** accessibility callback은 framework 값을 `ForegroundObservation`으로 바꾸고
+   visible package set을 deduplicate한다. node tree traversal, Room, evaluator, wait는 이
+   callback에서 실행하지 않는다.
+3. **Handoff:** callback은 `DecisionRequest`에 source `requestSequence`, lifecycle/runtime
+   generation, reason, observation, runtime을 넣어 `submit`하고 즉시 반환한다. event를 queue에
+   넣는 경우 복사본의 소유권은 worker가 갖고, accepted, rejected, dropped, exception,
+   shutdown 각각에서 정확히 한 번 recycle한다.
+4. **Evidence:** worker가 `ForegroundEvidenceModule.classify`를 같은 serialized path에서
+   실행한다. module result의 `VISIBLE`/`NOT_VISIBLE`/`UNKNOWN`와 follow-up fact만 다음 단계의
+   입력으로 사용한다.
+5. **Visible reconciliation:** worker가 complete visible package set을 session reconciler에
+   전달한다. 이전 package finish와 current-use-day boundary split을 먼저 처리하고, 새 package
+   start는 모든 필요한 finish가 완료된 뒤에만 수행한다. unknown fallback package는 session으로
+   만들지 않는다.
+6. **Commit:** worker가 session checkpoint와 current-use-day persistence를 commit하고 성공
+   여부를 확인한다. commit 실패는 partial decision을 만들지 않고 durable recovery 대상과
+   nonfatal error를 기록한다.
+7. **Decision:** commit이 확인된 뒤에만 evaluator를 실행한다. package별 allowance, guardian
+   override, use-day와 기존 rule meaning은 그대로 사용한다. evaluator는 evidence module이
+   `EVALUATE`한 package만 받는다.
+8. **Plan and publish:** worker가 allowance, skip, schedule, use-day boundary를 계산하고
+   scheduler implementation에 value-level follow-up을 전달한다. activity와 notification은
+   lifecycle, runtime, recheck generation을 다시 확인한 뒤 effect publisher로만 게시한다.
+9. **Refresh:** settings collector와 refresh receiver는 source order identity를 붙여 하나의
+   serialized publication path로 보낸다. snapshot, override/reset input, runtime generation,
+   recheck invalidation은 한 번에 accepted되며, 이미 accepted된 최신 publication 뒤의 stale
+   emission은 무시한다.
+10. **Screen and wake:** screen off는 `SCREEN_OFF` evidence와 session end 의미만 전달하고 새
+    rule decision을 만들지 않는다. unlocked screen-on과 USER_PRESENT는 300ms contract 안의
+    새 observation을 예약한다. wall-clock boundary는 wake 시 현재 wall time으로 다시
+    계산하며 sleep 중 존재하지 않은 사용량을 소급하지 않는다.
+11. **Reconnect:** 이전 lifecycle generation을 폐기하고 durable open-session recovery를
+    수행한 뒤 새 observation을 capture한다. known application window가 있으면 event가 없어도
+    reconciliation을 시도하지만, package evidence가 없으면 임의 package를 발명하지 않는다.
+12. **Destroy:** 먼저 accepting flag와 generation을 무효화하고, scheduler callback과 worker를
+    stop한다. 하나의 total drain deadline 안에 in-flight persistence를 안전하게 끝내거나
+    durable reconnect recovery로 남긴다. deadline 이후 evaluator, warning, notification,
+    scheduler callback은 0건이어야 한다. receiver cleanup은 한 feature의 예외가 다른 cleanup을
+    건너뛰지 않도록 독립적으로 containment한다.
+
+### 4. Adapter와 seam table
+
+외부에 공개할 real `seam`은 framework 관찰값과 value-level observation 사이 하나다. 이
+seam에는 서로 다른 두 `adapter`가 있어 실제 variation을 입증한다. production adapter와
+deterministic adapter 모두 같은 `ForegroundObservationSource` interface를 만족하며, 그
+interface와 evidence module contract에는 Android type이 없다.
+
+| Seam | Interface shape | Production adapter | Deterministic adapter | Visibility |
+| --- | --- | --- | --- | --- |
+| framework facts → `ForegroundObservation` | capture signal을 받고 immutable observation value를 반환 | accessibility event, application window, active root, display/keyguard 사실을 value로 변환 | virtual wall/elapsed/scheduler clock과 fresh/stale/empty/partial/null/exception snapshot을 공급 | real external seam; 두 adapter 모두 같은 contract suite를 통과 |
+| session persistence | worker implementation이 사용하는 read/commit value port | 기존 multi-process Room owner를 감싼 production implementation | in-memory, delayed, fault-injecting fake | private internal test seam; `SerializedDecisionWorker` public interface 밖 |
+| scheduler | next evidence/boundary value와 generation을 받는 private port | monotonic Handler wake adapter | virtual-clock scheduler adapter | private internal test seam; Handler type는 implementation 안 |
+| effect publication | `DecisionOutcome` value를 받는 private sink | main-thread activity/notification dispatcher | recording sink that captures outcome and generation | private internal test seam; Android effect type는 implementation 안 |
+| clock | wall/elapsed read를 제공하는 private value source | device clocks | independent virtual clocks | private internal test seam |
+
+두 external adapter의 역할은 framework snapshot 공급에 한정한다. persistence, scheduler,
+effect와 clock은 worker module의 internal implementation seam이며, 테스트가 이를 사용하는
+것은 public contract를 넓히는 근거가 아니다. 현재 Phase 0 테스트의 reflection field와
+temporary lambda는 migration 중 private internal test seam으로만 허용하고, 최종 contract의
+caller가 private field나 private call order를 알 필요가 없게 한다.
+
+### 5. Invariant contract
+
+#### Ordering and generation
+
+- request sequence는 source에서 정하고 worker queue에서 보존한다. caller thread의 실행
+  속도나 별도 tracker queue와 decision queue의 우연한 순서에 의존하지 않는다.
+- settings collector와 refresh receiver는 한 publication owner를 공유한다. accepted
+  publication의 source order identity는 strictly monotonic하며, stale emission은 snapshot,
+  override, reset, runtime generation 또는 recheck state를 되돌리지 않는다.
+- `lifecycleGeneration`은 setup/reconnect/destroy마다 증가하고 `runtimeGeneration`은 accepted
+  rule/reset/override publication마다 증가한다. side effect는 두 generation과 recheck
+  generation이 모두 최신일 때만 게시한다.
+- stale result는 evaluator 결과 자체가 계산되었더라도 activity, notification, scheduler
+  재예약을 publish하지 않는다. current visible session의 durable commit은 decision
+  publication과 별개로 정확히 한 번만 보존할 수 있다.
+
+#### Evidence, persistence, and decision ordering
+
+- `VISIBLE`, `NOT_VISIBLE`, `UNKNOWN`은 승인된 13개 행에서만 유도한다. essential root는
+  직접 application window를 지우지 않으며, 확실히 다른 nonessential root가 있으면 stale
+  이전 package를 되살리지 않는다.
+- visible package set은 session 의미를 위한 direct observation이다. R5 A fallback은 rule
+  decision의 후보가 될 수 있지만 session evidence TTL을 갱신하거나 새 usage session을
+  만들지 않는다.
+- 모든 이전 session finish/checkpoint commit이 끝난 뒤 current-use-day evaluator를 실행한다.
+  evaluator는 persistence를 다시 수행하지 않고, worker 밖에서 session writer가 독립적으로
+  실행되지 않는다.
+- one package의 retry, replace, cancellation, failure가 다른 visible package의 session과
+  deadline을 삭제하지 않는다. Phase 3 coordinator는 이 invariant의 증거가 생길 때까지
+  만들지 않는다.
+
+#### Error and CancellationException
+
+- production adapter의 window/root/event read failure는 `FAILED` observation 또는 해당 policy의
+  `UNKNOWN`으로 변환되고 nonfatal error로 기록된다. 하나의 provider failure가 host를 종료하지
+  않는다.
+- worker request 하나의 persistence, evaluator, scheduler, effect failure는 worker 전체를
+  죽이지 않는다. 일반 exception은 기록하고 request를 recoverable failure로 끝낸 뒤 다음
+  request를 처리한다.
+- persistence commit이 실패하면 uncommitted session time이나 aggregate를 발명하지 않는다.
+  open row는 지정된 durable recovery 경로로만 이어진다.
+- 승인된 R5 A에서 bounded retry 후 evaluator가 명시적으로 allow하지 못하면 block이 우선한다.
+  이 문장은 R5의 승인된 fail policy를 구현하는 것이며, 다른 행의 product meaning을 새로
+  정의하지 않는다.
+- worker coroutine implementation에서 `CancellationException`은 정상 cancellation control
+  flow로 재전파하고 crash/nonfatal error로 대체하지 않는다. stop으로 취소된 request는
+  outcome과 side effect를 publish하지 않는다.
+- callback과 synchronous adapter 경계는 host safety contract에 따라 feature exception이
+  accessibility callback 밖으로 새지 않게 contain한다. cancellation이 worker scope의
+  lifecycle cancellation인 경우에만 위의 rethrow 규칙을 적용한다.
+
+#### Retry and deadline
+
+- retry attempt와 timer ownership은 worker/scheduler implementation에 있다. evidence module은
+  classification, TTL action, evidence follow-up requirement만 반환한다.
+- 승인된 bounded retry는 첫 observation 뒤 250ms, 500ms, 750ms의 최대 세 번이며 기본 total
+  decision budget은 1.5초다. scheduler는 이 값을 넘어 polling하지 않는다.
+- R3는 최근 실제 event를 최대 5초 동안만 bounded fallback으로 사용할 수 있고 TTL을 갱신하지
+  않는다. R5는 1.5초 뒤 마지막 비필수 package에 대해 승인된 A fail closed를 사용한다.
+- R6의 확실한 다른 nonessential active root는 이전 package의 fallback을 즉시 무효화한다.
+  R8과 R11은 reliable evidence 또는 USER_PRESENT까지 새 package decision을 만들지 않는다.
+  R12는 대기하지 않고 session을 종료하며 evaluator와 guardian을 실행하지 않는다.
+- wall-clock boundary는 monotonic scheduler delay로 변환하되, wake/reconnect 때 현재 wall
+  clock에서 다시 계산한다. doze 동안 callback이 실행되지 않았다는 이유로 없는 foreground
+  time을 ledger에 소급하지 않는다.
+- scheduler post가 false를 반환하거나 exception을 내면 request에만 recoverable failure를
+  기록하고 generation이 최신일 때만 bounded recovery를 시도한다. stale callback은 결과와
+  재예약을 모두 무시한다.
+
+#### Performance and thread ownership
+
+- accessibility callback의 synchronous work는 event/value capture와 bounded handoff뿐이다.
+  Room read/write, evaluator, session reconciliation, rule planning은 callback 밖의 worker에서
+  수행한다.
+- Handler는 lightweight wakeup/timer와 main-thread effect dispatch만 담당한다. worker로 옮긴
+  뒤 Handler에서 Room read/write와 evaluator를 수행하지 않는다.
+- worker는 하나의 serialized path를 사용한다. visible tracker queue와 decision queue를
+  나누어 flush/evaluator ordering을 맞추지 않는다.
+- 제품 latency는 policy matrix의 row budget을 따른다: 일반 직접 증거는 1초 이내, R5 bounded
+  decision은 1.5초 이내, USER_PRESENT recovery는 300ms 이내다. callback blocking time의
+  representative p95와 decision latency p95는 구현 후 측정해 계획 문서에 기록하되, 아직
+  새로운 숫자 threshold를 승인된 제품 요구사항처럼 만들지 않는다.
+- node tree traversal는 callback에 들어오지 않고 기존 conflated background worker의 recycle
+  ownership을 유지한다. 새 observation adapter가 event copy를 만들면 모든 success, reject,
+  drop, exception, shutdown 경로를 contract test로 검증한다.
+
+#### Total drain and reconnect
+
+- destroy는 flag와 generation을 먼저 invalidate하고 새 request/effect를 받지 않는다.
+- stop에는 하나의 absolute total deadline이 있고, persistence, evaluator, effect, scheduler
+  cleanup 단계가 각자 timeout을 다시 시작하지 않는다.
+- total deadline 안에는 evaluator, warning, notification, handler callback의 post-destroy
+  side effect가 0건이어야 한다. 이미 시작한 durable commit은 정상 완료하거나, timeout 뒤
+  open row recovery로 남긴다.
+- reconnect는 새 lifecycle generation과 새 worker state를 만들고, 이전 worker의 queue와
+  effect를 재사용하지 않는다. durable session read와 window reconciliation으로 다음 event가
+  없어도 복구할 수 있는 상태를 확인한다.
+- reconnect recovery가 읽은 durable session은 현재 use-day와 generation filter를 지키고,
+  destroy 중 취소된 in-memory tail을 실제 사용으로 소급하지 않는다.
+
+### 6. Phase 0 RED contract → future invariant mapping
+
+| Ticket | Phase 0 RED evidence | Phase 1/2에서 green이 되어야 하는 invariant |
+| --- | --- | --- |
+| 02 | 30초 이상 추가시간 뒤 stale/empty/null window와 no event에서 evaluator/warning/persisted outcome이 빠지고, 다른 nonessential root 전환은 이전 package를 잠그면 안 됨 | `ForegroundEvidenceModule`이 직접 window, recent real event, contradictory root를 같은 contract로 분류하고, R5 A bounded fallback은 TTL을 갱신하지 않으며, worker가 direct visible set과 fallback candidate를 분리한다. |
+| 03 | latest refresh 뒤 delayed stale settings publication이 final snapshot, generation, visible outcome을 stale 값으로 되돌림 | refresh receiver와 settings collector가 하나의 source-ordered publication owner를 사용하고, accepted runtime generation보다 오래된 emission과 그 visible/effect 결과를 publish하지 않는다. |
+| 04 | wall clock boundary가 virtual doze 중 지나가고 scheduler clock은 멈춘 상태에서 wake recovery가 없거나 늦어지며, sleep 중 usage mutation이 없어야 함 | worker scheduler가 wall-to-monotonic deadline을 변환하고 wake/USER_PRESENT에서 현재 wall time을 재계산하며, R5/AR005 decision은 wake 후 budget 안에 나오고 sleep interval을 session으로 소급하지 않는다. |
+| 05 | callback이 delayed persistence를 기다리고, separate decision call이 flush commit 전에 evaluator를 읽을 수 있음 | `submit`은 nonblocking이고 `SerializedDecisionWorker`가 visible reconciliation → commit → decision을 단일 serialized owner로 실행한다. persisted outcome은 commit 완료 후에만 evaluator가 읽는다. |
+| 06 | destroy 중 evaluator/notification/handler가 in flight이고, fault/cancellation 뒤 next event와 durable reconnect recovery가 불명확함 | lifecycle generation과 stop total deadline이 in-flight 작업을 invalidate하고, nonfatal fault는 다음 request를 살리며, worker cancellation은 `CancellationException`을 재전파하고, destroy 뒤 side effect는 0건이며 durable state는 reconnect에서 복구된다. |
+
+이 mapping은 Phase 0 RED 테스트를 삭제하거나 약화시키라는 뜻이 아니다. Phase 1/2의 contract
+test는 같은 value-level interface를 통과해 RED assertion을 green으로 만들고, 제품 동작
+regression은 기존 evaluator/session meaning을 별도로 계속 검증한다.
+
+### 7. Deletion test와 module 가치
+
+| Deleted module | Complexity that reappears | Depth / leverage / locality judgment |
+| --- | --- | --- |
+| `ForegroundEvidenceModule` | R1부터 R13의 stale, partial, null, essential, keyguard, split-screen, contradictory root와 TTL branch가 accessibility caller, retry callback, reconnect path, 테스트 fixture에 다시 복제된다. caller가 Android observation shape와 policy meaning을 동시에 알아야 한다. | 한 `classify` interface 뒤에 13행의 policy interpretation과 evidence state를 모으므로 depth가 있다. 모든 caller와 두 adapter가 같은 classification을 얻어 leverage를 받고, policy bug와 verification은 한 implementation과 한 contract suite에 모여 locality를 얻는다. |
+| `SerializedDecisionWorker` | `AppUsageTracker`, accessibility host, rule blocker가 visible reconciliation, Room commit, evaluator, planner, generation guard와 side effect ordering을 각각 조합해야 한다. ticket 05의 separate queue race와 ticket 06의 destroy race가 caller마다 재발한다. | 한 `submit` handoff 뒤에 persistence, decision, scheduling, generation과 error containment를 숨기므로 depth가 있다. caller는 observation과 runtime만 알면 되고, 한 ordering fix가 모든 request에 leverage를 준다. commit/evaluator/destroy 지식이 한 implementation에 모여 locality를 얻는다. |
+
+이 deletion test는 qualitative design gate다. 줄 수가 줄었는지나 private call order가 맞는지를
+자동 판정하지 않는다. 실제 implementation에서 module을 지워도 위 복잡성이 N caller로
+되돌아오는지 PR 또는 design record에서 다시 기록해야 하며, 복잡성이 돌아오지 않으면
+shallow wrapper로 판단해 도입하지 않는다.
+
+### 8. Explicit out of scope
+
+- Room entity, DAO contract, database version, migration, usage ledger의 의미와 multi-process
+  owner 변경.
+- Gradle properties, version catalog, plugin, Kotlin/KSP version, dependency와 build 설정 변경.
+- AIDL, exported API, public app response, guardian approval surface와 flavor capability gate의
+  의미 변경.
+- 사용일, active range, allowance, contributor, guardian extra time, skip, fail policy의 제품
+  의미 변경. R5 A 외의 policy 선택은 별도 product approval이 필요하다.
+- Device Owner, Lock Task, kiosk guarantee, best-effort protection 수준의 변경.
+- Phase 3 per-package coordinator와 Phase 4 lifecycle host의 선제 도입. 각 조건이 재현되기
+  전에는 unused interface와 pass-through host를 만들지 않는다.
+- 이 ticket에서의 production code, Room, Gradle, exported API 또는 ticket status 변경.
+- 샤오신 패드 프로 12.7 Android 16의 AR004 실제 검증과 reported incident 종료 판정. 이
+  contract는 device evidence를 대신하지 않는다.
+
+### 9. Decision table — user approval required
+
+아래 표의 `Recommended option`은 설계 권고일 뿐 승인 기록이 아니다. 각 행의 `Approval
+evidence`는 사용자가 명시적으로 선택한 뒤에만 채운다. 이전의 policy matrix `A` 응답은
+이 architecture table의 승인 evidence가 아니다.
+
+| Decision | Recommended option | Alternative | User impact | Evidence / rationale | Approval evidence |
+| --- | --- | --- | --- | --- | --- |
+| D1. evidence module seam | **A —** value-only `ForegroundEvidenceModule`의 단일 `classify`와 `ForegroundObservationSource`의 production/deterministic 두 adapter | **B —** 현재 blocker caller에 policy branch를 유지하고 module seam을 만들지 않음 | A는 stale/partial 정책을 한 곳에서 바꾸며 caller와 테스트가 단순해진다. B는 초기 추출은 작지만 AR001/AR002의 policy branch와 reflection fixture가 여러 경로에 남는다. | 13행 policy, ticket 02, known responsibility concentration, DEEPENING의 deletion/depth 기준 | `[NOT RECORDED — explicit user choice required]` |
+| D2. persistence/decision ownership | **A —** worker가 visible reconciliation, flush/commit, evaluator와 next-plan의 단일 serialized owner가 됨 | **B —** tracker가 Room writer를 계속 소유하고 별도 worker가 evaluator를 호출 | A는 ticket 05의 flush-before-decision invariant를 구조적으로 보장한다. B는 callback을 비동기화해도 두 queue의 순서를 다시 조정해야 하며 stale read 위험이 남는다. | ticket 05 RED result와 canonical Phase 2 ownership requirement | `[NOT RECORDED — explicit user choice required]` |
+| D3. evidence와 scheduling 분리 | **A —** evidence module은 classification, TTL action, evidence follow-up fact만 반환하고 worker/scheduler가 retry timing과 post를 소유 | **B —** evidence module이 concrete delay와 Handler/scheduler operation까지 반환 | A는 evidence meaning과 scheduling policy를 분리해 module depth를 유지한다. B는 caller가 단순해 보이지만 Android timing과 retry state가 evidence interface에 결합된다. | ticket 02/04의 서로 다른 evidence와 clock 실패, DEEPENING의 seam discipline | `[NOT RECORDED — explicit user choice required]` |
+| D4. runtime publication ordering | **A —** settings collector와 refresh receiver가 source-order identity를 가진 하나의 serialized publication path를 사용 | **B —** 현재 mutex critical section만 유지 | A는 ticket 03에서 재현된 latest→stale rollback을 차단한다. B는 lock mutual exclusion만 보장하고 stale emission의 identity를 보장하지 않는다. | ticket 03 deterministic interleaving과 AR010 known limitation | `[NOT RECORDED — explicit user choice required]` |
+| D5. cancellation semantics | **A —** worker implementation은 `CancellationException`을 control flow로 재전파하고, 일반 exception만 request 단위로 contain하며 다음 request를 처리 | **B —** 모든 throwable을 nonfatal failure로 변환 | A는 cancellation과 fault를 구분해 structured cancellation을 보존한다. B는 worker가 계속 살아 보일 수 있지만 cancellation을 crash처럼 기록하거나 정상 teardown을 지연시킬 위험이 있다. | repository instructions, ticket 06 cancellation contract | `[NOT RECORDED — explicit user choice required]` |
+| D6. total drain budget | **A — PROPOSED, UNRESOLVED —** end-to-end total drain을 **5초**로 제한하고 persistence/evaluator/scheduler cleanup이 하나의 absolute deadline을 공유 | **B — PROPOSED, UNRESOLVED —** end-to-end total drain을 **2초**로 제한하고 deadline 뒤 남은 durable work는 reconnect recovery에 남김 | 5초는 느린 durable commit과 fault injection의 회복 여유가 커지지만 destroy가 더 오래 block될 수 있다. 2초는 teardown 응답성이 좋지만 timeout 후 open row recovery와 재연결 검증 부담이 커진다. 어느 값도 아직 승인하지 않는다. | ticket 06의 outer 5초 관찰과 현재 단계별 2초 대기가 total contract를 확정하지 못한다. 구현 전에 실제 drain latency를 측정해야 한다. | `[NOT RECORDED — explicit user choice required; do not infer from test constant]` |
+| D7. performance acceptance | **A —** callback nonblocking을 hard invariant로 두고 representative p95 callback/decision latency를 구현 후 기록하며 새 p95 숫자는 발명하지 않음 | **B —** architecture approval에서 고정 p95 숫자까지 제품 threshold로 결정 | A는 ticket 05가 입증한 callback blocking 제거를 보장하면서 측정 전 가짜 정밀도를 피한다. B는 운영 목표를 조기에 고정하지만 세션 크기와 device evidence 없이 잘못된 목표가 될 수 있다. | ticket 05 RED contract와 canonical Phase 2 performance criterion | `[NOT RECORDED — explicit user choice required]` |
+| D8. adapters와 internal seams | **A —** framework observation seam에 production adapter와 deterministic adapter를 두고 persistence/scheduler/effect/clock은 private internal test seam으로 유지 | **B —** current internal provider lambda와 reflection field를 public contract로 승격 | A는 두 adapter가 실제 variation을 증명하면서 public surface를 작게 유지한다. B는 테스트는 쉬워질 수 있으나 implementation detail을 caller와 장기 contract에 고정한다. | DEEPENING의 “two adapters means a real seam”과 Phase 0 temporary seam evidence | `[NOT RECORDED — explicit user choice required]` |
+| D9. conditional modules | **A —** Phase 3 coordinator와 Phase 4 lifecycle host는 trigger가 재현될 때만 별도 approval과 ticket으로 시작 | **B —** 지금 worker와 함께 coordinator/host를 미리 만든다 | A는 unused shallow layer와 조건부 ticket을 피한다. B는 미래 변경을 미리 준비하지만 현재 증거 없이 scheduling/lifecycle ownership을 넓힌다. | canonical Phase 3 no-go와 Phase 4 trigger rules, prior reviewer conclusion | `[NOT RECORDED — explicit user choice required]` |
+
+**Approval record placeholder:**
+
+- `Architecture decision:` `[NOT RECORDED]`
+- `Selected options:` `[NOT RECORDED]`
+- `Approved by:` `[NOT RECORDED]`
+- `Approved at:` `[NOT RECORDED]`
+- `Tradeoffs accepted:` `[NOT RECORDED]`
+- `Drain budget:` `5 seconds or 2 seconds — unresolved until D6 is explicitly selected`
+
+사용자가 D1부터 D9를 승인하기 전까지 이 section은 `PROPOSED / NOT YET APPROVED`로 유지한다.
+승인 후에만 ticket 08의 evidence contract와 adapter implementation을 시작하며, 승인되지
+않은 선택은 implementation에서 추측하지 않는다.
+
 ### Phase 1 — foreground evidence deep module
 
 **목적:** Android 관찰값을 제품 판단으로 바꾸는 복잡성을 하나의 deep module 뒤에 둔다.
