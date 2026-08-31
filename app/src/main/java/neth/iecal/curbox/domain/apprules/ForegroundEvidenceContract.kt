@@ -130,12 +130,14 @@ data class ActiveRootFact(
     )
 }
 
-data class ApplicationWindowsFact(
-    val packages: Set<String> = emptySet(),
+class ApplicationWindowsFact(
+    packages: Set<String> = emptySet(),
     val unknownSlotCount: Int = 0,
     val readState: ForegroundReadState = ForegroundReadState.EMPTY,
     val freshness: ApplicationWindowsFreshness = ApplicationWindowsFreshness.FRESH
 ) {
+    val packages: Set<String> = immutablePackageSet(packages)
+
     init {
         require(unknownSlotCount >= 0) { "unknown application window count must not be negative" }
     }
@@ -145,8 +147,42 @@ data class ApplicationWindowsFact(
         get() = packages
 
     internal fun normalized(): ApplicationWindowsFact = copy(
-        packages = immutablePackageSet(packages)
+        packages = packages
     )
+
+    fun copy(
+        packages: Set<String> = this.packages,
+        unknownSlotCount: Int = this.unknownSlotCount,
+        readState: ForegroundReadState = this.readState,
+        freshness: ApplicationWindowsFreshness = this.freshness
+    ): ApplicationWindowsFact = ApplicationWindowsFact(
+        packages = packages,
+        unknownSlotCount = unknownSlotCount,
+        readState = readState,
+        freshness = freshness
+    )
+
+    operator fun component1(): Set<String> = packages
+
+    operator fun component2(): Int = unknownSlotCount
+
+    operator fun component3(): ForegroundReadState = readState
+
+    operator fun component4(): ApplicationWindowsFreshness = freshness
+
+    override fun equals(other: Any?): Boolean =
+        this === other || (other is ApplicationWindowsFact &&
+            packages == other.packages &&
+            unknownSlotCount == other.unknownSlotCount &&
+            readState == other.readState &&
+            freshness == other.freshness)
+
+    override fun hashCode(): Int = (((packages.hashCode() * 31 + unknownSlotCount) * 31 +
+        readState.hashCode()) * 31 + freshness.hashCode())
+
+    override fun toString(): String =
+        "ApplicationWindowsFact(packages=$packages, unknownSlotCount=$unknownSlotCount, " +
+            "readState=$readState, freshness=$freshness)"
 }
 
 /** Raw framework facts. No policy-derived package set, retry state, or deadline is carried here. */
@@ -171,12 +207,29 @@ data class ForegroundFacts(
 }
 
 /** The canonical policy input for evidence interpretation. */
-data class ForegroundEvidencePolicySnapshot(
-    val essentialPackages: Set<String> = emptySet()
+class ForegroundEvidencePolicySnapshot(
+    essentialPackages: Set<String> = emptySet()
 ) {
+    val essentialPackages: Set<String> = immutablePackageSet(essentialPackages)
+
     internal fun normalized(): ForegroundEvidencePolicySnapshot = copy(
-        essentialPackages = immutablePackageSet(essentialPackages)
+        essentialPackages = essentialPackages
     )
+
+    fun copy(
+        essentialPackages: Set<String> = this.essentialPackages
+    ): ForegroundEvidencePolicySnapshot = ForegroundEvidencePolicySnapshot(essentialPackages)
+
+    operator fun component1(): Set<String> = essentialPackages
+
+    override fun equals(other: Any?): Boolean =
+        this === other || (other is ForegroundEvidencePolicySnapshot &&
+            essentialPackages == other.essentialPackages)
+
+    override fun hashCode(): Int = essentialPackages.hashCode()
+
+    override fun toString(): String =
+        "ForegroundEvidencePolicySnapshot(essentialPackages=$essentialPackages)"
 }
 
 private fun immutablePackageSet(packages: Set<String>): Set<String> =
@@ -268,9 +321,25 @@ sealed class ForegroundEvidenceOutcome {
     }
 }
 
-data class ForegroundEvidenceResult(
-    val outcomes: List<ForegroundEvidenceOutcome>
-)
+class ForegroundEvidenceResult(
+    outcomes: List<ForegroundEvidenceOutcome>
+) {
+    val outcomes: List<ForegroundEvidenceOutcome> =
+        java.util.Collections.unmodifiableList(java.util.ArrayList(outcomes))
+
+    fun copy(
+        outcomes: List<ForegroundEvidenceOutcome> = this.outcomes
+    ): ForegroundEvidenceResult = ForegroundEvidenceResult(outcomes)
+
+    operator fun component1(): List<ForegroundEvidenceOutcome> = outcomes
+
+    override fun equals(other: Any?): Boolean =
+        this === other || (other is ForegroundEvidenceResult && outcomes == other.outcomes)
+
+    override fun hashCode(): Int = outcomes.hashCode()
+
+    override fun toString(): String = "ForegroundEvidenceResult(outcomes=$outcomes)"
+}
 
 interface ForegroundObservationSource {
     fun capture(trigger: ObservationTrigger): ForegroundFacts

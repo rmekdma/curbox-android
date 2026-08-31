@@ -20,6 +20,7 @@ class ForegroundEvidenceModule {
     ): ForegroundEvidenceResult {
         val normalizedFacts = facts.normalized()
         val essentialPackages = policy.normalized().essentialPackages
+        val previousRealSignal = lastRealSignal
         val currentRealSignal = normalizedFacts.signal
             .takeIf { it.kind == ObservationKind.REAL_EVENT && it.eventPackage != null }
         currentRealSignal?.let { lastRealSignal = it }
@@ -39,7 +40,13 @@ class ForegroundEvidenceModule {
             ?.takeIf { it !in essentialPackages }
 
         if (activeRootPackage != null) {
-            val previousCandidate = eventPackage?.takeIf { it != activeRootPackage }
+            val previousCandidate = if (eventPackage == activeRootPackage) {
+                previousRealSignal
+                    ?.eventPackage
+                    ?.takeIf { it !in essentialPackages && it != activeRootPackage }
+            } else {
+                eventPackage
+            }
             val visible = ForegroundEvidenceOutcome.Visible(
                 packageName = activeRootPackage,
                 evidenceBasis = if (
