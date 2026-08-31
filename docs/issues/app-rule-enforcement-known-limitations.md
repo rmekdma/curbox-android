@@ -200,26 +200,26 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Target refactor phase:** `Phase 1`과 `Phase 2`를 기본 경로로 하고, `Phase 3`과 `Phase 4`는 각각의
   조건을 충족할 때만 수행한다.
 
-### AR 010 refresh ordering 위험은 재현 전 확정하지 않음
+### AR 010 refresh ordering 위험 재현됨, Phase 2 serialized publication 필요
 
-- **Status / Severity:** `재현 필요` / `P2`
+- **Status / Severity:** `확정 미해결` / `P2`
 - **Exact trigger:** `INTENT_ACTION_REFRESH_APP_RULES` broadcast가 빠르게 연속 도착하고 동시에 DataStore settings emission이 발생한다. 서로 다른 refresh coroutine이 lock을 기다리는 동안 settings snapshot과 package scope의 관찰 시점이 교차한다.
-- **Current behavior:** 현재 구현은 settings collector와 refresh receiver 양쪽에서 `refreshMutex`를 사용하고 lifecycle 및 generation guard로 오래된 callback을 버린다. 따라서 과거에 우려된 “첫 coroutine이 최신 snapshot을 되돌린다”는 현상이 현재 커밋에서 재현됐다는 증거는 없다. 다만 lock 획득 순서와 `settings.first()`의 관찰 시점을 기록하는 stress test가 없다.
-- **Impact:** 위험이 실제라면 최신 제한 설정 대신 오래된 snapshot, override 또는 reset time으로 평가하거나 refresh 직후 visible check가 누락될 수 있다. 재현되지 않는 상태에서 별도 actor를 추가하면 불필요한 복잡성과 지연이 생긴다.
+- **Current behavior:** 현재 구현은 settings collector와 refresh receiver 양쪽에서 `refreshMutex`를 사용하지만, lock 진입 전에 이미 수신된 stale emission을 식별하지 않는다. 결정론적 interleaving에서 latest refresh가 먼저 publish된 뒤 stale snapshot이 최종 상태를 덮어쓰고, runtime generation도 stale publication에 맞춰 증가하며, 최종 상태에서 실행한 visible reconciliation이 stale denial을 평가했다.
+- **Impact:** 최신 제한 설정 대신 오래된 snapshot, override 또는 reset time으로 평가하거나 refresh 직후 visible check가 stale 정책을 사용할 수 있다. 이 경로는 현재 결정론적 harness에서 재현됐으므로 Phase 2 serialized publication 계약이 필요하다.
 - **Evidence:**
   - [AppRuleBlocker.kt:196](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L196)부터 [AppRuleBlocker.kt:212](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L212)의 settings collector와 mutex
-  - [AppRuleBlocker.kt:558](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L558)부터 [AppRuleBlocker.kt:581](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L581)의 refresh receiver
+- [AppRuleBlocker.kt:558](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L558)부터 [AppRuleBlocker.kt:581](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L581)의 refresh receiver
   - [AppRuleBlocker.kt:840](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L840)부터 [AppRuleBlocker.kt:865](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L865)의 snapshot generation과 예약 취소
-- **Mitigation or decision needed:** 100회 stress burst는 보조 증거로만 수행한다. latch,
-  controllable Flow 또는 virtual scheduler로 receiver가 최신 값을 읽은 뒤 지연된 이전
-  emission이 publish되는 deterministic interleaving을 강제하고, 그 결과의 final snapshot,
-  generation과 visible check를 기록한다. 위험을 반증하면 그 ordering 근거를, 재현하면 수정된
-  ordering contract 또는 fix와 함께 기록한다.
-- **Acceptance criteria:** deterministic test가 위 interleaving을 실제로 강제하고 final
-  snapshot, generation과 visible check를 검증한다. 100회 stress 결과만으로 AR 010을 닫지
-  않는다. deterministic test가 위험을 반증하거나 ordering contract/fix를 입증한 뒤에만
-  `재현 필요` 상태를 `닫힘`으로 바꾼다. deterministic test가 실패하면 재현 로그와 수정된
-  contract/fix를 남긴다.
+  - [AppRuleBlocker.kt:851](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L851)의 `applySettingsSnapshot`이 snapshot, override/reset inputs, generation과 recheck 취소를 실제로 함께 publish하는 유일한 production apply path다. `rg`로 확인한 production 호출은 settings collector의 [AppRuleBlocker.kt:209](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L209)부터 [AppRuleBlocker.kt:212](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L212), refresh receiver의 [AppRuleBlocker.kt:583](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L583)부터 [AppRuleBlocker.kt:588](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L588)뿐이며, 두 경로 모두 동일한 `refreshMutex.withLock { applySettingsSnapshot(...) }` critical section으로 수렴한다. receiver의 package scope/settings 읽기는 그 lock 안에서 apply 전에 일어나고, visible reconciliation은 lock 밖에서 post되므로 snapshot publication 순서에 추가 ordering identity를 제공하지 않는다.
+  - [AppRuleBlockerRefreshOrderingRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRefreshOrderingRedTest.kt)의 instrumentation test는 위 공통 production publication critical section을 실제 `Mutex`와 실제 `applySettingsSnapshot`으로 호출한다. Android broadcast registration과 DataStore collector scheduling 자체를 재현하는 대신, 두 외부 endpoint가 공유하고 다른 ordering 동작을 추가하지 않는 지점에서 `CompletableDeferred`로 stale settings emission을 lock 진입 전에 멈추고 latest refresh를 먼저 publish한 뒤 stale emission을 재개한다. 이는 endpoint scheduling을 검증한다는 주장이 아니라, 두 endpoint에서 가능한 snapshot publication 순서를 직접 강제하는 증거다.
+  - Connected device `iPlay50_mini_Pro - 13`에서 `connectedFullDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=neth.iecal.curbox.blockers.AppRuleBlockerRefreshOrderingRedTest`를 실행했다. 1개 테스트 중 1개가 의도된 RED assertion으로 실패했고, latest refresh generation `1` 뒤 stale publication이 generation `2`로 최종 snapshot을 `stale`로 되돌렸다. 최종 상태에서 실제 `checkCurrentlyVisibleApplications`를 실행한 reconciliation의 `AppRulesEvaluation.isAllowed`가 `false`였고 warning activity user outcome도 기록됐다.
+- **Mitigation or decision needed:** 100회 stress burst는 보조 증거로만 취급하며 이 결과를 닫힘 근거로 사용하지 않는다. Phase 2는 다음 최소 ordering contract를 구현해야 한다.
+  1. settings collector와 refresh receiver는 하나의 serialized snapshot publication path를 공유한다.
+  2. 각 publication은 source order를 식별할 수 있는 monotonic ordering identity 또는 동등한 순서 보존 수단을 가지며, 이미 수용된 최신 publication 뒤의 stale emission은 snapshot을 되돌리지 않는다.
+  3. snapshot, override/reset inputs와 recheck generation은 한 번의 원자적 publication으로 수용되며, accepted publication의 visible reconciliation만 그 generation을 사용한다.
+  4. visible check와 그 외 side effect는 capture한 generation이 아직 최신일 때만 결과를 게시한다.
+  이 계약은 actor, Flow, lock, public interface 중 어느 구현을 선택할지는 결정하지 않는다.
+- **Acceptance criteria:** deterministic test가 두 production endpoint의 공통 publication path에서 위 interleaving을 실제로 강제하고 final snapshot, generation과 실제 visible reconciliation/user outcome을 검증한다. 현재 테스트는 최종 snapshot 회귀와 stale denial warning outcome을 재현했으므로 AR 010은 `확정 미해결`로 남긴다. 100회 stress 결과만으로 AR 010을 닫지 않는다. Phase 2가 위 ordering contract 또는 동등한 fix를 구현하고 같은 deterministic test가 통과한 뒤에만 `닫힘`으로 바꾼다.
 - **Target refactor phase:** `Phase 0 재현 gate`; 재현될 때만 `Phase 2 serialized publication path`.
 
 ## `c17677ae`에서 이미 닫힌 항목
@@ -229,7 +229,6 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **전체 앱 대상이 stale launcher 목록에서 사라지는 경로:** evaluator가 현재 event package를 all apps fallback으로 전달한다. [AppRuleEvaluator.kt:91](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleEvaluator.kt#L91)부터 [AppRuleEvaluator.kt:106](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleEvaluator.kt#L106)을 참조한다.
 - **synthetic Handler callback의 예외와 event recycle 누락:** callback, synthetic event 생성, evaluator 호출과 recycle에 containment이 있다. [AppRuleBlocker.kt:1012](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1012)부터 [AppRuleBlocker.kt:1078](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1078)을 참조한다.
 - **split screen에서 하나의 예약이 다른 패키지를 덮어쓰는 경로:** 패키지별 `scheduledRechecks` keyed job을 유지한다. [AppRuleBlocker.kt:933](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L933)부터 [AppRuleBlocker.kt:979](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L979)을 참조한다.
-- **refresh ordering의 즉시 확인된 독립 coroutine race에 대한 방어:** settings collector와 refresh receiver가 mutex와 generation으로 보호된다. 최종 ordering 증명 여부는 AR 010의 stress 재현으로 별도 확인한다.
 - **서비스 재연결 후 기존 visible application을 검사하지 않는 경로:** setup 완료 후 visible reconciliation을 게시한다. [AppRuleBlocker.kt:219](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L219)부터 [AppRuleBlocker.kt:224](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L224)을 참조한다.
 - **AppBlockerService의 한 feature cleanup 실패가 AppRuleBlocker cleanup을 건너뛰는 경로:** feature별 containment로 분리됐다. [AppBlockerService.kt:259](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L259)부터 [AppBlockerService.kt:303](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L303)을 참조한다.
 
