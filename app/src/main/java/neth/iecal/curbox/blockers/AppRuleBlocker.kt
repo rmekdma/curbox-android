@@ -156,6 +156,8 @@ class AppRuleBlocker {
     internal var screenInteractiveProvider: (() -> Boolean)? = null
     internal var keyguardLockedProvider: (() -> Boolean)? = null
     internal var evaluationResultObserver: ((AppRulesEvaluation) -> Unit)? = null
+    /** Temporary seam for observing the external notification publication boundary. */
+    internal var notificationPostObserver: ((LiveRuleNotificationModel) -> Unit)? = null
 
     fun setup(service: BaseBlockingService) {
         val connectionGeneration = lifecycleGeneration.incrementAndGet()
@@ -493,6 +495,7 @@ class AppRuleBlocker {
                     model != lastPostedNotificationModel
                 ) {
                     lastPostedNotificationModel = model
+                    notificationPostObserver?.invoke(model)
                     service.updateForegroundNotification(model)
                 }
             } catch (error: CancellationException) {
