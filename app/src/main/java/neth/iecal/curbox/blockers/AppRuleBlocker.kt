@@ -152,6 +152,8 @@ class AppRuleBlocker {
     internal var recheckRemoveCallback: ((Runnable) -> Unit)? = null
     /** Temporary seam for deterministic wake-reconciliation contract tests. */
     internal var visibleApplicationCheckPostDelayed: ((Runnable, Long) -> Boolean)? = null
+    /** Temporary seam for observing removal of virtual wake-reconciliation callbacks. */
+    internal var visibleApplicationCheckRemoveCallbacks: (() -> Unit)? = null
     /** Temporary seams for deterministic screen and keyguard recovery contract tests. */
     internal var screenInteractiveProvider: (() -> Boolean)? = null
     internal var keyguardLockedProvider: (() -> Boolean)? = null
@@ -572,6 +574,11 @@ class AppRuleBlocker {
         settingsJob?.cancel()
         notificationTickJob?.cancel()
         cancelScheduledRechecks()
+        try {
+            visibleApplicationCheckRemoveCallbacks?.invoke()
+        } catch (error: Throwable) {
+            logNonFatal(error)
+        }
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)
