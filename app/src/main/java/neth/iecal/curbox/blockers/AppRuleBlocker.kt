@@ -39,6 +39,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleMembershipResolver
 import neth.iecal.curbox.domain.apprules.AppRuleReevaluationGate
+import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleReceiverLifecycle
@@ -145,6 +146,12 @@ class AppRuleBlocker {
     /** Test seams model framework snapshots that cannot be constructed with public setters. */
     internal var applicationWindowSnapshotProvider: (() -> ApplicationWindowSnapshot)? = null
     internal var activeWindowSnapshotProvider: (() -> ActiveWindowSnapshot)? = null
+
+    internal var wallClockMsProvider: () -> Long = { System.currentTimeMillis() }
+    internal var elapsedRealtimeMsProvider: () -> Long = { SystemClock.elapsedRealtime() }
+    internal var recheckPostDelayed: ((Runnable, Long) -> Boolean)? = null
+    internal var recheckRemoveCallback: ((Runnable) -> Unit)? = null
+    internal var evaluationResultObserver: ((AppRulesEvaluation) -> Unit)? = null
 
     fun setup(service: BaseBlockingService) {
         val connectionGeneration = lifecycleGeneration.incrementAndGet()
@@ -329,7 +336,7 @@ class AppRuleBlocker {
             cancelScheduledRechecks()
             return
         }
-        val now = System.currentTimeMillis()
+        val now = wallClockMsProvider()
         val calculator = ConfigurableUseDayCalculator(resetTime = runtime.resetTime)
         val useDayId = calculator.idAt(now)
         val evaluation = try {
@@ -353,6 +360,14 @@ class AppRuleBlocker {
             // limited to a storage outage; a malformed persisted snapshot fails closed above.
             logNonFatal(error)
             return
+        }
+
+        evaluationResultObserver?.let { observer ->
+            try {
+                observer(evaluation)
+            } catch (error: Throwable) {
+                logNonFatal(error)
+            }
         }
 
         if (!isReadyForChecks() || recheckGeneration.get() != generation) return
@@ -419,7 +434,7 @@ class AppRuleBlocker {
             try {
                 if (!isReadyForChecks() || recheckGeneration.get() != generation) return@launch
                 val currentSnapshot = runtime.snapshot
-                val now = System.currentTimeMillis()
+                val now = wallClockMsProvider()
                 val calculator = ConfigurableUseDayCalculator(resetTime = runtime.resetTime)
                 val useDayId = calculator.idAt(now)
                 val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
@@ -650,7 +665,7 @@ class AppRuleBlocker {
                     synchronized(runtimeLock) {
                         if (foregroundEvidenceSuspended) {
                             currentForegroundPackage = activePackage
-                            currentForegroundEvidenceAtElapsedMs = SystemClock.elapsedRealtime()
+                            currentForegroundEvidenceAtElapsedMs = elapsedRealtimeMsProvider()
                             suspendedForegroundPackage = null
                             foregroundEvidenceSuspended = false
                         }
@@ -937,7 +952,11 @@ class AppRuleBlocker {
         }
         previous?.let { removeHandlerCallback(it.runnable) }
         try {
-            if (!handler.postDelayed(runnable, delayMillis.coerceAtLeast(1L))) {
+            val posted = recheckPostDelayed?.invoke(
+                runnable,
+                delayMillis.coerceAtLeast(1L)
+            ) ?: handler.postDelayed(runnable, delayMillis.coerceAtLeast(1L))
+            if (!posted) {
                 synchronized(scheduledRechecks) {
                     if (scheduledRechecks[packageName]?.runnable === runnable) {
                         scheduledRechecks.remove(packageName)
@@ -1247,7 +1266,7 @@ class AppRuleBlocker {
     private fun recordForegroundEvidence(packageName: String) {
         synchronized(runtimeLock) {
             currentForegroundPackage = packageName
-            currentForegroundEvidenceAtElapsedMs = SystemClock.elapsedRealtime()
+            currentForegroundEvidenceAtElapsedMs = elapsedRealtimeMsProvider()
             suspendedForegroundPackage = null
             foregroundEvidenceSuspended = false
         }
@@ -1264,7 +1283,7 @@ class AppRuleBlocker {
 
     private fun hasRecentForegroundEvidence(packageName: String): Boolean {
         if (!isCurrentForegroundPackage(packageName)) return false
-        val ageMs = SystemClock.elapsedRealtime() - currentForegroundEvidenceAtElapsedMs
+        val ageMs = elapsedRealtimeMsProvider() - currentForegroundEvidenceAtElapsedMs
         return ageMs in 0..FOREGROUND_EVIDENCE_MAX_AGE_MS
     }
 
@@ -1373,6 +1392,10 @@ class AppRuleBlocker {
 
     private fun removeHandlerCallback(runnable: Runnable) {
         try {
+            recheckRemoveCallback?.let {
+                it(runnable)
+                return
+            }
             handler.removeCallbacks(runnable)
         } catch (error: Throwable) {
             logNonFatal(error)
