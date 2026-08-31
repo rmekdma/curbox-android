@@ -138,6 +138,51 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
                 clock.schedulerClockMs
             )
 
+            // An unlocked SCREEN_ON must reconcile without waiting for USER_PRESENT.
+            val postsBeforeUnlockedScreenOn = scheduler.posts.size
+            val decisionsBeforeUnlockedScreenOn = decisions.size
+            val activitiesBeforeUnlockedScreenOn = service.startedActivities.size
+            val unlockedScreenOnSchedulerClockMs = clock.schedulerClockMs
+            keyguardLocked = false
+            sendScreenAction(blocker, Intent.ACTION_SCREEN_ON)
+            val unlockedScreenOnPost = scheduler.posts
+                .drop(postsBeforeUnlockedScreenOn)
+                .singleOrNull()
+            if (unlockedScreenOnPost?.label != "wake" ||
+                unlockedScreenOnPost.delayMs != USER_PRESENT_RECOVERY_DELAY_MS
+            ) {
+                failures += "unlocked SCREEN_ON did not schedule a 300ms visible check"
+            }
+            scheduler.advanceBy(USER_PRESENT_RECOVERY_DELAY_MS)
+
+            val unlockedRecovery = decisions.lastOrNull()
+            if (decisions.size == decisionsBeforeUnlockedScreenOn || unlockedRecovery == null) {
+                failures += "unlocked SCREEN_ON produced no recovery decision within 300ms"
+            } else {
+                assertEquals(wakeWallClockMs, unlockedRecovery.wallClockMs)
+                assertEquals(wakeElapsedRealtimeMs, unlockedRecovery.elapsedRealtimeMs)
+                assertEquals(
+                    USER_PRESENT_RECOVERY_DELAY_MS,
+                    unlockedRecovery.schedulerClockMs - unlockedScreenOnSchedulerClockMs
+                )
+                if (unlockedRecovery.evaluation.isAllowed) {
+                    failures += "unlocked SCREEN_ON recovery allowed the active target restriction"
+                }
+                if (unlockedRecovery.evaluation.denyingRules.none { it.ruleId == TARGET_RULE_ID }) {
+                    failures += "unlocked SCREEN_ON recovery did not name the target rule"
+                }
+                if (service.startedActivities.size <= activitiesBeforeUnlockedScreenOn) {
+                    failures += "unlocked SCREEN_ON recovery produced no denial activity"
+                }
+                val unlockedDenialPayload = service.startedActivities.lastOrNull()
+                    ?.intent
+                    ?.getStringExtra(GuardianApprovalActivity.EXTRA_DENIALS)
+                    .orEmpty()
+                if (TARGET_RULE_ID !in unlockedDenialPayload) {
+                    failures += "unlocked SCREEN_ON recovery omitted the target denial"
+                }
+            }
+
             // SCREEN_ON can precede USER_PRESENT. Model the keyguard interval through the real
             // receiver; no new guardian may be launched in that interval.
             val activitiesBeforeScreenOn = service.startedActivities.size
