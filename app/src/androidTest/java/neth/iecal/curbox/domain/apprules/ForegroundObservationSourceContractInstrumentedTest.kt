@@ -1,16 +1,143 @@
 package neth.iecal.curbox.domain.apprules
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Context
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class ForegroundObservationSourceContractInstrumentedTest {
+    @Test
+    fun defaultErrorReporterPersistsProviderFailuresThroughCrashLogger() {
+        val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
+        val service = AttachedThrowingAccessibilityService().apply {
+            attachTo(targetContext)
+        }
+        val logFile = File(targetContext.filesDir, "crash_log.txt")
+        val existingLog = logFile.takeIf(File::exists)?.readBytes()
+        val callbackEvent = callbackEvent("com.example.reader", eventTime = 9_000L)
+
+        try {
+            AndroidForegroundObservationSource(
+                service = service,
+                wallClockMs = { 1_000L },
+                elapsedRealtimeMs = { 10_000L },
+                displayStateProvider = { DisplayState.UNLOCKED }
+            ).captureEvent(callbackEvent, trigger("com.example.reader"))
+
+            assertTrue(logFile.exists())
+            assertTrue(logFile.readText().contains("Non-Fatal Error"))
+        } finally {
+            callbackEvent.recycle()
+            if (existingLog == null) {
+                logFile.delete()
+            } else {
+                logFile.writeBytes(existingLog)
+            }
+        }
+    }
+
+    @Test
+    fun captureEventUsesCopiedValuesAndLeavesCallbackEventWithItsCaller() {
+        val targetPackage = "com.example.reader"
+        val callbackEvent = callbackEvent(targetPackage, eventTime = 9_000L)
+        val source = AndroidForegroundObservationSource(
+            service = FakeAccessibilityService(rootPackage = null),
+            wallClockMs = { 1_000L },
+            elapsedRealtimeMs = { 10_000L },
+            displayStateProvider = { DisplayState.UNLOCKED }
+        )
+
+        val captured = source.captureEvent(callbackEvent, trigger(targetPackage))
+
+        assertEquals(targetPackage, captured.signal.eventPackage)
+        assertEquals(9_000L, captured.signal.eventElapsedMs)
+        assertEquals(targetPackage, callbackEvent.packageName)
+        assertEquals(9_000L, callbackEvent.eventTime)
+
+        /*
+         * AccessibilityEvent is a final pooled framework type. It has no public recycled-state
+         * query or injectable recycle hook, so recycle failure and exact pool counts cannot be
+         * observed here. The closest ownership invariant is that captureEvent reads a copied
+         * value and leaves the callback event owned by this test, which is recycled exactly once
+         * below. Production's finally block owns the copy on every path.
+         */
+        callbackEvent.recycle()
+    }
+
+    @Test
+    fun captureEventReportsProviderFailuresAfterCopyAndReturnsFailedFacts() {
+        val targetPackage = "com.example.reader"
+        val callbackEvent = callbackEvent(targetPackage, eventTime = 9_000L)
+        val reported = mutableListOf<Throwable>()
+        val source = AndroidForegroundObservationSource(
+            service = ThrowingAccessibilityService(),
+            wallClockMs = { 1_000L },
+            elapsedRealtimeMs = { 10_000L },
+            displayStateProvider = { throw IllegalStateException("display provider failed") },
+            onNonFatalError = { reported += it }
+        )
+
+        val captured = source.captureEvent(callbackEvent, trigger(targetPackage))
+
+        assertEquals(ForegroundReadState.FAILED, captured.activeRoot.readState)
+        assertEquals(ForegroundReadState.FAILED, captured.applicationWindows.readState)
+        assertEquals(DisplayState.UNLOCKED, captured.displayState)
+        assertEquals(targetPackage, captured.signal.eventPackage)
+        assertEquals(9_000L, captured.signal.eventElapsedMs)
+        assertEquals(3, reported.size)
+        assertEquals(targetPackage, callbackEvent.packageName)
+        callbackEvent.recycle()
+    }
+
+    @Test
+    fun captureEventContainsReporterCallbackFailures() {
+        val callbackEvent = callbackEvent("com.example.reader", eventTime = 9_000L)
+        val source = AndroidForegroundObservationSource(
+            service = ThrowingAccessibilityService(),
+            wallClockMs = { throw IllegalStateException("wall clock failed") },
+            elapsedRealtimeMs = { throw IllegalStateException("elapsed clock failed") },
+            displayStateProvider = { throw IllegalStateException("display provider failed") },
+            onNonFatalError = { throw AssertionError("reporter failed") }
+        )
+
+        val captured = source.captureEvent(
+            callbackEvent,
+            trigger("com.example.reader")
+        )
+
+        assertEquals(1_000L, captured.capturedAtWallMs)
+        assertEquals(10_000L, captured.capturedAtElapsedMs)
+        assertEquals(ForegroundReadState.FAILED, captured.activeRoot.readState)
+        assertEquals(ForegroundReadState.FAILED, captured.applicationWindows.readState)
+        callbackEvent.recycle()
+    }
+
+    @Test
+    fun captureEventWithoutFrameworkEventUsesTriggerAndDoesNotCreateAnOwnedCopy() {
+        val targetPackage = "com.example.reader"
+        val source = AndroidForegroundObservationSource(
+            service = FakeAccessibilityService(rootPackage = null),
+            wallClockMs = { 1_000L },
+            elapsedRealtimeMs = { 10_000L },
+            displayStateProvider = { DisplayState.UNLOCKED }
+        )
+
+        val captured = source.captureEvent(null, trigger(targetPackage))
+
+        assertEquals(targetPackage, captured.signal.eventPackage)
+        assertEquals(10_000L, captured.signal.eventElapsedMs)
+        assertEquals(ForegroundReadState.EMPTY, captured.activeRoot.readState)
+    }
+
     @Test
     fun recentEventWithoutReliableRootIsPreservedByBothAdapters() {
         val targetPackage = "com.example.reader"
@@ -158,6 +285,12 @@ class ForegroundObservationSourceContractInstrumentedTest {
         requestedAtElapsedMs = 10_000L
     )
 
+    private fun callbackEvent(packageName: String, eventTime: Long): AccessibilityEvent =
+        AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED).apply {
+            this.packageName = packageName
+            this.eventTime = eventTime
+        }
+
     private class FakeAccessibilityService(
         private val rootPackage: String?
     ) : AccessibilityService() {
@@ -170,5 +303,33 @@ class ForegroundObservationSourceContractInstrumentedTest {
         }
 
         override fun getWindows(): MutableList<AccessibilityWindowInfo> = mutableListOf()
+    }
+
+    private class ThrowingAccessibilityService : AccessibilityService() {
+        override fun onAccessibilityEvent(event: AccessibilityEvent) = Unit
+
+        override fun onInterrupt() = Unit
+
+        override fun getRootInActiveWindow(): AccessibilityNodeInfo? =
+            throw IllegalStateException("root provider failed")
+
+        override fun getWindows(): MutableList<AccessibilityWindowInfo> =
+            throw IllegalStateException("windows provider failed")
+    }
+
+    private class AttachedThrowingAccessibilityService : AccessibilityService() {
+        fun attachTo(context: Context) {
+            attachBaseContext(context)
+        }
+
+        override fun onAccessibilityEvent(event: AccessibilityEvent) = Unit
+
+        override fun onInterrupt() = Unit
+
+        override fun getRootInActiveWindow(): AccessibilityNodeInfo? =
+            throw IllegalStateException("root provider failed")
+
+        override fun getWindows(): MutableList<AccessibilityWindowInfo> =
+            throw IllegalStateException("windows provider failed")
     }
 }

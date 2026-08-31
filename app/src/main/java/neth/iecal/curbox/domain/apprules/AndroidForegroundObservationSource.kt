@@ -7,6 +7,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
+import neth.iecal.curbox.CrashLogger
 
 /**
  * Production adapter from Accessibility framework state to the Android-free observation seam.
@@ -21,7 +22,9 @@ class AndroidForegroundObservationSource private constructor(
         wallClockMs: () -> Long = { System.currentTimeMillis() },
         elapsedRealtimeMs: () -> Long = { SystemClock.elapsedRealtime() },
         displayStateProvider: (() -> DisplayState)? = null,
-        onNonFatalError: (Throwable) -> Unit = {}
+        onNonFatalError: (Throwable) -> Unit = { error ->
+            CrashLogger(service).logNonFatalError(error.asNonFatalException())
+        }
     ) : this(
         factProvider = { trigger ->
             captureAndroidFacts(
@@ -39,7 +42,7 @@ class AndroidForegroundObservationSource private constructor(
     override fun capture(trigger: ObservationTrigger): ForegroundFacts = try {
         factProvider(trigger).normalized()
     } catch (error: Throwable) {
-        report(error)
+        reportNonFatal(errorReporter, error)
         ForegroundFacts(
             capturedAtWallMs = trigger.requestedAtWallMs,
             capturedAtElapsedMs = trigger.requestedAtElapsedMs,
@@ -93,23 +96,19 @@ class AndroidForegroundObservationSource private constructor(
                 } else {
                     facts
                 }
-            }
+        }
         } catch (error: Throwable) {
-            report(error)
+            reportNonFatal(errorReporter, error)
             capture(trigger)
         } finally {
             eventCopy?.let { copy ->
                 try {
                     copy.recycle()
                 } catch (error: Throwable) {
-                    report(error)
+                    reportNonFatal(errorReporter, error)
                 }
             }
         }
-    }
-
-    private fun report(error: Throwable) {
-        runCatching { errorReporter(error) }
     }
 }
 
@@ -309,3 +308,6 @@ private fun readDisplayState(
 private fun reportNonFatal(reporter: (Throwable) -> Unit, error: Throwable) {
     runCatching { reporter(error) }
 }
+
+private fun Throwable.asNonFatalException(): Exception =
+    this as? Exception ?: Exception(this)

@@ -6,6 +6,71 @@ import org.junit.Test
 
 class ForegroundEvidenceContractTest {
     @Test
+    fun consecutiveRealEventAndRootTransitionEndsPreviousCandidateBeforeNewVisible() {
+        val previousPackage = "com.example.reader"
+        val activePackage = "com.example.calendar"
+        val module = ForegroundEvidenceModule()
+
+        module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 1_000L,
+                capturedAtElapsedMs = 1_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = previousPackage,
+                    eventWallMs = 900L,
+                    eventElapsedMs = 900L
+                ),
+                activeRoot = ActiveRootFact(
+                    packageName = previousPackage,
+                    readState = ForegroundReadState.AVAILABLE
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        val result = module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 2_000L,
+                capturedAtElapsedMs = 2_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = activePackage,
+                    eventWallMs = 1_900L,
+                    eventElapsedMs = 1_900L
+                ),
+                activeRoot = ActiveRootFact(
+                    packageName = activePackage,
+                    readState = ForegroundReadState.AVAILABLE
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.NotVisible(
+                    packageName = previousPackage,
+                    evidenceBasis = EvidenceBasis.DIFFERENT_ACTIVE_ROOT,
+                    sessionEffect = SessionEvidenceEffect.END_WITHOUT_RENEWAL,
+                    decisionPermission = DecisionPermission.DO_NOT_EVALUATE,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = activePackage,
+                    evidenceBasis = EvidenceBasis.REAL_EVENT_AND_ACTIVE_ROOT,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(7_000L),
+                    followUp = FollowUpKind.NONE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
     fun differentActiveRootOnSyntheticRecheckEndsTheLastObservedCandidate() {
         val previousPackage = "com.example.reader"
         val activePackage = "com.example.calendar"
@@ -91,6 +156,65 @@ class ForegroundEvidenceContractTest {
             fail("the source must return an immutable package set")
         } catch (_: UnsupportedOperationException) {
             // Expected: callers cannot mutate a captured value after the source seam.
+        }
+    }
+
+    @Test
+    fun applicationWindowsPackagesAreSnapshottedAtConstruction() {
+        val packages = linkedSetOf("com.example.reader")
+        val fact = ApplicationWindowsFact(packages = packages)
+
+        packages += "com.example.calendar"
+
+        assertEquals(setOf("com.example.reader"), fact.packages)
+        try {
+            @Suppress("UNCHECKED_CAST")
+            (fact.packages as MutableSet<String>) += "com.example.mail"
+            fail("the fact must expose an immutable package set")
+        } catch (_: UnsupportedOperationException) {
+            // Expected: the public fact owns its package snapshot.
+        }
+    }
+
+    @Test
+    fun essentialPackagesAreSnapshottedAtConstruction() {
+        val essentialPackages = linkedSetOf("com.android.systemui")
+        val policy = ForegroundEvidencePolicySnapshot(essentialPackages = essentialPackages)
+
+        essentialPackages += "com.example.guardian"
+
+        assertEquals(setOf("com.android.systemui"), policy.essentialPackages)
+        try {
+            @Suppress("UNCHECKED_CAST")
+            (policy.essentialPackages as MutableSet<String>) += "com.example.overlay"
+            fail("the policy must expose an immutable package set")
+        } catch (_: UnsupportedOperationException) {
+            // Expected: the public policy owns its package snapshot.
+        }
+    }
+
+    @Test
+    fun evidenceOutcomesAreSnapshottedAtConstruction() {
+        val outcome = ForegroundEvidenceOutcome.Unknown(
+            candidatePackage = null,
+            evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+            sessionEffect = SessionEvidenceEffect.PRESERVE,
+            decisionPermission = DecisionPermission.DEFER,
+            evidenceValidity = EvidenceValidity.NotRenewed,
+            followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
+        )
+        val outcomes = mutableListOf<ForegroundEvidenceOutcome>(outcome)
+        val result = ForegroundEvidenceResult(outcomes)
+
+        outcomes.clear()
+
+        assertEquals(listOf(outcome), result.outcomes)
+        try {
+            @Suppress("UNCHECKED_CAST")
+            (result.outcomes as MutableList<ForegroundEvidenceOutcome>).clear()
+            fail("the result must expose an immutable outcome list")
+        } catch (_: UnsupportedOperationException) {
+            // Expected: the public result owns its outcome snapshot.
         }
     }
 
