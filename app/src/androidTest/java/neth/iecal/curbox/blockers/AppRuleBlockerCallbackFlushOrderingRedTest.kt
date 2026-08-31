@@ -70,13 +70,13 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
                 "the evaluator must reach the delayed persistence seam",
                 repository.readStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             )
-            val returnedWithinBudget = callbackReturned.await(
-                CALLBACK_LATENCY_BUDGET_MS,
+            val returnedWhilePersistenceBlocked = callbackReturned.await(
+                WAIT_TIMEOUT_MS,
                 TimeUnit.MILLISECONDS
             )
             val callbackObservation = CallbackObservation(
-                returnedWithinBudget = returnedWithinBudget,
-                elapsedMs = if (returnedWithinBudget) {
+                returnedWhilePersistenceBlocked = returnedWhilePersistenceBlocked,
+                elapsedMs = if (returnedWhilePersistenceBlocked) {
                     callbackReturnedAtMs.get() - callbackStartedAtMs.get()
                 } else {
                     SystemClock.elapsedRealtime() - callbackStartedAtMs.get()
@@ -85,9 +85,12 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             )
             val failure = callbackFailure.get()
             if (failure != null) throw AssertionError("callback failed", failure)
-            if (!callbackObservation.returnedWithinBudget) {
+            if (!callbackObservation.returnedWhilePersistenceBlocked ||
+                callbackObservation.persistenceReleased
+            ) {
                 throw AssertionError(
-                    "callback waited for persistence instead of returning: $callbackObservation"
+                    "callback waited for persistence instead of returning while the gate was held: " +
+                        callbackObservation
                 )
             }
         } finally {
@@ -104,6 +107,7 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         val repository = DelayedFlushRepository()
         val service = recordingService()
         val observations = CopyOnWriteArrayList<DecisionObservation>()
+        val firstEvaluationObserved = CountDownLatch(1)
         val blocker = configureBlocker(
             repository = repository,
             service = service,
@@ -111,8 +115,10 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             observer = { evaluation ->
                 observations += DecisionObservation(
                     evaluation = evaluation,
-                    persistedSessions = repository.lastRead
+                    persistedSessions = repository.lastRead,
+                    commitCompletedAtObservation = repository.commitCompleted.get()
                 )
+                firstEvaluationObserved.countDown()
             }
         )
         val tracker = configureTracker(repository, service)
@@ -131,6 +137,7 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         }
         val decisionThread = Thread {
             try {
+                repository.decisionStarted.countDown()
                 sendWindowEvent(blocker, TARGET_PACKAGE)
             } catch (error: Throwable) {
                 decisionFailure.set(error)
@@ -157,10 +164,15 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             decisionThread.start()
             assertTrue(
                 "the decision request must be observable for the ordering contract",
-                decisionReturned.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                repository.decisionStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             )
-            val earlyObservation = observations.lastOrNull()
-            val earlyRead = earlyObservation?.persistedSessions
+            val decisionReadBeforeCommit = repository.decisionReadCompleted.await(
+                WAIT_TIMEOUT_MS,
+                TimeUnit.MILLISECONDS
+            )
+            val decisionReturnedBeforeCommit = decisionReadBeforeCommit &&
+                decisionReturned.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            val observationsBeforeCommit = observations.toList()
 
             repository.releaseCommit()
             assertTrue(
@@ -169,6 +181,17 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             )
             flushThread.join(WAIT_TIMEOUT_MS)
 
+            assertTrue(
+                "the original decision must complete after the flush commit",
+                decisionReturned.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            decisionThread.join(WAIT_TIMEOUT_MS)
+            assertTrue(
+                "the original evaluator must complete after the flush commit",
+                firstEvaluationObserved.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            val originalObservation = observations.singleOrNull()
+
             // This second public decision is the product outcome after the durable session has
             // been committed. It must see the consumed target allowance and deny the rule.
             sendWindowEvent(blocker, TARGET_PACKAGE)
@@ -176,15 +199,23 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             val failures = mutableListOf<String>()
             if (flushFailure.get() != null) failures += "flush failed: ${flushFailure.get()}"
             if (decisionFailure.get() != null) failures += "decision failed: ${decisionFailure.get()}"
-            if (earlyObservation != null) {
-                failures += "evaluator ran before flush commit: ${earlyObservation.evaluation}"
+            if (decisionReadBeforeCommit) {
+                failures += "evaluator read persisted sessions before flush commit"
             }
-            val earlySession = earlyRead?.singleOrNull()
-            if (earlySession != null && earlySession.endedAtMs != earlySession.startedAtMs) {
-                failures += "early evaluator did not observe the pre-commit durable checkpoint"
+            if (decisionReturnedBeforeCommit) {
+                failures += "original decision returned while the flush commit was blocked"
+            }
+            if (observationsBeforeCommit.isNotEmpty()) {
+                failures += "original evaluator ran before flush commit: " +
+                    observationsBeforeCommit.joinToString()
             }
             if (!repository.commitCompleted.get()) {
                 failures += "flush commit was not recorded"
+            }
+            if (originalObservation == null) {
+                failures += "original decision did not produce an evaluator result"
+            } else if (!originalObservation.commitCompletedAtObservation) {
+                failures += "original evaluator ran before flush commit: ${originalObservation.evaluation}"
             }
             if (committedObservation == null || committedObservation.evaluation.isAllowed) {
                 failures += "post-commit evaluator did not deny the consumed target session"
@@ -255,18 +286,20 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
     }
 
     private fun sendWindowEvent(blocker: AppRuleBlocker, packageName: String) {
-        val event = windowEvent(packageName)
-        try {
-            blocker.doAppRuleCheck(event)
-        } finally {
-            event.recycle()
-        }
+        withWindowEvent(packageName) { event -> blocker.doAppRuleCheck(event) }
     }
 
     private fun sendWindowEvent(tracker: AppUsageTracker, packageName: String) {
+        withWindowEvent(packageName) { event -> tracker.onEvent(event) }
+    }
+
+    private inline fun withWindowEvent(
+        packageName: String,
+        block: (AccessibilityEvent) -> Unit
+    ) {
         val event = windowEvent(packageName)
         try {
-            tracker.onEvent(event)
+            block(event)
         } finally {
             event.recycle()
         }
@@ -312,14 +345,15 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
     }
 
     private data class CallbackObservation(
-        val returnedWithinBudget: Boolean,
+        val returnedWhilePersistenceBlocked: Boolean,
         val elapsedMs: Long,
         val persistenceReleased: Boolean
     )
 
     private data class DecisionObservation(
         val evaluation: AppRulesEvaluation,
-        val persistedSessions: List<ForegroundSession>?
+        val persistedSessions: List<ForegroundSession>?,
+        val commitCompletedAtObservation: Boolean
     )
 
     private class RecordingService : BaseBlockingService() {
@@ -366,6 +400,8 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
 
     private class DelayedFlushRepository : CurrentUseDaySessionRepository {
         val commitStarted = CountDownLatch(1)
+        val decisionStarted = CountDownLatch(1)
+        val decisionReadCompleted = CountDownLatch(1)
         val commitCompleted = AtomicBoolean(false)
         val readHistory = CopyOnWriteArrayList<List<ForegroundSession>>()
         private val releaseCommit = CountDownLatch(1)
@@ -412,6 +448,7 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
             val result = persistedSessions.filter { it.useDayId == useDayId }
             readHistory += result
+            decisionReadCompleted.countDown()
             return result
         }
 
@@ -448,7 +485,6 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         const val TARGET_GROUP_ID = "target-group"
         const val TARGET_RULE_ID = "target-rule"
         const val WAIT_TIMEOUT_MS = 2_000L
-        const val CALLBACK_LATENCY_BUDGET_MS = 100L
         const val SESSION_DURATION_MS = 2 * 60_000L
     }
 }
