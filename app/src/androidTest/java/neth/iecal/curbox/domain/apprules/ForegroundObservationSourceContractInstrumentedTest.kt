@@ -24,8 +24,10 @@ class ForegroundObservationSourceContractInstrumentedTest {
             attachTo(targetContext)
         }
         val logFile = File(targetContext.filesDir, "crash_log.txt")
-        val logBefore = logFile.takeIf(File::exists)?.readText().orEmpty()
-        assertTrue("the per-test marker must be absent before capture", !logBefore.contains(marker))
+        val logExistedBefore = logFile.exists()
+        val logBytesBefore = if (logExistedBefore) logFile.readBytes() else null
+        val logTextBefore = logBytesBefore?.toString(Charsets.UTF_8).orEmpty()
+        assertTrue("the per-test marker must be absent before capture", !logTextBefore.contains(marker))
         val callbackEvent = callbackEvent("com.example.reader", eventTime = 9_000L)
 
         try {
@@ -39,7 +41,15 @@ class ForegroundObservationSourceContractInstrumentedTest {
             val logAfter = logFile.takeIf(File::exists)?.readText().orEmpty()
             assertTrue("the default reporter must persist the per-test marker", logAfter.contains(marker))
         } finally {
-            callbackEvent.recycle()
+            try {
+                callbackEvent.recycle()
+            } finally {
+                if (logExistedBefore) {
+                    logFile.writeBytes(checkNotNull(logBytesBefore))
+                } else if (logFile.exists()) {
+                    logFile.delete()
+                }
+            }
         }
     }
 
