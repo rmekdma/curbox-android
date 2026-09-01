@@ -1031,7 +1031,11 @@ class AppRuleBlocker {
                             delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
                             visibilityAttempt = visibilityAttempt + 1
                         )
-                    } else if (canUseForegroundFallback(packageName)) {
+                    } else if (canUseForegroundFallback(
+                            packageName = packageName,
+                            requireRecentEvidence = false
+                        )
+                    ) {
                         // Window providers on some Android 16/OEM builds can remain empty while
                         // the active app is still unchanged. The recent foreground event is a
                         // bounded, package-checked fallback rather than an unbounded poll.
@@ -1074,7 +1078,11 @@ class AppRuleBlocker {
                         delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
                         visibilityAttempt = visibilityAttempt + 1
                     )
-                } else if (canUseForegroundFallback(packageName)) {
+                } else if (canUseForegroundFallback(
+                        packageName = packageName,
+                        requireRecentEvidence = false
+                    )
+                ) {
                     // If the provider throws on every bounded read, retain the same package guard
                     // as the unknown-window path so an otherwise valid boundary is not lost
                     // forever.
@@ -1324,8 +1332,12 @@ class AppRuleBlocker {
         return ageMs in 0..FOREGROUND_EVIDENCE_MAX_AGE_MS
     }
 
-    private fun canUseForegroundFallback(packageName: String): Boolean {
-        if (!hasRecentForegroundEvidence(packageName)) return false
+    private fun canUseForegroundFallback(
+        packageName: String,
+        requireRecentEvidence: Boolean = true
+    ): Boolean {
+        if (!isCurrentForegroundPackage(packageName)) return false
+        if (requireRecentEvidence && !hasRecentForegroundEvidence(packageName)) return false
         val configuredEssentialPackages = try {
             readEssentialPackagesForEvaluation()
         } catch (error: Throwable) {
