@@ -303,6 +303,57 @@ class ForegroundEvidenceContractTest {
     }
 
     @Test
+    fun expiredRealEventWithEmptyWindowsKeepsLastPackageAsFailClosedCandidate() {
+        val targetPackage = "com.example.reader"
+        val module = ForegroundEvidenceModule()
+
+        module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 1_000L,
+                capturedAtElapsedMs = 1_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = targetPackage,
+                    eventWallMs = 1_000L,
+                    eventElapsedMs = 1_000L
+                ),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                applicationWindows = ApplicationWindowsFact(
+                    readState = ForegroundReadState.EMPTY
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        val result = module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 7_000L,
+                capturedAtElapsedMs = 7_000L,
+                signal = SignalFact(kind = ObservationKind.SYNTHETIC_RECHECK),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                applicationWindows = ApplicationWindowsFact(
+                    readState = ForegroundReadState.EMPTY
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = targetPackage,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.EVALUATE_FAIL_CLOSED,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
     fun obviousNonessentialActiveRootIsVisibleAndRenewsIntrinsicEvidence() {
         val targetPackage = "com.example.reader"
         val facts = ForegroundFacts(
