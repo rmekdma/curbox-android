@@ -46,7 +46,20 @@ import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleReceiverLifecycle
 import neth.iecal.curbox.domain.apprules.AppRuleRecheckPlanner
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
+import neth.iecal.curbox.domain.apprules.ActiveRootFact
+import neth.iecal.curbox.domain.apprules.AndroidForegroundObservationSource
 import neth.iecal.curbox.domain.apprules.ApplicationWindowsFreshness
+import neth.iecal.curbox.domain.apprules.ApplicationWindowsFact
+import neth.iecal.curbox.domain.apprules.AtomicConnectionScopedSourceOrderSequencer
+import neth.iecal.curbox.domain.apprules.DisplayState
+import neth.iecal.curbox.domain.apprules.ForegroundEvidenceModule
+import neth.iecal.curbox.domain.apprules.ForegroundEvidenceOutcome
+import neth.iecal.curbox.domain.apprules.ForegroundEvidencePolicySnapshot
+import neth.iecal.curbox.domain.apprules.ForegroundFacts
+import neth.iecal.curbox.domain.apprules.ForegroundReadState
+import neth.iecal.curbox.domain.apprules.ObservationKind
+import neth.iecal.curbox.domain.apprules.ObservationTrigger
+import neth.iecal.curbox.domain.apprules.SignalFact
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationFormatter
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationStateCalculator
@@ -64,7 +77,6 @@ class AppRuleBlocker {
         private const val MAX_VISIBILITY_RETRIES = 3
         private const val VISIBILITY_RETRY_DELAY_MS = 250L
         private const val UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS = 20_000L
-        private const val FOREGROUND_EVIDENCE_MAX_AGE_MS = 5_000L
 
         internal fun createGuardianApprovalIntent(
             context: Context,
@@ -109,6 +121,9 @@ class AppRuleBlocker {
     private val lifecycleGeneration = AtomicLong(0L)
     private val scheduledRechecks = mutableMapOf<String, ScheduledRecheck>()
     private val applicationWindowProvenanceCache = ApplicationWindowProvenanceCache()
+    private var foregroundEvidenceModule = ForegroundEvidenceModule()
+    private var foregroundObservationSource: AndroidForegroundObservationSource? = null
+    private var sourceOrderSequencer = AtomicConnectionScopedSourceOrderSequencer()
 
     private data class RuleRuntime(
         val snapshot: AppRuleSnapshot,
@@ -123,12 +138,6 @@ class AppRuleBlocker {
         val generation: Long,
         val runnable: Runnable
     )
-
-    private enum class PackageVisibility {
-        VISIBLE,
-        NOT_VISIBLE,
-        UNKNOWN
-    }
 
     /** Evidence snapshot kept internal so Android tests can exercise OEM failure combinations. */
     internal data class ApplicationWindowSnapshot(
@@ -193,6 +202,14 @@ class AppRuleBlocker {
         lastShownAt = 0L
         this.service = service
         crashLogger = CrashLogger(service)
+        foregroundEvidenceModule = ForegroundEvidenceModule()
+        sourceOrderSequencer = AtomicConnectionScopedSourceOrderSequencer()
+        foregroundObservationSource = AndroidForegroundObservationSource(
+            service = service,
+            wallClockMs = { wallClockMsProvider() },
+            elapsedRealtimeMs = { elapsedRealtimeMsProvider() },
+            onNonFatalError = ::logNonFatal
+        )
         val database = AppDatabase.getInstance(service)
         sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
         enforcement = AppRuleEnforcement(sessionRepository)
@@ -229,7 +246,12 @@ class AppRuleBlocker {
                         }
                     }
                     if (!isReadyForChecks(connectionGeneration)) return@collect
-                    if (changed) postVisibleApplicationCheck(connectionGeneration = connectionGeneration)
+                    if (changed) {
+                        postVisibleApplicationCheck(
+                            connectionGeneration = connectionGeneration,
+                            observationKind = ObservationKind.REFRESH
+                        )
+                    }
                     updateLiveNotification()
                 }
             } catch (error: CancellationException) {
@@ -327,13 +349,51 @@ class AppRuleBlocker {
         if (packageName.isBlank()) return
 
         val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
-        if (isEssentialPackage(packageName, evaluationEssentialPackages)) {
+        val evidencePolicy = ForegroundEvidencePolicySnapshot(
+            essentialPackages = evaluationEssentialPackages +
+                setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
+        )
+        val foregroundEvidence = foregroundEvidenceModule.classify(
+            facts = captureForegroundFacts(
+                event = event,
+                kind = if (updateForegroundEvidence) {
+                    ObservationKind.REAL_EVENT
+                } else {
+                    ObservationKind.SYNTHETIC_RECHECK
+                }
+            ),
+            policy = evidencePolicy
+        )
+        // Essential events are observed and classified before this effect boundary. They clear
+        // suspended foreground state so an existing guardian cannot be launched a second time.
+        if (packageName in evidencePolicy.essentialPackages) {
             clearForegroundEvidence()
             return
         }
-        // Accessibility can deliver the last app event while the display is still locked after
-        // SCREEN_ON. Wait for USER_PRESENT before showing a guardian underneath the keyguard.
-        if (!isScreenReadyForChecks()) return
+        val packageOutcome = foregroundEvidence.outcomes.firstOrNull {
+            it.packageName == packageName
+        }
+        val shouldFailClosed = when (packageOutcome) {
+            is ForegroundEvidenceOutcome.Visible ->
+                packageOutcome.decisionPermission ==
+                    neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED
+            is ForegroundEvidenceOutcome.Unknown ->
+                packageOutcome.decisionPermission ==
+                    neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED
+            is ForegroundEvidenceOutcome.NotVisible -> {
+                cancelScheduledRecheck(packageName)
+                false
+            }
+            null -> false
+        }
+        if (packageOutcome == null || packageOutcome is ForegroundEvidenceOutcome.NotVisible ||
+            packageOutcome.decisionPermission ==
+                neth.iecal.curbox.domain.apprules.DecisionPermission.DEFER ||
+            packageOutcome.decisionPermission ==
+                neth.iecal.curbox.domain.apprules.DecisionPermission.DO_NOT_EVALUATE
+        ) {
+            return
+        }
 
         if (updateForegroundEvidence) recordForegroundEvidence(packageName)
         updateLiveNotification(packageName.takeIf { updateForegroundEvidence })
@@ -370,7 +430,7 @@ class AppRuleBlocker {
             throw error
         } catch (error: Exception) {
             logNonFatal(error)
-            if (!failClosedOnEvaluationFailure) return
+            if (!failClosedOnEvaluationFailure && !shouldFailClosed) return
             evaluationFailedClosed = true
             failClosedEvaluation(
                 snapshot = currentSnapshot,
@@ -472,10 +532,11 @@ class AppRuleBlocker {
                     // Handler delays use uptime and may be held during doze. A light, once per
                     // minute reconciliation repairs a missed wall-clock boundary after wake;
                     // screen-on/user-present also trigger this path immediately.
-                    if (captureRuleRuntime().snapshot.appRules.any { it.isActive } &&
-                        isScreenReadyForChecks()
-                    ) {
-                        postVisibleApplicationCheck(connectionGeneration = connectionGeneration)
+                    if (captureRuleRuntime().snapshot.appRules.any { it.isActive }) {
+                        postVisibleApplicationCheck(
+                            connectionGeneration = connectionGeneration,
+                            observationKind = ObservationKind.REFRESH
+                        )
                     }
                     updateLiveNotification()
                 } catch (error: CancellationException) {
@@ -654,7 +715,7 @@ class AppRuleBlocker {
             scope.launch {
                 try {
                     if (!isReadyForChecks(connectionGeneration)) return@launch
-                    val changed = refreshMutex.withLock {
+                    refreshMutex.withLock {
                         if (!isReadyForChecks(connectionGeneration)) return@withLock false
                         val packageScopeChanged = refreshPackageScope()
                         val settings = service.dataStoreManager.settings.first()
@@ -664,9 +725,10 @@ class AppRuleBlocker {
                     if (!isReadyForChecks(connectionGeneration)) return@launch
                     // A refresh is also useful when the package reader returned the same set:
                     // the window/root provider may have recovered since the last event.
-                    if (changed || isScreenReadyForChecks()) {
-                        postVisibleApplicationCheck(connectionGeneration = connectionGeneration)
-                    }
+                    postVisibleApplicationCheck(
+                        connectionGeneration = connectionGeneration,
+                        observationKind = ObservationKind.REFRESH
+                    )
                     updateLiveNotification()
                 } catch (error: CancellationException) {
                     throw error
@@ -678,144 +740,49 @@ class AppRuleBlocker {
     }
 
     private fun checkCurrentlyVisibleApplications() {
-        if (!isReadyForChecks() || !isScreenReadyForChecks()) return
+        checkCurrentlyVisibleApplications(ObservationKind.RECONNECT)
+    }
+
+    private fun checkCurrentlyVisibleApplications(observationKind: ObservationKind) {
+        if (!isReadyForChecks()) return
         try {
             val configuredEssentialPackages = readEssentialPackagesForEvaluation()
-            val windows = readApplicationWindowSnapshot()
-            val activePackage = readActiveWindowPackage()
-            val currentPackage = currentForegroundPackage
-            val evidenceSuspended = foregroundEvidenceSuspended
-            val activePackageIsEssential = activePackage?.let {
-                isEssentialPackage(it, configuredEssentialPackages)
-            } == true
-            // After the guardian/SystemUI has been foregrounded, the old event package is no
-            // longer safe fallback evidence. If that overlay is still active, do not evaluate
-            // stale application-window entries and accidentally launch a second guardian.
-            if (evidenceSuspended && activePackageIsEssential) return
-            val visiblePackages = linkedSetOf<String>()
-            val freshWindowPackages = windows.packages.takeIf {
-                windows.freshness == ApplicationWindowsFreshness.FRESH
-            }.orEmpty()
-            val activeRootIsConsistent = !evidenceSuspended && activePackage != null &&
-                isReliableApplicationEvidence(
-                    activePackage,
-                    windows,
-                    configuredEssentialPackages
-                ) &&
-                (activePackage in freshWindowPackages ||
-                    !windows.hasApplicationWindow) &&
-                (currentPackage == null ||
-                    currentPackage == activePackage ||
-                    currentPackage in freshWindowPackages)
-            if (activeRootIsConsistent && activePackage != null) {
-                visiblePackages += activePackage
-                // Keep every package that was identified successfully. A split-screen provider
-                // can return one valid root and one null root; dropping the valid package would
-                // lose its keyed boundary even though it is still visible.
-                if (activePackage in freshWindowPackages || !windows.hasApplicationWindow) {
-                    visiblePackages += freshWindowPackages
-                }
-            } else if (evidenceSuspended) {
-                // Once a nonessential active root is available again, it is safe to resume the
-                // current package evidence. Require it to agree with a known application window
-                // (or with an otherwise empty window snapshot) so a stale root cannot resurrect
-                // the package that was visible before the overlay.
-                val activeRootCanResume = activePackage != null &&
-                    !activePackageIsEssential &&
-                    isReliableApplicationEvidence(
-                        activePackage,
-                        windows,
-                        configuredEssentialPackages
-                    ) &&
-                    (activePackage in freshWindowPackages || !windows.hasApplicationWindow)
-                if (activeRootCanResume) {
-                    val packageToSuppress = suspendedForegroundPackage
-                    synchronized(runtimeLock) {
-                        if (foregroundEvidenceSuspended) {
-                            currentForegroundPackage = activePackage
-                            currentForegroundEvidenceAtElapsedMs = elapsedRealtimeMsProvider()
-                            suspendedForegroundPackage = null
-                            foregroundEvidenceSuspended = false
-                        }
-                    }
-                    activePackage?.let(visiblePackages::add)
-                    // Do not immediately re-evaluate the package that was underneath the
-                    // essential overlay. Its window entry can be stale even when another known
-                    // package is now visible; a real event or reliable root must re-establish it.
-                    visiblePackages += freshWindowPackages - setOfNotNull(packageToSuppress)
-                }
-            } else {
-                val recentCurrentPackage = currentPackage
-                    ?.takeIf { it.isNotBlank() && hasRecentForegroundEvidence(it) }
-                val activeRootIsUsable = activePackage != null &&
-                    !activePackageIsEssential &&
-                    isReliableApplicationEvidence(
-                        activePackage,
-                        windows,
-                        configuredEssentialPackages
-                    ) &&
-                    (activePackage in freshWindowPackages || !windows.hasApplicationWindow)
-                val hasMultipleApplicationWindows =
-                    windows.applicationWindowCount > 1 || freshWindowPackages.size > 1
-
-                if (activeRootIsUsable && activePackage != null) {
-                    // A reliable nonessential root is stronger than a stale previous event. It
-                    // must be checked even when the old event package is absent from the window
-                    // list, otherwise a switch can leave the new app unenforced.
-                    visiblePackages += activePackage
-                    if (recentCurrentPackage != null &&
-                        recentCurrentPackage != activePackage &&
-                        (recentCurrentPackage in freshWindowPackages ||
-                            windows.hasUnknownApplicationWindow)
-                    ) {
-                        // A partial split-screen snapshot can expose B while A's root is null.
-                        // Keep the recent A event as a second candidate only when the provider
-                        // explicitly reports an unknown application window.
-                        visiblePackages += recentCurrentPackage
-                    }
-                    if (recentCurrentPackage == activePackage ||
-                        recentCurrentPackage == null ||
-                        hasMultipleApplicationWindows
-                    ) {
-                    visiblePackages += freshWindowPackages
-                    }
-                } else {
-                    recentCurrentPackage?.let(visiblePackages::add)
-                    if (recentCurrentPackage == null ||
-                        !windows.hasApplicationWindow ||
-                        recentCurrentPackage in freshWindowPackages ||
-                        hasMultipleApplicationWindows
-                    ) {
-                        // On reconnect there is no event-derived foreground package yet. Known
-                        // application roots are still safe to evaluate independently of a null
-                        // active root, including partial split-screen snapshots. If there is a
-                        // recent event and more than one application window, retain every known
-                        // package so each split-screen boundary gets its own keyed recheck.
-                        visiblePackages += freshWindowPackages
+            val policy = ForegroundEvidencePolicySnapshot(
+                essentialPackages = configuredEssentialPackages +
+                    setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
+            )
+            val facts = captureForegroundFacts(event = null, kind = observationKind)
+            var packageToSuppress: String? = null
+            if (foregroundEvidenceSuspended) {
+                val activeRootPackage = facts.activeRoot.packageName
+                    ?.takeIf { facts.activeRoot.readState == ForegroundReadState.AVAILABLE }
+                if (activeRootPackage == null || activeRootPackage in policy.essentialPackages) return
+                synchronized(runtimeLock) {
+                    if (foregroundEvidenceSuspended) {
+                        packageToSuppress = suspendedForegroundPackage
+                        currentForegroundPackage = activeRootPackage
+                        currentForegroundEvidenceAtElapsedMs = facts.capturedAtElapsedMs
+                        suspendedForegroundPackage = null
+                        foregroundEvidenceSuspended = false
                     }
                 }
             }
-            for (pkg in visiblePackages) {
-                if (!isReadyForChecks()) return
-                val event = try {
-                    AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
-                } catch (error: Throwable) {
-                    logNonFatal(error)
-                    continue
-                }
-                try {
-                    event.packageName = pkg
-                    doAppRuleCheck(event, updateForegroundEvidence = false)
-                } catch (error: Throwable) {
-                    // This path runs from a Handler callback. A feature failure must not escape
-                    // into the accessibility service's main looper.
-                    logNonFatal(error)
-                } finally {
-                    try {
-                        event.recycle()
-                    } catch (error: Throwable) {
-                        logNonFatal(error)
+            val result = foregroundEvidenceModule.classify(facts, policy)
+            val generation = recheckGeneration.get()
+            result.outcomes.forEach { outcome ->
+                if (!isReadyForChecks() || recheckGeneration.get() != generation) return
+                when (outcome) {
+                    is ForegroundEvidenceOutcome.NotVisible ->
+                        cancelScheduledRecheck(outcome.packageName)
+                    is ForegroundEvidenceOutcome.Visible -> {
+                        if (outcome.packageName != packageToSuppress &&
+                            outcome.decisionPermission ==
+                                neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
+                        ) {
+                            dispatchSyntheticCheck(outcome.packageName, generation)
+                        }
                     }
+                    is ForegroundEvidenceOutcome.Unknown -> Unit
                 }
             }
         } catch (error: Throwable) {
@@ -829,22 +796,22 @@ class AppRuleBlocker {
             val connectionGeneration = lifecycleGeneration.get()
             when (intent?.action) {
                 Intent.ACTION_SCREEN_ON -> {
-                    // SCREEN_ON is delivered while the keyguard can still be showing. Defer
-                    // enforcement until USER_PRESENT so the guardian cannot appear underneath the
-                    // lock screen or be launched twice during unlock.
-                    screenOnAwaitingUserPresent = isDeviceKeyguardLocked()
-                    if (!screenOnAwaitingUserPresent) {
-                        postVisibleApplicationCheck(
-                            delayMillis = 300L,
-                            connectionGeneration = connectionGeneration
-                        )
-                    }
+                    // The observation source reads the display state. SCREEN_ON is only a cheap
+                    // wake trigger; USER_PRESENT supplies the follow-up observation if keyguard
+                    // is still present when this one runs.
+                    screenOnAwaitingUserPresent = false
+                    postVisibleApplicationCheck(
+                        delayMillis = 300L,
+                        connectionGeneration = connectionGeneration,
+                        observationKind = ObservationKind.SCREEN_WAKE
+                    )
                 }
                 Intent.ACTION_USER_PRESENT -> {
                     screenOnAwaitingUserPresent = false
                     postVisibleApplicationCheck(
                         delayMillis = 300L,
-                        connectionGeneration = connectionGeneration
+                        connectionGeneration = connectionGeneration,
+                        observationKind = ObservationKind.USER_PRESENT
                     )
                 }
             }
@@ -865,7 +832,10 @@ class AppRuleBlocker {
                     if (!isReadyForChecks(connectionGeneration)) return@launch
                     // Package broadcasts must not erase unrelated boundary jobs. Visible apps are
                     // reconciled and will replace only their own keyed job when needed.
-                    postVisibleApplicationCheck(connectionGeneration = connectionGeneration)
+                    postVisibleApplicationCheck(
+                        connectionGeneration = connectionGeneration,
+                        observationKind = ObservationKind.REFRESH
+                    )
                     updateLiveNotification()
                 } catch (error: CancellationException) {
                     throw error
@@ -969,16 +939,148 @@ class AppRuleBlocker {
         )
     }
 
+    private fun captureForegroundFacts(
+        event: AccessibilityEvent?,
+        kind: ObservationKind
+    ): ForegroundFacts {
+        val trigger = ObservationTrigger(
+            sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity(),
+            kind = kind,
+            eventPackage = event?.packageName
+                ?.toString()
+                ?.trim()
+                ?.takeIf(String::isNotEmpty),
+            requestedAtWallMs = observationWallClockMs(),
+            requestedAtElapsedMs = observationElapsedRealtimeMs()
+        )
+        val source = foregroundObservationSource
+        val facts = if (source != null) {
+            if (event != null) {
+                source.captureEvent(event, trigger)
+            } else {
+                source.capture(trigger)
+            }
+        } else {
+            captureLegacyForegroundFacts(event, trigger)
+        }
+        val factsWithProvenance = if (source != null) {
+            facts.copy(
+                applicationWindows = applicationWindowProvenanceCache.resolve(
+                    raw = facts.applicationWindows.toApplicationWindowSnapshot(),
+                    capturedAtElapsedMs = facts.capturedAtElapsedMs
+                ).toForegroundFact()
+            )
+        } else {
+            facts
+        }
+        return if (screenOnAwaitingUserPresent && factsWithProvenance.displayState == DisplayState.UNLOCKED) {
+            factsWithProvenance.copy(displayState = DisplayState.KEYGUARD)
+        } else {
+            factsWithProvenance
+        }
+    }
+
+    private fun captureLegacyForegroundFacts(
+        event: AccessibilityEvent?,
+        trigger: ObservationTrigger
+    ): ForegroundFacts {
+        val eventPackage = event?.packageName
+            ?.toString()
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+        val eventElapsedMs = event?.eventTime?.takeIf { it > 0L }
+        val activeWindow = readActiveWindowSnapshot()
+        val applicationWindows = readApplicationWindowSnapshot()
+        return ForegroundFacts(
+            capturedAtWallMs = trigger.requestedAtWallMs,
+            capturedAtElapsedMs = trigger.requestedAtElapsedMs,
+            signal = SignalFact(
+                kind = trigger.kind,
+                eventPackage = eventPackage,
+                eventWallMs = eventPackage?.let { trigger.requestedAtWallMs },
+                eventElapsedMs = eventPackage?.let {
+                    eventElapsedMs ?: trigger.requestedAtElapsedMs
+                }
+            ),
+            activeRoot = ActiveRootFact(
+                packageName = activeWindow.packageName,
+                readState = when {
+                    activeWindow.readFailed -> ForegroundReadState.FAILED
+                    activeWindow.packageName == null -> ForegroundReadState.EMPTY
+                    else -> ForegroundReadState.AVAILABLE
+                }
+            ),
+            applicationWindows = applicationWindows.toForegroundFact(),
+            displayState = legacyDisplayState()
+        )
+    }
+
+    private fun ApplicationWindowSnapshot.toForegroundFact(): ApplicationWindowsFact =
+        ApplicationWindowsFact(
+            packages = packages,
+            unknownSlotCount = if (hasUnknownApplicationWindow) {
+                (applicationWindowCount - packages.size).coerceAtLeast(1)
+            } else {
+                0
+            },
+            readState = when {
+                providerFailed -> ForegroundReadState.FAILED
+                !hasApplicationWindow -> ForegroundReadState.EMPTY
+                else -> ForegroundReadState.AVAILABLE
+            },
+            freshness = freshness
+        )
+
+    private fun ApplicationWindowsFact.toApplicationWindowSnapshot(): ApplicationWindowSnapshot =
+        ApplicationWindowSnapshot(
+            packages = packages,
+            hasApplicationWindow = readState != ForegroundReadState.EMPTY ||
+                packages.isNotEmpty() || unknownSlotCount > 0,
+            hasUnknownApplicationWindow = readState == ForegroundReadState.FAILED ||
+                unknownSlotCount > 0,
+            providerFailed = readState == ForegroundReadState.FAILED,
+            applicationWindowCount = (packages.size + unknownSlotCount).coerceAtLeast(
+                if (readState == ForegroundReadState.FAILED) 1 else 0
+            ),
+            freshness = freshness,
+            capturedAtElapsedMs = 0L
+        )
+
+    private fun legacyDisplayState(): DisplayState = when {
+        !isScreenInteractive() -> DisplayState.SCREEN_OFF
+        screenOnAwaitingUserPresent || isDeviceKeyguardLocked() -> DisplayState.KEYGUARD
+        else -> DisplayState.UNLOCKED
+    }
+
+    private fun observationWallClockMs(): Long = try {
+        wallClockMsProvider().coerceAtLeast(0L)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        logNonFatal(error)
+        System.currentTimeMillis().coerceAtLeast(0L)
+    }
+
+    private fun observationElapsedRealtimeMs(): Long = try {
+        elapsedRealtimeMsProvider().coerceAtLeast(0L)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        logNonFatal(error)
+        SystemClock.elapsedRealtime().coerceAtLeast(0L)
+    }
+
     /** Posts a guarded main-thread reconciliation used by refresh, reconnect, and wake paths. */
     private fun postVisibleApplicationCheck(
         delayMillis: Long = 0L,
-        connectionGeneration: Long = lifecycleGeneration.get()
+        connectionGeneration: Long = lifecycleGeneration.get(),
+        observationKind: ObservationKind = ObservationKind.RECONNECT
     ) {
         if (!isReadyForChecks(connectionGeneration)) return
         val callback = Runnable {
             try {
-                if (isReadyForChecks(connectionGeneration) && isScreenReadyForChecks()) {
-                    checkCurrentlyVisibleApplications()
+                if (isReadyForChecks(connectionGeneration)) {
+                    checkCurrentlyVisibleApplications(observationKind)
                 }
             } catch (error: Throwable) {
                 // Handler callbacks have no coroutine parent to contain a feature failure.
@@ -1013,9 +1115,6 @@ class AppRuleBlocker {
         logNonFatal(error)
         false
     }
-
-    private fun isScreenReadyForChecks(): Boolean =
-        isScreenInteractive() && !screenOnAwaitingUserPresent && !isDeviceKeyguardLocked()
 
     private fun scheduleRecheck(
         packageName: String,
@@ -1080,14 +1179,32 @@ class AppRuleBlocker {
                 scheduledRechecks.remove(packageName)
             }
             if (!isReadyForChecks() || recheckGeneration.get() != generation) return
-            if (!isScreenReadyForChecks()) return
-
-            when (packageVisibility(packageName)) {
-                PackageVisibility.VISIBLE -> {
-                    dispatchSyntheticCheck(packageName, generation)
+            if (foregroundEvidenceSuspended) {
+                // An essential overlay owns the foreground effect. Keep this package's boundary
+                // keyed and recover it after the overlay releases the suspended evidence.
+                postScheduledRecheck(
+                    packageName = packageName,
+                    generation = generation,
+                    delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
+                    visibilityAttempt = 0
+                )
+                return
+            }
+            when (val outcome = observeForegroundOutcome(packageName)) {
+                is ForegroundEvidenceOutcome.Visible -> {
+                    if (outcome.decisionPermission ==
+                        neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
+                    ) {
+                        dispatchSyntheticCheck(packageName, generation)
+                    }
                 }
-                PackageVisibility.NOT_VISIBLE -> Unit
-                PackageVisibility.UNKNOWN -> {
+                is ForegroundEvidenceOutcome.NotVisible -> Unit
+                is ForegroundEvidenceOutcome.Unknown,
+                null -> {
+                    val failClosedCandidate = outcome is ForegroundEvidenceOutcome.Unknown &&
+                        outcome.candidatePackage == packageName &&
+                        outcome.decisionPermission ==
+                            neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED
                     if (visibilityAttempt < MAX_VISIBILITY_RETRIES) {
                         postScheduledRecheck(
                             packageName = packageName,
@@ -1095,23 +1212,18 @@ class AppRuleBlocker {
                             delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
                             visibilityAttempt = visibilityAttempt + 1
                         )
-                    } else if (canUseForegroundFallback(
-                            packageName = packageName,
-                            requireRecentEvidence = false
-                        )
-                    ) {
-                        // Window providers on some Android 16/OEM builds can remain empty while
-                        // the active app is still unchanged. The recent foreground event is a
-                        // bounded, package-checked fallback rather than an unbounded poll.
+                    } else if (failClosedCandidate) {
+                        // R5 A is a bounded, package-checked fallback. The module grants this
+                        // permission without renewing evidence validity; the evaluator remains the
+                        // final allow/deny authority.
                         dispatchSyntheticCheck(
                             packageName = packageName,
                             generation = generation,
                             failClosedOnEvaluationFailure = true
                         )
                     } else {
-                        // Do not drop the boundary merely because an OEM returned a stale,
-                        // non-empty window list. Keep a low-frequency recovery until a real
-                        // foreground event or a reliable window snapshot resolves visibility.
+                        // Null, partial, keyguard, and stale evidence keep this keyed boundary
+                        // alive until a reliable observation or the next wake/reconnect.
                         postScheduledRecheck(
                             packageName = packageName,
                             generation = generation,
@@ -1137,25 +1249,14 @@ class AppRuleBlocker {
                         delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
                         visibilityAttempt = visibilityAttempt + 1
                     )
-                } else if (canUseForegroundFallback(
-                        packageName = packageName,
-                        requireRecentEvidence = false
-                    )
-                ) {
-                    // If the provider throws on every bounded read, retain the same package guard
-                    // as the unknown-window path so an otherwise valid boundary is not lost
-                    // forever.
+                } else if (isReadyForChecks() && recheckGeneration.get() == generation) {
+                    // After the bounded ordinary-failure retries, preserve R5's fail-closed
+                    // behavior for this keyed package. Cancellation exits above without logging,
+                    // enforcing, or scheduling recovery.
                     dispatchSyntheticCheck(
                         packageName = packageName,
                         generation = generation,
                         failClosedOnEvaluationFailure = true
-                    )
-                } else if (isReadyForChecks() && recheckGeneration.get() == generation) {
-                    postScheduledRecheck(
-                        packageName = packageName,
-                        generation = generation,
-                        delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
-                        visibilityAttempt = 0
                     )
                 }
             } catch (recoveryCancellation: CancellationException) {
@@ -1205,45 +1306,21 @@ class AppRuleBlocker {
         }
     }
 
-    private fun packageVisibility(packageName: String): PackageVisibility {
-        if (foregroundEvidenceSuspended) return PackageVisibility.NOT_VISIBLE
+    private fun observeForegroundOutcome(
+        packageName: String
+    ): ForegroundEvidenceOutcome? {
         val configuredEssentialPackages = readEssentialPackagesForEvaluation()
-        val windows = readApplicationWindowSnapshot()
-        val freshWindowPackages = windows.packages.takeIf {
-            windows.freshness == ApplicationWindowsFreshness.FRESH
-        }.orEmpty()
-        val activePackage = readActiveWindowPackage()
-        val activeIsReliable = activePackage != null &&
-            isReliableApplicationEvidence(activePackage, windows, configuredEssentialPackages)
-        val targetInWindows = windows.freshness == ApplicationWindowsFreshness.FRESH &&
-            packageName in windows.packages
-        val lastForeground = currentForegroundPackage
-        val foregroundSupportsActive = lastForeground == null ||
-            lastForeground == activePackage ||
-            lastForeground == packageName ||
-            lastForeground in freshWindowPackages
-        val activeSwitchIsConfirmed = lastForeground != null &&
-            lastForeground != packageName &&
-            lastForeground == activePackage &&
-            !windows.hasUnknownApplicationWindow
-
-        // Only a reliable root that agrees with the latest real foreground event can prove an app
-        // switch. Null, IME/SystemUI, stale, or uncorrelated roots remain UNKNOWN: the window
-        // provider is known to publish stale/partial snapshots on some Android 16 devices.
-        return when {
-            activeIsReliable && activePackage == packageName &&
-                (activePackage in freshWindowPackages ||
-                    !windows.hasApplicationWindow) &&
-                foregroundSupportsActive ->
-                PackageVisibility.VISIBLE
-            activeIsReliable && targetInWindows &&
-                (activePackage?.let { it in freshWindowPackages } == true ||
-                    !windows.hasApplicationWindow) &&
-                foregroundSupportsActive ->
-                PackageVisibility.VISIBLE // split-screen
-            activeIsReliable && activeSwitchIsConfirmed -> PackageVisibility.NOT_VISIBLE
-            else -> PackageVisibility.UNKNOWN
-        }
+        val facts = captureForegroundFacts(
+            event = null,
+            kind = ObservationKind.SYNTHETIC_RECHECK
+        )
+        return foregroundEvidenceModule.classify(
+            facts = facts,
+            policy = ForegroundEvidencePolicySnapshot(
+                essentialPackages = configuredEssentialPackages +
+                    setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
+            )
+        ).outcomes.firstOrNull { it.packageName == packageName }
     }
 
     private fun readApplicationWindowSnapshot(): ApplicationWindowSnapshot {
@@ -1340,29 +1417,6 @@ class AppRuleBlocker {
         capturedAtElapsedMs = elapsedRealtimeMsProvider().coerceAtLeast(0L)
     )
 
-    private fun isReliableApplicationEvidence(
-        packageName: String,
-        windows: ApplicationWindowSnapshot,
-        configuredEssentialPackages: Set<String> = essentialPackages
-    ): Boolean {
-        if (packageName.isBlank() || isEssentialPackage(packageName, configuredEssentialPackages)) return false
-        // A root that agrees with a window, the last real accessibility event, or the current
-        // launcher set is credible. With no application window at all the root itself is the only
-        // evidence available, so accept it unless it is an essential package.
-        return (windows.freshness == ApplicationWindowsFreshness.FRESH &&
-            packageName in windows.packages) ||
-            packageName == currentForegroundPackage ||
-            packageName in launchablePackages ||
-            (!windows.hasApplicationWindow && !windows.providerFailed)
-    }
-
-    private fun isEssentialPackage(packageName: String, configured: Set<String>): Boolean =
-        packageName == service.packageName ||
-            packageName == Constants.SYSTEM_UI_PACKAGE_NAME ||
-            packageName in configured
-
-    private fun readActiveWindowPackage(): String? = readActiveWindowSnapshot().packageName
-
     private fun readActiveWindowSnapshot(): ActiveWindowSnapshot {
         activeWindowSnapshotProvider?.let { provider ->
             return try {
@@ -1404,9 +1458,6 @@ class AppRuleBlocker {
         return ActiveWindowSnapshot(packageName = packageName, readFailed = readFailed)
     }
 
-    private fun isCurrentForegroundPackage(packageName: String): Boolean =
-        currentForegroundPackage == packageName && isReadyForChecks()
-
     private fun recordForegroundEvidence(packageName: String) {
         synchronized(runtimeLock) {
             currentForegroundPackage = packageName
@@ -1423,78 +1474,6 @@ class AppRuleBlocker {
             currentForegroundEvidenceAtElapsedMs = 0L
             foregroundEvidenceSuspended = true
         }
-    }
-
-    private fun hasRecentForegroundEvidence(packageName: String): Boolean {
-        if (!isCurrentForegroundPackage(packageName)) return false
-        val ageMs = elapsedRealtimeMsProvider() - currentForegroundEvidenceAtElapsedMs
-        return ageMs in 0..FOREGROUND_EVIDENCE_MAX_AGE_MS
-    }
-
-    private fun canUseForegroundFallback(
-        packageName: String,
-        requireRecentEvidence: Boolean = true
-    ): Boolean {
-        if (!isCurrentForegroundPackage(packageName)) return false
-        if (requireRecentEvidence && !hasRecentForegroundEvidence(packageName)) return false
-        val configuredEssentialPackages = try {
-            readEssentialPackagesForEvaluation()
-        } catch (error: Throwable) {
-            logNonFatal(error)
-            return false
-        }
-        val activeWindow = try {
-            readActiveWindowSnapshot()
-        } catch (error: Throwable) {
-            logNonFatal(error)
-            return false
-        }
-        val windows = readApplicationWindowSnapshot()
-        if (windows.providerFailed) {
-            // A failed window provider cannot contradict a very recent foreground event unless
-            // the active root independently identifies another nonessential app.
-            return activeWindow.readFailed || activeWindow.packageName == null ||
-                isEssentialPackage(activeWindow.packageName, configuredEssentialPackages)
-        }
-        if (windows.freshness == ApplicationWindowsFreshness.FRESH &&
-            packageName in windows.packages
-        ) return true
-        if (windows.freshness == ApplicationWindowsFreshness.FRESH &&
-            windows.packages.isNotEmpty()
-        ) {
-            return false
-        }
-        if (activeWindow.packageName != null &&
-            !isEssentialPackage(activeWindow.packageName, configuredEssentialPackages)
-        ) {
-            // A different nonessential active root is stronger switch evidence than the recent
-            // event, including when the window list is stale or empty.
-            return false
-        }
-        if (activeWindow.packageName != null &&
-            isEssentialPackage(activeWindow.packageName, configuredEssentialPackages)
-        ) {
-            // An IME, launcher, SystemUI, or the guardian may temporarily own the active root.
-            // Only a window that names the target directly is enough evidence while that overlay
-            // is on top; stale or empty application windows must not resurrect the old package.
-            return windows.freshness == ApplicationWindowsFreshness.FRESH &&
-                packageName in windows.packages
-        }
-        if (windows.hasApplicationWindow) {
-            // Some Android 16/OEM providers return a stale list that omits the current app while
-            // rootInActiveWindow is null or transiently belongs to IME/SystemUI. Honor the recent
-            // real event for this short bounded interval, then fall back to periodic recovery.
-            return true
-        }
-        if (activeWindow.readFailed) {
-            // No contradictory root is available. The bounded event evidence is still safer than
-            // silently dropping an allowance boundary forever.
-            return true
-        }
-        // With no application window, a null root or a known transient overlay leaves the recent
-        // real foreground event as the best available evidence.
-        return activeWindow.packageName == null ||
-            isEssentialPackage(activeWindow.packageName, configuredEssentialPackages)
     }
 
     private fun cancelScheduledRecheck(packageName: String) {

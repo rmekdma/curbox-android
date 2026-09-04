@@ -354,7 +354,7 @@ class ForegroundEvidenceContractTest {
     }
 
     @Test
-    fun expiredEventWithFreshCompleteDifferentWindowDefersWithoutInferringVisibility() {
+    fun expiredEventWithFreshCompleteDifferentWindowEvaluatesOnlyKnownWindow() {
         val targetPackage = "com.example.reader"
         val otherPackage = "com.example.calendar"
         val module = ForegroundEvidenceModule()
@@ -413,13 +413,13 @@ class ForegroundEvidenceContractTest {
 
         assertEquals(
             listOf(
-                ForegroundEvidenceOutcome.Unknown(
-                    candidatePackage = targetPackage,
-                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
-                    sessionEffect = SessionEvidenceEffect.PRESERVE,
-                    decisionPermission = DecisionPermission.DEFER,
-                    evidenceValidity = EvidenceValidity.NotRenewed,
-                    followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = otherPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
+                    followUp = FollowUpKind.NONE
                 )
             ),
             result.outcomes
@@ -437,7 +437,27 @@ class ForegroundEvidenceContractTest {
             )
         )
 
-        assertDeferredPriorCandidate(result)
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = "com.example.calendar",
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
     }
 
     @Test
@@ -473,7 +493,7 @@ class ForegroundEvidenceContractTest {
     }
 
     @Test
-    fun expiredEventWhileScreenOffOrKeyguardDefersWithoutEvaluatingPriorCandidate() {
+    fun expiredEventWhileScreenOffEndsOrKeyguardDefersWithoutEvaluatingPriorCandidate() {
         listOf(DisplayState.SCREEN_OFF, DisplayState.KEYGUARD).forEach { displayState ->
             val result = classifyExpiredCandidate(
                 applicationWindows = ApplicationWindowsFact(
@@ -482,7 +502,30 @@ class ForegroundEvidenceContractTest {
                 displayState = displayState
             )
 
-            assertDeferredPriorCandidate(result)
+            val expected = when (displayState) {
+                DisplayState.SCREEN_OFF -> listOf(
+                    ForegroundEvidenceOutcome.NotVisible(
+                        packageName = "com.example.reader",
+                        evidenceBasis = EvidenceBasis.SCREEN_OFF,
+                        sessionEffect = SessionEvidenceEffect.END_WITHOUT_RENEWAL,
+                        decisionPermission = DecisionPermission.DO_NOT_EVALUATE,
+                        evidenceValidity = EvidenceValidity.NotRenewed,
+                        followUp = FollowUpKind.NONE
+                    )
+                )
+                DisplayState.KEYGUARD -> listOf(
+                    ForegroundEvidenceOutcome.Unknown(
+                        candidatePackage = null,
+                        evidenceBasis = EvidenceBasis.KEYGUARD,
+                        sessionEffect = SessionEvidenceEffect.PRESERVE,
+                        decisionPermission = DecisionPermission.DEFER,
+                        evidenceValidity = EvidenceValidity.NotRenewed,
+                        followUp = FollowUpKind.WAIT_FOR_USER_PRESENT
+                    )
+                )
+                DisplayState.UNLOCKED -> error("unexpected display state")
+            }
+            assertEquals(expected, result.outcomes)
         }
     }
 
@@ -579,6 +622,380 @@ class ForegroundEvidenceContractTest {
         assertEquals(DecisionPermission.EVALUATE, visible.decisionPermission)
         assertEquals(EvidenceValidity.RenewedUntil(15_000L), visible.evidenceValidity)
         assertEquals(FollowUpKind.NONE, visible.followUp)
+    }
+
+    @Test
+    fun partialSplitScreenKeepsKnownPackageAndLeavesUnknownSlotForRetry() {
+        val knownPackage = "com.example.reader"
+
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 7_000L,
+                capturedAtElapsedMs = 7_000L,
+                signal = SignalFact(kind = ObservationKind.SYNTHETIC_RECHECK),
+                activeRoot = ActiveRootFact(
+                    packageName = knownPackage,
+                    readState = ForegroundReadState.AVAILABLE
+                ),
+                applicationWindows = ApplicationWindowsFact(
+                    packages = linkedSetOf(knownPackage, knownPackage),
+                    unknownSlotCount = 1,
+                    readState = ForegroundReadState.AVAILABLE,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.UNLOCKED
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = knownPackage,
+                    evidenceBasis = EvidenceBasis.ACTIVE_ROOT,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun partialSplitScreenWithNullActiveRootKeepsKnownWindowVisible() {
+        val knownPackage = "com.example.reader"
+
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 7_000L,
+                capturedAtElapsedMs = 7_000L,
+                signal = SignalFact(kind = ObservationKind.SYNTHETIC_RECHECK),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                applicationWindows = ApplicationWindowsFact(
+                    packages = setOf(knownPackage),
+                    unknownSlotCount = 1,
+                    readState = ForegroundReadState.AVAILABLE,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.UNLOCKED
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = knownPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun partialSplitScreenClassifiesEachKnownPackageOnce() {
+        val activePackage = "com.example.reader"
+        val secondPackage = "com.example.calendar"
+
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 7_000L,
+                capturedAtElapsedMs = 7_000L,
+                signal = SignalFact(kind = ObservationKind.SYNTHETIC_RECHECK),
+                activeRoot = ActiveRootFact(
+                    packageName = activePackage,
+                    readState = ForegroundReadState.AVAILABLE
+                ),
+                applicationWindows = ApplicationWindowsFact(
+                    packages = linkedSetOf(activePackage, secondPackage, activePackage),
+                    unknownSlotCount = 1,
+                    readState = ForegroundReadState.AVAILABLE,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.UNLOCKED
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = activePackage,
+                    evidenceBasis = EvidenceBasis.ACTIVE_ROOT,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = secondPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun essentialRootDoesNotEraseDirectApplicationWindowEvidence() {
+        val applicationPackage = "com.example.reader"
+
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 10_000L,
+                capturedAtElapsedMs = 10_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = applicationPackage,
+                    eventWallMs = 9_000L,
+                    eventElapsedMs = 9_000L
+                ),
+                activeRoot = ActiveRootFact(
+                    packageName = "com.android.systemui",
+                    readState = ForegroundReadState.AVAILABLE
+                ),
+                applicationWindows = ApplicationWindowsFact(
+                    packages = setOf(applicationPackage),
+                    readState = ForegroundReadState.AVAILABLE,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.UNLOCKED
+            ),
+            ForegroundEvidencePolicySnapshot(
+                essentialPackages = setOf("com.android.systemui")
+            )
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = applicationPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(15_000L),
+                    followUp = FollowUpKind.NONE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun essentialRootWithoutApplicationWindowWaitsWithoutReevaluatingCandidate() {
+        val candidatePackage = "com.example.reader"
+
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 10_000L,
+                capturedAtElapsedMs = 10_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = candidatePackage,
+                    eventWallMs = 9_000L,
+                    eventElapsedMs = 9_000L
+                ),
+                activeRoot = ActiveRootFact(
+                    packageName = "com.android.systemui",
+                    readState = ForegroundReadState.AVAILABLE
+                ),
+                applicationWindows = ApplicationWindowsFact(
+                    readState = ForegroundReadState.EMPTY,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.UNLOCKED
+            ),
+            ForegroundEvidencePolicySnapshot(
+                essentialPackages = setOf("com.android.systemui")
+            )
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun keyguardWaitsForUserPresentWithoutReevaluatingCandidate() {
+        val candidatePackage = "com.example.reader"
+
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 10_000L,
+                capturedAtElapsedMs = 10_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = candidatePackage,
+                    eventWallMs = 9_000L,
+                    eventElapsedMs = 9_000L
+                ),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                applicationWindows = ApplicationWindowsFact(
+                    readState = ForegroundReadState.EMPTY,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.KEYGUARD
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.KEYGUARD,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.WAIT_FOR_USER_PRESENT
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun screenOffEndsCandidateWithoutEvaluatingOrRenewingIt() {
+        val candidatePackage = "com.example.reader"
+
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 10_000L,
+                capturedAtElapsedMs = 10_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = candidatePackage,
+                    eventWallMs = 9_000L,
+                    eventElapsedMs = 9_000L
+                ),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                applicationWindows = ApplicationWindowsFact(
+                    readState = ForegroundReadState.EMPTY,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.SCREEN_OFF
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.NotVisible(
+                    packageName = candidatePackage,
+                    evidenceBasis = EvidenceBasis.SCREEN_OFF,
+                    sessionEffect = SessionEvidenceEffect.END_WITHOUT_RENEWAL,
+                    decisionPermission = DecisionPermission.DO_NOT_EVALUATE,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.NONE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun reconnectReobservesAllKnownApplicationWindowsInsteadOfReusingEventHistory() {
+        val firstPackage = "com.example.reader"
+        val secondPackage = "com.example.calendar"
+        val module = ForegroundEvidenceModule()
+
+        module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 1_000L,
+                capturedAtElapsedMs = 1_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = firstPackage,
+                    eventWallMs = 1_000L,
+                    eventElapsedMs = 1_000L
+                ),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY)
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        val result = module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 2_000L,
+                capturedAtElapsedMs = 2_000L,
+                signal = SignalFact(kind = ObservationKind.RECONNECT),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                applicationWindows = ApplicationWindowsFact(
+                    packages = linkedSetOf(firstPackage, secondPackage, firstPackage),
+                    readState = ForegroundReadState.AVAILABLE,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.UNLOCKED
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = firstPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(7_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = secondPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(7_000L),
+                    followUp = FollowUpKind.NONE
+                )
+            ),
+            result.outcomes
+        )
     }
 
     private fun classifyExpiredCandidate(
