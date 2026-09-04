@@ -604,10 +604,48 @@ class ForegroundEvidenceContractTest {
                         followUp = FollowUpKind.WAIT_FOR_USER_PRESENT
                     )
                 )
+                DisplayState.UNKNOWN -> error("unexpected display state")
                 DisplayState.UNLOCKED -> error("unexpected display state")
             }
             assertEquals(expected, result.outcomes)
         }
+    }
+
+    @Test
+    fun unknownDisplayStateDefersWithoutEvaluatingOrRenewingCandidate() {
+        val module = ForegroundEvidenceModule()
+        val result = module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 10_000L,
+                capturedAtElapsedMs = 10_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = "com.example.reader",
+                    eventWallMs = 9_000L,
+                    eventElapsedMs = 9_000L
+                ),
+                activeRoot = ActiveRootFact(
+                    packageName = "com.example.reader",
+                    readState = ForegroundReadState.AVAILABLE
+                ),
+                displayState = DisplayState.UNKNOWN
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
     }
 
     @Test
@@ -838,6 +876,64 @@ class ForegroundEvidenceContractTest {
                     decisionPermission = DecisionPermission.EVALUATE,
                     evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
                     followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun windowReadExceptionSlotsKeepKnownPackagesVisibleAndCreateOneRetryPerUnknownSlot() {
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 7_000L,
+                capturedAtElapsedMs = 7_000L,
+                signal = SignalFact(kind = ObservationKind.RECONNECT),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                applicationWindows = ApplicationWindowsFact(
+                    packages = linkedSetOf("com.example.reader", "com.example.calendar"),
+                    unknownSlotCount = 2,
+                    readState = ForegroundReadState.FAILED,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                ),
+                displayState = DisplayState.UNLOCKED
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = "com.example.reader",
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = "com.example.calendar",
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(12_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
                 ),
                 ForegroundEvidenceOutcome.Unknown(
                     candidatePackage = null,

@@ -65,6 +65,10 @@ class ForegroundEvidenceModule {
             return screenOff(eventPackage)
         }
 
+        if (normalizedFacts.displayState == DisplayState.UNKNOWN) {
+            return displayStateUnknownDeferred()
+        }
+
         if (essentialActiveRoot != null && freshApplicationPackages.isNotEmpty()) {
             return ForegroundEvidenceResult(
                 outcomes = buildList {
@@ -279,6 +283,20 @@ class ForegroundEvidenceModule {
                     decisionPermission = DecisionPermission.DEFER,
                     evidenceValidity = EvidenceValidity.NotRenewed,
                     followUp = FollowUpKind.WAIT_FOR_USER_PRESENT
+                )
+            )
+        )
+
+    private fun displayStateUnknownDeferred(): ForegroundEvidenceResult =
+        ForegroundEvidenceResult(
+            outcomes = listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
                 )
             )
         )

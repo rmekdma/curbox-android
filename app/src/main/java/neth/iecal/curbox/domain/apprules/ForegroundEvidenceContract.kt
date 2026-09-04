@@ -91,7 +91,8 @@ enum class ApplicationWindowsFreshness {
 enum class DisplayState {
     SCREEN_OFF,
     UNLOCKED,
-    KEYGUARD
+    KEYGUARD,
+    UNKNOWN
 }
 
 data class SignalFact(

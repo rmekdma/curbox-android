@@ -54,6 +54,15 @@ class AppRuleBlockerLongBoundaryRedTest {
     }
 
     @Test
+    fun cachedTargetThenCurrentPartialOtherDoesNotReevaluateStaleTarget() {
+        val result = runBoundaryScenario(WindowState.CACHED_TARGET_THEN_PARTIAL_OTHER)
+
+        check(result.startedActivities.none { it.observedAtMs >= boundaryTimeMs() }) {
+            "a stale cached target must not open a guardian when current partial windows identify another package"
+        }
+    }
+
+    @Test
     fun ar002R06_differentNonessentialActiveRootDoesNotLockPreviousPackage() {
         val result = runBoundaryScenario(WindowState.DIFFERENT_ACTIVE_ROOT)
 
@@ -261,6 +270,7 @@ class AppRuleBlockerLongBoundaryRedTest {
             applicationWindowSnapshotProvider = {
                 val readIndex = windowReadCount++
                 when {
+                    windowState.seedTargetWindow && readIndex == 0 -> RESOLVED_TARGET_WINDOW
                     windowState.seedResolvedWindow && readIndex == 0 -> RESOLVED_OTHER_WINDOW
                     windowState.failAfterSeed ->
                         error("injected application-window provider failure")
@@ -389,7 +399,8 @@ class AppRuleBlockerLongBoundaryRedTest {
         val windowSnapshot: AppRuleBlocker.ApplicationWindowSnapshot,
         val activeWindowSnapshot: AppRuleBlocker.ActiveWindowSnapshot,
         val seedResolvedWindow: Boolean = false,
-        val failAfterSeed: Boolean = false
+        val failAfterSeed: Boolean = false,
+        val seedTargetWindow: Boolean = false
     ) {
         STALE_WINDOW(
             contractName = "successful window then empty read",
@@ -463,6 +474,17 @@ class AppRuleBlockerLongBoundaryRedTest {
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
             seedResolvedWindow = true,
             failAfterSeed = true
+        ),
+        CACHED_TARGET_THEN_PARTIAL_OTHER(
+            contractName = "cached target then current partial other window",
+            windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(OTHER_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = true,
+                applicationWindowCount = 2
+            ),
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            seedTargetWindow = true
         ),
         DIFFERENT_ACTIVE_ROOT(
             contractName = "different active nonessential root",
@@ -681,6 +703,12 @@ class AppRuleBlockerLongBoundaryRedTest {
         const val CANCELLATION_MESSAGE = "injected R5 boundary cancellation"
         val RESOLVED_OTHER_WINDOW = AppRuleBlocker.ApplicationWindowSnapshot(
             packages = setOf(OTHER_PACKAGE),
+            hasApplicationWindow = true,
+            hasUnknownApplicationWindow = false,
+            applicationWindowCount = 1
+        )
+        val RESOLVED_TARGET_WINDOW = AppRuleBlocker.ApplicationWindowSnapshot(
+            packages = setOf(TARGET_PACKAGE),
             hasApplicationWindow = true,
             hasUnknownApplicationWindow = false,
             applicationWindowCount = 1

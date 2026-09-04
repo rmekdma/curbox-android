@@ -98,7 +98,7 @@ class ForegroundObservationSourceContractInstrumentedTest {
 
         assertEquals(ForegroundReadState.FAILED, captured.activeRoot.readState)
         assertEquals(ForegroundReadState.FAILED, captured.applicationWindows.readState)
-        assertEquals(DisplayState.UNLOCKED, captured.displayState)
+        assertEquals(DisplayState.UNKNOWN, captured.displayState)
         assertEquals(targetPackage, captured.signal.eventPackage)
         assertEquals(9_000L, captured.signal.eventElapsedMs)
         assertEquals(3, reported.size)
