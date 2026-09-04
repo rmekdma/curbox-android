@@ -1,6 +1,9 @@
 package neth.iecal.curbox.ui.activity
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
@@ -11,6 +14,7 @@ import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -35,6 +39,26 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var denials: List<AppRuleGuardianDenial> = emptyList()
     private var selectedRuleId: String? = null
     private var hasPassword = false
+    private var guardianClosedBroadcastSent = false
+    private var guardianStateReceiverRegistered = false
+
+    private val guardianStateRequestReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != INTENT_ACTION_STATE_REQUEST ||
+                guardianClosedBroadcastSent || isFinishing
+            ) return
+            val packageName = this@GuardianApprovalActivity.intent
+                .getStringExtra(EXTRA_PACKAGE)
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?: return
+            sendBroadcast(
+                Intent(INTENT_ACTION_OPENED)
+                    .setPackage(this@GuardianApprovalActivity.packageName)
+                    .putExtra(EXTRA_GUARDIAN_PACKAGE, packageName)
+            )
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,6 +89,13 @@ class GuardianApprovalActivity : AppCompatActivity() {
             finish()
             return
         }
+        ContextCompat.registerReceiver(
+            this,
+            guardianStateRequestReceiver,
+            IntentFilter(INTENT_ACTION_STATE_REQUEST),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        guardianStateReceiverRegistered = true
         selectedRuleId = denials.first().ruleId
         render()
         lifecycleScope.launch {
@@ -196,8 +227,31 @@ class GuardianApprovalActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
+            notifyGuardianClosed()
             finish()
         }
+    }
+
+    override fun onDestroy() {
+        if (guardianStateReceiverRegistered) {
+            runCatching { unregisterReceiver(guardianStateRequestReceiver) }
+            guardianStateReceiverRegistered = false
+        }
+        super.onDestroy()
+    }
+
+    private fun notifyGuardianClosed() {
+        if (guardianClosedBroadcastSent) return
+        val packageName = intent.getStringExtra(EXTRA_PACKAGE)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return
+        guardianClosedBroadcastSent = true
+        sendBroadcast(
+            Intent(INTENT_ACTION_CLOSED)
+                .setPackage(this.packageName)
+                .putExtra(EXTRA_GUARDIAN_PACKAGE, packageName)
+        )
     }
 
     private fun navigateHomeAndFinish() {
@@ -222,5 +276,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_DENIALS = "app_rule_denials_json"
         const val EXTRA_PACKAGE = "launch_package"
+        const val INTENT_ACTION_CLOSED = "neth.iecal.curbox.guardian.approval.closed"
+        const val INTENT_ACTION_OPENED = "neth.iecal.curbox.guardian.approval.opened"
+        const val INTENT_ACTION_STATE_REQUEST = "neth.iecal.curbox.guardian.approval.state_request"
+        const val EXTRA_GUARDIAN_PACKAGE = "guardian_package"
     }
 }

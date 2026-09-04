@@ -57,9 +57,10 @@ class AndroidForegroundObservationSource private constructor(
             ),
             activeRoot = ActiveRootFact(readState = ForegroundReadState.FAILED),
             applicationWindows = ApplicationWindowsFact(
+                unknownSlotCount = 1,
                 readState = ForegroundReadState.FAILED
             ),
-            displayState = DisplayState.UNLOCKED
+            displayState = DisplayState.UNKNOWN
         )
     }
 
@@ -220,7 +221,10 @@ private fun readApplicationWindows(
         throw error
     } catch (error: Throwable) {
         reportNonFatal(onNonFatalError, error)
-        return ApplicationWindowsFact(readState = ForegroundReadState.FAILED)
+        return ApplicationWindowsFact(
+            unknownSlotCount = 1,
+            readState = ForegroundReadState.FAILED
+        )
     }
     if (windows.isNullOrEmpty()) return ApplicationWindowsFact()
 
@@ -236,17 +240,20 @@ private fun readApplicationWindows(
                 throw error
             } catch (error: Throwable) {
                 readFailed = true
+                unknownSlotCount++
                 reportNonFatal(onNonFatalError, error)
-                false
+                null
             }
-            if (!isApplicationWindow) continue
+            if (isApplicationWindow == null || !isApplicationWindow) continue
             applicationWindowCount++
+            var unknownSlot = false
             val root = try {
                 window.root
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 readFailed = true
+                unknownSlot = true
                 reportNonFatal(onNonFatalError, error)
                 null
             }
@@ -260,7 +267,7 @@ private fun readApplicationWindows(
                     ?.trim()
                     ?.takeIf(String::isNotEmpty)
                 if (packageName == null) {
-                    unknownSlotCount++
+                    unknownSlot = true
                 } else {
                     packages += packageName
                 }
@@ -268,7 +275,7 @@ private fun readApplicationWindows(
                 throw error
             } catch (error: Throwable) {
                 readFailed = true
-                unknownSlotCount++
+                unknownSlot = true
                 reportNonFatal(onNonFatalError, error)
             } finally {
                 try {
@@ -277,14 +284,17 @@ private fun readApplicationWindows(
                     throw error
                 } catch (error: Throwable) {
                     readFailed = true
+                    unknownSlot = true
                     reportNonFatal(onNonFatalError, error)
                 }
             }
+            if (unknownSlot) unknownSlotCount++
         }
     } catch (error: CancellationException) {
         throw error
     } catch (error: Throwable) {
         readFailed = true
+        unknownSlotCount++
         reportNonFatal(onNonFatalError, error)
     }
 
@@ -312,17 +322,19 @@ private fun readDisplayState(
             throw error
         } catch (error: Throwable) {
             reportNonFatal(onNonFatalError, error)
-            DisplayState.UNLOCKED
+            DisplayState.UNKNOWN
         }
     }
     return try {
         val powerManager = service.getSystemService(Context.POWER_SERVICE) as? PowerManager
-        if (powerManager?.isInteractive == false) {
+            ?: return DisplayState.UNKNOWN
+        if (!powerManager.isInteractive) {
             DisplayState.SCREEN_OFF
         } else {
             val keyguardManager =
                 service.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-            if (keyguardManager?.isKeyguardLocked == true) {
+                    ?: return DisplayState.UNKNOWN
+            if (keyguardManager.isKeyguardLocked) {
                 DisplayState.KEYGUARD
             } else {
                 DisplayState.UNLOCKED
@@ -332,7 +344,7 @@ private fun readDisplayState(
         throw error
     } catch (error: Throwable) {
         reportNonFatal(onNonFatalError, error)
-        DisplayState.UNLOCKED
+        DisplayState.UNKNOWN
     }
 }
 

@@ -143,11 +143,6 @@ class AppRuleBlocker {
         val runnable: Runnable
     )
 
-    private data class ScheduledForegroundObservation(
-        val outcome: ForegroundEvidenceOutcome?,
-        val permitsCachedBoundaryFallback: Boolean
-    )
-
     /** Evidence snapshot kept internal so Android tests can exercise OEM failure combinations. */
     internal data class ApplicationWindowSnapshot(
         val packages: Set<String>,
@@ -157,6 +152,12 @@ class AppRuleBlocker {
         val providerFailed: Boolean = false,
         /** Number of application windows, including windows whose root package is unavailable. */
         val applicationWindowCount: Int = packages.size,
+        /** Exact number of application-window slots whose package could not be read. */
+        val unknownSlotCount: Int = if (hasUnknownApplicationWindow) {
+            (applicationWindowCount - packages.size).coerceAtLeast(1)
+        } else {
+            0
+        },
         val freshness: ApplicationWindowsFreshness = ApplicationWindowsFreshness.FRESH,
         val capturedAtElapsedMs: Long = 0L
     )
@@ -290,7 +291,12 @@ class AppRuleBlocker {
         }
         val screenFilter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_USER_PRESENT)
+        }
+        val guardianFilter = IntentFilter().apply {
+            addAction(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_OPENED)
         }
         val lifecycle = AppRuleReceiverLifecycle(
             registrations = listOf(
@@ -326,6 +332,17 @@ class AppRuleBlocker {
                         )
                     },
                     unregister = { service.unregisterReceiver(screenReceiver) }
+                ),
+                AppRuleReceiverLifecycle.Registration(
+                    register = {
+                        ContextCompat.registerReceiver(
+                            service,
+                            guardianReceiver,
+                            guardianFilter,
+                            ContextCompat.RECEIVER_NOT_EXPORTED
+                        )
+                    },
+                    unregister = { service.unregisterReceiver(guardianReceiver) }
                 )
             ),
             isReady = { setupReady }
@@ -334,6 +351,10 @@ class AppRuleBlocker {
         receiverLifecycle = lifecycle
         try {
             lifecycle.register()
+            service.sendBroadcast(
+                Intent(GuardianApprovalActivity.INTENT_ACTION_STATE_REQUEST)
+                    .setPackage(service.packageName)
+            )
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -352,8 +373,7 @@ class AppRuleBlocker {
     private fun doAppRuleCheck(
         event: AccessibilityEvent?,
         updateForegroundEvidence: Boolean,
-        failClosedOnEvaluationFailure: Boolean = false,
-        allowScheduledPackageFallback: Boolean = false
+        failClosedOnEvaluationFailure: Boolean = false
     ) {
         if (!isReadyForChecks()) return
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
@@ -376,13 +396,34 @@ class AppRuleBlocker {
             ),
             policy = evidencePolicy
         )
+        if (eventPackageName in evidencePolicy.essentialPackages) {
+            val generation = recheckGeneration.get()
+            foregroundEvidence.outcomes
+                .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
+                .filter {
+                    it.evidenceBasis ==
+                        neth.iecal.curbox.domain.apprules.EvidenceBasis.APPLICATION_WINDOW &&
+                    it.decisionPermission ==
+                        neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
+                }
+                .mapNotNull { it.packageName }
+                .distinct()
+                .forEach { packageName ->
+                    // The module owns the direct-window package set. Reclassifying each exact
+                    // package keeps evaluation package-scoped while preserving one guardian for
+                    // an essential overlay over several application windows.
+                    dispatchSyntheticCheck(
+                        packageName = packageName,
+                        generation = generation,
+                        failClosedOnEvaluationFailure = failClosedOnEvaluationFailure
+                    )
+                }
+            return
+        }
         val packageOutcome = foregroundEvidence.outcomes.firstOrNull {
             it.packageName == eventPackageName
-        } ?: foregroundEvidence.outcomes
-            .firstOrNull { !allowScheduledPackageFallback && it.packageName != null }
-        val packageName = packageOutcome?.packageName
-            ?: eventPackageName.takeIf { allowScheduledPackageFallback }
-            ?: return
+        }
+        val packageName = packageOutcome?.packageName ?: return
         val shouldFailClosed = when (packageOutcome) {
             is ForegroundEvidenceOutcome.Visible ->
                 packageOutcome.decisionPermission ==
@@ -777,22 +818,29 @@ class AppRuleBlocker {
                     setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
             )
             val facts = captureForegroundFacts(event = null, kind = observationKind)
-            var packageToSuppress: String? = null
-            if (foregroundEvidenceSuspended) {
-                val activeRootPackage = facts.activeRoot.packageName
-                    ?.takeIf { facts.activeRoot.readState == ForegroundReadState.AVAILABLE }
-                if (activeRootPackage == null || activeRootPackage in policy.essentialPackages) return
+            val result = foregroundEvidenceModule.classify(facts, policy)
+            val moduleVisiblePackages = result.outcomes
+                .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
+                .mapNotNull { it.packageName }
+                .distinct()
+            val suspendedPackage = synchronized(runtimeLock) {
+                suspendedForegroundPackage.takeIf { foregroundEvidenceSuspended }
+            }
+            // A suspended package is only resumed when the module reports that exact package.
+            // If it disappeared while the display was off, a new package may be adopted only
+            // from the module's own direct visible outcomes, never from caller state.
+            val resumedPackage = moduleVisiblePackages.firstOrNull { it == suspendedPackage }
+                ?: moduleVisiblePackages.firstOrNull()
+            if (foregroundEvidenceSuspended && resumedPackage != null) {
                 synchronized(runtimeLock) {
                     if (foregroundEvidenceSuspended) {
-                        packageToSuppress = suspendedForegroundPackage
-                        currentForegroundPackage = activeRootPackage
+                        currentForegroundPackage = resumedPackage
                         currentForegroundEvidenceAtElapsedMs = facts.capturedAtElapsedMs
                         suspendedForegroundPackage = null
                         foregroundEvidenceSuspended = false
                     }
                 }
             }
-            val result = foregroundEvidenceModule.classify(facts, policy)
             val generation = recheckGeneration.get()
             val needsObservationRetry = result.outcomes.any { outcome ->
                 outcome is ForegroundEvidenceOutcome.Unknown &&
@@ -805,8 +853,7 @@ class AppRuleBlocker {
                     is ForegroundEvidenceOutcome.NotVisible ->
                         cancelScheduledRecheck(outcome.packageName)
                     is ForegroundEvidenceOutcome.Visible -> {
-                        if (outcome.packageName != packageToSuppress &&
-                            outcome.decisionPermission ==
+                        if (outcome.decisionPermission ==
                                 neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
                         ) {
                             dispatchSyntheticCheck(outcome.packageName, generation)
@@ -835,6 +882,7 @@ class AppRuleBlocker {
             if (!isReadyForChecks()) return
             val connectionGeneration = lifecycleGeneration.get()
             when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> handleScreenOff()
                 Intent.ACTION_SCREEN_ON -> {
                     // The observation source reads the display state. SCREEN_ON is only a cheap
                     // wake trigger; USER_PRESENT supplies the follow-up observation if keyguard
@@ -856,6 +904,39 @@ class AppRuleBlocker {
                 }
             }
         }
+    }
+
+    private val guardianReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            if (action != GuardianApprovalActivity.INTENT_ACTION_CLOSED &&
+                action != GuardianApprovalActivity.INTENT_ACTION_OPENED
+            ) return
+            val packageName = intent.getStringExtra(
+                GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE
+            )?.trim().orEmpty()
+            if (packageName.isBlank()) return
+            synchronized(runtimeLock) {
+                if (action == GuardianApprovalActivity.INTENT_ACTION_OPENED) {
+                    activeGuardianPackage = packageName
+                } else if (activeGuardianPackage == packageName) {
+                    activeGuardianPackage = null
+                    lastShownAt = 0L
+                }
+            }
+        }
+    }
+
+    private fun handleScreenOff() {
+        synchronized(runtimeLock) {
+            screenOnAwaitingUserPresent = false
+            // Invalidate both keyed boundary callbacks and any reconciliation callback already
+            // posted for the visible display. The screen-off broadcast is the terminal signal for
+            // this foreground observation; no provider retry may run until wake.
+            recheckGeneration.incrementAndGet()
+        }
+        cancelScheduledRechecks()
+        clearForegroundEvidence()
     }
 
     private val packageReceiver = object : BroadcastReceiver() {
@@ -1058,11 +1139,7 @@ class AppRuleBlocker {
     private fun ApplicationWindowSnapshot.toForegroundFact(): ApplicationWindowsFact =
         ApplicationWindowsFact(
             packages = packages,
-            unknownSlotCount = if (hasUnknownApplicationWindow) {
-                (applicationWindowCount - packages.size).coerceAtLeast(1)
-            } else {
-                0
-            },
+            unknownSlotCount = unknownSlotCount,
             readState = when {
                 providerFailed -> ForegroundReadState.FAILED
                 !hasApplicationWindow -> ForegroundReadState.EMPTY
@@ -1084,14 +1161,20 @@ class AppRuleBlocker {
             applicationWindowCount = (packages.size + unknownSlotCount).coerceAtLeast(
                 if (readState == ForegroundReadState.FAILED) 1 else 0
             ),
+            unknownSlotCount = unknownSlotCount,
             freshness = freshness,
             capturedAtElapsedMs = 0L
         )
 
-    private fun legacyDisplayState(): DisplayState = when {
-        !isScreenInteractive() -> DisplayState.SCREEN_OFF
-        screenOnAwaitingUserPresent || isDeviceKeyguardLocked() -> DisplayState.KEYGUARD
-        else -> DisplayState.UNLOCKED
+    private fun legacyDisplayState(): DisplayState {
+        val interactive = isScreenInteractive() ?: return DisplayState.UNKNOWN
+        if (!interactive) return DisplayState.SCREEN_OFF
+        if (screenOnAwaitingUserPresent) return DisplayState.KEYGUARD
+        return when (isDeviceKeyguardLocked()) {
+            null -> DisplayState.UNKNOWN
+            true -> DisplayState.KEYGUARD
+            false -> DisplayState.UNLOCKED
+        }
     }
 
     private fun observationWallClockMs(): Long = try {
@@ -1112,6 +1195,18 @@ class AppRuleBlocker {
         SystemClock.elapsedRealtime().coerceAtLeast(0L)
     }
 
+    /** Compatibility overload for the existing private scheduler test seam. */
+    private fun postVisibleApplicationCheck(
+        delayMillis: Long,
+        connectionGeneration: Long
+    ) {
+        postVisibleApplicationCheck(
+            delayMillis = delayMillis,
+            connectionGeneration = connectionGeneration,
+            observationKind = ObservationKind.RECONNECT
+        )
+    }
+
     /** Posts a guarded main-thread reconciliation used by refresh, reconnect, and wake paths. */
     private fun postVisibleApplicationCheck(
         delayMillis: Long = 0L,
@@ -1119,43 +1214,108 @@ class AppRuleBlocker {
         observationKind: ObservationKind = ObservationKind.RECONNECT
     ) {
         if (!isReadyForChecks(connectionGeneration)) return
-        val callback = Runnable {
-            try {
-                if (isReadyForChecks(connectionGeneration)) {
-                    checkCurrentlyVisibleApplications(observationKind)
-                }
-            } catch (error: Throwable) {
-                // Handler callbacks have no coroutine parent to contain a feature failure.
-                logNonFatal(error)
+        val observationGeneration = recheckGeneration.get()
+        postVisibleApplicationAttempt(
+            delayMillis = delayMillis,
+            connectionGeneration = connectionGeneration,
+            observationGeneration = observationGeneration,
+            observationKind = observationKind,
+            postAttempt = 1
+        )
+    }
+
+    /** Retries failed Handler posts without recursive calls or stale-generation callbacks. */
+    private fun postVisibleApplicationAttempt(
+        delayMillis: Long,
+        connectionGeneration: Long,
+        observationGeneration: Long,
+        observationKind: ObservationKind,
+        postAttempt: Int
+    ) {
+        var attempt = postAttempt
+        while (attempt <= MAX_SCHEDULER_POST_ATTEMPTS &&
+            isReadyForChecks(connectionGeneration) &&
+            recheckGeneration.get() == observationGeneration
+        ) {
+            val attemptNumber = attempt
+            val callback = Runnable {
+                runVisibleApplicationCheck(
+                    connectionGeneration = connectionGeneration,
+                    observationGeneration = observationGeneration,
+                    observationKind = observationKind,
+                    postAttempt = attemptNumber
+                )
             }
-        }
-        try {
-            visibleApplicationCheckPostDelayed?.invoke(
-                callback,
+            val retryDelay = if (attempt == 1) {
                 delayMillis.coerceAtLeast(0L)
-            ) ?: handler.postDelayed(callback, delayMillis.coerceAtLeast(0L))
-        } catch (error: Throwable) {
-            logNonFatal(error)
+            } else {
+                VISIBILITY_RETRY_DELAY_MS * (attempt - 1)
+            }
+            val posted = try {
+                visibleApplicationCheckPostDelayed?.invoke(callback, retryDelay)
+                    ?: handler.postDelayed(callback, retryDelay)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+                false
+            }
+            if (posted) return
+            attempt++
         }
     }
 
-    private fun isScreenInteractive(): Boolean = try {
-        screenInteractiveProvider?.invoke()
-            ?: ((service.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive ?: true)
+    private fun runVisibleApplicationCheck(
+        connectionGeneration: Long,
+        observationGeneration: Long,
+        observationKind: ObservationKind,
+        postAttempt: Int
+    ) {
+        if (!isReadyForChecks(connectionGeneration) ||
+            recheckGeneration.get() != observationGeneration
+        ) return
+        try {
+            checkCurrentlyVisibleApplications(observationKind)
+        } catch (_: CancellationException) {
+            return
+        } catch (error: Throwable) {
+            // Handler callbacks have no coroutine parent to contain a feature failure. Keep the
+            // recovery bounded and tied to the generation that posted this callback.
+            logNonFatal(error)
+            postVisibleApplicationAttempt(
+                delayMillis = VISIBILITY_RETRY_DELAY_MS * postAttempt,
+                connectionGeneration = connectionGeneration,
+                observationGeneration = observationGeneration,
+                observationKind = observationKind,
+                postAttempt = postAttempt + 1
+            )
+        }
+    }
+
+    private fun isScreenInteractive(): Boolean? = try {
+        screenInteractiveProvider?.invoke() ?: run {
+            val powerManager = service.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                ?: return@run null
+            powerManager.isInteractive
+        }
     } catch (error: CancellationException) {
         throw error
     } catch (error: Throwable) {
         logNonFatal(error)
-        true
+        null
     }
 
-    private fun isDeviceKeyguardLocked(): Boolean = try {
-        keyguardLockedProvider?.invoke()
-            ?: ((service.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)
-                ?.isKeyguardLocked == true)
+    private fun isDeviceKeyguardLocked(): Boolean? = try {
+        keyguardLockedProvider?.invoke() ?: run {
+            val keyguardManager = service.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                ?: return@run null
+            keyguardManager.isKeyguardLocked
+        }
+    } catch (error: CancellationException) {
+        throw error
     } catch (error: Throwable) {
         logNonFatal(error)
-        false
+        null
     }
 
     private fun scheduleRecheck(
@@ -1296,8 +1456,7 @@ class AppRuleBlocker {
                 )
                 return
             }
-            val observation = observeForegroundOutcome(packageName)
-            when (val outcome = observation.outcome) {
+            when (val outcome = observeForegroundOutcome(packageName)) {
                 is ForegroundEvidenceOutcome.Visible -> {
                     if (outcome.decisionPermission ==
                         neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
@@ -1319,16 +1478,14 @@ class AppRuleBlocker {
                             delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
                             visibilityAttempt = visibilityAttempt + 1
                         )
-                    } else if (failClosedCandidate || observation.permitsCachedBoundaryFallback) {
+                    } else if (failClosedCandidate) {
                         // R5 A is a bounded, package-checked fallback. The module grants this
                         // permission without renewing evidence validity; the evaluator remains the
                         // final allow/deny authority.
                         dispatchSyntheticCheck(
                             packageName = packageName,
                             generation = generation,
-                            failClosedOnEvaluationFailure = true,
-                            allowScheduledPackageFallback =
-                                observation.permitsCachedBoundaryFallback
+                            failClosedOnEvaluationFailure = true
                         )
                     } else {
                         // Null, partial, keyguard, and stale evidence keep this keyed boundary
@@ -1381,8 +1538,7 @@ class AppRuleBlocker {
     private fun dispatchSyntheticCheck(
         packageName: String,
         generation: Long,
-        failClosedOnEvaluationFailure: Boolean = false,
-        allowScheduledPackageFallback: Boolean = false
+        failClosedOnEvaluationFailure: Boolean = false
     ) {
         if (!isReadyForChecks() || recheckGeneration.get() != generation) return
         val event = try {
@@ -1399,8 +1555,7 @@ class AppRuleBlocker {
             doAppRuleCheck(
                 event = event,
                 updateForegroundEvidence = false,
-                failClosedOnEvaluationFailure = failClosedOnEvaluationFailure,
-                allowScheduledPackageFallback = allowScheduledPackageFallback
+                failClosedOnEvaluationFailure = failClosedOnEvaluationFailure
             )
         } catch (error: CancellationException) {
             throw error
@@ -1419,28 +1574,19 @@ class AppRuleBlocker {
 
     private fun observeForegroundOutcome(
         packageName: String
-    ): ScheduledForegroundObservation {
+    ): ForegroundEvidenceOutcome? {
         val configuredEssentialPackages = readEssentialPackagesForEvaluation()
         val facts = captureForegroundFacts(
             event = null,
             kind = ObservationKind.SYNTHETIC_RECHECK
         )
-        val result = foregroundEvidenceModule.classify(
+        return foregroundEvidenceModule.classify(
             facts = facts,
             policy = ForegroundEvidencePolicySnapshot(
                 essentialPackages = configuredEssentialPackages +
                     setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
             )
-        )
-        val outcome = result.outcomes.firstOrNull { it.packageName == packageName }
-        val permitsCachedBoundaryFallback = outcome == null &&
-            applicationWindowProvenanceCache.hasResolvedObservation() &&
-            result.outcomes.any {
-                it is ForegroundEvidenceOutcome.Unknown &&
-                    it.candidatePackage == null &&
-                    it.followUp == FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
-            }
-        return ScheduledForegroundObservation(outcome, permitsCachedBoundaryFallback)
+        ).outcomes.firstOrNull { it.packageName == packageName }
     }
 
     private fun readApplicationWindowSnapshot(): ApplicationWindowSnapshot {
@@ -1463,6 +1609,8 @@ class AppRuleBlocker {
         }
         val windows = try {
             service.windows
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             logNonFatal(error)
             return applyApplicationWindowProvenance(
@@ -1488,6 +1636,7 @@ class AppRuleBlocker {
         val packages = linkedSetOf<String>()
         var hasApplicationWindow = false
         var hasUnknownPackage = false
+        var unknownSlotCount = 0
         var applicationWindowCount = 0
         var providerFailed = false
         try {
@@ -1499,6 +1648,7 @@ class AppRuleBlocker {
                 } catch (error: Throwable) {
                     logNonFatal(error)
                     hasUnknownPackage = true
+                    unknownSlotCount++
                     providerFailed = true
                     false
                 }
@@ -1508,6 +1658,7 @@ class AppRuleBlocker {
                 val packageName = packageNameForWindow(window)
                 if (packageName.isNullOrBlank()) {
                     hasUnknownPackage = true
+                    unknownSlotCount++
                 } else {
                     packages += packageName
                 }
@@ -1518,6 +1669,7 @@ class AppRuleBlocker {
             logNonFatal(error)
             providerFailed = true
             hasUnknownPackage = true
+            unknownSlotCount++
         }
         return applyApplicationWindowProvenance(
             ApplicationWindowSnapshot(
@@ -1525,7 +1677,8 @@ class AppRuleBlocker {
                 hasApplicationWindow = hasApplicationWindow || applicationWindowCount > 0,
                 hasUnknownApplicationWindow = !hasApplicationWindow || hasUnknownPackage,
                 providerFailed = providerFailed,
-                applicationWindowCount = applicationWindowCount
+                applicationWindowCount = applicationWindowCount,
+                unknownSlotCount = unknownSlotCount
             )
         )
     }
@@ -1534,7 +1687,7 @@ class AppRuleBlocker {
         raw: ApplicationWindowSnapshot
     ): ApplicationWindowSnapshot = applicationWindowProvenanceCache.resolve(
         raw = raw,
-        capturedAtElapsedMs = elapsedRealtimeMsProvider().coerceAtLeast(0L)
+        capturedAtElapsedMs = observationElapsedRealtimeMs()
     )
 
     private fun readActiveWindowSnapshot(): ActiveWindowSnapshot {
@@ -1581,7 +1734,7 @@ class AppRuleBlocker {
     private fun recordForegroundEvidence(packageName: String) {
         synchronized(runtimeLock) {
             currentForegroundPackage = packageName
-            currentForegroundEvidenceAtElapsedMs = elapsedRealtimeMsProvider()
+            currentForegroundEvidenceAtElapsedMs = observationElapsedRealtimeMs()
             suspendedForegroundPackage = null
             foregroundEvidenceSuspended = false
         }
@@ -1727,6 +1880,4 @@ internal class ApplicationWindowProvenanceCache {
         cached = null
     }
 
-    @Synchronized
-    fun hasResolvedObservation(): Boolean = cached != null
 }

@@ -79,6 +79,85 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun screenOffImmediatelyEndsForegroundEvidenceAndInvalidatesPendingRecheck() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val queued = ArrayDeque<Runnable>()
+        var evaluations = 0
+        var posts = 0
+        var removals = 0
+        val blocker = AppRuleBlocker().apply {
+            recheckPostDelayed = { runnable, _ ->
+                posts++
+                queued.addLast(runnable)
+                true
+            }
+            recheckRemoveCallback = { removals++ }
+            evaluationResultObserver = { evaluations++ }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        setField(blocker, "currentForegroundPackage", PACKAGE)
+        setField(blocker, "foregroundEvidenceSuspended", false)
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        val screenReceiver = getField(blocker, "screenReceiver") as android.content.BroadcastReceiver
+        screenReceiver.onReceive(service, Intent(Intent.ACTION_SCREEN_OFF))
+        queued.removeFirst().run()
+
+        assertEquals(null, getField(blocker, "currentForegroundPackage"))
+        assertEquals(true, getField(blocker, "foregroundEvidenceSuspended"))
+        assertTrue(
+            "screen-off must cancel every pending boundary without evaluating",
+            (getField(blocker, "scheduledRechecks") as Map<*, *>).isEmpty()
+        )
+        assertEquals(0, evaluations)
+        assertEquals(1, posts)
+        assertTrue(removals > 0)
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun displayReadFailureDefersWithoutEvaluatingOrTreatingTheScreenAsUnlocked() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        var evaluations = 0
+        val blocker = AppRuleBlocker().apply {
+            screenInteractiveProvider = { error("display interactivity read failed") }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluations++ }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        sendWindowEvent(blocker)
+
+        assertEquals(0, evaluations)
+        assertTrue(service.startedActivities.isEmpty())
+        blocker.onDestroy()
+    }
+
+    @Test
     fun positiveGuardianRemainderSchedulesARecheckWithoutAnotherWindowEvent() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
@@ -346,6 +425,48 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun essentialEventEvaluatesEveryDedupedApplicationWindowPackage() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        var evaluations = 0
+        val blocker = AppRuleBlocker().apply {
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = service.packageName)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = linkedSetOf(PACKAGE, OTHER_PACKAGE, PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluations++ }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        sendWindowEvent(blocker, service.packageName)
+
+        assertEquals(
+            "an essential event must evaluate every distinct direct application window",
+            2,
+            evaluations
+        )
+        assertEquals(
+            "one guardian must cover the current denial while it is open",
+            1,
+            service.startedActivities.size
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
     fun essentialRootAndReconnectProcessVisibleTargetWithoutDuplicateGuardian() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
@@ -388,6 +509,111 @@ class AppRuleBlockerRecheckTest {
             1,
             service.startedActivities.size
         )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun guardianLifecycleSignalsOpenAndCloseOnlyAffectTheMatchingPackage() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val blocker = AppRuleBlocker()
+        setField(blocker, "service", service)
+        setField(blocker, "setupReady", true)
+        val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+
+        receiver.onReceive(
+            service,
+            Intent(GuardianApprovalActivity.INTENT_ACTION_OPENED)
+                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+        )
+        assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+
+        receiver.onReceive(
+            service,
+            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
+                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, OTHER_PACKAGE)
+        )
+        assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+
+        receiver.onReceive(
+            service,
+            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
+                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+        )
+        assertEquals(null, getField(blocker, "activeGuardianPackage"))
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun suspendedEvidenceResumesFromModuleVisibleOutcomeUnderEssentialRoot() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        var evaluations = 0
+        val blocker = AppRuleBlocker().apply {
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = service.packageName)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluations++ }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        setField(blocker, "suspendedForegroundPackage", PACKAGE)
+        setField(blocker, "foregroundEvidenceSuspended", true)
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        invokePrivate(blocker, "checkCurrentlyVisibleApplications")
+
+        assertEquals(1, evaluations)
+        assertEquals(false, getField(blocker, "foregroundEvidenceSuspended"))
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun suspendedEvidenceResumesOnlyFromTheMatchingModulePackageOutcome() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val blocker = AppRuleBlocker().apply {
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = OTHER_PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = linkedSetOf(OTHER_PACKAGE, PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+        setField(blocker, "suspendedForegroundPackage", PACKAGE)
+        setField(blocker, "foregroundEvidenceSuspended", true)
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        invokePrivate(blocker, "checkCurrentlyVisibleApplications")
+
+        assertEquals(
+            "suspended recovery must match the suspended package in module outcomes",
+            PACKAGE,
+            getField(blocker, "currentForegroundPackage")
+        )
+        assertEquals(false, getField(blocker, "foregroundEvidenceSuspended"))
         blocker.onDestroy()
     }
 
@@ -658,6 +884,118 @@ class AppRuleBlockerRecheckTest {
             )
             blocker.onDestroy()
         }
+    }
+
+    @Test
+    fun visibleReconciliationPostFailureRecoversWithTheSameGeneration() {
+        listOf(false, true).forEach { throws ->
+            val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+            service.lastBackPressTimeStamp = 0L
+            val queued = ArrayDeque<Runnable>()
+            var posts = 0
+            var evaluations = 0
+            val blocker = AppRuleBlocker().apply {
+                screenInteractiveProvider = { true }
+                keyguardLockedProvider = { false }
+                activeWindowSnapshotProvider = {
+                    AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+                }
+                applicationWindowSnapshotProvider = {
+                    AppRuleBlocker.ApplicationWindowSnapshot(
+                        packages = setOf(PACKAGE),
+                        hasApplicationWindow = true,
+                        hasUnknownApplicationWindow = false
+                    )
+                }
+                evaluationResultObserver = { evaluations++ }
+                visibleApplicationCheckPostDelayed = { runnable, _ ->
+                    posts++
+                    if (posts == 1) {
+                        if (throws) error("visible reconciliation post failed") else false
+                    } else {
+                        queued.addLast(runnable)
+                        true
+                    }
+                }
+            }
+            val repository = EmptySessionRepository()
+            setField(blocker, "service", service)
+            setField(blocker, "sessionRepository", repository)
+            setField(blocker, "enforcement", AppRuleEnforcement(repository))
+            setField(blocker, "setupReady", true)
+            setField(blocker, "launchablePackages", setOf(PACKAGE))
+            val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+            coordinator.accept(snapshotWithGlobalDeny())
+
+            invokePrivate(
+                blocker,
+                "postVisibleApplicationCheck",
+                0L,
+                0L,
+                neth.iecal.curbox.domain.apprules.ObservationKind.RECONNECT
+            )
+            assertTrue("failed visible post must enqueue bounded recovery", queued.isNotEmpty())
+            queued.removeFirst().run()
+
+            assertTrue(
+                "visible post $throws recovery must evaluate the module's visible package",
+                evaluations > 0
+            )
+            assertEquals(2, posts)
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun visibleReconciliationCallbackIsIgnoredAfterItsGenerationChanges() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val queued = ArrayDeque<Runnable>()
+        var evaluations = 0
+        val blocker = AppRuleBlocker().apply {
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluations++ }
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                queued.addLast(runnable)
+                true
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        invokePrivate(
+            blocker,
+            "postVisibleApplicationCheck",
+            0L,
+            0L,
+            neth.iecal.curbox.domain.apprules.ObservationKind.RECONNECT
+        )
+        (getField(blocker, "recheckGeneration") as java.util.concurrent.atomic.AtomicLong)
+            .incrementAndGet()
+        queued.removeFirst().run()
+
+        assertEquals(
+            "a stale visible reconciliation callback must not evaluate after generation change",
+            0,
+            evaluations
+        )
+        blocker.onDestroy()
     }
 
     @Test
