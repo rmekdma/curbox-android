@@ -20,6 +20,12 @@ class ForegroundEvidenceModule {
     ): ForegroundEvidenceResult {
         val normalizedFacts = facts.normalized()
         val essentialPackages = policy.normalized().essentialPackages
+        if (normalizedFacts.signal.kind == ObservationKind.RECONNECT ||
+            normalizedFacts.signal.kind == ObservationKind.SCREEN_WAKE ||
+            normalizedFacts.signal.kind == ObservationKind.USER_PRESENT
+        ) {
+            lastRealSignal = null
+        }
         val previousRealSignal = lastRealSignal
         val currentRealSignal = normalizedFacts.signal
             .takeIf { it.kind == ObservationKind.REAL_EVENT && it.eventPackage != null }
@@ -38,14 +44,58 @@ class ForegroundEvidenceModule {
         val activeRootPackage = normalizedFacts.activeRoot.packageName
             ?.takeIf { normalizedFacts.activeRoot.readState == ForegroundReadState.AVAILABLE }
             ?.takeIf { it !in essentialPackages }
+        val essentialActiveRoot = normalizedFacts.activeRoot.packageName
+            ?.takeIf { normalizedFacts.activeRoot.readState == ForegroundReadState.AVAILABLE }
+            ?.takeIf { it in essentialPackages }
+
+        val freshApplicationPackages = normalizedFacts.applicationWindows.packages
+            .asSequence()
+            .filter { it !in essentialPackages }
+            .takeIf {
+                normalizedFacts.applicationWindows.freshness == ApplicationWindowsFreshness.FRESH
+            }
+            .orEmpty()
+            .toCollection(LinkedHashSet())
 
         val applicationWindowPackages = normalizedFacts.applicationWindows.packages
             .asSequence()
             .filter { it !in essentialPackages }
             .toList()
 
-        if (normalizedFacts.displayState != DisplayState.UNLOCKED) {
-            return deferred(eventPackage)
+        if (normalizedFacts.displayState == DisplayState.KEYGUARD) {
+            return keyguardDeferred()
+        }
+
+        if (normalizedFacts.displayState == DisplayState.SCREEN_OFF) {
+            return screenOff(eventPackage)
+        }
+
+        if (essentialActiveRoot != null && freshApplicationPackages.isNotEmpty()) {
+            return ForegroundEvidenceResult(
+                outcomes = buildList {
+                    freshApplicationPackages.forEach { packageName ->
+                        add(
+                            ForegroundEvidenceOutcome.Visible(
+                                packageName = packageName,
+                                evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                                sessionEffect = SessionEvidenceEffect.RENEW,
+                                decisionPermission = DecisionPermission.EVALUATE,
+                                evidenceValidity = renewedUntil(
+                                    normalizedFacts.capturedAtElapsedMs
+                                ),
+                                followUp = FollowUpKind.NONE
+                            )
+                        )
+                    }
+                    repeat(normalizedFacts.applicationWindows.unknownSlotCount) {
+                        add(unknownApplicationSlot())
+                    }
+                }
+            )
+        }
+
+        if (essentialActiveRoot != null) {
+            return deferred(candidatePackage = null)
         }
 
         if (activeRootPackage != null) {
@@ -87,6 +137,91 @@ class ForegroundEvidenceModule {
                         )
                     }
                     add(visible)
+                    freshApplicationPackages
+                        .filter { it != activeRootPackage }
+                        .forEach { packageName ->
+                            add(
+                                ForegroundEvidenceOutcome.Visible(
+                                    packageName = packageName,
+                                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                                    sessionEffect = SessionEvidenceEffect.RENEW,
+                                    decisionPermission = DecisionPermission.EVALUATE,
+                                    evidenceValidity = renewedUntil(
+                                        normalizedFacts.capturedAtElapsedMs
+                                    ),
+                                    followUp = FollowUpKind.NONE
+                                )
+                            )
+                        }
+                    repeat(normalizedFacts.applicationWindows.unknownSlotCount) {
+                        add(unknownApplicationSlot())
+                    }
+                }
+            )
+        }
+
+        if (isRecentEvent && normalizedFacts.applicationWindows.unknownSlotCount > 0 &&
+            freshApplicationPackages.isNotEmpty()
+        ) {
+            val recentPackage = requireNotNull(eventPackage)
+            return ForegroundEvidenceResult(
+                outcomes = buildList {
+                    add(
+                        ForegroundEvidenceOutcome.Visible(
+                            packageName = recentPackage,
+                            evidenceBasis = EvidenceBasis.RECENT_REAL_EVENT,
+                            sessionEffect = SessionEvidenceEffect.PRESERVE,
+                            decisionPermission = DecisionPermission.EVALUATE,
+                            evidenceValidity = EvidenceValidity.NotRenewed,
+                            followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                        )
+                    )
+                    freshApplicationPackages
+                        .filter { it != recentPackage }
+                        .forEach { packageName ->
+                            add(
+                                ForegroundEvidenceOutcome.Visible(
+                                    packageName = packageName,
+                                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                                    sessionEffect = SessionEvidenceEffect.RENEW,
+                                    decisionPermission = DecisionPermission.EVALUATE,
+                                    evidenceValidity = renewedUntil(
+                                        normalizedFacts.capturedAtElapsedMs
+                                    ),
+                                    followUp = FollowUpKind.NONE
+                                )
+                            )
+                        }
+                    repeat(normalizedFacts.applicationWindows.unknownSlotCount) {
+                        add(unknownApplicationSlot())
+                    }
+                }
+            )
+        }
+
+        if (!isRecentEvent &&
+            normalizedFacts.applicationWindows.freshness == ApplicationWindowsFreshness.FRESH &&
+            freshApplicationPackages.isNotEmpty()
+        ) {
+            return ForegroundEvidenceResult(
+                outcomes = buildList {
+                    freshApplicationPackages.forEach { packageName ->
+                        add(
+                            ForegroundEvidenceOutcome.Visible(
+                                packageName = packageName,
+                                evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                                sessionEffect = SessionEvidenceEffect.RENEW,
+                                decisionPermission = DecisionPermission.EVALUATE,
+                                evidenceValidity = renewedUntil(
+                                    normalizedFacts.capturedAtElapsedMs
+                                ),
+                                followUp = FollowUpKind.NONE
+                            )
+                        )
+                    }
+                    repeat(normalizedFacts.applicationWindows.unknownSlotCount) {
+                        add(unknownApplicationSlot())
+                    }
                 }
             )
         }
@@ -154,5 +289,47 @@ class ForegroundEvidenceModule {
                     followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
                 )
             )
+        )
+
+    private fun keyguardDeferred(): ForegroundEvidenceResult =
+        ForegroundEvidenceResult(
+            outcomes = listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = null,
+                    evidenceBasis = EvidenceBasis.KEYGUARD,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.WAIT_FOR_USER_PRESENT
+                )
+            )
+        )
+
+    private fun screenOff(candidatePackage: String?): ForegroundEvidenceResult =
+        if (candidatePackage == null) {
+            ForegroundEvidenceResult(emptyList())
+        } else {
+            ForegroundEvidenceResult(
+                outcomes = listOf(
+                    ForegroundEvidenceOutcome.NotVisible(
+                        packageName = candidatePackage,
+                        evidenceBasis = EvidenceBasis.SCREEN_OFF,
+                        sessionEffect = SessionEvidenceEffect.END_WITHOUT_RENEWAL,
+                        decisionPermission = DecisionPermission.DO_NOT_EVALUATE,
+                        evidenceValidity = EvidenceValidity.NotRenewed,
+                        followUp = FollowUpKind.NONE
+                    )
+                )
+            )
+        }
+
+    private fun unknownApplicationSlot(): ForegroundEvidenceOutcome.Unknown =
+        ForegroundEvidenceOutcome.Unknown(
+            candidatePackage = null,
+            evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+            sessionEffect = SessionEvidenceEffect.PRESERVE,
+            decisionPermission = DecisionPermission.DEFER,
+            evidenceValidity = EvidenceValidity.NotRenewed,
+            followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
         )
 }

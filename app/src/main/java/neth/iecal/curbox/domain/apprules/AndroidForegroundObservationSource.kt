@@ -7,6 +7,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
+import kotlinx.coroutines.CancellationException
 import neth.iecal.curbox.CrashLogger
 
 /**
@@ -41,6 +42,8 @@ class AndroidForegroundObservationSource private constructor(
 
     override fun capture(trigger: ObservationTrigger): ForegroundFacts = try {
         factProvider(trigger).normalized()
+    } catch (error: CancellationException) {
+        throw error
     } catch (error: Throwable) {
         reportNonFatal(errorReporter, error)
         ForegroundFacts(
@@ -75,7 +78,7 @@ class AndroidForegroundObservationSource private constructor(
                 ?.toString()
                 ?.trim()
                 ?.takeIf(String::isNotEmpty)
-            val eventTime = eventCopy?.eventTime?.takeIf { it >= 0L }
+            val eventTime = eventCopy?.eventTime?.takeIf { it > 0L }
             val effectiveTrigger = if (packageName == null) {
                 trigger
             } else {
@@ -97,6 +100,8 @@ class AndroidForegroundObservationSource private constructor(
                     facts
                 }
         }
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             reportNonFatal(errorReporter, error)
             capture(trigger)
@@ -104,6 +109,8 @@ class AndroidForegroundObservationSource private constructor(
             eventCopy?.let { copy ->
                 try {
                     copy.recycle()
+                } catch (error: CancellationException) {
+                    throw error
                 } catch (error: Throwable) {
                     reportNonFatal(errorReporter, error)
                 }
@@ -152,6 +159,8 @@ private fun safeClockRead(
     onNonFatalError: (Throwable) -> Unit
 ): Long = try {
     read().coerceAtLeast(0L)
+} catch (error: CancellationException) {
+    throw error
 } catch (error: Throwable) {
     reportNonFatal(onNonFatalError, error)
     fallback.coerceAtLeast(0L)
@@ -163,6 +172,8 @@ private fun readActiveRoot(
 ): ActiveRootFact {
     val root = try {
         service.rootInActiveWindow
+    } catch (error: CancellationException) {
+        throw error
     } catch (error: Throwable) {
         reportNonFatal(onNonFatalError, error)
         return ActiveRootFact(readState = ForegroundReadState.FAILED)
@@ -171,6 +182,8 @@ private fun readActiveRoot(
     var readFailed = false
     val packageName = try {
         root.packageName?.toString()?.trim()?.takeIf(String::isNotEmpty)
+    } catch (error: CancellationException) {
+        throw error
     } catch (error: Throwable) {
         readFailed = true
         reportNonFatal(onNonFatalError, error)
@@ -178,6 +191,8 @@ private fun readActiveRoot(
     } finally {
         try {
             root.recycle()
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             readFailed = true
             reportNonFatal(onNonFatalError, error)
@@ -201,6 +216,8 @@ private fun readApplicationWindows(
 ): ApplicationWindowsFact {
     val windows = try {
         service.windows
+    } catch (error: CancellationException) {
+        throw error
     } catch (error: Throwable) {
         reportNonFatal(onNonFatalError, error)
         return ApplicationWindowsFact(readState = ForegroundReadState.FAILED)
@@ -215,6 +232,8 @@ private fun readApplicationWindows(
         for (window in windows) {
             val isApplicationWindow = try {
                 window.type == AccessibilityWindowInfo.TYPE_APPLICATION
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 readFailed = true
                 reportNonFatal(onNonFatalError, error)
@@ -224,6 +243,8 @@ private fun readApplicationWindows(
             applicationWindowCount++
             val root = try {
                 window.root
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 readFailed = true
                 reportNonFatal(onNonFatalError, error)
@@ -243,6 +264,8 @@ private fun readApplicationWindows(
                 } else {
                     packages += packageName
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 readFailed = true
                 unknownSlotCount++
@@ -250,12 +273,16 @@ private fun readApplicationWindows(
             } finally {
                 try {
                     root.recycle()
+                } catch (error: CancellationException) {
+                    throw error
                 } catch (error: Throwable) {
                     readFailed = true
                     reportNonFatal(onNonFatalError, error)
                 }
             }
         }
+    } catch (error: CancellationException) {
+        throw error
     } catch (error: Throwable) {
         readFailed = true
         reportNonFatal(onNonFatalError, error)
@@ -281,6 +308,8 @@ private fun readDisplayState(
     displayStateProvider?.let { provider ->
         return try {
             provider()
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             reportNonFatal(onNonFatalError, error)
             DisplayState.UNLOCKED
@@ -299,6 +328,8 @@ private fun readDisplayState(
                 DisplayState.UNLOCKED
             }
         }
+    } catch (error: CancellationException) {
+        throw error
     } catch (error: Throwable) {
         reportNonFatal(onNonFatalError, error)
         DisplayState.UNLOCKED
