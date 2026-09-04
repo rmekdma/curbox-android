@@ -19,6 +19,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -311,6 +312,86 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun essentialEventEvaluatesTargetIdentifiedByApplicationWindow() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val blocker = AppRuleBlocker().apply {
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = service.packageName)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        sendWindowEvent(blocker, service.packageName)
+
+        assertTrue(
+            "the target window must be evaluated even when an essential package emitted the event",
+            service.startedActivities.size == 1
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun essentialRootAndReconnectProcessVisibleTargetWithoutDuplicateGuardian() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        var nowMs = 10_000L
+        var activePackage = PACKAGE
+        var evaluations = 0
+        val blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { nowMs }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = activePackage)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluations++ }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        sendWindowEvent(blocker, PACKAGE)
+        activePackage = service.packageName
+        nowMs += 2_000L
+        sendWindowEvent(blocker, service.packageName)
+        nowMs += 2_000L
+        invokePrivate(blocker, "checkCurrentlyVisibleApplications")
+
+        assertEquals(3, evaluations)
+        assertEquals(
+            "essential and reconnect observations must reuse the existing guardian",
+            1,
+            service.startedActivities.size
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
     fun recentForegroundEvidenceSurvivesAStaleOtherApplicationWindow() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
@@ -510,6 +591,73 @@ class AppRuleBlockerRecheckTest {
             OTHER_PACKAGE in scheduledPackages
         )
         blocker.onDestroy()
+    }
+
+    @Test
+    fun packageLessUnknownSlotRetriesObservationThreeTimesThenStops() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val queued = ArrayDeque<Runnable>()
+        val delays = mutableListOf<Long>()
+        val blocker = AppRuleBlocker().apply {
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(OTHER_PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = true,
+                    applicationWindowCount = 2
+                )
+            }
+            recheckPostDelayed = { runnable, delayMillis ->
+                delays += delayMillis
+                queued.addLast(runnable)
+                true
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(OTHER_PACKAGE))
+
+        invokePrivate(blocker, "checkCurrentlyVisibleApplications")
+        while (queued.isNotEmpty()) queued.removeFirst().run()
+
+        assertEquals(listOf(250L, 500L, 750L), delays)
+        assertTrue(
+            "package-less observation retry must terminate after the third attempt",
+            (getField(blocker, "scheduledRechecks") as Map<*, *>).isEmpty()
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun schedulerPostFailureRetriesThreeTimesAndRetainsBoundaryState() {
+        listOf(false, true).forEach { throws ->
+            val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+            var postAttempts = 0
+            val blocker = AppRuleBlocker().apply {
+                recheckPostDelayed = { _, _ ->
+                    postAttempts++
+                    if (throws) error("scheduler post failed")
+                    false
+                }
+            }
+            setField(blocker, "service", service)
+            setField(blocker, "setupReady", true)
+
+            invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+
+            assertEquals(3, postAttempts)
+            assertTrue(
+                "failed scheduler posts must retain the package boundary",
+                PACKAGE in (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
+            )
+            blocker.onDestroy()
+        }
     }
 
     @Test

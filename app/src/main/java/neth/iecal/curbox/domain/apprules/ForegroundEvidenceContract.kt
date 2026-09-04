@@ -134,9 +134,11 @@ class ApplicationWindowsFact(
     packages: Set<String> = emptySet(),
     val unknownSlotCount: Int = 0,
     val readState: ForegroundReadState = ForegroundReadState.EMPTY,
-    val freshness: ApplicationWindowsFreshness = ApplicationWindowsFreshness.FRESH
+    val freshness: ApplicationWindowsFreshness = ApplicationWindowsFreshness.FRESH,
+    stalePackages: Set<String> = emptySet()
 ) {
     val packages: Set<String> = immutablePackageSet(packages)
+    val stalePackages: Set<String> = immutablePackageSet(stalePackages - this.packages)
 
     init {
         require(unknownSlotCount >= 0) { "unknown application window count must not be negative" }
@@ -154,12 +156,14 @@ class ApplicationWindowsFact(
         packages: Set<String> = this.packages,
         unknownSlotCount: Int = this.unknownSlotCount,
         readState: ForegroundReadState = this.readState,
-        freshness: ApplicationWindowsFreshness = this.freshness
+        freshness: ApplicationWindowsFreshness = this.freshness,
+        stalePackages: Set<String> = this.stalePackages
     ): ApplicationWindowsFact = ApplicationWindowsFact(
         packages = packages,
         unknownSlotCount = unknownSlotCount,
         readState = readState,
-        freshness = freshness
+        freshness = freshness,
+        stalePackages = stalePackages
     )
 
     operator fun component1(): Set<String> = packages
@@ -170,19 +174,22 @@ class ApplicationWindowsFact(
 
     operator fun component4(): ApplicationWindowsFreshness = freshness
 
+    operator fun component5(): Set<String> = stalePackages
+
     override fun equals(other: Any?): Boolean =
         this === other || (other is ApplicationWindowsFact &&
             packages == other.packages &&
+            stalePackages == other.stalePackages &&
             unknownSlotCount == other.unknownSlotCount &&
             readState == other.readState &&
             freshness == other.freshness)
 
-    override fun hashCode(): Int = (((packages.hashCode() * 31 + unknownSlotCount) * 31 +
-        readState.hashCode()) * 31 + freshness.hashCode())
+    override fun hashCode(): Int = ((((packages.hashCode() * 31 + stalePackages.hashCode()) * 31 +
+        unknownSlotCount) * 31 + readState.hashCode()) * 31 + freshness.hashCode())
 
     override fun toString(): String =
-        "ApplicationWindowsFact(packages=$packages, unknownSlotCount=$unknownSlotCount, " +
-            "readState=$readState, freshness=$freshness)"
+        "ApplicationWindowsFact(packages=$packages, stalePackages=$stalePackages, " +
+            "unknownSlotCount=$unknownSlotCount, readState=$readState, freshness=$freshness)"
 }
 
 /** Raw framework facts. No policy-derived package set, retry state, or deadline is carried here. */
