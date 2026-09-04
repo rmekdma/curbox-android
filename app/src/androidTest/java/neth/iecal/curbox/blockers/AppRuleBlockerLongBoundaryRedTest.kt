@@ -16,7 +16,6 @@ import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
-import neth.iecal.curbox.domain.apprules.ApplicationWindowsFreshness
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
@@ -42,6 +41,16 @@ class AppRuleBlockerLongBoundaryRedTest {
     @Test
     fun ar002R05_nullRootAfterThirtySecondGrantUsesPersistedDecisionAndWarning() {
         assertBoundaryContract(WindowState.NULL_ROOT)
+    }
+
+    @Test
+    fun successfulWindowThenUncertainReadsCarryStaleProvenanceToBoundedR5Decision() {
+        listOf(
+            WindowState.STALE_WINDOW,
+            WindowState.NULL_ROOT,
+            WindowState.CACHED_PARTIAL_WINDOW,
+            WindowState.CACHED_FAILED_WINDOW
+        ).forEach(::assertBoundaryContract)
     }
 
     @Test
@@ -142,7 +151,7 @@ class AppRuleBlockerLongBoundaryRedTest {
     }
 
     @Test
-    fun boundaryReadCancellationRethrowsWithoutLoggingDenialOrRecovery() {
+    fun scheduledBoundaryCancellationIsContainedWithoutEffectsOrRecovery() {
         val result = runBoundaryScenario(
             windowState = WindowState.STALE_WINDOW,
             boundaryFailure = BoundaryFailure.CANCELLATION
@@ -151,11 +160,11 @@ class AppRuleBlockerLongBoundaryRedTest {
             observation.observedAtMs in boundaryTimeMs()..boundaryDeadlineMs()
         }
 
-        check(result.escapedFailure is CancellationException) {
-            "boundary cancellation was swallowed or replaced: ${result.escapedFailure}"
+        check(result.escapedFailure == null) {
+            "boundary cancellation escaped the Handler callback: ${result.escapedFailure}"
         }
         check(boundaryDecisions.isEmpty()) {
-            "boundary cancellation published an evaluator outcome: $boundaryDecisions"
+            "boundary cancellation published a denial or allow outcome: $boundaryDecisions"
         }
         check(result.startedActivities.none { observation ->
             observation.observedAtMs in boundaryTimeMs()..boundaryDeadlineMs()
@@ -248,7 +257,16 @@ class AppRuleBlockerLongBoundaryRedTest {
                     persistedRead = repository.lastRead
                 )
             }
-            applicationWindowSnapshotProvider = { windowState.windowSnapshot }
+            var windowReadCount = 0
+            applicationWindowSnapshotProvider = {
+                val readIndex = windowReadCount++
+                when {
+                    windowState.seedResolvedWindow && readIndex == 0 -> RESOLVED_OTHER_WINDOW
+                    windowState.failAfterSeed ->
+                        error("injected application-window provider failure")
+                    else -> windowState.windowSnapshot
+                }
+            }
             activeWindowSnapshotProvider = { windowState.activeWindowSnapshot }
         }
 
@@ -369,18 +387,19 @@ class AppRuleBlockerLongBoundaryRedTest {
     private enum class WindowState(
         val contractName: String,
         val windowSnapshot: AppRuleBlocker.ApplicationWindowSnapshot,
-        val activeWindowSnapshot: AppRuleBlocker.ActiveWindowSnapshot
+        val activeWindowSnapshot: AppRuleBlocker.ActiveWindowSnapshot,
+        val seedResolvedWindow: Boolean = false,
+        val failAfterSeed: Boolean = false
     ) {
         STALE_WINDOW(
-            contractName = "no event + stale window",
+            contractName = "successful window then empty read",
             windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
-                packages = setOf(OTHER_PACKAGE),
-                hasApplicationWindow = true,
-                hasUnknownApplicationWindow = false,
-                applicationWindowCount = 1,
-                freshness = ApplicationWindowsFreshness.STALE
+                packages = emptySet(),
+                hasApplicationWindow = false,
+                hasUnknownApplicationWindow = true
             ),
-            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            seedResolvedWindow = true
         ),
         EMPTY_WINDOW(
             contractName = "no event + empty window",
@@ -392,14 +411,15 @@ class AppRuleBlockerLongBoundaryRedTest {
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
         ),
         NULL_ROOT(
-            contractName = "no event + null root",
+            contractName = "successful window then null root",
             windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
                 packages = emptySet(),
                 hasApplicationWindow = true,
                 hasUnknownApplicationWindow = true,
                 applicationWindowCount = 1
             ),
-            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            seedResolvedWindow = true
         ),
         FRESH_DIFFERENT_WINDOW(
             contractName = "expired event + fresh complete different window",
@@ -421,6 +441,29 @@ class AppRuleBlockerLongBoundaryRedTest {
             ),
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
         ),
+        CACHED_PARTIAL_WINDOW(
+            contractName = "successful window then partial unresolved read",
+            windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(OTHER_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = true,
+                applicationWindowCount = 2
+            ),
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            seedResolvedWindow = true
+        ),
+        CACHED_FAILED_WINDOW(
+            contractName = "successful window then failed read",
+            windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = emptySet(),
+                hasApplicationWindow = false,
+                hasUnknownApplicationWindow = true,
+                providerFailed = true
+            ),
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            seedResolvedWindow = true,
+            failAfterSeed = true
+        ),
         DIFFERENT_ACTIVE_ROOT(
             contractName = "different active nonessential root",
             windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
@@ -428,7 +471,8 @@ class AppRuleBlockerLongBoundaryRedTest {
                 hasApplicationWindow = false,
                 hasUnknownApplicationWindow = true
             ),
-            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = OTHER_PACKAGE)
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = OTHER_PACKAGE),
+            seedResolvedWindow = true
         )
     }
 
@@ -635,6 +679,12 @@ class AppRuleBlockerLongBoundaryRedTest {
         const val TARGET_RULE_ID = "target-rule"
         const val THIRTY_SECOND_GRANT_MS = 30_000L
         const val CANCELLATION_MESSAGE = "injected R5 boundary cancellation"
+        val RESOLVED_OTHER_WINDOW = AppRuleBlocker.ApplicationWindowSnapshot(
+            packages = setOf(OTHER_PACKAGE),
+            hasApplicationWindow = true,
+            hasUnknownApplicationWindow = false,
+            applicationWindowCount = 1
+        )
         val BASE_TIME_MS = Instant.parse("2026-08-31T10:00:00Z").toEpochMilli()
     }
 }
