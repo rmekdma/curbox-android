@@ -354,6 +354,139 @@ class ForegroundEvidenceContractTest {
     }
 
     @Test
+    fun expiredEventWithFreshCompleteDifferentWindowDefersWithoutInferringVisibility() {
+        val targetPackage = "com.example.reader"
+        val otherPackage = "com.example.calendar"
+        val module = ForegroundEvidenceModule()
+
+        module.classify(
+            DeterministicForegroundObservationSource(
+                ForegroundFacts(
+                    capturedAtWallMs = 1_000L,
+                    capturedAtElapsedMs = 1_000L,
+                    signal = SignalFact(
+                        kind = ObservationKind.REAL_EVENT,
+                        eventPackage = targetPackage,
+                        eventWallMs = 1_000L,
+                        eventElapsedMs = 1_000L
+                    ),
+                    activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                    applicationWindows = ApplicationWindowsFact(
+                        readState = ForegroundReadState.EMPTY
+                    )
+                )
+            ).capture(
+                ObservationTrigger(
+                    sourceOrderIdentity = SourceOrderIdentity(1L),
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = targetPackage,
+                    requestedAtWallMs = 1_000L,
+                    requestedAtElapsedMs = 1_000L
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        val result = module.classify(
+            DeterministicForegroundObservationSource(
+                ForegroundFacts(
+                    capturedAtWallMs = 7_000L,
+                    capturedAtElapsedMs = 7_000L,
+                    signal = SignalFact(kind = ObservationKind.SYNTHETIC_RECHECK),
+                    activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                    applicationWindows = ApplicationWindowsFact(
+                        packages = setOf(otherPackage),
+                        readState = ForegroundReadState.AVAILABLE,
+                        freshness = ApplicationWindowsFreshness.FRESH
+                    )
+                )
+            ).capture(
+                ObservationTrigger(
+                    sourceOrderIdentity = SourceOrderIdentity(2L),
+                    kind = ObservationKind.SYNTHETIC_RECHECK,
+                    requestedAtWallMs = 7_000L,
+                    requestedAtElapsedMs = 7_000L
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = targetPackage,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun expiredEventWithPartialDifferentWindowDefersWithoutInferringMissingPackage() {
+        val result = classifyExpiredCandidate(
+            applicationWindows = ApplicationWindowsFact(
+                packages = setOf("com.example.calendar"),
+                unknownSlotCount = 1,
+                readState = ForegroundReadState.AVAILABLE,
+                freshness = ApplicationWindowsFreshness.FRESH
+            )
+        )
+
+        assertDeferredPriorCandidate(result)
+    }
+
+    @Test
+    fun expiredEventWithStaleOrNullWindowEvidenceRemainsFailClosedCandidate() {
+        listOf(
+            ApplicationWindowsFact(
+                packages = setOf("com.example.calendar"),
+                readState = ForegroundReadState.AVAILABLE,
+                freshness = ApplicationWindowsFreshness.STALE
+            ),
+            ApplicationWindowsFact(
+                unknownSlotCount = 1,
+                readState = ForegroundReadState.AVAILABLE,
+                freshness = ApplicationWindowsFreshness.FRESH
+            )
+        ).forEach { applicationWindows ->
+            val result = classifyExpiredCandidate(applicationWindows)
+
+            assertEquals(
+                listOf(
+                    ForegroundEvidenceOutcome.Unknown(
+                        candidatePackage = "com.example.reader",
+                        evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                        sessionEffect = SessionEvidenceEffect.PRESERVE,
+                        decisionPermission = DecisionPermission.EVALUATE_FAIL_CLOSED,
+                        evidenceValidity = EvidenceValidity.NotRenewed,
+                        followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                    )
+                ),
+                result.outcomes
+            )
+        }
+    }
+
+    @Test
+    fun expiredEventWhileScreenOffOrKeyguardDefersWithoutEvaluatingPriorCandidate() {
+        listOf(DisplayState.SCREEN_OFF, DisplayState.KEYGUARD).forEach { displayState ->
+            val result = classifyExpiredCandidate(
+                applicationWindows = ApplicationWindowsFact(
+                    readState = ForegroundReadState.EMPTY
+                ),
+                displayState = displayState
+            )
+
+            assertDeferredPriorCandidate(result)
+        }
+    }
+
+    @Test
     fun obviousNonessentialActiveRootIsVisibleAndRenewsIntrinsicEvidence() {
         val targetPackage = "com.example.reader"
         val facts = ForegroundFacts(
@@ -446,5 +579,79 @@ class ForegroundEvidenceContractTest {
         assertEquals(DecisionPermission.EVALUATE, visible.decisionPermission)
         assertEquals(EvidenceValidity.RenewedUntil(15_000L), visible.evidenceValidity)
         assertEquals(FollowUpKind.NONE, visible.followUp)
+    }
+
+    private fun classifyExpiredCandidate(
+        applicationWindows: ApplicationWindowsFact,
+        displayState: DisplayState = DisplayState.UNLOCKED
+    ): ForegroundEvidenceResult {
+        val targetPackage = "com.example.reader"
+        val module = ForegroundEvidenceModule()
+        val source = DeterministicForegroundObservationSource { trigger ->
+            if (trigger.kind == ObservationKind.REAL_EVENT) {
+                ForegroundFacts(
+                    capturedAtWallMs = 1_000L,
+                    capturedAtElapsedMs = 1_000L,
+                    signal = SignalFact(
+                        kind = ObservationKind.REAL_EVENT,
+                        eventPackage = targetPackage,
+                        eventWallMs = 1_000L,
+                        eventElapsedMs = 1_000L
+                    ),
+                    activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                    applicationWindows = ApplicationWindowsFact(
+                        readState = ForegroundReadState.EMPTY
+                    )
+                )
+            } else {
+                ForegroundFacts(
+                    capturedAtWallMs = 7_000L,
+                    capturedAtElapsedMs = 7_000L,
+                    signal = SignalFact(kind = ObservationKind.SYNTHETIC_RECHECK),
+                    activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                    applicationWindows = applicationWindows,
+                    displayState = displayState
+                )
+            }
+        }
+        module.classify(
+            source.capture(
+                ObservationTrigger(
+                    sourceOrderIdentity = SourceOrderIdentity(10L),
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = targetPackage,
+                    requestedAtWallMs = 1_000L,
+                    requestedAtElapsedMs = 1_000L
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+        return module.classify(
+            source.capture(
+                ObservationTrigger(
+                    sourceOrderIdentity = SourceOrderIdentity(11L),
+                    kind = ObservationKind.SYNTHETIC_RECHECK,
+                    requestedAtWallMs = 7_000L,
+                    requestedAtElapsedMs = 7_000L
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+    }
+
+    private fun assertDeferredPriorCandidate(result: ForegroundEvidenceResult) {
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = "com.example.reader",
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
     }
 }

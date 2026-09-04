@@ -44,6 +44,10 @@ class ForegroundEvidenceModule {
             .filter { it !in essentialPackages }
             .toList()
 
+        if (normalizedFacts.displayState != DisplayState.UNLOCKED) {
+            return deferred(eventPackage)
+        }
+
         if (activeRootPackage != null) {
             val previousCandidate = if (eventPackage == activeRootPackage) {
                 previousRealSignal
@@ -87,40 +91,11 @@ class ForegroundEvidenceModule {
             )
         }
 
-        if (normalizedFacts.applicationWindows.freshness == ApplicationWindowsFreshness.FRESH &&
+        if (!isRecentEvent &&
+            normalizedFacts.applicationWindows.freshness == ApplicationWindowsFreshness.FRESH &&
             applicationWindowPackages.isNotEmpty()
         ) {
-            val previousCandidate = eventPackage?.takeIf { it !in applicationWindowPackages }
-            return ForegroundEvidenceResult(
-                outcomes = buildList {
-                    previousCandidate?.let {
-                        add(
-                            ForegroundEvidenceOutcome.NotVisible(
-                                packageName = it,
-                                evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
-                                sessionEffect = SessionEvidenceEffect.END_WITHOUT_RENEWAL,
-                                decisionPermission = DecisionPermission.DO_NOT_EVALUATE,
-                                evidenceValidity = EvidenceValidity.NotRenewed,
-                                followUp = FollowUpKind.NONE
-                            )
-                        )
-                    }
-                    applicationWindowPackages.forEach { packageName ->
-                        add(
-                            ForegroundEvidenceOutcome.Visible(
-                                packageName = packageName,
-                                evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
-                                sessionEffect = SessionEvidenceEffect.RENEW,
-                                decisionPermission = DecisionPermission.EVALUATE,
-                                evidenceValidity = renewedUntil(
-                                    normalizedFacts.capturedAtElapsedMs
-                                ),
-                                followUp = FollowUpKind.NONE
-                            )
-                        )
-                    }
-                }
-            )
+            return deferred(eventPackage)
         }
 
         if (isRecentEvent) {
@@ -165,5 +140,19 @@ class ForegroundEvidenceModule {
         EvidenceValidity.RenewedUntil(
             validUntilElapsedMs = (capturedAtElapsedMs + RECENT_EVENT_MAX_AGE_MS)
                 .coerceAtLeast(capturedAtElapsedMs)
+        )
+
+    private fun deferred(candidatePackage: String?): ForegroundEvidenceResult =
+        ForegroundEvidenceResult(
+            outcomes = listOf(
+                ForegroundEvidenceOutcome.Unknown(
+                    candidatePackage = candidatePackage,
+                    evidenceBasis = EvidenceBasis.NO_RELIABLE_EVIDENCE,
+                    sessionEffect = SessionEvidenceEffect.PRESERVE,
+                    decisionPermission = DecisionPermission.DEFER,
+                    evidenceValidity = EvidenceValidity.NotRenewed,
+                    followUp = FollowUpKind.WAIT_FOR_RELIABLE_EVIDENCE
+                )
+            )
         )
 }
