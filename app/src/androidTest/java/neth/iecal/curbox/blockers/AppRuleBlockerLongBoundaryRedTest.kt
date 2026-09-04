@@ -5,6 +5,8 @@ import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.CancellationException
+import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleOverrideState
@@ -14,12 +16,15 @@ import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
+import neth.iecal.curbox.domain.apprules.ApplicationWindowsFreshness
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.RandomAccessFile
 import java.time.Instant
 
 @RunWith(AndroidJUnit4::class)
@@ -48,6 +53,123 @@ class AppRuleBlockerLongBoundaryRedTest {
         }
         check(result.startedActivities.isEmpty()) {
             "a different active nonessential root must not launch a warning for the previous app"
+        }
+        check(result.decisions.none { it.observedAtMs >= boundaryTimeMs() }) {
+            "a different active nonessential root must not evaluate the previous app at its boundary"
+        }
+    }
+
+    @Test
+    fun unsupportedFreshOrPartialDifferentWindowDoesNotMutateOrPublishBoundaryOutcome() {
+        listOf(
+            WindowState.FRESH_DIFFERENT_WINDOW,
+            WindowState.PARTIAL_DIFFERENT_WINDOW
+        ).forEach { windowState ->
+            val result = runBoundaryScenario(windowState)
+            val failures = mutableListOf<String>()
+
+            if (result.decisions.any { it.observedAtMs >= boundaryTimeMs() }) {
+                failures += "boundary evaluator outcome was published"
+            }
+            if (result.startedActivities.any { it.observedAtMs >= boundaryTimeMs() }) {
+                failures += "boundary warning was launched"
+            }
+            if (result.repository.readHistory.any { it.observedAtMs >= boundaryTimeMs() }) {
+                failures += "persisted session state was read at the unsupported boundary"
+            }
+            if (result.repository.mutationHistory.any { it >= boundaryTimeMs() }) {
+                failures += "persisted session state was mutated at the unsupported boundary"
+            }
+            if (failures.isNotEmpty()) {
+                throw AssertionError(
+                    "${windowState.contractName} deferred contract failures:\n" +
+                        failures.joinToString(separator = "\n") { "- $it" }
+                )
+            }
+        }
+    }
+
+    @Test
+    fun ordinaryBoundaryFailureDeniesStaleEmptyAndNullThenAllowsLaterEventHandling() {
+        listOf(BoundaryFailure.SESSION_READ, BoundaryFailure.EVALUATOR_INPUT).forEach { failureMode ->
+            listOf(
+                WindowState.STALE_WINDOW,
+                WindowState.EMPTY_WINDOW,
+                WindowState.NULL_ROOT
+            ).forEach { windowState ->
+                val result = runBoundaryScenario(
+                    windowState = windowState,
+                    boundaryFailure = failureMode
+                )
+                val failures = mutableListOf<String>()
+                val boundaryDecisions = result.decisions.filter { observation ->
+                    observation.observedAtMs in boundaryTimeMs()..boundaryDeadlineMs()
+                }
+
+                if (boundaryDecisions.none { observation ->
+                        !observation.evaluation.isAllowed &&
+                            observation.evaluation.denyingRules.any { it.ruleId == TARGET_RULE_ID }
+                    }
+                ) {
+                    failures += "ordinary failure did not publish the target-rule denial"
+                }
+                if (boundaryDecisions.any { it.evaluation.isAllowed }) {
+                    failures += "ordinary failure published an allow outcome"
+                }
+                val boundaryPayloads = result.startedActivities
+                    .filter { it.observedAtMs in boundaryTimeMs()..boundaryDeadlineMs() }
+                    .mapNotNull {
+                        it.intent.getStringExtra(GuardianApprovalActivity.EXTRA_DENIALS)
+                    }
+                if (boundaryPayloads.none { TARGET_RULE_ID in it }) {
+                    failures += "ordinary failure did not launch the target-rule warning"
+                }
+                if (result.boundaryPostedDelays != listOf(20_000L, 250L, 500L, 750L)) {
+                    failures += "ordinary failure scheduled recovery beyond the bounded retries: " +
+                        result.boundaryPostedDelays
+                }
+                if (result.decisions.none { it.observedAtMs > boundaryDeadlineMs() }) {
+                    failures += "a healthy later event did not reach the evaluator"
+                }
+                if (failures.isNotEmpty()) {
+                    throw AssertionError(
+                        "${windowState.contractName} ${failureMode.name} contract failures:\n" +
+                            failures.joinToString(separator = "\n") { "- $it" }
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun boundaryReadCancellationRethrowsWithoutLoggingDenialOrRecovery() {
+        val result = runBoundaryScenario(
+            windowState = WindowState.STALE_WINDOW,
+            boundaryFailure = BoundaryFailure.CANCELLATION
+        )
+        val boundaryDecisions = result.decisions.filter { observation ->
+            observation.observedAtMs in boundaryTimeMs()..boundaryDeadlineMs()
+        }
+
+        check(result.escapedFailure is CancellationException) {
+            "boundary cancellation was swallowed or replaced: ${result.escapedFailure}"
+        }
+        check(boundaryDecisions.isEmpty()) {
+            "boundary cancellation published an evaluator outcome: $boundaryDecisions"
+        }
+        check(result.startedActivities.none { observation ->
+            observation.observedAtMs in boundaryTimeMs()..boundaryDeadlineMs()
+        }) {
+            "boundary cancellation launched a denial warning"
+        }
+        check(CANCELLATION_MESSAGE !in result.appendedCrashLog) {
+            "boundary cancellation was logged as a nonfatal error"
+        }
+        check(result.boundaryPostedDelays == listOf(20_000L, 250L, 500L, 750L)) {
+            "boundary cancellation scheduled recovery: ${result.boundaryPostedDelays}"
+        }
+        check(result.decisions.any { it.observedAtMs > boundaryDeadlineMs() }) {
+            "a healthy later event was not handled after boundary cancellation"
         }
     }
 
@@ -100,7 +222,10 @@ class AppRuleBlockerLongBoundaryRedTest {
         }
     }
 
-    private fun runBoundaryScenario(windowState: WindowState): BoundaryResult {
+    private fun runBoundaryScenario(
+        windowState: WindowState,
+        boundaryFailure: BoundaryFailure = BoundaryFailure.NONE
+    ): BoundaryResult {
         val clock = VirtualClock(BASE_TIME_MS)
         val scheduler = VirtualRecheckScheduler(clock)
         val repository = MutableSessionRepository(clock)
@@ -128,6 +253,7 @@ class AppRuleBlockerLongBoundaryRedTest {
         }
 
         setField(blocker, "service", service)
+        setField(blocker, "crashLogger", CrashLogger(service))
         setField(blocker, "sessionRepository", repository)
         setField(blocker, "enforcement", AppRuleEnforcement(repository))
         setField(blocker, "setupReady", true)
@@ -151,10 +277,26 @@ class AppRuleBlockerLongBoundaryRedTest {
                     endedAtMs = clock.wallClockMs
                 )
             )
-            scheduler.runDue()
-            scheduler.advanceBy(250L)
-            scheduler.advanceBy(500L)
-            scheduler.advanceBy(750L)
+            repository.boundaryFailure = boundaryFailure
+            val crashLog = File(service.filesDir, "crash_log.txt")
+            val crashLogLengthBeforeBoundary = crashLog.length()
+            var escapedFailure: Throwable? = null
+            try {
+                scheduler.runDue()
+                scheduler.advanceBy(250L)
+                scheduler.advanceBy(500L)
+                scheduler.advanceBy(750L)
+            } catch (error: Throwable) {
+                if (boundaryFailure != BoundaryFailure.CANCELLATION) throw error
+                escapedFailure = error
+            }
+            val boundaryPostedDelays = scheduler.postedDelays.toList()
+
+            if (boundaryFailure != BoundaryFailure.NONE) {
+                repository.boundaryFailure = BoundaryFailure.NONE
+                clock.advanceBy(1_000L)
+                sendWindowEvent(blocker, TARGET_PACKAGE)
+            }
 
             val persistedBoundaryDecision = AppRuleEvaluator.evaluate(
                 snapshot = snapshot.snapshot,
@@ -172,6 +314,9 @@ class AppRuleBlockerLongBoundaryRedTest {
                 persistedBoundaryDecision = persistedBoundaryDecision,
                 virtualElapsedMs = clock.elapsedRealtimeMs,
                 scheduler = scheduler.snapshot(),
+                boundaryPostedDelays = boundaryPostedDelays,
+                escapedFailure = escapedFailure,
+                appendedCrashLog = appendedText(crashLog, crashLogLengthBeforeBoundary),
                 repository = repository
             )
         } finally {
@@ -232,7 +377,8 @@ class AppRuleBlockerLongBoundaryRedTest {
                 packages = setOf(OTHER_PACKAGE),
                 hasApplicationWindow = true,
                 hasUnknownApplicationWindow = false,
-                applicationWindowCount = 1
+                applicationWindowCount = 1,
+                freshness = ApplicationWindowsFreshness.STALE
             ),
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
         ),
@@ -252,6 +398,26 @@ class AppRuleBlockerLongBoundaryRedTest {
                 hasApplicationWindow = true,
                 hasUnknownApplicationWindow = true,
                 applicationWindowCount = 1
+            ),
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+        ),
+        FRESH_DIFFERENT_WINDOW(
+            contractName = "expired event + fresh complete different window",
+            windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(OTHER_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = false,
+                applicationWindowCount = 1
+            ),
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+        ),
+        PARTIAL_DIFFERENT_WINDOW(
+            contractName = "expired event + partial different window",
+            windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(OTHER_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = true,
+                applicationWindowCount = 2
             ),
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
         ),
@@ -277,6 +443,9 @@ class AppRuleBlockerLongBoundaryRedTest {
         val persistedBoundaryDecision: AppRulesEvaluation,
         val virtualElapsedMs: Long,
         val scheduler: SchedulerState,
+        val boundaryPostedDelays: List<Long>,
+        val escapedFailure: Throwable?,
+        val appendedCrashLog: String,
         val repository: MutableSessionRepository
     )
 
@@ -364,6 +533,8 @@ class AppRuleBlockerLongBoundaryRedTest {
         val calculator = ConfigurableUseDayCalculator(zone)
         val useDayId: String = calculator.idAt(BASE_TIME_MS)
         val readHistory = mutableListOf<PersistedSessionRead>()
+        val mutationHistory = mutableListOf<Long>()
+        var boundaryFailure: BoundaryFailure = BoundaryFailure.NONE
         var lastRead: PersistedSessionRead? = null
         var persistedSessions: List<ForegroundSession> = listOf(
             ForegroundSession(
@@ -374,20 +545,38 @@ class AppRuleBlockerLongBoundaryRedTest {
             )
         )
 
-        override suspend fun startSession(useDayId: String, packageName: String, startedAtMs: Long): Long = 1L
+        override suspend fun startSession(useDayId: String, packageName: String, startedAtMs: Long): Long {
+            mutationHistory += clock.wallClockMs
+            return 1L
+        }
 
-        override suspend fun finishSession(id: Long, endedAtMs: Long) = Unit
+        override suspend fun finishSession(id: Long, endedAtMs: Long) {
+            mutationHistory += clock.wallClockMs
+        }
 
-        override suspend fun updateSessionEnd(id: Long, endedAtMs: Long) = Unit
+        override suspend fun updateSessionEnd(id: Long, endedAtMs: Long) {
+            mutationHistory += clock.wallClockMs
+        }
 
         override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+            if (clock.wallClockMs >= BASE_TIME_MS + THIRTY_SECOND_GRANT_MS) {
+                when (boundaryFailure) {
+                    BoundaryFailure.SESSION_READ ->
+                        throw IllegalStateException("injected ordinary R5 boundary read failure")
+                    BoundaryFailure.EVALUATOR_INPUT -> return ThrowingSessionList()
+                    BoundaryFailure.CANCELLATION -> throw CancellationException(CANCELLATION_MESSAGE)
+                    BoundaryFailure.NONE -> Unit
+                }
+            }
             val read = PersistedSessionRead(clock.wallClockMs, persistedSessions.toList())
             readHistory += read
             lastRead = read
             return read.sessions.filter { it.useDayId == useDayId }
         }
 
-        override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) = Unit
+        override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) {
+            mutationHistory += clock.wallClockMs
+        }
     }
 
     private class RecordingService(private val nowMsProvider: () -> Long) : BaseBlockingService() {
@@ -414,12 +603,38 @@ class AppRuleBlockerLongBoundaryRedTest {
 
     private fun boundaryTimeMs(): Long = BASE_TIME_MS + THIRTY_SECOND_GRANT_MS
 
+    private fun boundaryDeadlineMs(): Long = boundaryTimeMs() + 1_500L
+
+    private fun appendedText(file: File, startOffset: Long): String {
+        if (!file.exists() || file.length() <= startOffset) return ""
+        return RandomAccessFile(file, "r").use { input ->
+            input.seek(startOffset)
+            ByteArray((input.length() - startOffset).toInt()).also(input::readFully)
+                .toString(Charsets.UTF_8)
+        }
+    }
+
+    private enum class BoundaryFailure {
+        NONE,
+        SESSION_READ,
+        EVALUATOR_INPUT,
+        CANCELLATION
+    }
+
+    private class ThrowingSessionList : AbstractList<ForegroundSession>() {
+        override val size: Int get() = 1
+
+        override fun get(index: Int): ForegroundSession =
+            error("injected ordinary R5 evaluator input failure")
+    }
+
     private companion object {
         const val TARGET_PACKAGE = "com.example.reader"
         const val OTHER_PACKAGE = "com.example.other"
         const val TARGET_GROUP_ID = "target-group"
         const val TARGET_RULE_ID = "target-rule"
         const val THIRTY_SECOND_GRANT_MS = 30_000L
+        const val CANCELLATION_MESSAGE = "injected R5 boundary cancellation"
         val BASE_TIME_MS = Instant.parse("2026-08-31T10:00:00Z").toEpochMilli()
     }
 }

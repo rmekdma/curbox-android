@@ -37,6 +37,7 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
+import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRuleMembershipResolver
 import neth.iecal.curbox.domain.apprules.AppRuleReevaluationGate
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
@@ -45,6 +46,7 @@ import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleReceiverLifecycle
 import neth.iecal.curbox.domain.apprules.AppRuleRecheckPlanner
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
+import neth.iecal.curbox.domain.apprules.ApplicationWindowsFreshness
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationFormatter
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationStateCalculator
@@ -134,7 +136,8 @@ class AppRuleBlocker {
         val hasUnknownApplicationWindow: Boolean,
         val providerFailed: Boolean = false,
         /** Number of application windows, including windows whose root package is unavailable. */
-        val applicationWindowCount: Int = packages.size
+        val applicationWindowCount: Int = packages.size,
+        val freshness: ApplicationWindowsFreshness = ApplicationWindowsFreshness.FRESH
     )
 
     internal data class ActiveWindowSnapshot(
@@ -312,7 +315,8 @@ class AppRuleBlocker {
      */
     private fun doAppRuleCheck(
         event: AccessibilityEvent?,
-        updateForegroundEvidence: Boolean
+        updateForegroundEvidence: Boolean,
+        failClosedOnEvaluationFailure: Boolean = false
     ) {
         if (!isReadyForChecks()) return
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
@@ -344,6 +348,7 @@ class AppRuleBlocker {
         val now = wallClockMsProvider()
         val calculator = ConfigurableUseDayCalculator(resetTime = runtime.resetTime)
         val useDayId = calculator.idAt(now)
+        var evaluationFailedClosed = false
         val evaluation = try {
             runBlocking(Dispatchers.IO) {
                 enforcement.check(
@@ -361,10 +366,18 @@ class AppRuleBlocker {
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            // A failed read must not terminate the accessibility service. Failing open here is
-            // limited to a storage outage; a malformed persisted snapshot fails closed above.
             logNonFatal(error)
-            return
+            if (!failClosedOnEvaluationFailure) return
+            evaluationFailedClosed = true
+            failClosedEvaluation(
+                snapshot = currentSnapshot,
+                packageName = packageName,
+                useDayId = useDayId,
+                nowMs = now,
+                calculator = calculator,
+                runtime = runtime,
+                essentialPackages = evaluationEssentialPackages
+            )
         }
 
         evaluationResultObserver?.let { observer ->
@@ -377,31 +390,73 @@ class AppRuleBlocker {
 
         if (!isReadyForChecks() || recheckGeneration.get() != generation) return
 
-        val nextPlan = AppRuleRecheckPlanner.nextPlan(
-            snapshot = currentSnapshot,
-            evaluation = evaluation,
-            overrideState = runtime.overrideState,
-            useDayId = useDayId,
-            nowMs = now,
-            useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
-            zone = calculator.zone,
-            useDayCalculator = calculator
-        )
-        if (nextPlan != null) {
-            scheduleRecheck(
-                packageName = packageName,
-                remainingMillis = nextPlan.delayMillis,
-                maxDelayMillis = nextPlan.maxDelayMillis,
-                generation = generation
-            )
-        } else {
+        if (evaluationFailedClosed) {
             cancelScheduledRecheck(packageName)
+        } else {
+            val nextPlan = AppRuleRecheckPlanner.nextPlan(
+                snapshot = currentSnapshot,
+                evaluation = evaluation,
+                overrideState = runtime.overrideState,
+                useDayId = useDayId,
+                nowMs = now,
+                useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
+                zone = calculator.zone,
+                useDayCalculator = calculator
+            )
+            if (nextPlan != null) {
+                scheduleRecheck(
+                    packageName = packageName,
+                    remainingMillis = nextPlan.delayMillis,
+                    maxDelayMillis = nextPlan.maxDelayMillis,
+                    generation = generation
+                )
+            } else {
+                cancelScheduledRecheck(packageName)
+            }
         }
         if (evaluation.denyingRules.isEmpty()) return
         val bypassThrottle = reevaluationGate.consumeIfApplicable(evaluation.evaluations.isNotEmpty())
         if (!bypassThrottle && now - lastShownAt < 1_000L) return
         lastShownAt = now
         showWarning(packageName, evaluation, currentSnapshot, generation)
+    }
+
+    private fun failClosedEvaluation(
+        snapshot: AppRuleSnapshot,
+        packageName: String,
+        useDayId: String,
+        nowMs: Long,
+        calculator: ConfigurableUseDayCalculator,
+        runtime: RuleRuntime,
+        essentialPackages: Set<String>
+    ): AppRulesEvaluation {
+        val eligibility = AppRuleEvaluator.evaluate(
+            snapshot = snapshot,
+            packageName = packageName,
+            useDayId = useDayId,
+            sessions = emptyList(),
+            nowMs = nowMs,
+            zone = calculator.zone,
+            useDayCalculator = calculator,
+            useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
+            availablePackages = runtime.launchablePackages,
+            essentialExcludedPackages = essentialPackages,
+            overrides = runtime.overrideState
+        )
+        val applicable = eligibility.evaluations
+            .filter { it.isApplicable && it.isActive && !it.isSkipped }
+            .ifEmpty { eligibility.denyingRules }
+        val denials = applicable.map { evaluation ->
+            evaluation.copy(
+                remainingMillis = 0L,
+                isAllowed = false
+            )
+        }
+        return AppRulesEvaluation(
+            isAllowed = false,
+            denyingRules = denials,
+            evaluations = denials
+        )
     }
 
     private fun startNotificationTicker(connectionGeneration: Long) {
@@ -1011,6 +1066,7 @@ class AppRuleBlocker {
         visibilityAttempt: Int,
         runnable: Runnable
     ) {
+        var evaluationDispatchStarted = false
         try {
             synchronized(scheduledRechecks) {
                 val scheduled = scheduledRechecks[packageName]
@@ -1021,7 +1077,10 @@ class AppRuleBlocker {
             if (!isScreenReadyForChecks()) return
 
             when (packageVisibility(packageName)) {
-                PackageVisibility.VISIBLE -> dispatchSyntheticCheck(packageName, generation)
+                PackageVisibility.VISIBLE -> {
+                    evaluationDispatchStarted = true
+                    dispatchSyntheticCheck(packageName, generation)
+                }
                 PackageVisibility.NOT_VISIBLE -> Unit
                 PackageVisibility.UNKNOWN -> {
                     if (visibilityAttempt < MAX_VISIBILITY_RETRIES) {
@@ -1039,7 +1098,12 @@ class AppRuleBlocker {
                         // Window providers on some Android 16/OEM builds can remain empty while
                         // the active app is still unchanged. The recent foreground event is a
                         // bounded, package-checked fallback rather than an unbounded poll.
-                        dispatchSyntheticCheck(packageName, generation)
+                        evaluationDispatchStarted = true
+                        dispatchSyntheticCheck(
+                            packageName = packageName,
+                            generation = generation,
+                            failClosedOnEvaluationFailure = true
+                        )
                     } else {
                         // Do not drop the boundary merely because an OEM returned a stale,
                         // non-empty window list. Keep a low-frequency recovery until a real
@@ -1053,21 +1117,20 @@ class AppRuleBlocker {
                     }
                 }
             }
+        } catch (error: CancellationException) {
+            if (evaluationDispatchStarted) throw error
+            // Observation providers execute inside a Handler callback rather than a coroutine.
+            // Keep their cancellation contained so the service main looper remains alive.
+            if (isReadyForChecks() && recheckGeneration.get() == generation) {
+                postScheduledRecheck(
+                    packageName = packageName,
+                    generation = generation,
+                    delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
+                    visibilityAttempt = 0
+                )
+            }
         } catch (error: Throwable) {
             logNonFatal(error)
-            // This is a Handler callback, not a coroutine worker. Swallow cancellation and other
-            // feature exceptions here so the service's main looper remains alive.
-            if (error is CancellationException) {
-                if (isReadyForChecks() && recheckGeneration.get() == generation) {
-                    postScheduledRecheck(
-                        packageName = packageName,
-                        generation = generation,
-                        delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
-                        visibilityAttempt = 0
-                    )
-                }
-                return
-            }
             try {
                 if (visibilityAttempt < MAX_VISIBILITY_RETRIES &&
                     isReadyForChecks() && recheckGeneration.get() == generation
@@ -1086,8 +1149,23 @@ class AppRuleBlocker {
                     // If the provider throws on every bounded read, retain the same package guard
                     // as the unknown-window path so an otherwise valid boundary is not lost
                     // forever.
-                    dispatchSyntheticCheck(packageName, generation)
+                    evaluationDispatchStarted = true
+                    dispatchSyntheticCheck(
+                        packageName = packageName,
+                        generation = generation,
+                        failClosedOnEvaluationFailure = true
+                    )
                 } else if (isReadyForChecks() && recheckGeneration.get() == generation) {
+                    postScheduledRecheck(
+                        packageName = packageName,
+                        generation = generation,
+                        delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
+                        visibilityAttempt = 0
+                    )
+                }
+            } catch (recoveryCancellation: CancellationException) {
+                if (evaluationDispatchStarted) throw recoveryCancellation
+                if (isReadyForChecks() && recheckGeneration.get() == generation) {
                     postScheduledRecheck(
                         packageName = packageName,
                         generation = generation,
@@ -1103,10 +1181,16 @@ class AppRuleBlocker {
         }
     }
 
-    private fun dispatchSyntheticCheck(packageName: String, generation: Long) {
+    private fun dispatchSyntheticCheck(
+        packageName: String,
+        generation: Long,
+        failClosedOnEvaluationFailure: Boolean = false
+    ) {
         if (!isReadyForChecks() || recheckGeneration.get() != generation) return
         val event = try {
             AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             logNonFatal(error)
             return
@@ -1114,12 +1198,20 @@ class AppRuleBlocker {
         try {
             if (!isReadyForChecks() || recheckGeneration.get() != generation) return
             event.packageName = packageName
-            doAppRuleCheck(event, updateForegroundEvidence = false)
+            doAppRuleCheck(
+                event = event,
+                updateForegroundEvidence = false,
+                failClosedOnEvaluationFailure = failClosedOnEvaluationFailure
+            )
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             logNonFatal(error)
         } finally {
             try {
                 event.recycle()
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 logNonFatal(error)
             }
@@ -1358,6 +1450,11 @@ class AppRuleBlocker {
                 isEssentialPackage(activeWindow.packageName, configuredEssentialPackages)
         }
         if (packageName in windows.packages) return true
+        if (windows.freshness == ApplicationWindowsFreshness.FRESH &&
+            windows.packages.isNotEmpty()
+        ) {
+            return false
+        }
         if (activeWindow.packageName != null &&
             !isEssentialPackage(activeWindow.packageName, configuredEssentialPackages)
         ) {
