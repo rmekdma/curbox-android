@@ -467,6 +467,56 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun overlayEvaluationUsesEveryPackageFromTheOriginalWindowSnapshot() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        var windowSnapshotReads = 0
+        val evaluatedRuleIds = mutableListOf<String>()
+        val blocker = AppRuleBlocker().apply {
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = service.packageName)
+            }
+            applicationWindowSnapshotProvider = {
+                windowSnapshotReads++
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = if (windowSnapshotReads == 1) {
+                        linkedSetOf(PACKAGE, OTHER_PACKAGE)
+                    } else {
+                        emptySet()
+                    },
+                    hasApplicationWindow = windowSnapshotReads == 1,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluation ->
+                evaluatedRuleIds += evaluation.evaluations.single().ruleId
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithSplitAllowances())
+
+        sendWindowEvent(blocker, service.packageName)
+
+        assertEquals(
+            "both packages from the original overlay observation must be evaluated once",
+            listOf("target", "other"),
+            evaluatedRuleIds
+        )
+        assertEquals(
+            "one overlay observation must not recapture foreground windows per package",
+            1,
+            windowSnapshotReads
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
     fun essentialRootAndReconnectProcessVisibleTargetWithoutDuplicateGuardian() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L

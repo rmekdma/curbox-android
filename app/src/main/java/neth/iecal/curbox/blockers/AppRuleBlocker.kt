@@ -396,8 +396,10 @@ class AppRuleBlocker {
             ),
             policy = evidencePolicy
         )
-        if (eventPackageName in evidencePolicy.essentialPackages) {
-            val generation = recheckGeneration.get()
+        val packageOutcomes = linkedMapOf<String, ForegroundEvidenceOutcome>()
+        foregroundEvidence.outcomes.firstOrNull { it.packageName == eventPackageName }
+            ?.let { outcome -> packageOutcomes[eventPackageName] = outcome }
+        if (updateForegroundEvidence) {
             foregroundEvidence.outcomes
                 .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
                 .filter {
@@ -406,24 +408,31 @@ class AppRuleBlocker {
                     it.decisionPermission ==
                         neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
                 }
-                .mapNotNull { it.packageName }
-                .distinct()
-                .forEach { packageName ->
-                    // The module owns the direct-window package set. Reclassifying each exact
-                    // package keeps evaluation package-scoped while preserving one guardian for
-                    // an essential overlay over several application windows.
-                    dispatchSyntheticCheck(
-                        packageName = packageName,
-                        generation = generation,
-                        failClosedOnEvaluationFailure = failClosedOnEvaluationFailure
-                    )
+                .forEach { outcome ->
+                    packageOutcomes.putIfAbsent(outcome.packageName, outcome)
                 }
-            return
         }
-        val packageOutcome = foregroundEvidence.outcomes.firstOrNull {
-            it.packageName == eventPackageName
+        val evidenceGeneration = recheckGeneration.get()
+        packageOutcomes.forEach { (packageName, packageOutcome) ->
+            if (!isReadyForChecks() || recheckGeneration.get() != evidenceGeneration) return
+            evaluateForegroundOutcome(
+                packageName = packageName,
+                packageOutcome = packageOutcome,
+                updateForegroundEvidence = updateForegroundEvidence &&
+                    packageName == eventPackageName,
+                failClosedOnEvaluationFailure = failClosedOnEvaluationFailure,
+                evaluationEssentialPackages = evaluationEssentialPackages
+            )
         }
-        val packageName = packageOutcome?.packageName ?: return
+    }
+
+    private fun evaluateForegroundOutcome(
+        packageName: String,
+        packageOutcome: ForegroundEvidenceOutcome,
+        updateForegroundEvidence: Boolean,
+        failClosedOnEvaluationFailure: Boolean,
+        evaluationEssentialPackages: Set<String>
+    ) {
         val shouldFailClosed = when (packageOutcome) {
             is ForegroundEvidenceOutcome.Visible ->
                 packageOutcome.decisionPermission ==
@@ -435,12 +444,11 @@ class AppRuleBlocker {
                 cancelScheduledRecheck(packageName)
                 false
             }
-            null -> false
         }
         if (packageOutcome is ForegroundEvidenceOutcome.NotVisible ||
-            packageOutcome?.decisionPermission ==
+            packageOutcome.decisionPermission ==
                 neth.iecal.curbox.domain.apprules.DecisionPermission.DEFER ||
-            packageOutcome?.decisionPermission ==
+            packageOutcome.decisionPermission ==
                 neth.iecal.curbox.domain.apprules.DecisionPermission.DO_NOT_EVALUATE
         ) {
             return
