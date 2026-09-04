@@ -160,6 +160,39 @@ class ForegroundEvidenceContractTest {
     }
 
     @Test
+    fun deterministicSourcePreservesCurrentAndStalePackageProvenanceSeparately() {
+        val captured = DeterministicForegroundObservationSource(
+            ForegroundFacts(
+                capturedAtWallMs = 7_000L,
+                capturedAtElapsedMs = 7_000L,
+                applicationWindows = ApplicationWindowsFact(
+                    packages = setOf("com.example.current"),
+                    stalePackages = setOf("com.example.cached"),
+                    unknownSlotCount = 1,
+                    readState = ForegroundReadState.AVAILABLE,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                )
+            )
+        ).capture(
+            ObservationTrigger(
+                sourceOrderIdentity = SourceOrderIdentity(2L),
+                kind = ObservationKind.SYNTHETIC_RECHECK,
+                requestedAtWallMs = 7_000L,
+                requestedAtElapsedMs = 7_000L
+            )
+        )
+
+        assertEquals(setOf("com.example.current"), captured.applicationWindows.packages)
+        assertEquals(setOf("com.example.cached"), captured.applicationWindows.stalePackages)
+        assertEquals(1, captured.applicationWindows.unknownSlotCount)
+        assertEquals(ForegroundReadState.AVAILABLE, captured.applicationWindows.readState)
+        assertEquals(
+            ApplicationWindowsFreshness.FRESH,
+            captured.applicationWindows.freshness
+        )
+    }
+
+    @Test
     fun applicationWindowsPackagesAreSnapshottedAtConstruction() {
         val packages = linkedSetOf("com.example.reader")
         val fact = ApplicationWindowsFact(packages = packages)
@@ -300,6 +333,54 @@ class ForegroundEvidenceContractTest {
         assertEquals(DecisionPermission.EVALUATE, visible.decisionPermission)
         assertEquals(EvidenceValidity.NotRenewed, visible.evidenceValidity)
         assertEquals(FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE, visible.followUp)
+    }
+
+    @Test
+    fun recentEventWithNullRootEmitsEveryCompleteApplicationWindowOnce() {
+        val eventPackage = "com.example.reader"
+        val secondPackage = "com.example.calendar"
+
+        val result = ForegroundEvidenceModule().classify(
+            ForegroundFacts(
+                capturedAtWallMs = 10_000L,
+                capturedAtElapsedMs = 10_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = eventPackage,
+                    eventWallMs = 9_000L,
+                    eventElapsedMs = 9_000L
+                ),
+                activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+                applicationWindows = ApplicationWindowsFact(
+                    packages = linkedSetOf(eventPackage, secondPackage),
+                    readState = ForegroundReadState.AVAILABLE,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = eventPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(15_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = secondPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(15_000L),
+                    followUp = FollowUpKind.NONE
+                )
+            ),
+            result.outcomes
+        )
     }
 
     @Test
@@ -765,6 +846,71 @@ class ForegroundEvidenceContractTest {
                     decisionPermission = DecisionPermission.DEFER,
                     evidenceValidity = EvidenceValidity.NotRenewed,
                     followUp = FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                )
+            ),
+            result.outcomes
+        )
+    }
+
+    @Test
+    fun splitScreenDoesNotEndPreviousCandidateThatCurrentWindowsStillIdentify() {
+        val previousPackage = "com.example.reader"
+        val activePackage = "com.example.calendar"
+        val module = ForegroundEvidenceModule()
+
+        module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 1_000L,
+                capturedAtElapsedMs = 1_000L,
+                signal = SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = previousPackage,
+                    eventWallMs = 1_000L,
+                    eventElapsedMs = 1_000L
+                ),
+                activeRoot = ActiveRootFact(
+                    packageName = previousPackage,
+                    readState = ForegroundReadState.AVAILABLE
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        val result = module.classify(
+            ForegroundFacts(
+                capturedAtWallMs = 2_000L,
+                capturedAtElapsedMs = 2_000L,
+                signal = SignalFact(kind = ObservationKind.SYNTHETIC_RECHECK),
+                activeRoot = ActiveRootFact(
+                    packageName = activePackage,
+                    readState = ForegroundReadState.AVAILABLE
+                ),
+                applicationWindows = ApplicationWindowsFact(
+                    packages = linkedSetOf(previousPackage, activePackage),
+                    readState = ForegroundReadState.AVAILABLE,
+                    freshness = ApplicationWindowsFreshness.FRESH
+                )
+            ),
+            ForegroundEvidencePolicySnapshot()
+        )
+
+        assertEquals(
+            listOf(
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = activePackage,
+                    evidenceBasis = EvidenceBasis.ACTIVE_ROOT,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(7_000L),
+                    followUp = FollowUpKind.NONE
+                ),
+                ForegroundEvidenceOutcome.Visible(
+                    packageName = previousPackage,
+                    evidenceBasis = EvidenceBasis.APPLICATION_WINDOW,
+                    sessionEffect = SessionEvidenceEffect.RENEW,
+                    decisionPermission = DecisionPermission.EVALUATE,
+                    evidenceValidity = EvidenceValidity.RenewedUntil(7_000L),
+                    followUp = FollowUpKind.NONE
                 )
             ),
             result.outcomes

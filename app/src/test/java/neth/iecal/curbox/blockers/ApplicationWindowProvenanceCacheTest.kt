@@ -8,7 +8,32 @@ import org.junit.Test
 
 class ApplicationWindowProvenanceCacheTest {
     @Test
-    fun uncertainReadsCarryResolvedPackagesAndOriginalCaptureTimeAsStale() {
+    fun partialReadKeepsCurrentPackagesFreshAndSeparatesCachedPackagesAsStale() {
+        val cache = ApplicationWindowProvenanceCache()
+        cache.resolve(resolvedOther(), capturedAtElapsedMs = 1_000L)
+
+        val result = cache.resolve(
+            snapshot(
+                packages = setOf("com.example.current"),
+                hasApplicationWindow = true,
+                hasUnknown = true,
+                count = 2
+            ),
+            capturedAtElapsedMs = 7_000L
+        )
+
+        assertEquals(setOf("com.example.current"), result.packages)
+        assertEquals(setOf("com.example.other"), result.stalePackages)
+        assertEquals(ApplicationWindowsFreshness.FRESH, result.freshness)
+        assertEquals(1_000L, result.capturedAtElapsedMs)
+        assertTrue(result.hasApplicationWindow)
+        assertTrue(result.hasUnknownApplicationWindow)
+        assertFalse(result.providerFailed)
+        assertEquals(2, result.applicationWindowCount)
+    }
+
+    @Test
+    fun uncertainReadsSeparateCurrentPackagesFromCarriedStalePackages() {
         val uncertainReads = listOf(
             snapshot(hasApplicationWindow = false, hasUnknown = true),
             snapshot(hasApplicationWindow = true, hasUnknown = true, count = 1),
@@ -27,9 +52,17 @@ class ApplicationWindowProvenanceCacheTest {
 
             val result = cache.resolve(uncertain, capturedAtElapsedMs = 7_000L)
 
-            assertEquals(ApplicationWindowsFreshness.STALE, result.freshness)
+            assertEquals(uncertain.packages, result.packages)
+            assertEquals(setOf("com.example.other") - uncertain.packages, result.stalePackages)
+            assertEquals(
+                if (uncertain.packages.isEmpty()) {
+                    ApplicationWindowsFreshness.STALE
+                } else {
+                    ApplicationWindowsFreshness.FRESH
+                },
+                result.freshness
+            )
             assertEquals(1_000L, result.capturedAtElapsedMs)
-            assertTrue("cached package missing", "com.example.other" in result.packages)
             assertEquals(uncertain.hasApplicationWindow, result.hasApplicationWindow)
             assertEquals(uncertain.hasUnknownApplicationWindow, result.hasUnknownApplicationWindow)
             assertEquals(uncertain.providerFailed, result.providerFailed)
@@ -45,6 +78,7 @@ class ApplicationWindowProvenanceCacheTest {
 
         assertEquals(ApplicationWindowsFreshness.FRESH, result.freshness)
         assertEquals(60_000L, result.capturedAtElapsedMs)
+        assertTrue(result.stalePackages.isEmpty())
     }
 
     @Test
@@ -61,6 +95,7 @@ class ApplicationWindowProvenanceCacheTest {
         assertEquals(ApplicationWindowsFreshness.FRESH, result.freshness)
         assertEquals(7_000L, result.capturedAtElapsedMs)
         assertTrue(result.packages.isEmpty())
+        assertTrue(result.stalePackages.isEmpty())
         assertFalse(result.providerFailed)
     }
 
