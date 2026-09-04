@@ -403,8 +403,6 @@ class AppRuleBlocker {
             foregroundEvidence.outcomes
                 .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
                 .filter {
-                    it.evidenceBasis ==
-                        neth.iecal.curbox.domain.apprules.EvidenceBasis.APPLICATION_WINDOW &&
                     it.decisionPermission ==
                         neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
                 }

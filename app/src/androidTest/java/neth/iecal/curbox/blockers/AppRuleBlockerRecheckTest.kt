@@ -517,6 +517,59 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun differentReliableActiveRootReplacesTheEventPackageWithoutRecapture() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        var activeRootReads = 0
+        var applicationWindowReads = 0
+        val evaluatedRuleIds = mutableListOf<String>()
+        val blocker = AppRuleBlocker().apply {
+            activeWindowSnapshotProvider = {
+                activeRootReads++
+                AppRuleBlocker.ActiveWindowSnapshot(
+                    packageName = if (activeRootReads == 1) OTHER_PACKAGE else PACKAGE
+                )
+            }
+            applicationWindowSnapshotProvider = {
+                applicationWindowReads++
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = emptySet(),
+                    hasApplicationWindow = false,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluation ->
+                evaluatedRuleIds += evaluation.evaluations.single().ruleId
+            }
+            recheckPostDelayed = { _, _ -> true }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithSplitAllowances())
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 60_000L, 60_000L, 0L)
+
+        sendWindowEvent(blocker, PACKAGE)
+
+        assertEquals(
+            "the event package must end without evaluation and the active root must evaluate once",
+            listOf("other"),
+            evaluatedRuleIds
+        )
+        assertTrue(
+            "the not-visible event outcome must cancel its existing boundary",
+            PACKAGE !in (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
+        )
+        assertEquals(1, activeRootReads)
+        assertEquals(1, applicationWindowReads)
+        blocker.onDestroy()
+    }
+
+    @Test
     fun essentialRootAndReconnectProcessVisibleTargetWithoutDuplicateGuardian() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
