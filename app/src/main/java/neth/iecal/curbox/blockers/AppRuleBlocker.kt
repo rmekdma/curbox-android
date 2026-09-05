@@ -140,11 +140,6 @@ class AppRuleBlocker {
     private var sourceOrderSequencer = AtomicConnectionScopedSourceOrderSequencer()
     private var decisionWorker: SerializedDecisionWorker? = null
     @Volatile private var latestRuntimeRevision = RuntimeRevision(0L)
-    private var visibleSessionReconciler: (suspend (
-        Set<String>,
-        Long,
-        Long
-    ) -> Boolean)? = null
 
     private data class RuleRuntime(
         val snapshot: AppRuleSnapshot,
@@ -208,15 +203,7 @@ class AppRuleBlocker {
     /** Temporary seam for observing the external notification publication boundary. */
     internal var notificationPostObserver: ((LiveRuleNotificationModel) -> Unit)? = null
 
-    fun setup(
-        service: BaseBlockingService,
-        visibleSessionReconciler: (suspend (
-            Set<String>,
-            Long,
-            Long
-        ) -> Boolean)? = null
-    ) {
-        this.visibleSessionReconciler = visibleSessionReconciler
+    fun setup(service: BaseBlockingService) {
         val connectionGeneration = lifecycleGeneration.incrementAndGet()
         synchronized(runtimeLock) {
             destroyed = false
@@ -419,7 +406,6 @@ class AppRuleBlocker {
             workerScope = scope,
             onNonFatalError = ::logNonFatal,
             onEvaluation = ::observeWorkerEvaluation,
-            visibleSessionReconciler = visibleSessionReconciler,
             enforcement = enforcement
         )
         decisionWorker = worker

@@ -144,12 +144,7 @@ class SerializedDecisionWorker internal constructor(
         String,
         AppRulesEvaluation
     ) -> Unit)? = null,
-    private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository),
-    private val visibleSessionReconciler: (suspend (
-        Set<String>,
-        Long,
-        Long
-    ) -> Boolean)? = null
+    private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository)
 ) {
     private val accepting = AtomicBoolean(true)
     private val requests = Channel<DecisionRequest>(Channel.UNLIMITED)
@@ -157,7 +152,7 @@ class SerializedDecisionWorker internal constructor(
     private var currentLifecycleGeneration = lifecycleGeneration
     private var currentAcceptedRuntime = acceptedRuntime
     private var evidenceModule = ForegroundEvidenceModule()
-    private val sessionLedger = WorkerSessionLedger(repository)
+    private val sessionPersistence = SerializedForegroundSessionPersistence(repository)
     private val workerJob: Job = workerScope.launch {
         for (request in requests) {
             try {
@@ -198,7 +193,7 @@ class SerializedDecisionWorker internal constructor(
             currentLifecycleGeneration = lifecycleGeneration
             currentAcceptedRuntime = acceptedRuntime
             evidenceModule = ForegroundEvidenceModule()
-            sessionLedger.clear()
+            sessionPersistence.clear()
             accepting.set(true)
         }
     }
@@ -244,11 +239,7 @@ class SerializedDecisionWorker internal constructor(
         }
         val shouldReconcile = visiblePackages.isNotEmpty() || endsVisibility
         val commitStatus = if (shouldReconcile) {
-            val reconciled = visibleSessionReconciler?.invoke(
-                visiblePackages,
-                request.observation.capturedAtWallMs,
-                request.observation.capturedAtElapsedMs
-            ) ?: sessionLedger.reconcile(
+            val reconciled = sessionPersistence.reconcile(
                 visiblePackages = visiblePackages,
                 nowWallMs = request.observation.capturedAtWallMs,
                 nowElapsedMs = request.observation.capturedAtElapsedMs,
@@ -390,7 +381,7 @@ class SerializedDecisionWorker internal constructor(
 }
 
 /** Private worker-owned session persistence. */
-private class WorkerSessionLedger(
+private class SerializedForegroundSessionPersistence(
     private val repository: CurrentUseDaySessionRepository
 ) {
     private data class ActiveSession(

@@ -87,7 +87,7 @@ class AppUsageTracker {
     private var lastCleanupGenerationStartedAtMs = Long.MIN_VALUE
     private var pendingSettingsSnapshot: Settings? = null
     private var destroying = false
-    @Volatile private var serializedDecisionWorkerOwnsForeground = false
+    private val foregroundSessionOwnership = ForegroundSessionOwnership()
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var screenOn = true
     /** All state below is owned by the accessibility service main thread. */
@@ -122,7 +122,7 @@ class AppUsageTracker {
 
     fun setup(service: BaseBlockingService) {
         this.service = service
-        serializedDecisionWorkerOwnsForeground = false
+        foregroundSessionOwnership.returnToTracker()
         crashLogger = CrashLogger(service)
         ownPackage = service.packageName
         val database = AppDatabase.getInstance(service)
@@ -212,6 +212,12 @@ class AppUsageTracker {
     }
 
     private fun applySettingsSnapshot(settings: Settings) {
+        foregroundSessionOwnership.runIfTrackerOwner {
+            applyTrackerSettingsSnapshot(settings)
+        }
+    }
+
+    private fun applyTrackerSettingsSnapshot(settings: Settings) {
         if (destroying) return
         val nextReset = safeResetTime(settings.useDayResetHour, settings.useDayResetMinute)
         val nextDecision = AppUsageTrackingPolicy.decide(
@@ -247,41 +253,28 @@ class AppUsageTracker {
     }
 
     fun onEvent(event: AccessibilityEvent?) {
-        if (destroying || !recordingEnabled || !screenOn || event == null) return
-        // A reset command owns the service-process writer until its Room transaction and
-        // foreground restart commit.  Deferring visibility reconciliation keeps a heartbeat or
-        // accessibility event from racing the reset transaction.
-        if (activeUsageResetCommands > 0) return
-        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
-        ) return
+        foregroundSessionOwnership.runIfTrackerOwner {
+            if (destroying || !recordingEnabled || !screenOn || event == null) {
+                return@runIfTrackerOwner
+            }
+            // A reset command owns the service-process writer until its Room transaction and
+            // foreground restart commit. Deferring visibility reconciliation keeps a heartbeat
+            // or accessibility event from racing the reset transaction.
+            if (activeUsageResetCommands > 0) return@runIfTrackerOwner
+            if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
+            ) return@runIfTrackerOwner
 
-        val visiblePackages = queryVisiblePackages(event)
-        reconcileVisiblePackages(visiblePackages)
-    }
-
-    /** Runs the existing session writer inside SerializedDecisionWorker's serialized owner. */
-    internal fun reconcileForDecision(
-        visiblePackages: Set<String>,
-        nowWallMs: Long,
-        nowElapsedMs: Long
-    ): Boolean {
-        if (destroying || activeUsageResetCommands > 0) return false
-        if (!recordingEnabled) {
-            endAllSessions()
-            return true
+            val visiblePackages = queryVisiblePackages(event)
+            reconcileVisiblePackages(visiblePackages)
         }
-        reconcileVisiblePackages(
-            nextPackages = visiblePackages,
-            observedWallMs = nowWallMs,
-            observedElapsedMs = nowElapsedMs
-        )
-        return true
     }
 
     internal fun handoffForegroundOwnershipToDecisionWorker() {
-        serializedDecisionWorkerOwnsForeground = true
-        stopHeartbeat()
+        foregroundSessionOwnership.handoffToWorker {
+            stopHeartbeat()
+            endAllSessions()
+        }
     }
 
     /**
@@ -890,7 +883,7 @@ class AppUsageTracker {
 
     private val heartbeat = object : Runnable {
         override fun run() {
-            if (serializedDecisionWorkerOwnsForeground || destroying || !recordingEnabled ||
+            if (foregroundSessionOwnership.isWorkerOwner() || destroying || !recordingEnabled ||
                 activeSessions.isEmpty() || activeUsageResetCommands > 0
             ) return
             try {
@@ -908,7 +901,7 @@ class AppUsageTracker {
     }
 
     private fun startHeartbeat() {
-        if (serializedDecisionWorkerOwnsForeground) return
+        if (foregroundSessionOwnership.isWorkerOwner()) return
         mainHandler.removeCallbacks(heartbeat)
         mainHandler.postDelayed(heartbeat, HEARTBEAT_MS)
     }
@@ -963,8 +956,9 @@ class AppUsageTracker {
                 Intent.ACTION_SCREEN_OFF -> {
                     screenOn = false
                     try {
-                        if (activeUsageResetCommands > 0) return
-                        endAllSessions()
+                        foregroundSessionOwnership.runIfTrackerOwner {
+                            if (activeUsageResetCommands == 0) endAllSessions()
+                        }
                     } catch (error: Exception) {
                         logNonFatal(error)
                     }
@@ -979,20 +973,24 @@ class AppUsageTracker {
     }
 
     private fun resumeVisibleApplications() {
-        if (destroying || !recordingEnabled || !screenOn || activeUsageResetCommands > 0) return
-        try {
-            val windows = service.windows.map { window ->
-                VisibleApplicationWindow(packageNameForWindow(window), window.type)
+        foregroundSessionOwnership.runIfTrackerOwner {
+            if (destroying || !recordingEnabled || !screenOn || activeUsageResetCommands > 0) {
+                return@runIfTrackerOwner
             }
-            reconcileVisiblePackages(
-                VisibleApplicationPackages.fromWindows(
-                    windows,
-                    ownPackage,
-                    Constants.SYSTEM_UI_PACKAGE_NAME
+            try {
+                val windows = service.windows.map { window ->
+                    VisibleApplicationWindow(packageNameForWindow(window), window.type)
+                }
+                reconcileVisiblePackages(
+                    VisibleApplicationPackages.fromWindows(
+                        windows,
+                        ownPackage,
+                        Constants.SYSTEM_UI_PACKAGE_NAME
+                    )
                 )
-            )
-        } catch (error: Exception) {
-            logNonFatal(error)
+            } catch (error: Exception) {
+                logNonFatal(error)
+            }
         }
     }
 
