@@ -157,9 +157,8 @@ class AppRuleBlocker {
     private val recheckGeneration = AtomicLong(0L)
     private val lifecycleGeneration = AtomicLong(0L)
     private val scheduledRechecks = mutableMapOf<String, ScheduledRecheck>()
-    private val scheduledAlarmPendingIntents = mutableMapOf<String, PendingIntent>()
-    private val scheduledAlarmCallbacks = mutableMapOf<String, Runnable>()
-    private val scheduledAlarmTokens = mutableMapOf<String, Long>()
+    /** Canonical identity for every AlarmManager registration, including recovery alarms. */
+    private val scheduledAlarms = mutableMapOf<String, ScheduledAlarmRegistration>()
     private val schedulerAlarmRequestCode = AtomicLong(0L)
     private val scheduledRecoveryCallbacks = mutableMapOf<String, Runnable>()
     private var pendingSchedulerWakeGeneration: Long? = null
@@ -188,7 +187,15 @@ class AppRuleBlocker {
         val generation: Long,
         val runnable: Runnable,
         val dueAtWallClockMs: Long?,
-        val maxDelayMillis: Long?
+        val maxDelayMillis: Long?,
+        val relativeDelayMillis: Long?
+    )
+
+    private data class ScheduledAlarmRegistration(
+        val token: Long,
+        val pendingIntent: PendingIntent,
+        val callback: Runnable,
+        val generation: Long
     )
 
     private data class ObservedForegroundOutcome(
@@ -641,6 +648,7 @@ class AppRuleBlocker {
                 packageName = update.packageName,
                 dueAtWallClockMs = plan.dueAtWallClockMs,
                 maxDelayMillis = plan.maxDelayMillis,
+                relativeDelayMillis = plan.delayMillis,
                 generation = generation
             )
         }
@@ -1090,23 +1098,43 @@ class AppRuleBlocker {
                 ?: return
             val token = intent.getLongExtra(EXTRA_SCHEDULER_TOKEN, -1L)
             val generation = synchronized(runtimeLock) {
-                if (!isReadyForChecks() || scheduledAlarmTokens[packageName] != token) return
-                val callback = scheduledAlarmCallbacks[packageName] ?: return
+                if (!isReadyForChecks()) return
+                val registration = scheduledAlarms[packageName]
+                    ?.takeIf { it.token == token }
+                    ?: return
                 val scheduled = scheduledRechecks[packageName]
-                    ?.takeIf { it.runnable === callback }
-                    ?: run {
-                        // Only clear the registration proven by this callback and token. A stale
-                        // alarm must never remove a newer alarm for the same package.
-                        removeAlarmRegistrationLocked(packageName, callback, token)
-                        return
+                    ?.takeIf {
+                        it.runnable === registration.callback &&
+                            it.generation == registration.generation
                     }
-                if (recheckGeneration.get() != scheduled.generation) {
-                    removeAlarmRegistrationLocked(packageName, callback, token)
+                val recovery = scheduledRecoveryCallbacks[packageName]
+                    ?.takeIf { it === registration.callback }
+                if (scheduled == null && recovery == null) {
+                    // The token matched a registration, but its callback was replaced or
+                    // cancelled. Remove only that exact registration and reject the delivery.
+                    removeAlarmRegistrationLocked(
+                        packageName,
+                        registration.callback,
+                        registration.token
+                    )
                     return
                 }
-                removeAlarmRegistrationLocked(packageName, callback, token)
-                scheduledRechecks.remove(packageName)
-                scheduled.generation
+                if (recheckGeneration.get() != registration.generation) {
+                    removeAlarmRegistrationLocked(
+                        packageName,
+                        registration.callback,
+                        registration.token
+                    )
+                    return
+                }
+                removeAlarmRegistrationLocked(
+                    packageName,
+                    registration.callback,
+                    registration.token
+                )
+                if (scheduled != null) scheduledRechecks.remove(packageName)
+                if (recovery != null) scheduledRecoveryCallbacks.remove(packageName)
+                registration.generation
             }
             // Coalesce an alarm into one guarded observation. The actual framework reads and
             // decision work happen from the posted reconciliation callback, outside onReceive.
@@ -1654,24 +1682,38 @@ class AppRuleBlocker {
                 remainingMillis
             ),
             maxDelayMillis = maxDelayMillis,
+            relativeDelayMillis = remainingMillis,
             generation = generation
         )
     }
+
+    /** Relative recovery must not inherit an already-expired semantic boundary. */
+    private fun relativeRecoveryDueAtWallClockMs(delayMillis: Long): Long =
+        safeWallClockAdd(
+            observationWallClockMs(),
+            delayMillis.coerceAtLeast(1L)
+        )
 
     private fun scheduleRecheckAtWallClock(
         packageName: String,
         dueAtWallClockMs: Long,
         maxDelayMillis: Long,
+        relativeDelayMillis: Long? = null,
         generation: Long
     ) {
         if (!isReadyForChecks() || packageName.isBlank()) return
         postScheduledRecheck(
             packageName = packageName,
             generation = generation,
-            delayMillis = 0L,
+            delayMillis = relativeDelayMillis ?: AppRuleWallClockScheduler.delayUntil(
+                dueAtWallClockMs = dueAtWallClockMs,
+                nowWallClockMs = observationWallClockMs(),
+                nowElapsedRealtimeMs = observationElapsedRealtimeMs()
+            ),
             visibilityAttempt = 0,
             maxDelayMillis = maxDelayMillis,
-            dueAtWallClockMs = dueAtWallClockMs
+            dueAtWallClockMs = dueAtWallClockMs,
+            relativeDelayMillis = relativeDelayMillis
         )
     }
 
@@ -1682,7 +1724,8 @@ class AppRuleBlocker {
         visibilityAttempt: Int,
         postAttempt: Int = 1,
         maxDelayMillis: Long? = null,
-        dueAtWallClockMs: Long? = null
+        dueAtWallClockMs: Long? = null,
+        relativeDelayMillis: Long? = null
     ) {
         lateinit var runnable: Runnable
         runnable = Runnable {
@@ -1714,7 +1757,8 @@ class AppRuleBlocker {
                 generation = generation,
                 runnable = runnable,
                 dueAtWallClockMs = dueAtWallClockMs,
-                maxDelayMillis = maxDelayMillis
+                maxDelayMillis = maxDelayMillis,
+                relativeDelayMillis = relativeDelayMillis ?: delayMillis.takeIf { it > 0L }
             )
             old
         }
@@ -1741,7 +1785,8 @@ class AppRuleBlocker {
                     postAttempt = postAttempt,
                     delayMillis = delayMillis,
                     maxDelayMillis = maxDelayMillis,
-                    dueAtWallClockMs = dueAtWallClockMs
+                    dueAtWallClockMs = dueAtWallClockMs,
+                    relativeDelayMillis = relativeDelayMillis
                 )
             }
         } catch (error: Throwable) {
@@ -1754,7 +1799,8 @@ class AppRuleBlocker {
                     postAttempt = postAttempt,
                     delayMillis = delayMillis,
                     maxDelayMillis = maxDelayMillis,
-                    dueAtWallClockMs = dueAtWallClockMs
+                    dueAtWallClockMs = dueAtWallClockMs,
+                    relativeDelayMillis = relativeDelayMillis
                 )
             } else {
                 removeScheduledCallback(packageName, runnable)
@@ -1769,7 +1815,8 @@ class AppRuleBlocker {
         postAttempt: Int,
         delayMillis: Long,
         maxDelayMillis: Long?,
-        dueAtWallClockMs: Long?
+        dueAtWallClockMs: Long?,
+        relativeDelayMillis: Long?
     ) {
         if (postAttempt >= MAX_SCHEDULER_POST_ATTEMPTS ||
             !isReadyForChecks() || recheckGeneration.get() != generation
@@ -1781,7 +1828,8 @@ class AppRuleBlocker {
                     visibilityAttempt = visibilityAttempt,
                     delayMillis = delayMillis,
                     maxDelayMillis = maxDelayMillis,
-                    dueAtWallClockMs = dueAtWallClockMs
+                    dueAtWallClockMs = dueAtWallClockMs,
+                    relativeDelayMillis = relativeDelayMillis
                 )
             }
             return
@@ -1793,7 +1841,8 @@ class AppRuleBlocker {
             visibilityAttempt = visibilityAttempt,
             postAttempt = postAttempt + 1,
             maxDelayMillis = maxDelayMillis,
-            dueAtWallClockMs = dueAtWallClockMs
+            dueAtWallClockMs = dueAtWallClockMs,
+            relativeDelayMillis = relativeDelayMillis
         )
     }
 
@@ -1803,16 +1852,20 @@ class AppRuleBlocker {
         visibilityAttempt: Int,
         delayMillis: Long,
         maxDelayMillis: Long?,
-        dueAtWallClockMs: Long?
+        dueAtWallClockMs: Long?,
+        relativeDelayMillis: Long?
     ) {
         if (!isReadyForChecks() || recheckGeneration.get() != generation) return
-        val recoveryDelay = dueAtWallClockMs?.let { dueAt ->
-            AppRuleWallClockScheduler.delayUntil(
-                dueAtWallClockMs = dueAt,
-                nowWallClockMs = observationWallClockMs(),
-                nowElapsedRealtimeMs = observationElapsedRealtimeMs()
-            )
-        }?.coerceAtLeast(1L) ?: delayMillis.coerceAtLeast(1L)
+        val nowWallClockMs = observationWallClockMs()
+        val recoveryDueAtWallClockMs = dueAtWallClockMs
+            ?.takeIf { it > nowWallClockMs }
+            ?: relativeRecoveryDueAtWallClockMs(relativeDelayMillis ?: delayMillis)
+        val requestedRecoveryDelayMillis = relativeDelayMillis ?: delayMillis
+        val recoveryDelay = AppRuleWallClockScheduler.delayUntil(
+            dueAtWallClockMs = recoveryDueAtWallClockMs,
+            nowWallClockMs = nowWallClockMs,
+            nowElapsedRealtimeMs = observationElapsedRealtimeMs()
+        ).coerceAtLeast(1L)
         lateinit var recoveryRunnable: Runnable
         recoveryRunnable = Runnable {
             val current = synchronized(runtimeLock) {
@@ -1824,6 +1877,9 @@ class AppRuleBlocker {
                 }
             }
             if (!current || !isReadyForChecks() || recheckGeneration.get() != generation) return@Runnable
+            val dueAtWallClockMsForRearm = recoveryDueAtWallClockMs
+                .takeIf { it > observationWallClockMs() }
+                ?: relativeRecoveryDueAtWallClockMs(requestedRecoveryDelayMillis)
             postScheduledRecheck(
                 packageName = packageName,
                 generation = generation,
@@ -1831,7 +1887,8 @@ class AppRuleBlocker {
                 visibilityAttempt = visibilityAttempt,
                 postAttempt = 1,
                 maxDelayMillis = maxDelayMillis,
-                dueAtWallClockMs = dueAtWallClockMs
+                dueAtWallClockMs = dueAtWallClockMsForRearm,
+                relativeDelayMillis = requestedRecoveryDelayMillis
             )
         }
         val previousRecovery = synchronized(runtimeLock) {
@@ -1897,11 +1954,16 @@ class AppRuleBlocker {
             ) {
                 return false
             }
-            val old = scheduledAlarmPendingIntents[packageName]
-            scheduledAlarmPendingIntents[packageName] = pendingIntent
-            scheduledAlarmCallbacks[packageName] = runnable
-            scheduledAlarmTokens[packageName] = token
-            old
+            val old = scheduledAlarms.put(
+                packageName,
+                ScheduledAlarmRegistration(
+                    token = token,
+                    pendingIntent = pendingIntent,
+                    callback = runnable,
+                    generation = generation
+                )
+            )
+            old?.pendingIntent
         }
         previousAlarm?.let(::cancelAlarm)
         val triggerAtElapsedMs = safeElapsedRealtimeAdd(
@@ -2010,7 +2072,8 @@ class AppRuleBlocker {
                     delayMillis = 0L,
                     visibilityAttempt = visibilityAttempt,
                     maxDelayMillis = scheduled.maxDelayMillis,
-                    dueAtWallClockMs = scheduled.dueAtWallClockMs
+                    dueAtWallClockMs = scheduled.dueAtWallClockMs,
+                    relativeDelayMillis = scheduled.relativeDelayMillis
                 )
                 return
             }
@@ -2024,7 +2087,9 @@ class AppRuleBlocker {
                     delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
                     visibilityAttempt = 0,
                     maxDelayMillis = scheduled.maxDelayMillis,
-                    dueAtWallClockMs = scheduled.dueAtWallClockMs
+                    dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
+                        UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS
+                    )
                 )
                 return
             }
@@ -2058,7 +2123,9 @@ class AppRuleBlocker {
                             delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
                             visibilityAttempt = visibilityAttempt + 1,
                             maxDelayMillis = scheduled.maxDelayMillis,
-                            dueAtWallClockMs = scheduled.dueAtWallClockMs
+                            dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
+                                VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1)
+                            )
                         )
                     } else if (failClosedCandidate) {
                         // R5 A is a bounded, package-checked fallback. The module grants this
@@ -2077,7 +2144,9 @@ class AppRuleBlocker {
                             delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
                             visibilityAttempt = 0,
                             maxDelayMillis = scheduled.maxDelayMillis,
-                            dueAtWallClockMs = scheduled.dueAtWallClockMs
+                            dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
+                                UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS
+                            )
                         )
                     }
                 }
@@ -2099,7 +2168,9 @@ class AppRuleBlocker {
                         delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
                         visibilityAttempt = visibilityAttempt + 1,
                         maxDelayMillis = plan.maxDelayMillis,
-                        dueAtWallClockMs = plan.dueAtWallClockMs
+                        dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
+                            VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1)
+                        )
                     )
                 } else if (isReadyForChecks() && recheckGeneration.get() == generation) {
                     // After the bounded ordinary-failure retries, preserve R5's fail-closed
@@ -2375,12 +2446,10 @@ class AppRuleBlocker {
         val callbacks = synchronized(runtimeLock) {
             val scheduled = scheduledRechecks.values.map(ScheduledRecheck::runnable)
             val recovery = scheduledRecoveryCallbacks.values.toList()
-            val alarms = scheduledAlarmPendingIntents.values.toList()
+            val alarms = scheduledAlarms.values.map(ScheduledAlarmRegistration::pendingIntent)
             scheduledRechecks.clear()
             scheduledRecoveryCallbacks.clear()
-            scheduledAlarmPendingIntents.clear()
-            scheduledAlarmCallbacks.clear()
-            scheduledAlarmTokens.clear()
+            scheduledAlarms.clear()
             Triple(scheduled, recovery, alarms)
         }
         callbacks.first.forEach(::removeHandlerCallback)
@@ -2390,13 +2459,9 @@ class AppRuleBlocker {
 
     private fun removeScheduledCallback(packageName: String, runnable: Runnable?) {
         val callbacks = synchronized(runtimeLock) {
-            val alarm = if (runnable == null || scheduledAlarmCallbacks[packageName] === runnable) {
-                scheduledAlarmCallbacks.remove(packageName)
-                scheduledAlarmTokens.remove(packageName)
-                scheduledAlarmPendingIntents.remove(packageName)
-            } else {
-                null
-            }
+            val alarm = scheduledAlarms[packageName]
+                ?.takeIf { runnable == null || it.callback === runnable }
+                ?.let { scheduledAlarms.remove(packageName)?.pendingIntent }
             val recovery = if (runnable == null || scheduledRecoveryCallbacks[packageName] === runnable) {
                 scheduledRecoveryCallbacks.remove(packageName)
             } else {
@@ -2453,14 +2518,13 @@ class AppRuleBlocker {
         runnable: Runnable,
         token: Long
     ): PendingIntent? {
-        if (scheduledAlarmCallbacks[packageName] !== runnable ||
-            scheduledAlarmTokens[packageName] != token
+        val registration = scheduledAlarms[packageName]
+        if (registration?.callback !== runnable || registration.token != token
         ) {
             return null
         }
-        scheduledAlarmCallbacks.remove(packageName)
-        scheduledAlarmTokens.remove(packageName)
-        return scheduledAlarmPendingIntents.remove(packageName)
+        scheduledAlarms.remove(packageName)
+        return registration.pendingIntent
     }
 
     private fun cancelAlarm(pendingIntent: PendingIntent) {

@@ -1285,6 +1285,54 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun schedulerPostFailureRefreshesExpiredRelativeRecoveryDue() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val primaryQueue = ArrayDeque<Runnable>()
+        val recoveryQueue = ArrayDeque<Runnable>()
+        val primaryDelays = mutableListOf<Long>()
+        var primaryAttempts = 0
+        var wallClockMs = 1_000_000L
+        var elapsedRealtimeMs = 5_000L
+        val blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { wallClockMs }
+            elapsedRealtimeMsProvider = { elapsedRealtimeMs }
+            recheckPostDelayed = { runnable, delayMillis ->
+                primaryAttempts++
+                primaryDelays += delayMillis
+                if (primaryAttempts <= 3) {
+                    false
+                } else {
+                    primaryQueue.addLast(runnable)
+                    true
+                }
+            }
+            recheckRecoveryPostDelayed = { runnable, _ ->
+                recoveryQueue.addLast(runnable)
+                true
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        assertTrue("failed primary posts must install recovery", recoveryQueue.isNotEmpty())
+
+        wallClockMs += 1_500L
+        elapsedRealtimeMs += 1_500L
+        recoveryQueue.removeFirst().run()
+
+        assertEquals(
+            "an expired recovery boundary must become a fresh relative deadline",
+            1_000L,
+            primaryDelays[3]
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
     fun productionWakeAlarmReceiverRecomputesFromCurrentWallClock() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         val wakeQueue = ArrayDeque<Runnable>()
@@ -1327,9 +1375,7 @@ class AppRuleBlockerRecheckTest {
         coordinator.accept(snapshotWithGlobalDeny())
 
         invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
-        @Suppress("UNCHECKED_CAST")
-        val tokens = getField(blocker, "scheduledAlarmTokens") as Map<String, Long>
-        val token = tokens.getValue(PACKAGE)
+        val token = scheduledAlarmToken(blocker)
 
         wallClockMs += 2_000L
         elapsedRealtimeMs += 2_000L
@@ -1358,6 +1404,156 @@ class AppRuleBlockerRecheckTest {
         SystemClock.sleep(100L)
         assertEquals("one alarm must produce one decision", 1, evaluations)
         blocker.onDestroy()
+    }
+
+    @Test
+    fun productionRecoveryWakeAlarmReceiverAcceptsOnlyCurrentTokenAndWakesOnce() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val wakeQueue = ArrayDeque<Runnable>()
+        var wallClockMs = 1_000_000L
+        var elapsedRealtimeMs = 5_000L
+        var primaryAttempts = 0
+        var evaluations = 0
+        val blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { wallClockMs }
+            elapsedRealtimeMsProvider = { elapsedRealtimeMs }
+            recheckPostDelayed = { _, _ ->
+                primaryAttempts++
+                false
+            }
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                wakeQueue.addLast(runnable)
+                true
+            }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluations++ }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(
+            blocker,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        // Force two production AlarmManager recovery registrations so the first token becomes
+        // stale and the second token is the only one allowed to wake the receiver.
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        val firstToken = scheduledAlarmToken(blocker)
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        val secondToken = scheduledAlarmToken(blocker)
+        assertTrue("replacement must receive a distinct alarm token", firstToken != secondToken)
+        assertTrue("primary post failures must reach recovery alarm registration", primaryAttempts >= 6)
+
+        val receiver = getField(blocker, "schedulerWakeReceiver") as android.content.BroadcastReceiver
+        fun deliver(token: Long) {
+            receiver.onReceive(
+                service,
+                Intent("neth.iecal.curbox.blockers.APP_RULE_SCHEDULER_WAKE")
+                    .putExtra("neth.iecal.curbox.blockers.EXTRA_SCHEDULER_PACKAGE", PACKAGE)
+                    .putExtra("neth.iecal.curbox.blockers.EXTRA_SCHEDULER_TOKEN", token)
+            )
+        }
+
+        deliver(firstToken)
+        assertTrue("a replaced recovery token must be rejected", wakeQueue.isEmpty())
+
+        wallClockMs += 1_000L
+        elapsedRealtimeMs += 1_000L
+        deliver(secondToken)
+        deliver(secondToken)
+        assertEquals("the current recovery token must wake exactly once", 1, wakeQueue.size)
+
+        wakeQueue.removeFirst().run()
+        assertTrue(
+            "the accepted recovery alarm must reach the decision path",
+            awaitCondition { evaluations > 0 }
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun relativeVisibilityAndSuspendedRecoveryRefreshesExpiredBoundary() {
+        listOf(false, true).forEach { suspended ->
+            val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+            val queued = ArrayDeque<Runnable>()
+            val delays = mutableListOf<Long>()
+            var wallClockMs = 1_000_000L
+            var elapsedRealtimeMs = 5_000L
+            val blocker = AppRuleBlocker().apply {
+                wallClockMsProvider = { wallClockMs }
+                elapsedRealtimeMsProvider = { elapsedRealtimeMs }
+                screenInteractiveProvider = { true }
+                keyguardLockedProvider = { false }
+                activeWindowSnapshotProvider = {
+                    AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+                }
+                applicationWindowSnapshotProvider = {
+                    AppRuleBlocker.ApplicationWindowSnapshot(
+                        packages = emptySet(),
+                        hasApplicationWindow = true,
+                        hasUnknownApplicationWindow = true,
+                        applicationWindowCount = 1
+                    )
+                }
+                recheckPostDelayed = { runnable, delayMillis ->
+                    delays += delayMillis
+                    queued.addLast(runnable)
+                    true
+                }
+            }
+            val repository = EmptySessionRepository()
+            setField(blocker, "service", service)
+            setField(blocker, "sessionRepository", repository)
+            setField(blocker, "enforcement", AppRuleEnforcement(repository))
+            setField(blocker, "setupReady", true)
+            setField(blocker, "launchablePackages", setOf(PACKAGE))
+            setField(blocker, "foregroundEvidenceSuspended", suspended)
+            if (suspended) setField(blocker, "suspendedForegroundPackage", PACKAGE)
+
+            invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+            wallClockMs += 1_000L
+            elapsedRealtimeMs += 1_000L
+            val recoveryAttempts = if (suspended) 1 else 4
+            repeat(recoveryAttempts) { attempt ->
+                queued.removeFirst().run()
+                if (attempt < recoveryAttempts - 1 && queued.isNotEmpty()) {
+                    val nextDelay = delays.last()
+                    wallClockMs += nextDelay
+                    elapsedRealtimeMs += nextDelay
+                }
+            }
+
+            assertTrue(
+                "${if (suspended) "suspended" else "unknown"} recovery must not clamp to 1ms",
+                delays.last() >= 20_000L
+            )
+            val scheduled = (getField(blocker, "scheduledRechecks") as Map<*, *>)
+                .get(PACKAGE) ?: error("relative recovery must retain a scheduled package")
+            val dueAtWallClockMs = getField(scheduled, "dueAtWallClockMs") as Long?
+            assertTrue(
+                "relative recovery must own a fresh future absolute due time",
+                dueAtWallClockMs != null && dueAtWallClockMs > wallClockMs
+            )
+            blocker.onDestroy()
+        }
     }
 
     @Test
@@ -1693,6 +1889,12 @@ class AppRuleBlockerRecheckTest {
 
     private fun getField(target: Any, name: String): Any? =
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+
+    private fun scheduledAlarmToken(blocker: AppRuleBlocker): Long {
+        val alarms = getField(blocker, "scheduledAlarms") as Map<*, *>
+        val registration = alarms[PACKAGE] ?: error("scheduled alarm registration is missing")
+        return getField(registration, "token") as Long
+    }
 
     private fun invokePrivate(target: Any, name: String, vararg args: Any?) {
         val method = target.javaClass.declaredMethods.first { it.name == name && it.parameterTypes.size == args.size }
