@@ -87,6 +87,7 @@ class AppUsageTracker {
     private var lastCleanupGenerationStartedAtMs = Long.MIN_VALUE
     private var pendingSettingsSnapshot: Settings? = null
     private var destroying = false
+    @Volatile private var serializedDecisionWorkerOwnsForeground = false
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var screenOn = true
     /** All state below is owned by the accessibility service main thread. */
@@ -121,6 +122,7 @@ class AppUsageTracker {
 
     fun setup(service: BaseBlockingService) {
         this.service = service
+        serializedDecisionWorkerOwnsForeground = false
         crashLogger = CrashLogger(service)
         ownPackage = service.packageName
         val database = AppDatabase.getInstance(service)
@@ -256,6 +258,30 @@ class AppUsageTracker {
 
         val visiblePackages = queryVisiblePackages(event)
         reconcileVisiblePackages(visiblePackages)
+    }
+
+    /** Runs the existing session writer inside SerializedDecisionWorker's serialized owner. */
+    internal fun reconcileForDecision(
+        visiblePackages: Set<String>,
+        nowWallMs: Long,
+        nowElapsedMs: Long
+    ): Boolean {
+        if (destroying || activeUsageResetCommands > 0) return false
+        if (!recordingEnabled) {
+            endAllSessions()
+            return true
+        }
+        reconcileVisiblePackages(
+            nextPackages = visiblePackages,
+            observedWallMs = nowWallMs,
+            observedElapsedMs = nowElapsedMs
+        )
+        return true
+    }
+
+    internal fun handoffForegroundOwnershipToDecisionWorker() {
+        serializedDecisionWorkerOwnsForeground = true
+        stopHeartbeat()
     }
 
     /**
@@ -433,14 +459,18 @@ class AppUsageTracker {
         ) setOf(packageName) else emptySet()
     }
 
-    private fun reconcileVisiblePackages(nextPackages: Set<String>) {
+    private fun reconcileVisiblePackages(
+        nextPackages: Set<String>,
+        observedWallMs: Long? = null,
+        observedElapsedMs: Long? = null
+    ) {
         if (!recordingEnabled) {
             endAllSessions()
             return
         }
 
-        val nowWall = System.currentTimeMillis()
-        val nowElapsed = SystemClock.elapsedRealtime()
+        val nowWall = observedWallMs ?: System.currentTimeMillis()
+        val nowElapsed = observedElapsedMs ?: SystemClock.elapsedRealtime()
         val previousPackages = activeSessions.keys.toSet()
 
         // Flush retained sessions before changing the set. This makes the preceding package's
@@ -473,7 +503,7 @@ class AppUsageTracker {
             ): Long = startSession(
                 packageName = packageName,
                 startedAtWallMs = startedAtMs,
-                startedAtElapsedMs = SystemClock.elapsedRealtime(),
+                startedAtElapsedMs = observedElapsedMs ?: SystemClock.elapsedRealtime(),
                 recordLaunch = packageName !in resetRestartPackages,
                 useDayId = useDayId
             )
@@ -860,7 +890,9 @@ class AppUsageTracker {
 
     private val heartbeat = object : Runnable {
         override fun run() {
-            if (destroying || !recordingEnabled || activeSessions.isEmpty() || activeUsageResetCommands > 0) return
+            if (serializedDecisionWorkerOwnsForeground || destroying || !recordingEnabled ||
+                activeSessions.isEmpty() || activeUsageResetCommands > 0
+            ) return
             try {
                 val nowWall = System.currentTimeMillis()
                 val nowElapsed = SystemClock.elapsedRealtime()
@@ -876,6 +908,7 @@ class AppUsageTracker {
     }
 
     private fun startHeartbeat() {
+        if (serializedDecisionWorkerOwnsForeground) return
         mainHandler.removeCallbacks(heartbeat)
         mainHandler.postDelayed(heartbeat, HEARTBEAT_MS)
     }
