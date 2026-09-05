@@ -1,6 +1,8 @@
 package neth.iecal.curbox.domain.apprules
 
 import java.util.concurrent.atomic.AtomicBoolean
+import java.time.Instant
+import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,6 +14,7 @@ import kotlinx.coroutines.launch
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
+import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.UseDayResetTime
 
 /** The complete rule inputs accepted by one serialized decision worker generation. */
@@ -21,7 +24,11 @@ data class RuleRuntimeSnapshot(
     val useDayGenerationStartedAtMs: Long = 0L,
     val overrideState: AppRuleOverrideState = AppRuleOverrideState(),
     val launchablePackages: Set<String> = emptySet(),
-    val evidencePolicy: ForegroundEvidencePolicySnapshot = ForegroundEvidencePolicySnapshot()
+    val evidencePolicy: ForegroundEvidencePolicySnapshot = ForegroundEvidencePolicySnapshot(),
+    val usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(
+        statisticsTrackingEnabled = true,
+        hasActiveTimeBasedRules = true
+    )
 ) {
     init {
         require(useDayGenerationStartedAtMs >= 0L) {
@@ -388,6 +395,8 @@ private class SerializedForegroundSessionPersistence(
         val packageName: String,
         val useDayId: String,
         val sessionId: Long,
+        val recordingEnabled: Boolean,
+        val statisticsTracked: Boolean,
         var lastCommittedWallMs: Long,
         var lastCommittedElapsedMs: Long
     )
@@ -402,10 +411,15 @@ private class SerializedForegroundSessionPersistence(
     ): Boolean {
         val calculator = ConfigurableUseDayCalculator(resetTime = runtime.resetTime)
         val currentUseDayId = calculator.idAt(nowWallMs)
+        val usageTrackingDecision = runtime.usageTrackingDecision
+        val recordingEnabled = usageTrackingDecision.shouldRecordSessions
         val existingPackages = active.keys.toList()
         for (packageName in existingPackages) {
             val session = active[packageName] ?: continue
-            val remainsVisible = packageName in visiblePackages && session.useDayId == currentUseDayId
+            val remainsVisible = packageName in visiblePackages &&
+                session.useDayId == currentUseDayId &&
+                session.recordingEnabled == recordingEnabled &&
+                session.statisticsTracked == usageTrackingDecision.recordStatistics
             if (!flush(session, nowWallMs, nowElapsedMs)) return false
             if (!remainsVisible) {
                 repository.finishSession(session.sessionId, nowWallMs)
@@ -413,24 +427,29 @@ private class SerializedForegroundSessionPersistence(
             }
         }
         visiblePackages.forEach { packageName ->
-            if (packageName in active) return@forEach
+            if (packageName in active || !recordingEnabled) return@forEach
             val id = repository.startSessionAtGeneration(
                 useDayId = currentUseDayId,
                 packageName = packageName,
                 startedAtMs = nowWallMs,
                 generationStartedAtMs = runtime.useDayGenerationStartedAtMs,
-                statisticsTracked = true
+                statisticsTracked = usageTrackingDecision.recordStatistics
             )
-            repository.recordLaunch(
-                useDayId = currentUseDayId,
-                packageName = packageName,
-                launchedAtMs = nowWallMs,
-                generationStartedAtMs = runtime.useDayGenerationStartedAtMs
-            )
+            if (usageTrackingDecision.recordStatistics) {
+                repository.recordLaunch(
+                    useDayId = currentUseDayId,
+                    packageName = packageName,
+                    launchedAtMs = nowWallMs,
+                    generationStartedAtMs = runtime.useDayGenerationStartedAtMs
+                )
+                repository.recordLaunchStatistics(packageName, nowWallMs)
+            }
             active[packageName] = ActiveSession(
                 packageName = packageName,
                 useDayId = currentUseDayId,
                 sessionId = id,
+                recordingEnabled = recordingEnabled,
+                statisticsTracked = usageTrackingDecision.recordStatistics,
                 lastCommittedWallMs = nowWallMs,
                 lastCommittedElapsedMs = nowElapsedMs
             )
@@ -450,7 +469,15 @@ private class SerializedForegroundSessionPersistence(
         val endWallMs = maxOf(nowWallMs, session.lastCommittedWallMs)
         if (session.sessionId == 0L) return false
         if (endWallMs > session.lastCommittedWallMs) {
-            val usage = emptyList<ForegroundUsageCheckpoint>()
+            val usage = if (session.statisticsTracked) {
+                splitIntoHourlyCheckpoints(
+                    packageName = session.packageName,
+                    startWallMs = session.lastCommittedWallMs,
+                    endWallMs = endWallMs
+                )
+            } else {
+                emptyList()
+            }
             if (!repository.commitSessionCheckpoint(session.sessionId, endWallMs, usage)) {
                 return false
             }
@@ -458,5 +485,36 @@ private class SerializedForegroundSessionPersistence(
         session.lastCommittedWallMs = endWallMs
         session.lastCommittedElapsedMs = maxOf(nowElapsedMs, session.lastCommittedElapsedMs)
         return true
+    }
+
+    private fun splitIntoHourlyCheckpoints(
+        packageName: String,
+        startWallMs: Long,
+        endWallMs: Long
+    ): List<ForegroundUsageCheckpoint> {
+        if (endWallMs <= startWallMs) return emptyList()
+        val zone = ZoneId.systemDefault()
+        val checkpoints = ArrayList<ForegroundUsageCheckpoint>()
+        var cursor = startWallMs
+        while (cursor < endWallMs) {
+            val local = Instant.ofEpochMilli(cursor).atZone(zone)
+            val nextHour = local
+                .plusHours(1)
+                .withMinute(0)
+                .withSecond(0)
+                .withNano(0)
+                .toInstant()
+                .toEpochMilli()
+            val segmentEnd = minOf(endWallMs, nextHour)
+            checkpoints += ForegroundUsageCheckpoint(
+                date = TimeTools.dayKey(local.toLocalDate()),
+                packageName = packageName,
+                hour = local.hour,
+                durationMs = segmentEnd - cursor,
+                lastUsedMs = segmentEnd
+            )
+            cursor = segmentEnd
+        }
+        return checkpoints
     }
 }
