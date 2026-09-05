@@ -78,6 +78,7 @@ import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
 import neth.iecal.curbox.domain.apprules.SignalFact
 import neth.iecal.curbox.domain.apprules.SubmissionResult
 import neth.iecal.curbox.domain.apprules.StopReason
+import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
 import neth.iecal.curbox.domain.apprules.UsageResetCommandPolicy
 import neth.iecal.curbox.domain.apprules.UsageResetRequest
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationFormatter
@@ -186,6 +187,7 @@ class AppRuleBlocker {
 
     private data class ScheduledRecheck(
         val registrationToken: Long,
+        val originatingSourceOrderIdentity: SourceOrderIdentity?,
         val generation: Long,
         val runnable: Runnable,
         val dueAtWallClockMs: Long?,
@@ -195,12 +197,14 @@ class AppRuleBlocker {
 
     private data class ScheduledRecoveryRegistration(
         val registrationToken: Long,
+        val originatingSourceOrderIdentity: SourceOrderIdentity?,
         val generation: Long,
         val runnable: Runnable
     )
 
     private data class ScheduledAlarmRegistration(
         val token: Long,
+        val originatingSourceOrderIdentity: SourceOrderIdentity?,
         val pendingIntent: PendingIntent,
         val callback: Runnable,
         val generation: Long
@@ -655,14 +659,20 @@ class AppRuleBlocker {
         ) return
         val plan = update.plan
         if (plan == null) {
-            cancelScheduledRecheck(update.packageName)
+            cancelScheduledRecheck(
+                packageName = update.packageName,
+                expectedOriginatingSourceOrderIdentity =
+                    update.expectedRegistrationSourceOrderIdentity
+                        ?: update.sourceOrderIdentity
+            )
         } else {
             scheduleRecheckAtWallClock(
                 packageName = update.packageName,
                 dueAtWallClockMs = plan.dueAtWallClockMs,
                 maxDelayMillis = plan.maxDelayMillis,
                 relativeDelayMillis = plan.delayMillis,
-                generation = generation
+                generation = generation,
+                originatingSourceOrderIdentity = update.sourceOrderIdentity
             )
         }
     }
@@ -1020,10 +1030,19 @@ class AppRuleBlocker {
 
     private fun checkCurrentlyVisibleApplications(
         observationKind: ObservationKind,
-        observationAttempt: Int
+        observationAttempt: Int,
+        expectedObservationRegistrationToken: Long? = null
     ) {
         if (!isReadyForChecks()) return
         try {
+            val expectedRegistrationTokens = synchronized(runtimeLock) {
+                val packageNames = scheduledRechecks.keys +
+                    scheduledRecoveryCallbacks.keys +
+                    scheduledAlarms.keys
+                packageNames.associateWith { packageName ->
+                    scheduledRegistrationTokenLocked(packageName)
+                }
+            }
             val configuredEssentialPackages = readEssentialPackagesForEvaluation()
             val policy = ForegroundEvidencePolicySnapshot(
                 essentialPackages = configuredEssentialPackages +
@@ -1077,7 +1096,11 @@ class AppRuleBlocker {
                 if (!isReadyForChecks() || recheckGeneration.get() != generation) return
                 when (outcome) {
                     is ForegroundEvidenceOutcome.NotVisible ->
-                        cancelScheduledRecheck(outcome.packageName)
+                        cancelScheduledRecheck(
+                            packageName = outcome.packageName,
+                            expectedRegistrationToken =
+                                expectedRegistrationTokens[outcome.packageName]
+                        )
                     is ForegroundEvidenceOutcome.Visible -> {
                         if (outcome.decisionPermission ==
                                 neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
@@ -1096,7 +1119,11 @@ class AppRuleBlocker {
                     visibilityAttempt = observationAttempt + 1
                 )
             } else {
-                cancelScheduledRecheck(OBSERVATION_RECHECK_KEY)
+                cancelScheduledRecheck(
+                    packageName = OBSERVATION_RECHECK_KEY,
+                    expectedRegistrationToken = expectedObservationRegistrationToken
+                        ?: expectedRegistrationTokens[OBSERVATION_RECHECK_KEY]
+                )
             }
         } catch (error: Throwable) {
             logNonFatal(error)
@@ -1717,7 +1744,8 @@ class AppRuleBlocker {
         dueAtWallClockMs: Long,
         maxDelayMillis: Long,
         relativeDelayMillis: Long? = null,
-        generation: Long
+        generation: Long,
+        originatingSourceOrderIdentity: SourceOrderIdentity? = null
     ) {
         if (!isReadyForChecks() || packageName.isBlank()) return
         postScheduledRecheck(
@@ -1731,7 +1759,8 @@ class AppRuleBlocker {
             visibilityAttempt = 0,
             maxDelayMillis = maxDelayMillis,
             dueAtWallClockMs = dueAtWallClockMs,
-            relativeDelayMillis = relativeDelayMillis
+            relativeDelayMillis = relativeDelayMillis,
+            originatingSourceOrderIdentity = originatingSourceOrderIdentity
         )
     }
 
@@ -1743,7 +1772,8 @@ class AppRuleBlocker {
         postAttempt: Int = 1,
         maxDelayMillis: Long? = null,
         dueAtWallClockMs: Long? = null,
-        relativeDelayMillis: Long? = null
+        relativeDelayMillis: Long? = null,
+        originatingSourceOrderIdentity: SourceOrderIdentity? = null
     ) {
         lateinit var runnable: Runnable
         runnable = Runnable {
@@ -1777,6 +1807,7 @@ class AppRuleBlocker {
             } ?: ScheduledRegistrationCleanup()
             scheduledRechecks[packageName] = ScheduledRecheck(
                 registrationToken = registrationToken,
+                originatingSourceOrderIdentity = originatingSourceOrderIdentity,
                 generation = generation,
                 runnable = runnable,
                 dueAtWallClockMs = dueAtWallClockMs,
@@ -1812,7 +1843,8 @@ class AppRuleBlocker {
                     maxDelayMillis = maxDelayMillis,
                     dueAtWallClockMs = dueAtWallClockMs,
                     relativeDelayMillis = relativeDelayMillis,
-                    registrationToken = registrationToken
+                    registrationToken = registrationToken,
+                    originatingSourceOrderIdentity = originatingSourceOrderIdentity
                 )
             }
         } catch (error: Throwable) {
@@ -1827,7 +1859,8 @@ class AppRuleBlocker {
                     maxDelayMillis = maxDelayMillis,
                     dueAtWallClockMs = dueAtWallClockMs,
                     relativeDelayMillis = relativeDelayMillis,
-                    registrationToken = registrationToken
+                    registrationToken = registrationToken,
+                    originatingSourceOrderIdentity = originatingSourceOrderIdentity
                 )
             } else {
                 removeScheduledCallback(packageName, runnable, registrationToken)
@@ -1844,7 +1877,8 @@ class AppRuleBlocker {
         maxDelayMillis: Long?,
         dueAtWallClockMs: Long?,
         relativeDelayMillis: Long?,
-        registrationToken: Long
+        registrationToken: Long,
+        originatingSourceOrderIdentity: SourceOrderIdentity?
     ) {
         if (postAttempt >= MAX_SCHEDULER_POST_ATTEMPTS ||
             !isReadyForChecks() || recheckGeneration.get() != generation
@@ -1858,7 +1892,8 @@ class AppRuleBlocker {
                     maxDelayMillis = maxDelayMillis,
                     dueAtWallClockMs = dueAtWallClockMs,
                     relativeDelayMillis = relativeDelayMillis,
-                    registrationToken = registrationToken
+                    registrationToken = registrationToken,
+                    originatingSourceOrderIdentity = originatingSourceOrderIdentity
                 )
             }
             return
@@ -1871,7 +1906,8 @@ class AppRuleBlocker {
             postAttempt = postAttempt + 1,
             maxDelayMillis = maxDelayMillis,
             dueAtWallClockMs = dueAtWallClockMs,
-            relativeDelayMillis = relativeDelayMillis
+            relativeDelayMillis = relativeDelayMillis,
+            originatingSourceOrderIdentity = originatingSourceOrderIdentity
         )
     }
 
@@ -1883,7 +1919,8 @@ class AppRuleBlocker {
         maxDelayMillis: Long?,
         dueAtWallClockMs: Long?,
         relativeDelayMillis: Long?,
-        registrationToken: Long
+        registrationToken: Long,
+        originatingSourceOrderIdentity: SourceOrderIdentity?
     ) {
         if (!isReadyForChecks() || recheckGeneration.get() != generation) return
         val nowWallClockMs = observationWallClockMs()
@@ -1922,7 +1959,8 @@ class AppRuleBlocker {
                 postAttempt = 1,
                 maxDelayMillis = maxDelayMillis,
                 dueAtWallClockMs = dueAtWallClockMsForRearm,
-                relativeDelayMillis = requestedRecoveryDelayMillis
+                relativeDelayMillis = requestedRecoveryDelayMillis,
+                originatingSourceOrderIdentity = originatingSourceOrderIdentity
             )
         }
         val previousRecovery = synchronized(runtimeLock) {
@@ -1936,6 +1974,7 @@ class AppRuleBlocker {
             } ?: ScheduledRegistrationCleanup()
             scheduledRecoveryCallbacks[packageName] = ScheduledRecoveryRegistration(
                 registrationToken = registrationToken,
+                originatingSourceOrderIdentity = originatingSourceOrderIdentity,
                 generation = generation,
                 runnable = recoveryRunnable
             )
@@ -1986,13 +2025,19 @@ class AppRuleBlocker {
     ): Boolean {
         val alarmManager = service.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
             ?: return false
-        val token = synchronized(runtimeLock) {
+        val registration = synchronized(runtimeLock) {
             val primary = scheduledRechecks[packageName]
                 ?.takeIf { it.runnable === runnable && it.generation == generation }
             val recovery = scheduledRecoveryCallbacks[packageName]
                 ?.takeIf { it.runnable === runnable && it.generation == generation }
-            primary?.registrationToken ?: recovery?.registrationToken ?: return false
-        }
+            primary?.let {
+                it.registrationToken to it.originatingSourceOrderIdentity
+            } ?: recovery?.let {
+                it.registrationToken to it.originatingSourceOrderIdentity
+            }
+        } ?: return false
+        val token = registration.first
+        val originatingSourceOrderIdentity = registration.second
         val requestCode = token.toInt()
         val wakeIntent = Intent(SCHEDULER_WAKE_ACTION)
             .setPackage(service.packageName)
@@ -2014,6 +2059,7 @@ class AppRuleBlocker {
                 packageName,
                 ScheduledAlarmRegistration(
                     token = token,
+                    originatingSourceOrderIdentity = originatingSourceOrderIdentity,
                     pendingIntent = pendingIntent,
                     callback = runnable,
                     generation = generation
@@ -2075,7 +2121,8 @@ class AppRuleBlocker {
             if (!isReadyForChecks() || recheckGeneration.get() != generation) return
             checkCurrentlyVisibleApplications(
                 observationKind = ObservationKind.SYNTHETIC_RECHECK,
-                observationAttempt = observationAttempt
+                observationAttempt = observationAttempt,
+                expectedObservationRegistrationToken = scheduled.registrationToken
             )
         } catch (_: CancellationException) {
             return
@@ -2129,7 +2176,9 @@ class AppRuleBlocker {
                     visibilityAttempt = visibilityAttempt,
                     maxDelayMillis = scheduled.maxDelayMillis,
                     dueAtWallClockMs = scheduled.dueAtWallClockMs,
-                    relativeDelayMillis = scheduled.relativeDelayMillis
+                    relativeDelayMillis = scheduled.relativeDelayMillis,
+                    originatingSourceOrderIdentity =
+                        scheduled.originatingSourceOrderIdentity
                 )
                 return
             }
@@ -2145,7 +2194,9 @@ class AppRuleBlocker {
                     maxDelayMillis = scheduled.maxDelayMillis,
                     dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
                         UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS
-                    )
+                    ),
+                    originatingSourceOrderIdentity =
+                        scheduled.originatingSourceOrderIdentity
                 )
                 return
             }
@@ -2181,7 +2232,9 @@ class AppRuleBlocker {
                             maxDelayMillis = scheduled.maxDelayMillis,
                             dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
                                 VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1)
-                            )
+                            ),
+                            originatingSourceOrderIdentity =
+                                scheduled.originatingSourceOrderIdentity
                         )
                     } else if (failClosedCandidate) {
                         // R5 A is a bounded, package-checked fallback. The module grants this
@@ -2202,7 +2255,9 @@ class AppRuleBlocker {
                             maxDelayMillis = scheduled.maxDelayMillis,
                             dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
                                 UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS
-                            )
+                            ),
+                            originatingSourceOrderIdentity =
+                                scheduled.originatingSourceOrderIdentity
                         )
                     }
                 }
@@ -2226,7 +2281,8 @@ class AppRuleBlocker {
                         maxDelayMillis = plan.maxDelayMillis,
                         dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
                             VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1)
-                        )
+                        ),
+                        originatingSourceOrderIdentity = plan.originatingSourceOrderIdentity
                     )
                 } else if (isReadyForChecks() && recheckGeneration.get() == generation) {
                     // After the bounded ordinary-failure retries, preserve R5's fail-closed
@@ -2490,16 +2546,42 @@ class AppRuleBlocker {
             packageName != Constants.SYSTEM_UI_PACKAGE_NAME
     }
 
-    private fun cancelScheduledRecheck(packageName: String) {
+    private fun scheduledRegistrationTokenLocked(packageName: String): Long? =
+        scheduledRechecks[packageName]?.registrationToken
+            ?: scheduledRecoveryCallbacks[packageName]?.registrationToken
+            ?: scheduledAlarms[packageName]?.token
+
+    private fun scheduledRegistrationOriginLocked(
+        packageName: String
+    ): SourceOrderIdentity? =
+        scheduledRechecks[packageName]?.originatingSourceOrderIdentity
+            ?: scheduledRecoveryCallbacks[packageName]?.originatingSourceOrderIdentity
+            ?: scheduledAlarms[packageName]?.originatingSourceOrderIdentity
+
+    private fun cancelScheduledRecheck(
+        packageName: String,
+        expectedRegistrationToken: Long? = null,
+        expectedOriginatingSourceOrderIdentity: SourceOrderIdentity? = null
+    ) {
         val cancellation = synchronized(runtimeLock) {
-            val scheduled = scheduledRechecks.remove(packageName)
-            val registrationToken = scheduled?.registrationToken
-                ?: scheduledRecoveryCallbacks[packageName]?.registrationToken
-                ?: scheduledAlarms[packageName]?.token
-            val cleanup = registrationToken?.let {
-                removeScheduledRegistrationLocked(packageName, it)
-            } ?: ScheduledRegistrationCleanup()
-            scheduled?.runnable to cleanup
+            val hasExpectedIdentity = expectedRegistrationToken != null ||
+                expectedOriginatingSourceOrderIdentity != null
+            val currentToken = scheduledRegistrationTokenLocked(packageName)
+            val currentOrigin = scheduledRegistrationOriginLocked(packageName)
+            val tokenMatches = expectedRegistrationToken?.let { currentToken == it } ?: true
+            val originMatches = expectedOriginatingSourceOrderIdentity
+                ?.let { currentOrigin == it }
+                ?: true
+            if (!hasExpectedIdentity || !tokenMatches || !originMatches) {
+                null to ScheduledRegistrationCleanup()
+            } else {
+                val scheduled = scheduledRechecks.remove(packageName)
+                val registrationToken = scheduled?.registrationToken ?: currentToken
+                val cleanup = registrationToken?.let {
+                    removeScheduledRegistrationLocked(packageName, it)
+                } ?: ScheduledRegistrationCleanup()
+                scheduled?.runnable to cleanup
+            }
         }
         cancellation.first?.let(::removeHandlerCallback)
         cancellation.second.pendingIntent?.let(::cancelAlarm)
