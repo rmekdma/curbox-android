@@ -102,11 +102,9 @@ class AppBlockerService : BaseBlockingService() {
         }
 
         try {
-            // AppUsageTracker.onEvent is synchronous at this seam: it checkpoints the previous
-            // foreground sessions before the rule evaluator reads them. Keep these calls ordered
-            // and independently contained so a storage failure cannot kill later events.
-            // Flush the previous session before evaluating the newly foregrounded package.
-            if (appUsageTrackerReady) appUsageTracker.onEvent(event)
+            // The app-rule worker owns the serialized session flush and decision path. Keep the
+            // legacy tracker fallback only when that worker could not be started.
+            if (appUsageTrackerReady && !appRuleBlockerReady) appUsageTracker.onEvent(event)
         } catch (t: Throwable) {
             Log.e("Usage Tracking error", t.toString())
             crashLogger.logNonFatalError(Exception(t))
@@ -209,8 +207,27 @@ class AppBlockerService : BaseBlockingService() {
             Log.e("AppUsageTracker", "Setup failed", t)
         }
         try {
-            appRuleBlocker.setup(this)
+            val visibleSessionReconciler = if (appUsageTrackerReady) {
+                val reconciler: suspend (
+                    Set<String>,
+                    Long,
+                    Long
+                ) -> Boolean = { visiblePackages, nowWallMs, nowElapsedMs ->
+                    appUsageTracker.reconcileForDecision(
+                        visiblePackages = visiblePackages,
+                        nowWallMs = nowWallMs,
+                        nowElapsedMs = nowElapsedMs
+                    )
+                }
+                reconciler
+            } else {
+                null
+            }
+            appRuleBlocker.setup(this, visibleSessionReconciler)
             appRuleBlockerReady = true
+            if (appUsageTrackerReady) {
+                appUsageTracker.handoffForegroundOwnershipToDecisionWorker()
+            }
         } catch (t: Throwable) {
             crashLogger.logNonFatalError(Exception(t))
             Log.e("AppRuleBlocker", "Setup failed", t)

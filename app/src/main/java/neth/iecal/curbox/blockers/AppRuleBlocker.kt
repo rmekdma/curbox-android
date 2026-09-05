@@ -37,7 +37,6 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
-import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRuleMembershipResolver
 import neth.iecal.curbox.domain.apprules.AppRuleReevaluationGate
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
@@ -58,9 +57,20 @@ import neth.iecal.curbox.domain.apprules.ForegroundEvidencePolicySnapshot
 import neth.iecal.curbox.domain.apprules.ForegroundFacts
 import neth.iecal.curbox.domain.apprules.ForegroundReadState
 import neth.iecal.curbox.domain.apprules.FollowUpKind
+import neth.iecal.curbox.domain.apprules.AcceptedRuleRuntimeSnapshot
+import neth.iecal.curbox.domain.apprules.DecisionOutcome
+import neth.iecal.curbox.domain.apprules.DecisionOutcomeSink
+import neth.iecal.curbox.domain.apprules.DecisionRequest
+import neth.iecal.curbox.domain.apprules.LifecycleGeneration
 import neth.iecal.curbox.domain.apprules.ObservationKind
 import neth.iecal.curbox.domain.apprules.ObservationTrigger
+import neth.iecal.curbox.domain.apprules.RecoveryOnlyStop
+import neth.iecal.curbox.domain.apprules.RuleRuntimeSnapshot
+import neth.iecal.curbox.domain.apprules.RuntimePublication
+import neth.iecal.curbox.domain.apprules.RuntimeRevision
+import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
 import neth.iecal.curbox.domain.apprules.SignalFact
+import neth.iecal.curbox.domain.apprules.StopReason
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationFormatter
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationStateCalculator
@@ -128,6 +138,13 @@ class AppRuleBlocker {
     private var foregroundEvidenceModule = ForegroundEvidenceModule()
     private var foregroundObservationSource: AndroidForegroundObservationSource? = null
     private var sourceOrderSequencer = AtomicConnectionScopedSourceOrderSequencer()
+    private var decisionWorker: SerializedDecisionWorker? = null
+    @Volatile private var latestRuntimeRevision = RuntimeRevision(0L)
+    private var visibleSessionReconciler: (suspend (
+        Set<String>,
+        Long,
+        Long
+    ) -> Boolean)? = null
 
     private data class RuleRuntime(
         val snapshot: AppRuleSnapshot,
@@ -136,6 +153,11 @@ class AppRuleBlocker {
         val overrideState: AppRuleOverrideState,
         val launchablePackages: Set<String>,
         val generation: Long
+    )
+
+    private data class CapturedForegroundObservation(
+        val sourceOrderIdentity: neth.iecal.curbox.domain.apprules.SourceOrderIdentity,
+        val facts: ForegroundFacts
     )
 
     private data class ScheduledRecheck(
@@ -186,7 +208,15 @@ class AppRuleBlocker {
     /** Temporary seam for observing the external notification publication boundary. */
     internal var notificationPostObserver: ((LiveRuleNotificationModel) -> Unit)? = null
 
-    fun setup(service: BaseBlockingService) {
+    fun setup(
+        service: BaseBlockingService,
+        visibleSessionReconciler: (suspend (
+            Set<String>,
+            Long,
+            Long
+        ) -> Boolean)? = null
+    ) {
+        this.visibleSessionReconciler = visibleSessionReconciler
         val connectionGeneration = lifecycleGeneration.incrementAndGet()
         synchronized(runtimeLock) {
             destroyed = false
@@ -239,6 +269,7 @@ class AppRuleBlocker {
                 val initial = initialSettings.appRuleSnapshot
                 snapshot.accept(initial)
             }
+            createDecisionWorker(connectionGeneration)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -259,6 +290,7 @@ class AppRuleBlocker {
                     }
                     if (!isReadyForChecks(connectionGeneration)) return@collect
                     if (changed) {
+                        submitRuntimePublication(connectionGeneration)
                         postVisibleApplicationCheck(
                             connectionGeneration = connectionGeneration,
                             observationKind = ObservationKind.REFRESH
@@ -362,144 +394,159 @@ class AppRuleBlocker {
         }
     }
 
-    fun doAppRuleCheck(event: AccessibilityEvent?) {
-        doAppRuleCheck(event, updateForegroundEvidence = true)
-    }
-
-    /**
-     * Synthetic checks reconcile an already visible package but must not turn a stale window
-     * entry into the foreground fallback used by the next boundary check.
-     */
-    private fun doAppRuleCheck(
-        event: AccessibilityEvent?,
-        updateForegroundEvidence: Boolean,
-        failClosedOnEvaluationFailure: Boolean = false
-    ) {
-        if (!isReadyForChecks()) return
-        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        val eventPackageName = event.packageName?.toString().orEmpty()
-        if (eventPackageName.isBlank()) return
-
-        val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
-        val evidencePolicy = ForegroundEvidencePolicySnapshot(
-            essentialPackages = evaluationEssentialPackages +
-                setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
-        )
-        val foregroundEvidence = foregroundEvidenceModule.classify(
-            facts = captureForegroundFacts(
-                event = event,
-                kind = if (updateForegroundEvidence) {
-                    ObservationKind.REAL_EVENT
-                } else {
-                    ObservationKind.SYNTHETIC_RECHECK
-                }
-            ),
-            policy = evidencePolicy
-        )
-        val packageOutcomes = linkedMapOf<String, ForegroundEvidenceOutcome>()
-        foregroundEvidence.outcomes.firstOrNull { it.packageName == eventPackageName }
-            ?.let { outcome -> packageOutcomes[eventPackageName] = outcome }
-        if (updateForegroundEvidence) {
-            foregroundEvidence.outcomes
-                .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
-                .filter {
-                    it.decisionPermission ==
-                        neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
-                }
-                .forEach { outcome ->
-                    packageOutcomes.putIfAbsent(outcome.packageName, outcome)
-                }
-        }
-        val evidenceGeneration = recheckGeneration.get()
-        packageOutcomes.forEach { (packageName, packageOutcome) ->
-            if (!isReadyForChecks() || recheckGeneration.get() != evidenceGeneration) return
-            evaluateForegroundOutcome(
-                packageName = packageName,
-                packageOutcome = packageOutcome,
-                updateForegroundEvidence = updateForegroundEvidence &&
-                    packageName == eventPackageName,
-                failClosedOnEvaluationFailure = failClosedOnEvaluationFailure,
-                evaluationEssentialPackages = evaluationEssentialPackages
+    private fun createDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker {
+        decisionWorker?.stop(
+            RecoveryOnlyStop(
+                requestedAtElapsedMs = observationElapsedRealtimeMs(),
+                reason = StopReason.RECONNECT,
+                lifecycleGeneration = LifecycleGeneration(connectionGeneration)
             )
-        }
+        )
+        val runtimeRevision = sourceOrderSequencer.nextRuntimeRevision()
+        latestRuntimeRevision = runtimeRevision
+        val worker = SerializedDecisionWorker(
+            lifecycleGeneration = LifecycleGeneration(connectionGeneration.coerceAtLeast(1L)),
+            acceptedRuntime = AcceptedRuleRuntimeSnapshot(
+                runtime = ruleRuntimeSnapshot(),
+                runtimeRevision = runtimeRevision
+            ),
+            repository = sessionRepository,
+            outcomeSink = object : DecisionOutcomeSink {
+                override fun publish(outcome: DecisionOutcome) {
+                    publishDecisionOutcome(outcome)
+                }
+            },
+            workerScope = scope,
+            onNonFatalError = ::logNonFatal,
+            onEvaluation = ::observeWorkerEvaluation,
+            visibleSessionReconciler = visibleSessionReconciler,
+            enforcement = enforcement
+        )
+        decisionWorker = worker
+        return worker
     }
 
-    private fun evaluateForegroundOutcome(
-        packageName: String,
-        packageOutcome: ForegroundEvidenceOutcome,
-        updateForegroundEvidence: Boolean,
-        failClosedOnEvaluationFailure: Boolean,
-        evaluationEssentialPackages: Set<String>
-    ) {
-        val shouldFailClosed = when (packageOutcome) {
-            is ForegroundEvidenceOutcome.Visible ->
-                packageOutcome.decisionPermission ==
-                    neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED
-            is ForegroundEvidenceOutcome.Unknown ->
-                packageOutcome.decisionPermission ==
-                    neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED
-            is ForegroundEvidenceOutcome.NotVisible -> {
-                cancelScheduledRecheck(packageName)
-                false
+    private fun ensureDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker {
+        decisionWorker?.let { return it }
+        check(::sessionRepository.isInitialized) { "app-rule session repository is not ready" }
+        return createDecisionWorker(connectionGeneration)
+    }
+
+    private fun ruleRuntimeSnapshot(): RuleRuntimeSnapshot = synchronized(runtimeLock) {
+        RuleRuntimeSnapshot(
+            snapshot = snapshot.snapshot(),
+            resetTime = resetTime,
+            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+            overrideState = overrideState,
+            launchablePackages = launchablePackages,
+            evidencePolicy = ForegroundEvidencePolicySnapshot(
+                essentialPackages = essentialPackages +
+                    setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
+            )
+        )
+    }
+
+    private fun submitRuntimePublication(connectionGeneration: Long) {
+        if (!isReadyForChecks(connectionGeneration)) return
+        val revision = sourceOrderSequencer.nextRuntimeRevision()
+        latestRuntimeRevision = revision
+        val nowWallMs = observationWallClockMs()
+        val nowElapsedMs = observationElapsedRealtimeMs()
+        val request = DecisionRequest(
+            sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity(),
+            lifecycleGeneration = LifecycleGeneration(connectionGeneration),
+            reason = ObservationKind.REFRESH,
+            observation = ForegroundFacts(
+                capturedAtWallMs = nowWallMs,
+                capturedAtElapsedMs = nowElapsedMs,
+                signal = SignalFact(kind = ObservationKind.REFRESH),
+                displayState = DisplayState.UNLOCKED
+            ),
+            runtimePublication = RuntimePublication(
+                runtimeRevision = revision,
+                candidateRuntime = ruleRuntimeSnapshot()
+            )
+        )
+        ensureDecisionWorker(connectionGeneration).submit(request)
+    }
+
+    private fun publishDecisionOutcome(outcome: DecisionOutcome) {
+        if (!isCurrentWorkerOutcome(outcome)) return
+        handler.post {
+            if (!isCurrentWorkerOutcome(outcome)) return@post
+            val denied = outcome.packageDecisions.firstOrNull { !it.isAllowed }
+            if (denied == null) {
+                synchronized(runtimeLock) {
+                    outcome.packageDecisions.firstOrNull()?.packageName?.let { packageName ->
+                        if (activeGuardianPackage == packageName) activeGuardianPackage = null
+                    }
+                }
+                return@post
+            }
+            val evaluated = synchronized(runtimeLock) {
+                pendingWorkerEvaluations.remove(outcome.sourceOrderIdentity)
+                    ?.get(denied.packageName)
+            }
+            if (evaluated != null) {
+                val now = observationWallClockMs()
+                val bypassThrottle = reevaluationGate.consumeIfApplicable(
+                    evaluated.evaluations.isNotEmpty()
+                )
+                if (bypassThrottle || now - lastShownAt >= 1_000L) {
+                    lastShownAt = now
+                    showWarning(
+                        packageName = denied.packageName,
+                        evaluation = evaluated,
+                        evaluatedSnapshot = captureRuleRuntime().snapshot,
+                        generation = recheckGeneration.get()
+                    )
+                }
+            } else {
+                showWarningFromDecision(outcome, denied)
             }
         }
-        if (packageOutcome is ForegroundEvidenceOutcome.NotVisible ||
-            packageOutcome.decisionPermission ==
-                neth.iecal.curbox.domain.apprules.DecisionPermission.DEFER ||
-            packageOutcome.decisionPermission ==
-                neth.iecal.curbox.domain.apprules.DecisionPermission.DO_NOT_EVALUATE
-        ) {
-            return
-        }
+    }
 
-        if (updateForegroundEvidence) recordForegroundEvidence(packageName)
-        updateLiveNotification(packageName.takeIf { updateForegroundEvidence })
-
-        // Capture all rule inputs under one lock. Settings updates replace these values as one
-        // generation, so an in-flight evaluation can never combine a new snapshot with an old
-        // reset clock or guardian ledger.
-        val runtime = captureRuleRuntime()
-        val generation = runtime.generation
-        val currentSnapshot = runtime.snapshot
-        if (currentSnapshot.appRules.none { it.isActive }) {
-            cancelScheduledRechecks()
-            return
-        }
-        val now = wallClockMsProvider()
-        val calculator = ConfigurableUseDayCalculator(resetTime = runtime.resetTime)
-        val useDayId = calculator.idAt(now)
-        var evaluationFailedClosed = false
-        val evaluation = try {
-            runBlocking(Dispatchers.IO) {
-                enforcement.check(
-                    snapshot = currentSnapshot,
-                    packageName = packageName,
-                    useDayId = useDayId,
-                    nowMs = now,
-                    calculator = calculator,
-                    useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
-                    availablePackages = runtime.launchablePackages,
-                    essentialExcludedPackages = evaluationEssentialPackages,
-                    overrides = runtime.overrideState
+    private fun showWarningFromDecision(outcome: DecisionOutcome, decision: neth.iecal.curbox.domain.apprules.PackageDecision) {
+        if (!isReadyForChecks() || latestRuntimeRevision != outcome.acceptedRuntimeRevision) return
+        synchronized(runtimeLock) {
+            if (activeGuardianPackage == decision.packageName || !service.isDelayOver(1_000)) return
+            val evaluatedSnapshot = snapshot.snapshot()
+            val denials = decision.denyingRuleIds.map { ruleId ->
+                val rule = evaluatedSnapshot.appRules.find { it.id == ruleId }
+                AppRuleGuardianDenial(
+                    ruleId = ruleId,
+                    ruleName = rule?.name ?: ruleId,
+                    reason = service.getString(R.string.app_rules_warning_status_no_condition, 0L, 0L, 0L)
                 )
             }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            logNonFatal(error)
-            if (!failClosedOnEvaluationFailure && !shouldFailClosed) return
-            evaluationFailedClosed = true
-            failClosedEvaluation(
-                snapshot = currentSnapshot,
-                packageName = packageName,
-                useDayId = useDayId,
-                nowMs = now,
-                calculator = calculator,
-                runtime = runtime,
-                essentialPackages = evaluationEssentialPackages
-            )
+            service.startActivity(createGuardianApprovalIntent(service, decision.packageName, denials))
+            activeGuardianPackage = decision.packageName
         }
+    }
 
+    private fun isCurrentWorkerOutcome(outcome: DecisionOutcome): Boolean =
+        isReadyForChecks() &&
+            outcome.lifecycleGeneration == LifecycleGeneration(
+                lifecycleGeneration.get().coerceAtLeast(1L)
+            ) &&
+            outcome.acceptedRuntimeRevision == latestRuntimeRevision &&
+            outcome.publicationStatus == neth.iecal.curbox.domain.apprules.PublicationStatus.PUBLISHED
+
+    private val pendingWorkerEvaluations =
+        mutableMapOf<neth.iecal.curbox.domain.apprules.SourceOrderIdentity, MutableMap<String, AppRulesEvaluation>>()
+
+    private fun observeWorkerEvaluation(
+        request: DecisionRequest,
+        accepted: AcceptedRuleRuntimeSnapshot,
+        packageName: String,
+        evaluation: AppRulesEvaluation
+    ) {
+        if (!isReadyForChecks() || accepted.runtimeRevision != latestRuntimeRevision) return
+        synchronized(runtimeLock) {
+            pendingWorkerEvaluations
+                .getOrPut(request.sourceOrderIdentity) { mutableMapOf() }[packageName] = evaluation
+        }
         evaluationResultObserver?.let { observer ->
             try {
                 observer(evaluation)
@@ -507,81 +554,40 @@ class AppRuleBlocker {
                 logNonFatal(error)
             }
         }
-
-        if (!isReadyForChecks() || recheckGeneration.get() != generation) return
-
-        if (evaluationFailedClosed) {
-            cancelScheduledRecheck(packageName)
-        } else {
-            val nextPlan = AppRuleRecheckPlanner.nextPlan(
-                snapshot = currentSnapshot,
-                evaluation = evaluation,
-                overrideState = runtime.overrideState,
-                useDayId = useDayId,
-                nowMs = now,
-                useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
-                zone = calculator.zone,
-                useDayCalculator = calculator
-            )
-            if (nextPlan != null) {
-                scheduleRecheck(
-                    packageName = packageName,
-                    remainingMillis = nextPlan.delayMillis,
-                    maxDelayMillis = nextPlan.maxDelayMillis,
-                    generation = generation
-                )
-            } else {
-                cancelScheduledRecheck(packageName)
-            }
-        }
-        if (evaluation.denyingRules.isEmpty()) {
-            synchronized(runtimeLock) {
-                if (activeGuardianPackage == packageName) activeGuardianPackage = null
-            }
-            return
-        }
-        val bypassThrottle = reevaluationGate.consumeIfApplicable(evaluation.evaluations.isNotEmpty())
-        if (!bypassThrottle && now - lastShownAt < 1_000L) return
-        lastShownAt = now
-        showWarning(packageName, evaluation, currentSnapshot, generation)
     }
 
-    private fun failClosedEvaluation(
-        snapshot: AppRuleSnapshot,
-        packageName: String,
-        useDayId: String,
-        nowMs: Long,
-        calculator: ConfigurableUseDayCalculator,
-        runtime: RuleRuntime,
-        essentialPackages: Set<String>
-    ): AppRulesEvaluation {
-        val eligibility = AppRuleEvaluator.evaluate(
-            snapshot = snapshot,
-            packageName = packageName,
-            useDayId = useDayId,
-            sessions = emptyList(),
-            nowMs = nowMs,
-            zone = calculator.zone,
-            useDayCalculator = calculator,
-            useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
-            availablePackages = runtime.launchablePackages,
-            essentialExcludedPackages = essentialPackages,
-            overrides = runtime.overrideState
-        )
-        val applicable = eligibility.evaluations
-            .filter { it.isApplicable && it.isActive && !it.isSkipped }
-            .ifEmpty { eligibility.denyingRules }
-        val denials = applicable.map { evaluation ->
-            evaluation.copy(
-                remainingMillis = 0L,
-                isAllowed = false
+    fun doAppRuleCheck(event: AccessibilityEvent?) {
+        if (!isReadyForChecks() || event == null ||
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        ) return
+        val eventPackageName = event.packageName?.toString()?.trim().orEmpty()
+        if (eventPackageName.isBlank()) return
+
+        submitForegroundDecision(event, ObservationKind.REAL_EVENT)
+    }
+
+    private fun submitForegroundDecision(
+        event: AccessibilityEvent,
+        kind: ObservationKind
+    ) {
+        try {
+            val connectionGeneration = lifecycleGeneration.get().coerceAtLeast(1L)
+            val captured = captureForegroundObservation(
+                event = event,
+                kind = kind
             )
+            val request = DecisionRequest(
+                sourceOrderIdentity = captured.sourceOrderIdentity,
+                lifecycleGeneration = LifecycleGeneration(connectionGeneration),
+                reason = kind,
+                observation = captured.facts
+            )
+            ensureDecisionWorker(connectionGeneration).submit(request)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            logNonFatal(error)
         }
-        return AppRulesEvaluation(
-            isAllowed = false,
-            denyingRules = denials,
-            evaluations = denials
-        )
     }
 
     private fun startNotificationTicker(connectionGeneration: Long) {
@@ -765,6 +771,14 @@ class AppRuleBlocker {
             logNonFatal(error)
         }
         handler.removeCallbacksAndMessages(null)
+        decisionWorker?.stop(
+            RecoveryOnlyStop(
+                requestedAtElapsedMs = observationElapsedRealtimeMs(),
+                reason = StopReason.DESTROY,
+                lifecycleGeneration = LifecycleGeneration(lifecycleGeneration.get())
+            )
+        )
+        decisionWorker = null
         scope.cancel()
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)
         receiverLifecycle = null
@@ -780,7 +794,7 @@ class AppRuleBlocker {
             scope.launch {
                 try {
                     if (!isReadyForChecks(connectionGeneration)) return@launch
-                    refreshMutex.withLock {
+                    val changed = refreshMutex.withLock {
                         if (!isReadyForChecks(connectionGeneration)) return@withLock false
                         val packageScopeChanged = refreshPackageScope()
                         val settings = service.dataStoreManager.settings.first()
@@ -788,6 +802,7 @@ class AppRuleBlocker {
                         packageScopeChanged || applySettingsSnapshot(settings)
                     }
                     if (!isReadyForChecks(connectionGeneration)) return@launch
+                    if (changed) submitRuntimePublication(connectionGeneration)
                     // A refresh is also useful when the package reader returned the same set:
                     // the window/root provider may have recovered since the last event.
                     postVisibleApplicationCheck(
@@ -1069,7 +1084,12 @@ class AppRuleBlocker {
     private fun captureForegroundFacts(
         event: AccessibilityEvent?,
         kind: ObservationKind
-    ): ForegroundFacts {
+    ): ForegroundFacts = captureForegroundObservation(event, kind).facts
+
+    private fun captureForegroundObservation(
+        event: AccessibilityEvent?,
+        kind: ObservationKind
+    ): CapturedForegroundObservation {
         val trigger = ObservationTrigger(
             sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity(),
             kind = kind,
@@ -1100,11 +1120,14 @@ class AppRuleBlocker {
         } else {
             facts
         }
-        return if (screenOnAwaitingUserPresent && factsWithProvenance.displayState == DisplayState.UNLOCKED) {
+        val normalizedFacts = if (screenOnAwaitingUserPresent &&
+            factsWithProvenance.displayState == DisplayState.UNLOCKED
+        ) {
             factsWithProvenance.copy(displayState = DisplayState.KEYGUARD)
         } else {
             factsWithProvenance
         }
+        return CapturedForegroundObservation(trigger.sourceOrderIdentity, normalizedFacts)
     }
 
     private fun captureLegacyForegroundFacts(
@@ -1490,8 +1513,7 @@ class AppRuleBlocker {
                         // final allow/deny authority.
                         dispatchSyntheticCheck(
                             packageName = packageName,
-                            generation = generation,
-                            failClosedOnEvaluationFailure = true
+                            generation = generation
                         )
                     } else {
                         // Null, partial, keyguard, and stale evidence keep this keyed boundary
@@ -1527,8 +1549,7 @@ class AppRuleBlocker {
                     // enforcing, or scheduling recovery.
                     dispatchSyntheticCheck(
                         packageName = packageName,
-                        generation = generation,
-                        failClosedOnEvaluationFailure = true
+                        generation = generation
                     )
                 }
             } catch (recoveryCancellation: CancellationException) {
@@ -1543,8 +1564,7 @@ class AppRuleBlocker {
 
     private fun dispatchSyntheticCheck(
         packageName: String,
-        generation: Long,
-        failClosedOnEvaluationFailure: Boolean = false
+        generation: Long
     ) {
         if (!isReadyForChecks() || recheckGeneration.get() != generation) return
         val event = try {
@@ -1558,11 +1578,7 @@ class AppRuleBlocker {
         try {
             if (!isReadyForChecks() || recheckGeneration.get() != generation) return
             event.packageName = packageName
-            doAppRuleCheck(
-                event = event,
-                updateForegroundEvidence = false,
-                failClosedOnEvaluationFailure = failClosedOnEvaluationFailure
-            )
+            submitForegroundDecision(event, ObservationKind.SYNTHETIC_RECHECK)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
