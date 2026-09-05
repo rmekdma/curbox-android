@@ -4,6 +4,8 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
@@ -34,6 +36,126 @@ class SerializedDecisionWorkerTest {
         } finally {
             repository.release()
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun evaluatorFailureIsLoggedContainedAndNextForegroundDecisionIsProcessed() {
+        val repository = RecordingRepository()
+        repository.evaluatorFailure = IllegalStateException("injected evaluator failure")
+        val outcomes = RecordingOutcomeSink()
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            onNonFatalError = { errors += it }
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            assertTrue(outcomes.awaitCount(1))
+            assertTrue(outcomes.values.single().packageDecisions.single().isAllowed)
+            assertEquals(1, errors.size)
+
+            repository.evaluatorFailure = null
+            worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
+            assertTrue(outcomes.awaitCount(2))
+            assertFalse(outcomes.values.last().packageDecisions.single().isAllowed)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun persistenceFailureIsLoggedContainedAndNextForegroundDecisionIsProcessed() {
+        val repository = RecordingRepository()
+        repository.startFailure = IllegalStateException("injected persistence failure")
+        val outcomes = RecordingOutcomeSink()
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            onNonFatalError = { errors += it }
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            assertTrue(outcomes.awaitIdle())
+            assertTrue(outcomes.values.isEmpty())
+            assertEquals(1, errors.size)
+
+            repository.startFailure = null
+            worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
+            assertTrue(outcomes.awaitCount(1))
+            assertFalse(outcomes.values.single().packageDecisions.single().isAllowed)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun cancellationPropagatesToTheWorkerBoundaryWithoutBeingLogged() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val evaluationStarted = CountDownLatch(1)
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            onNonFatalError = { errors += it },
+            onEvaluation = { _, _, _, _ ->
+                evaluationStarted.countDown()
+                throw CancellationException("injected evaluator cancellation")
+            }
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            assertTrue(evaluationStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+
+            val deadline = System.nanoTime() +
+                TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
+            var result = SubmissionResult.ACCEPTED
+            while (System.nanoTime() < deadline && result == SubmissionResult.ACCEPTED) {
+                result = worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
+                if (result == SubmissionResult.ACCEPTED) Thread.yield()
+            }
+            assertEquals(SubmissionResult.REJECTED_NOT_READY, result)
+            assertTrue(errors.isEmpty())
+            assertTrue(outcomes.values.isEmpty())
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun lifecycleChangeDuringEvaluationPreventsStaleEvaluationPublication() {
+        val repository = RecordingRepository()
+        repository.evaluatorFailure = IllegalStateException("injected evaluator failure")
+        val outcomes = RecordingOutcomeSink()
+        val evaluations = Collections.synchronizedList(mutableListOf<AppRulesEvaluation>())
+        val workerReference = AtomicReference<SerializedDecisionWorker>()
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            onNonFatalError = {
+                workerReference.get().beginLifecycle(
+                    lifecycleGeneration = LifecycleGeneration(2L),
+                    acceptedRuntime = acceptedRuntime(RuntimeRevision(2L))
+                )
+            },
+            onEvaluation = { _, _, _, evaluation -> evaluations += evaluation }
+        )
+        workerReference.set(worker)
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            assertTrue(outcomes.awaitIdle())
+            assertTrue(evaluations.isEmpty())
+            assertTrue(outcomes.values.isEmpty())
+
+            repository.evaluatorFailure = null
+            worker.submit(request(2L, 2L, TARGET_PACKAGE, capturedAtMs = 2_000L))
+            assertTrue(outcomes.awaitCount(1))
+            assertFalse(outcomes.values.single().packageDecisions.single().isAllowed)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(2L)))
         }
     }
 
@@ -387,6 +509,13 @@ class SerializedDecisionWorkerTest {
         usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true),
         usageResetRepository: UsageResetRepository = RecordingUsageResetRepository(repository),
         onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
+        onNonFatalError: (Throwable) -> Unit = {},
+        onEvaluation: ((
+            DecisionRequest,
+            AcceptedRuleRuntimeSnapshot,
+            String,
+            AppRulesEvaluation
+        ) -> Unit)? = null,
         onRecheckPlan: (RecheckPlanUpdate) -> Unit = {}
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = LifecycleGeneration(1L),
@@ -399,6 +528,8 @@ class SerializedDecisionWorkerTest {
         outcomeSink = sink,
         usageResetRepository = usageResetRepository,
         onUsageResetComplete = onUsageResetComplete,
+        onNonFatalError = onNonFatalError,
+        onEvaluation = onEvaluation,
         onRecheckPlan = onRecheckPlan
     )
 
@@ -509,6 +640,8 @@ class SerializedDecisionWorkerTest {
     }
 
     private open class RecordingRepository : CurrentUseDaySessionRepository {
+        @Volatile var evaluatorFailure: Throwable? = null
+        @Volatile var startFailure: Throwable? = null
         val operations = Collections.synchronizedList(mutableListOf<String>())
         val launchEvents = Collections.synchronizedList(mutableListOf<String>())
         val statisticsLaunches = Collections.synchronizedList(mutableListOf<String>())
@@ -519,6 +652,7 @@ class SerializedDecisionWorkerTest {
         private val sessions = Collections.synchronizedList(mutableListOf<ForegroundSession>())
 
         override suspend fun startSession(useDayId: String, packageName: String, startedAtMs: Long): Long {
+            startFailure?.let { throw it }
             operations += "start:$packageName"
             val id = nextId.getAndIncrement()
             sessions += ForegroundSession(id, useDayId, packageName, startedAtMs, null)
@@ -578,6 +712,7 @@ class SerializedDecisionWorkerTest {
         }
 
         override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+            evaluatorFailure?.let { throw it }
             operations += "evaluate:${sessions.lastOrNull()?.packageName ?: "none"}"
             return persistedSessions()
         }

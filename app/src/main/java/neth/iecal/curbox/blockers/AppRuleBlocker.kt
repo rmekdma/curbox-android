@@ -273,6 +273,7 @@ class AppRuleBlocker {
             setupReady = false
             // A reconnect must invalidate work captured by the previous service connection.
             recheckGeneration.incrementAndGet()
+            pendingWorkerEvaluations.clear()
             applicationWindowProvenanceCache.clear()
         }
         settingsJob?.cancel()
@@ -502,7 +503,17 @@ class AppRuleBlocker {
     }
 
     private fun ensureDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker {
-        decisionWorker?.let { return it }
+        decisionWorker?.let { worker ->
+            if (worker.isReadyForSubmission()) return worker
+            worker.stop(
+                RecoveryOnlyStop(
+                    requestedAtElapsedMs = observationElapsedRealtimeMs(),
+                    reason = StopReason.REPLACEMENT,
+                    lifecycleGeneration = LifecycleGeneration(connectionGeneration)
+                )
+            )
+            decisionWorker = null
+        }
         check(::sessionRepository.isInitialized) { "app-rule session repository is not ready" }
         return createDecisionWorker(connectionGeneration)
     }
@@ -544,7 +555,13 @@ class AppRuleBlocker {
                 candidateRuntime = ruleRuntimeSnapshot()
             )
         )
-        ensureDecisionWorker(normalizedConnectionGeneration).submit(request)
+        val worker = ensureDecisionWorker(normalizedConnectionGeneration)
+        val result = worker.submit(request)
+        if (result == SubmissionResult.REJECTED_NOT_READY &&
+            isReadyForChecks(normalizedConnectionGeneration)
+        ) {
+            ensureDecisionWorker(normalizedConnectionGeneration).submit(request)
+        }
     }
 
     private fun publishDecisionOutcome(outcome: DecisionOutcome) {
@@ -575,7 +592,8 @@ class AppRuleBlocker {
                         packageName = denied.packageName,
                         evaluation = evaluated,
                         evaluatedSnapshot = captureRuleRuntime().snapshot,
-                        generation = recheckGeneration.get()
+                        generation = recheckGeneration.get(),
+                        expectedLifecycleGeneration = outcome.lifecycleGeneration
                     )
                 }
             } else {
@@ -585,8 +603,9 @@ class AppRuleBlocker {
     }
 
     private fun showWarningFromDecision(outcome: DecisionOutcome, decision: neth.iecal.curbox.domain.apprules.PackageDecision) {
-        if (!isReadyForChecks() || latestRuntimeRevision != outcome.acceptedRuntimeRevision) return
+        if (!isCurrentWorkerOutcome(outcome)) return
         synchronized(runtimeLock) {
+            if (!isCurrentWorkerOutcome(outcome)) return
             if (activeGuardianPackage == decision.packageName || !service.isDelayOver(1_000)) return
             val evaluatedSnapshot = snapshot.snapshot()
             val denials = decision.denyingRuleIds.map { ruleId ->
@@ -619,21 +638,35 @@ class AppRuleBlocker {
         packageName: String,
         evaluation: AppRulesEvaluation
     ) {
-        if (!isReadyForChecks() || accepted.runtimeRevision != latestRuntimeRevision) return
+        if (!isCurrentWorkerRequest(request, accepted)) return
         synchronized(runtimeLock) {
-            if (foregroundEvidenceSuspended) return
+            if (!isCurrentWorkerRequest(request, accepted) || foregroundEvidenceSuspended) return
             recordForegroundEvidence(packageName)
             pendingWorkerEvaluations
                 .getOrPut(request.sourceOrderIdentity) { mutableMapOf() }[packageName] = evaluation
         }
+        if (!isCurrentWorkerRequest(request, accepted)) return
         evaluationResultObserver?.let { observer ->
             try {
+                if (!isCurrentWorkerRequest(request, accepted)) return@let
                 observer(evaluation)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 logNonFatal(error)
             }
         }
     }
+
+    private fun isCurrentWorkerRequest(
+        request: DecisionRequest,
+        accepted: AcceptedRuleRuntimeSnapshot
+    ): Boolean =
+        isReadyForChecks() &&
+            request.lifecycleGeneration == LifecycleGeneration(
+                lifecycleGeneration.get().coerceAtLeast(1L)
+            ) &&
+            accepted.runtimeRevision == latestRuntimeRevision
 
     private fun applyRecheckPlan(update: RecheckPlanUpdate) {
         if (!isReadyForChecks() ||
@@ -786,7 +819,13 @@ class AppRuleBlocker {
                 reason = kind,
                 observation = captured.facts
             )
-            ensureDecisionWorker(connectionGeneration).submit(request)
+            val worker = ensureDecisionWorker(connectionGeneration)
+            val result = worker.submit(request)
+            if (result == SubmissionResult.REJECTED_NOT_READY &&
+                isReadyForChecks(connectionGeneration)
+            ) {
+                ensureDecisionWorker(connectionGeneration).submit(request)
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -887,6 +926,7 @@ class AppRuleBlocker {
                 ) {
                     lastPostedNotificationModel = model
                     notificationPostObserver?.invoke(model)
+                    if (!isReadyForChecks() || recheckGeneration.get() != generation) return@launch
                     service.updateForegroundNotification(model)
                 }
             } catch (error: CancellationException) {
@@ -901,15 +941,20 @@ class AppRuleBlocker {
         packageName: String,
         evaluation: neth.iecal.curbox.domain.apprules.AppRulesEvaluation,
         evaluatedSnapshot: AppRuleSnapshot,
-        generation: Long
+        generation: Long,
+        expectedLifecycleGeneration: LifecycleGeneration
     ) {
-        if (!isReadyForChecks() || recheckGeneration.get() != generation) return
+        if (!isCurrentLifecycle(expectedLifecycleGeneration) ||
+            recheckGeneration.get() != generation
+        ) return
         try {
             synchronized(runtimeLock) {
                 // Settings can be emitted between the evaluation and this call. Keep the
                 // generation check and activity launch in one short critical section so a stale
                 // evaluation cannot open a guardian after a newer snapshot was published.
-                if (!isReadyForChecks() || recheckGeneration.get() != generation) return
+                if (!isCurrentLifecycle(expectedLifecycleGeneration) ||
+                    recheckGeneration.get() != generation
+                ) return
                 if (activeGuardianPackage == packageName) return
                 if (!service.isDelayOver(1_000)) return
                 val denialRows = evaluation.denyingRules.map { denial ->
@@ -937,6 +982,10 @@ class AppRuleBlocker {
             logNonFatal(error)
         }
     }
+
+    private fun isCurrentLifecycle(expected: LifecycleGeneration): Boolean =
+        isReadyForChecks() &&
+            expected == LifecycleGeneration(lifecycleGeneration.get().coerceAtLeast(1L))
 
     private fun warningStatus(evaluation: AppRuleEvaluation): String = if (evaluation.conditionEnabled) {
         service.getString(
@@ -970,6 +1019,7 @@ class AppRuleBlocker {
             foregroundEvidenceSuspended = true
             screenOnAwaitingUserPresent = false
             pendingSchedulerWakeGeneration = null
+            pendingWorkerEvaluations.clear()
             applicationWindowProvenanceCache.clear()
         }
         settingsJob?.cancel()
