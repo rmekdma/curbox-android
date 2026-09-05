@@ -110,16 +110,24 @@ class AppBlockerService : BaseBlockingService() {
             crashLogger.logNonFatalError(Exception(t))
         }
 
-        try {
-            // This must remain after the usage flush above. Contributor earning and target
-            // consumption both use the current-use-day raw session ledger.
-            appRuleBlocker.doAppRuleCheck(event)
-        } catch (t: CancellationException) {
-            throw t
-        } catch (t: Throwable) {
-            Log.e("App rule check error", t.toString())
-            crashLogger.logNonFatalError(Exception(t))
-        }
+        // This must remain after the usage flush above. Contributor earning and target
+        // consumption both use the current-use-day raw session ledger. The worker itself still
+        // rethrows cancellation, but this callback is a synchronous service boundary: a worker
+        // cancellation must not skip the remaining accessibility event handling.
+        runAppRuleCheckAtSynchronousServiceBoundary(
+            action = { appRuleBlocker.doAppRuleCheck(event) },
+            onCancellation = { cancellation ->
+                Log.w(
+                    "App rule check",
+                    "App rule worker cancellation was contained at the service boundary",
+                    cancellation
+                )
+            },
+            onNonFatal = { t ->
+                Log.e("App rule check error", t.toString())
+                crashLogger.logNonFatalError(Exception(t))
+            }
+        )
 
         try {
             mindfulMessage.onEvent(event)
@@ -305,5 +313,19 @@ class AppBlockerService : BaseBlockingService() {
             }
             Log.e("AppBlockerService", "$name cleanup failed", error)
         }
+    }
+}
+
+internal fun runAppRuleCheckAtSynchronousServiceBoundary(
+    action: () -> Unit,
+    onCancellation: (CancellationException) -> Unit,
+    onNonFatal: (Throwable) -> Unit
+) {
+    try {
+        action()
+    } catch (error: CancellationException) {
+        runCatching { onCancellation(error) }
+    } catch (error: Throwable) {
+        runCatching { onNonFatal(error) }
     }
 }
