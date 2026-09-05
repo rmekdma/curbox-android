@@ -46,6 +46,7 @@ import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleReceiverLifecycle
 import neth.iecal.curbox.domain.apprules.AppRuleRecheckPlanner
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
+import neth.iecal.curbox.domain.apprules.AppRuleWallClockScheduler
 import neth.iecal.curbox.domain.apprules.ActiveRootFact
 import neth.iecal.curbox.domain.apprules.AndroidForegroundObservationSource
 import neth.iecal.curbox.domain.apprules.AppUsageTrackingDecision
@@ -170,7 +171,8 @@ class AppRuleBlocker {
 
     private data class ScheduledRecheck(
         val generation: Long,
-        val runnable: Runnable
+        val runnable: Runnable,
+        val dueAtWallClockMs: Long
     )
 
     /** Evidence snapshot kept internal so Android tests can exercise OEM failure combinations. */
@@ -566,6 +568,28 @@ class AppRuleBlocker {
                 logNonFatal(error)
             }
         }
+        val calculator = ConfigurableUseDayCalculator(resetTime = accepted.runtime.resetTime)
+        val useDayId = calculator.idAt(request.observation.capturedAtWallMs)
+        val nextPlan = AppRuleRecheckPlanner.nextPlan(
+            snapshot = accepted.runtime.snapshot,
+            evaluation = evaluation,
+            overrideState = accepted.runtime.overrideState,
+            useDayId = useDayId,
+            nowMs = request.observation.capturedAtWallMs,
+            useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
+            zone = calculator.zone,
+            useDayCalculator = calculator
+        )
+        if (nextPlan == null) {
+            cancelScheduledRecheck(packageName)
+        } else {
+            scheduleRecheckAtWallClock(
+                packageName = packageName,
+                dueAtWallClockMs = nextPlan.dueAtWallClockMs,
+                maxDelayMillis = nextPlan.maxDelayMillis,
+                generation = recheckGeneration.get()
+            )
+        }
     }
 
     fun doAppRuleCheck(event: AccessibilityEvent?) {
@@ -576,6 +600,15 @@ class AppRuleBlocker {
         if (eventPackageName.isBlank()) return
 
         submitForegroundDecision(event, ObservationKind.REAL_EVENT)
+    }
+
+    /** Called by the scheduler adapter when a delayed wall-clock plan becomes runnable. */
+    internal fun onSchedulerWake() {
+        if (!isReadyForChecks()) return
+        postVisibleApplicationCheck(
+            connectionGeneration = lifecycleGeneration.get(),
+            observationKind = ObservationKind.REFRESH
+        )
     }
 
     /** Enqueues a reset behind the worker's already accepted foreground observations. */
@@ -629,7 +662,7 @@ class AppRuleBlocker {
     }
 
     private fun submitForegroundDecision(
-        event: AccessibilityEvent,
+        event: AccessibilityEvent?,
         kind: ObservationKind
     ) {
         try {
@@ -1020,6 +1053,7 @@ class AppRuleBlocker {
         }
         cancelScheduledRechecks()
         clearForegroundEvidence()
+        submitForegroundDecision(event = null, kind = ObservationKind.SCREEN_OFF)
     }
 
     private val packageReceiver = object : BroadcastReceiver() {
@@ -1422,8 +1456,29 @@ class AppRuleBlocker {
         generation: Long = recheckGeneration.get()
     ) {
         if (!isReadyForChecks() || packageName.isBlank()) return
-        val delay = remainingMillis.coerceIn(1_000L, maxDelayMillis.coerceAtLeast(1_000L))
-        postScheduledRecheck(packageName, generation, delay, 0)
+        scheduleRecheckAtWallClock(
+            packageName = packageName,
+            dueAtWallClockMs = safeWallClockAdd(observationWallClockMs(), remainingMillis),
+            maxDelayMillis = maxDelayMillis,
+            generation = generation
+        )
+    }
+
+    private fun scheduleRecheckAtWallClock(
+        packageName: String,
+        dueAtWallClockMs: Long,
+        maxDelayMillis: Long,
+        generation: Long
+    ) {
+        if (!isReadyForChecks() || packageName.isBlank()) return
+        postScheduledRecheck(
+            packageName = packageName,
+            generation = generation,
+            delayMillis = 0L,
+            visibilityAttempt = 0,
+            dueAtWallClockMs = dueAtWallClockMs,
+            maxDelayMillis = maxDelayMillis
+        )
     }
 
     private fun postScheduledRecheck(
@@ -1431,7 +1486,9 @@ class AppRuleBlocker {
         generation: Long,
         delayMillis: Long,
         visibilityAttempt: Int,
-        postAttempt: Int = 1
+        postAttempt: Int = 1,
+        dueAtWallClockMs: Long = safeWallClockAdd(observationWallClockMs(), delayMillis),
+        maxDelayMillis: Long? = null
     ) {
         if (!isReadyForChecks() || recheckGeneration.get() != generation) return
         lateinit var runnable: Runnable
@@ -1444,21 +1501,44 @@ class AppRuleBlocker {
         }
         val previous = synchronized(scheduledRechecks) {
             val old = scheduledRechecks.remove(packageName)
-            scheduledRechecks[packageName] = ScheduledRecheck(generation, runnable)
+            scheduledRechecks[packageName] = ScheduledRecheck(
+                generation = generation,
+                runnable = runnable,
+                dueAtWallClockMs = dueAtWallClockMs
+            )
             old
         }
         previous?.let { removeHandlerCallback(it.runnable) }
+        val wallClockDelay = AppRuleWallClockScheduler.delayUntil(
+            dueAtWallClockMs = dueAtWallClockMs,
+            nowWallClockMs = observationWallClockMs(),
+            nowElapsedRealtimeMs = observationElapsedRealtimeMs()
+        )
+        val postDelay = if (postAttempt == 1) {
+            if (maxDelayMillis == null) {
+                wallClockDelay.coerceAtLeast(1L)
+            } else {
+                wallClockDelay.coerceIn(
+                    1_000L,
+                    maxDelayMillis.coerceAtLeast(1_000L)
+                )
+            }
+        } else {
+            VISIBILITY_RETRY_DELAY_MS * (postAttempt - 1)
+        }
         try {
             val posted = recheckPostDelayed?.invoke(
                 runnable,
-                delayMillis.coerceAtLeast(1L)
-            ) ?: handler.postDelayed(runnable, delayMillis.coerceAtLeast(1L))
+                postDelay
+            ) ?: handler.postDelayed(runnable, postDelay)
             if (!posted) {
                 recoverScheduledPost(
                     packageName = packageName,
                     generation = generation,
                     visibilityAttempt = visibilityAttempt,
-                    postAttempt = postAttempt
+                    postAttempt = postAttempt,
+                    dueAtWallClockMs = dueAtWallClockMs,
+                    maxDelayMillis = maxDelayMillis
                 )
             }
         } catch (error: Throwable) {
@@ -1467,7 +1547,9 @@ class AppRuleBlocker {
                 packageName = packageName,
                 generation = generation,
                 visibilityAttempt = visibilityAttempt,
-                postAttempt = postAttempt
+                postAttempt = postAttempt,
+                dueAtWallClockMs = dueAtWallClockMs,
+                maxDelayMillis = maxDelayMillis
             )
         }
     }
@@ -1476,7 +1558,9 @@ class AppRuleBlocker {
         packageName: String,
         generation: Long,
         visibilityAttempt: Int,
-        postAttempt: Int
+        postAttempt: Int,
+        dueAtWallClockMs: Long,
+        maxDelayMillis: Long?
     ) {
         if (postAttempt >= MAX_SCHEDULER_POST_ATTEMPTS ||
             !isReadyForChecks() || recheckGeneration.get() != generation
@@ -1488,7 +1572,9 @@ class AppRuleBlocker {
             generation = generation,
             delayMillis = VISIBILITY_RETRY_DELAY_MS * postAttempt,
             visibilityAttempt = visibilityAttempt,
-            postAttempt = postAttempt + 1
+            postAttempt = postAttempt + 1,
+            dueAtWallClockMs = dueAtWallClockMs,
+            maxDelayMillis = maxDelayMillis
         )
     }
 
@@ -1908,6 +1994,13 @@ class AppRuleBlocker {
             }
         }
     }
+
+    private fun safeWallClockAdd(baseMs: Long, deltaMs: Long): Long =
+        if (deltaMs > 0L && baseMs > Long.MAX_VALUE - deltaMs) {
+            Long.MAX_VALUE
+        } else {
+            baseMs + deltaMs
+        }
 
     private fun safeResetTime(hour: Int, minute: Int): UseDayResetTime = try {
         UseDayResetTime(hour, minute)
