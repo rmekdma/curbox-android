@@ -278,21 +278,26 @@ sequence, invariant를 실행하는 순서와 검증 checklist만 제공한다. 
 `capture(...)`만 제공한다. capture의 입력과 반환값은 모두 immutable value다.
 `ConnectionScopedSourceOrderSequencer`는 이 source와 분리된 connection-scoped allocator
 interface이며, 정확히 두 operation인 `nextSourceOrderIdentity(): SourceOrderIdentity`와
-`nextRuntimeRevision(): RuntimeRevision`만 제공한다. `SourceOrderIdentity`와
+`reserveRuntimePublication(): SourceOrderReservation`만 제공한다. 전자는 non-publication
+observation에 사용하고, 후자는 settings/refresh publication의 `SourceOrderIdentity`와
+`RuntimeRevision`을 하나의 atomic pair로 예약한다. `SourceOrderIdentity`와
 `RuntimeRevision`은 typealias가 아닌 서로 다른 real value type이며, 두 domain의 raw numeric
 value를 서로 비교하지 않는다. `LifecycleGeneration`도 이 둘과 구별되는 typealias가 아닌 real
 value type이며, lifecycle owner가 setup/reconnect/destroy 경계에서 발급한다.
 
 production `adapter`/callback은 event, synthetic wake 또는 runtime publication을 관찰한 순간
-sequencer에서 `SourceOrderIdentity`를 받고 framework event에서 immutable value facts를 만든다.
-settings/refresh runtime publication만 같은 관찰 시점에 `RuntimeRevision`도 받는다. caller와
-worker는 두 identity를 직접 allocate하지 않는다. value seam에 넘기기 전에 event와 생성한
+sequencer에서 source ordering value를 받고 framework event에서 immutable value facts를 만든다.
+event와 synthetic wake 같은 non-publication observation은 `nextSourceOrderIdentity()`를 호출하고,
+settings/refresh runtime publication은 `reserveRuntimePublication()`으로 source identity와
+revision을 함께 받는다. caller와 worker는 두 identity를 직접 allocate하지 않는다. worker의
+initial accepted snapshot은 publication이 아니므로 `RuntimeRevision(0L)` sentinel에서 시작하며,
+standalone publication revision을 소비하지 않는다. value seam에 넘기기 전에 event와 생성한
 framework copy를 무조건 recycle하며, worker는 platform event object의 소유권을 갖지 않는다.
 
 | Value | Exact shape | Invariant |
 | --- | --- | --- |
-| `ConnectionScopedSourceOrderSequencer.nextSourceOrderIdentity` | `SourceOrderIdentity` real value type 반환 | connection 안의 모든 event, synthetic wake와 runtime publication에 대해 한 domain에서 strictly increasing하며, allocator는 이 sequencer 하나뿐이다. |
-| `ConnectionScopedSourceOrderSequencer.nextRuntimeRevision` | `RuntimeRevision` real value type 반환 | settings/refresh runtime publication domain에서만 strictly increasing하며, allocator는 이 sequencer 하나뿐이다. event와 synthetic wake에는 새 revision을 발급하지 않는다. |
+| `ConnectionScopedSourceOrderSequencer.nextSourceOrderIdentity` | `SourceOrderIdentity` real value type 반환 | non-publication event와 synthetic wake observation에 대해 connection 안에서 strictly increasing하며, runtime publication의 source identity는 atomic reservation에서 함께 발급한다. allocator는 이 sequencer 하나뿐이다. |
+| `ConnectionScopedSourceOrderSequencer.reserveRuntimePublication` | `SourceOrderReservation` pair 반환 | settings/refresh runtime publication의 source identity와 revision을 같은 critical section에서 함께 strictly increasing하게 예약한다. pair를 별도 operation으로 나누지 않으며 event와 synthetic wake에는 새 revision을 발급하지 않는다. |
 | `ObservationTrigger` | `sourceOrderIdentity: SourceOrderIdentity`, `kind`, nullable normalized `eventPackage`, `requestedAtWallMs`, `requestedAtElapsedMs` | identity는 source observation 시점에 sequencer가 할당하며 재사용하지 않는다. `kind`는 `REAL_EVENT`, `SYNTHETIC_RECHECK`, `REFRESH`, `RECONNECT`, `SCREEN_WAKE`, `USER_PRESENT` 중 하나이며, `REAL_EVENT` 이외에는 event package가 없어도 된다. |
 | `ForegroundObservationSource.capture` | `ObservationTrigger`를 받아 raw `ForegroundFacts` 반환 | capture는 blocking persistence/evaluator를 수행하지 않으며, 반환된 value는 source 밖에서 변이되지 않는다. |
 | `ForegroundFacts` | 아래 1.1의 raw immutable value | source는 한 capture 안에서 wall/elapsed 시각, root, window, display 사실을 서로 다른 시점에 재조회해 혼합하지 않는다. |
@@ -513,7 +518,7 @@ production numeric selection이나 default의 근거로 오인하지 않는다.
 | Owner | Owns | Must not own |
 | --- | --- | --- |
 | 기존 accessibility host | lifecycle callback, 다른 blocker의 기존 fan-out, setup/reconnect/destroy 진입 순서 | Room read/write, evaluator 호출, evidence policy branch, decision queue의 별도 복제 |
-| `ConnectionScopedSourceOrderSequencer` | connection 안의 `SourceOrderIdentity`와 runtime-publication domain의 `RuntimeRevision`을 각 operation으로 발급하는 유일한 allocator | policy 해석, request 처리, 두 domain의 numeric 비교, lifecycle generation 발급 |
+| `ConnectionScopedSourceOrderSequencer` | connection 안의 non-publication `SourceOrderIdentity`와 settings/refresh publication의 atomic `SourceOrderReservation`을 발급하는 유일한 allocator | policy 해석, request 처리, 두 domain의 numeric 비교, lifecycle generation 발급 |
 | `ForegroundObservationSource` seam의 production adapter/callback | sequencer에서 observation 시점의 identity를 받아 framework fact를 immutable value로 만들고, value seam에 들어오기 전에 모든 경로에서 무조건 copy/recycle한 뒤 한 번 submit한다. settings/refresh publication이면 revision도 함께 받는다. | identity/revision 직접 allocation, policy에 따른 block/allow, session persistence, framework event object handoff |
 | `ForegroundEvidenceModule` implementation | 명시적으로 받은 raw facts와 canonical `ForegroundEvidencePolicySnapshot`의 의미 해석, essential filtering, stale/partial/split-screen/keyguard/screen-off classification, intrinsic `EvidenceValidity`, declarative `FollowUpKind`, sealed outcome 생성 | policy delivery state, retry/backoff/attempt, timer post, `ExecutionDeadline` 계산, wall-clock 재계산, coalescing, Room, session writer, evaluator, activity/notification |
 | `SerializedDecisionWorker` implementation | connection/`LifecycleGeneration` 검증, newer `RuntimeRevision` publication만 수락, current `AcceptedRuleRuntimeSnapshot` 소유/교체, request마다 accepted snapshot 하나를 고정해 classify/persistence/evaluator에 사용, visible session reconciliation, flush/commit, evaluator, private `FollowUpPolicy`와 retry/coalescing state, `ExecutionDeadline`과 wall-clock boundary 재계산, scheduler에 derived plan 전달, latest lifecycle/revision 검증, public outcome sink 전달 | identity/revision allocation, 두 ordering domain의 numeric 비교, Android object 보관, Handler callback에서 직접 DB 작업, caller별 별도 queue, framework event recycle, 제품 의미를 policy matrix 밖에서 변경 |
@@ -546,8 +551,8 @@ token의 stale callback과 재예약도 버린다.
    이 callback에서 실행하지 않는다.
 3. **Handoff:** callback은 `sourceOrderIdentity`, `LifecycleGeneration`, reason과 raw facts를 넣어
    `submit`하고 즉시 반환한다. settings/refresh publication이면 source가 같은 관찰 시점에
-   `nextRuntimeRevision()`으로 받은 `RuntimeRevision`과 candidate runtime도 원자적으로 넣는다.
-   worker queue에는 framework event object를 넣지 않는다.
+   `reserveRuntimePublication()`으로 받은 atomic pair와 candidate runtime을 넣는다. worker queue에는
+   framework event object를 넣지 않는다.
 4. **Evidence:** worker가 같은 serialized path에서 request마다 하나의 accepted immutable
    `AcceptedRuleRuntimeSnapshot`을 확정하고, 그 snapshot의 `ForegroundEvidencePolicySnapshot`과 raw
    `ForegroundFacts`를 `ForegroundEvidenceModule.classify(ForegroundFacts,
@@ -623,8 +628,11 @@ reflection field와 temporary lambda는 migration 중 private internal test seam
 
 #### Ordering and generation
 
-- connection마다 하나인 `ConnectionScopedSourceOrderSequencer`만 `SourceOrderIdentity`와
-  `RuntimeRevision`을 allocate한다. caller와 worker는 어느 것도 발급하지 않는다.
+- connection마다 하나인 `ConnectionScopedSourceOrderSequencer`만 ordering values를 allocate한다.
+  non-publication observation은 `nextSourceOrderIdentity()`를 사용하고, settings/refresh publication은
+  `reserveRuntimePublication()`으로 source identity와 revision을 atomic pair로 받는다. caller와
+  worker는 standalone publication revision을 발급하지 않으며, worker initial accepted snapshot은
+  `RuntimeRevision(0L)` sentinel을 사용한다.
 - event, synthetic wake와 runtime publication은 모두 source observation 시점에
   `SourceOrderIdentity`를 받는다. settings/refresh runtime publication만 별도의
   `RuntimeRevision`도 받는다. queue arrival이나 worker execution 시점에 identity/revision을
@@ -809,7 +817,7 @@ independent fresh Sol Medium reviewer와 parent의 D1부터 D9까지의 완전�
 | D1. evidence module seam | **A — 승인됨:** `ForegroundFacts`와 `ForegroundEvidencePolicySnapshot` 두 cohesive value만 받는 value-only `ForegroundEvidenceModule`의 단일 `classify(ForegroundFacts, ForegroundEvidencePolicySnapshot)`, 그리고 source의 production/deterministic 두 adapter | **B —** 현재 blocker caller에 policy branch를 유지하고 module seam을 만들지 않음 | A는 stale/partial 정책을 한 곳에서 유도하며 caller와 테스트를 단순하게 한다. module은 policy delivery state를 숨겨 갖지 않고, worker가 accepted snapshot을 명시적으로 주입한다. B는 초기 추출은 작지만 AR001/AR002의 policy branch와 reflection fixture가 여러 경로에 남는다. | 13행 policy, ticket 02, known responsibility concentration, DEEPENING의 deletion/depth 기준 | `APPROVAL-ARCH-2026-09-01` |
 | D2. persistence/decision ownership | **A — 승인됨:** worker가 visible reconciliation, flush/commit, evaluator와 next-plan의 단일 serialized owner가 됨 | **B —** tracker가 Room writer를 계속 소유하고 별도 worker가 evaluator를 호출 | A는 ticket 05의 flush-before-decision invariant를 구조적으로 보장한다. B는 callback을 비동기화해도 두 queue의 순서를 다시 조정해야 하며 stale read 위험이 남는다. | ticket 05 RED result와 canonical Phase 2 ownership requirement | `APPROVAL-ARCH-2026-09-01` |
 | D3. evidence와 scheduling 분리 | **C2 — 승인됨:** `ForegroundEvidenceModule`은 raw facts에서 value-only sealed classification, intrinsic evidence validity(`EvidenceValidity`, 예: `validUntil`)와 declarative `FollowUpKind`만 반환한다. public result에는 retry limit, backoff step, execution deadline, attempt, coalescing, generation, scheduler token 또는 callback operation을 넣지 않는다. `SerializedDecisionWorker`는 request마다 하나의 accepted immutable `AcceptedRuleRuntimeSnapshot`을 소유한다. private worker-internal `FollowUpPolicy`가 그 snapshot, follow-up kind, attempt와 runtime state에서 retry/backoff와 `ExecutionDeadline`을 도출하며, scheduler adapter는 derived plan만 post/cancel한다. `EvidenceValidity`와 `ExecutionDeadline`은 서로 다른 개념과 type이다. | **B —** evidence module이 concrete delay와 Handler/scheduler operation까지 반환 | C2는 evidence meaning과 execution scheduling을 분리하면서 worker가 request의 snapshot과 실행 순서를 함께 소유한다. module과 public result는 timing/execution state를 노출하지 않고, worker 내부에서만 runtime에 맞는 follow-up을 계산한다. B는 caller가 단순해 보이지만 Android timing과 retry state가 evidence interface에 결합된다. | ticket 02/04의 서로 다른 evidence와 clock 실패, DEEPENING의 seam discipline, evidence validity와 execution deadline의 분리 | `APPROVAL-ARCH-2026-09-01` |
-| D4. runtime publication ordering | **A — 승인됨:** `ConnectionScopedSourceOrderSequencer`가 모든 event/synthetic wake/runtime publication에 관찰 시점의 `SourceOrderIdentity`를 발급하고 settings/refresh publication에는 추가로 `RuntimeRevision`을 발급한다. worker는 connection/`LifecycleGeneration`을 검증하고 newer `RuntimeRevision`만 `AcceptedRuleRuntimeSnapshot`으로 수락한다. 세 값은 서로 교환하거나 numerically compare하지 않는 distinct real value type이며 caller와 worker는 어느 값도 allocate하지 않는다. | **B —** 현재 mutex critical section만 유지 | A는 ticket 03에서 재현된 latest→stale rollback을 차단한다. sequencer만 identity/revision을 발급하고 worker만 current accepted snapshot authority를 가지므로 caller emission이 accepted state를 되돌릴 수 없다. B는 lock mutual exclusion만 보장하고 stale emission의 identity를 보장하지 않는다. | ticket 03 deterministic interleaving과 AR010 known limitation | `APPROVAL-ARCH-2026-09-01` |
+| D4. runtime publication ordering | **A — 승인됨:** `ConnectionScopedSourceOrderSequencer`는 정확히 두 caller operation을 제공한다. non-publication event/synthetic wake는 `nextSourceOrderIdentity()`를 사용하고, settings/refresh publication은 `reserveRuntimePublication()`으로 `SourceOrderIdentity`와 `RuntimeRevision`을 같은 critical section에서 atomic pair로 예약한다. worker는 initial accepted snapshot을 `RuntimeRevision(0L)` sentinel로 시작하고 connection/`LifecycleGeneration`을 검증한 뒤 strictly newer `RuntimeRevision`만 `AcceptedRuleRuntimeSnapshot`으로 수락한다. 세 값은 서로 교환하거나 numerically compare하지 않는 distinct real value type이며 caller와 worker는 standalone publication revision을 allocate하지 않는다. | **B —** 현재 mutex critical section만 유지 | A는 ticket 03에서 재현된 latest→stale rollback을 차단한다. sequencer만 source/publication values를 발급하고 worker만 current accepted snapshot authority를 가지므로 caller emission이 accepted state를 되돌릴 수 없다. B는 lock mutual exclusion만 보장하고 stale emission의 identity를 보장하지 않는다. | ticket 03 deterministic interleaving과 AR010 known limitation | `APPROVAL-ARCH-2026-09-01` |
 | D5. cancellation semantics | **A — 승인됨:** 모든 suspend adapter/evaluator/request code의 `CancellationException`은 request child 밖으로 재전파하고 nonfatal logging하지 않는다. lifecycle owner가 worker-scope/generation cancellation이면 현재 generation을 종료하고, request-child cancellation인데 worker scope가 살아 있으면 해당 request만 `CANCELED`로 표시해 side effect/outcome 없이 버린 뒤 같은 serialized generation이 다음 queued request를 처리한다. `CancellationException`이 아닌 ordinary error는 request 단위로 contain/log하고 같은 generation을 계속하며, non-coroutine callback은 별도 callback boundary containment를 따른다. | **B —** 모든 throwable을 nonfatal failure로 변환 | A는 cancellation의 scope를 보존하면서 ticket 06의 same-generation continuation과 새-generation recovery를 구분한다. B는 worker가 계속 살아 보일 수 있지만 cancellation을 crash처럼 기록하거나 정상 teardown을 지연시킬 위험이 있다. | repository instructions, ticket 06 two-level cancellation contract | `APPROVAL-ARCH-2026-09-01` |
 | D6. total drain budget | **EXPLICIT_MEASUREMENT_DEFERRAL — 승인됨:** representative persistence/evaluator/scheduler cleanup latency와 durable reconnect recovery를 측정하고, 그 뒤 명시적으로 하나의 numeric end-to-end budget을 선택한다. 그 전 production은 `RecoveryOnlyStop`만 사용하며 `TotalDrainDeadline`이나 drain completion guarantee 없이 즉시 lifecycle/generation invalidation, post-destroy outcome suppression과 cancellation을 수행하고 unfinished durable state를 reconnect recovery 대상으로 남긴다. `DeadlineDrainStop`과 `DrainResult.completed`/`timedOut`은 later explicit numeric selection 뒤 production에서만 허용한다. candidate deadline injection은 deterministic tests/measurement 전용이다. | **NUMERIC_SELECTION_NOW —** 대표 측정 전 2초 또는 5초를 production budget으로 선택 | 숫자를 지금 고정하지 않아 teardown의 최종 운영 threshold는 뒤로 미루지만 안전한 invalidation/suppression/recovery와 측정 instrumentation은 먼저 만든다. 2초와 5초는 candidate test/measurement input일 수 있으나 승인된 production default나 현재 선택이 아니다. | ticket 06의 outer/단계별 대기는 total contract를 확정하지 못한다. 대표 persistence/evaluator/scheduler cleanup, fault/reconnect 조건을 측정하고 explicit later numeric selection을 남긴다. | `APPROVAL-ARCH-2026-09-01` |
 | D7. performance acceptance | **A — 승인됨:** callback nonblocking을 hard invariant로 두고 representative p95 callback/decision latency를 구현 후 기록하며 새 p95 숫자나 threshold는 지금 발명하지 않음 | **B —** architecture approval에서 고정 p95 숫자까지 제품 threshold로 결정 | A는 ticket 05가 입증한 callback blocking 제거를 보장하면서 측정 전 가짜 정밀도를 피한다. B는 운영 목표를 조기에 고정하지만 세션 크기와 device evidence 없이 잘못된 목표가 될 수 있다. | ticket 05 RED contract와 canonical Phase 2 performance criterion | `APPROVAL-ARCH-2026-09-01` |

@@ -5,7 +5,6 @@ import org.junit.Assert.fail
 import org.junit.Test
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Callable
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -16,47 +15,13 @@ class ForegroundEvidenceContractTest {
         val observationBarrier = CyclicBarrier(2)
         val executor = Executors.newFixedThreadPool(2)
         try {
-            val splitSourceBarrier = CyclicBarrier(2)
-            val firstSourceAllocated = CountDownLatch(1)
-            val secondRuntimeAllocated = CountDownLatch(1)
-            val splitFirst = executor.submit(Callable {
-                val sourceOrderIdentity = sequencer.nextSourceOrderIdentity()
-                firstSourceAllocated.countDown()
-                splitSourceBarrier.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                secondRuntimeAllocated.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                SourceOrderReservation(
-                    sourceOrderIdentity = sourceOrderIdentity,
-                    runtimeRevision = sequencer.nextRuntimeRevision()
-                )
-            })
-            val splitSecond = executor.submit(Callable {
-                firstSourceAllocated.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                val sourceOrderIdentity = sequencer.nextSourceOrderIdentity()
-                splitSourceBarrier.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                val reservation = SourceOrderReservation(
-                    sourceOrderIdentity = sourceOrderIdentity,
-                    runtimeRevision = sequencer.nextRuntimeRevision()
-                )
-                secondRuntimeAllocated.countDown()
-                reservation
-            })
-            assertEquals(
-                SourceOrderReservation(SourceOrderIdentity(1L), RuntimeRevision(2L)),
-                splitFirst.get(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            )
-            assertEquals(
-                SourceOrderReservation(SourceOrderIdentity(2L), RuntimeRevision(1L)),
-                splitSecond.get(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            )
-
-            val pairedSequencer = AtomicConnectionScopedSourceOrderSequencer()
             val first = executor.submit(Callable {
                 observationBarrier.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                pairedSequencer.reserveRuntimePublication()
+                sequencer.reserveRuntimePublication()
             })
             val second = executor.submit(Callable {
                 observationBarrier.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                pairedSequencer.reserveRuntimePublication()
+                sequencer.reserveRuntimePublication()
             })
 
             val reservations = listOf(
