@@ -114,6 +114,8 @@ class AppBlockerService : BaseBlockingService() {
             // This must remain after the usage flush above. Contributor earning and target
             // consumption both use the current-use-day raw session ledger.
             appRuleBlocker.doAppRuleCheck(event)
+        } catch (t: CancellationException) {
+            throw t
         } catch (t: Throwable) {
             Log.e("App rule check error", t.toString())
             crashLogger.logNonFatalError(Exception(t))

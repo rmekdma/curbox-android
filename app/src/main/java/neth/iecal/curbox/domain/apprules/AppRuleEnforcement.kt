@@ -58,7 +58,8 @@ class AppRuleEnforcement(
         useDayGenerationStartedAtMs: Long = 0L,
         availablePackages: Set<String> = emptySet(),
         essentialExcludedPackages: Set<String> = emptySet(),
-        overrides: AppRuleOverrideState = AppRuleOverrideState()
+        overrides: AppRuleOverrideState = AppRuleOverrideState(),
+        onNonFatalError: (Throwable) -> Unit = {}
     ): AppRulesEvaluation = try {
         check(
             snapshot,
@@ -73,7 +74,14 @@ class AppRuleEnforcement(
         )
     } catch (error: CancellationException) {
         throw error
-    } catch (_: Exception) {
+    } catch (error: Throwable) {
+        try {
+            onNonFatalError(error)
+        } catch (reportingError: CancellationException) {
+            throw reportingError
+        } catch (_: Throwable) {
+            // Reporting must not turn a recoverable evaluator failure into a worker failure.
+        }
         AppRulesEvaluation(isAllowed = true, denyingRules = emptyList(), evaluations = emptyList())
     }
 }

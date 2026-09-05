@@ -9,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
@@ -188,17 +187,23 @@ class SerializedDecisionWorker internal constructor(
     private var evidenceModule = ForegroundEvidenceModule()
     private val sessionPersistence = SerializedForegroundSessionPersistence(repository)
     private val workerJob: Job = workerScope.launch {
-        for (work in requests) {
-            try {
-                when (work) {
-                    is Work.Decision -> process(work.request)
-                    is Work.UsageReset -> processUsageReset(work)
+        try {
+            for (work in requests) {
+                try {
+                    when (work) {
+                        is Work.Decision -> process(work.request)
+                        is Work.UsageReset -> processUsageReset(work)
+                    }
+                } catch (error: CancellationException) {
+                    accepting.set(false)
+                    requests.close()
+                    throw error
+                } catch (error: Throwable) {
+                    reportNonFatal(error)
                 }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                reportNonFatal(error)
             }
+        } finally {
+            accepting.set(false)
         }
     }
 
@@ -206,7 +211,10 @@ class SerializedDecisionWorker internal constructor(
     fun submit(request: DecisionRequest): SubmissionResult {
         if (!accepting.get()) return SubmissionResult.REJECTED_NOT_READY
         synchronized(stateLock) {
-            if (!accepting.get()) return SubmissionResult.REJECTED_NOT_READY
+            if (!accepting.get() || !workerJob.isActive) {
+                accepting.set(false)
+                return SubmissionResult.REJECTED_NOT_READY
+            }
             if (request.lifecycleGeneration != currentLifecycleGeneration) {
                 return SubmissionResult.REJECTED_STALE
             }
@@ -223,7 +231,10 @@ class SerializedDecisionWorker internal constructor(
         request: UsageResetRequest,
         resetAtElapsedMs: Long
     ): SubmissionResult = synchronized(stateLock) {
-        if (!accepting.get()) return@synchronized SubmissionResult.REJECTED_NOT_READY
+        if (!accepting.get() || !workerJob.isActive) {
+            accepting.set(false)
+            return@synchronized SubmissionResult.REJECTED_NOT_READY
+        }
         if (UsageResetCommandPolicy.hasPendingOverlap(
                 request.packageNames,
                 pendingUsageResetPackages
@@ -255,9 +266,13 @@ class SerializedDecisionWorker internal constructor(
             sessionPersistence.clear()
             wallClockBoundaries.clear()
             boundarySourceOrderIdentities.clear()
-            accepting.set(true)
+            accepting.set(workerJob.isActive)
         }
     }
+
+    /** True only while this worker can still consume queued foreground work. */
+    internal fun isReadyForSubmission(): Boolean =
+        accepting.get() && workerJob.isActive
 
     /** Production currently uses recovery-only stop; it invalidates publication immediately. */
     fun stop(request: RecoveryOnlyStop): DrainResult.RecoveryOnly {
@@ -269,7 +284,6 @@ class SerializedDecisionWorker internal constructor(
         }
         requests.close()
         workerJob.cancel()
-        workerScope.cancel()
         return DrainResult.RecoveryOnly(
             remainingWork = true,
             durableRecoveryRequired = true
@@ -354,8 +368,10 @@ class SerializedDecisionWorker internal constructor(
         val calculator = ConfigurableUseDayCalculator(resetTime = accepted.runtime.resetTime)
         val useDayId = calculator.idAt(request.observation.capturedAtWallMs)
         val evaluatedPackages = mutableListOf<Pair<String, AppRulesEvaluation>>()
-        val decisions = evaluable.mapNotNull { outcome ->
-            val packageName = outcome.packageName ?: return@mapNotNull null
+        val decisions = mutableListOf<PackageDecision>()
+        for (outcome in evaluable) {
+            val packageName = outcome.packageName ?: continue
+            if (!isCurrent(request, accepted)) return
             val evaluation = enforcement.checkSafely(
                 snapshot = accepted.runtime.snapshot,
                 packageName = packageName,
@@ -365,8 +381,10 @@ class SerializedDecisionWorker internal constructor(
                 useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
                 availablePackages = accepted.runtime.launchablePackages,
                 essentialExcludedPackages = accepted.runtime.evidencePolicy.essentialPackages,
-                overrides = accepted.runtime.overrideState
+                overrides = accepted.runtime.overrideState,
+                onNonFatalError = ::reportNonFatal
             )
+            if (!isCurrent(request, accepted)) return
             try {
                 onEvaluation?.invoke(request, accepted, packageName, evaluation)
             } catch (error: CancellationException) {
@@ -374,8 +392,9 @@ class SerializedDecisionWorker internal constructor(
             } catch (error: Throwable) {
                 reportNonFatal(error)
             }
+            if (!isCurrent(request, accepted)) return
             evaluatedPackages += packageName to evaluation
-            PackageDecision(
+            decisions += PackageDecision(
                 packageName = packageName,
                 isAllowed = evaluation.isAllowed,
                 denyingRuleIds = evaluation.denyingRules.map { it.ruleId }
@@ -444,6 +463,7 @@ class SerializedDecisionWorker internal constructor(
                 boundarySourceOrderIdentities[packageName] = request.sourceOrderIdentity
             }
         }
+        if (!isCurrent(request, accepted)) return
         try {
             onRecheckPlan?.invoke(
                 RecheckPlanUpdate(
@@ -476,6 +496,7 @@ class SerializedDecisionWorker internal constructor(
             wallClockBoundaries.remove(packageName)
             boundarySourceOrderIdentities.remove(packageName)
         }
+        if (!isCurrent(request, accepted)) return
         try {
             onRecheckPlan?.invoke(
                 RecheckPlanUpdate(
