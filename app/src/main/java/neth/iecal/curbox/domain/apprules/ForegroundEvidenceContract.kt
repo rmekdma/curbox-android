@@ -56,12 +56,17 @@ data class ObservationTrigger(
     }
 }
 
-/** The one allocator for source-order and runtime-publication domains. */
+/**
+ * The one allocator for source-order and runtime-publication domains.
+ *
+ * Non-publication observations use [nextSourceOrderIdentity]. Settings and refresh publications
+ * use [reserveRuntimePublication], which reserves both values as one atomic pair.
+ */
 interface ConnectionScopedSourceOrderSequencer {
+    /** Reserves the identity for a non-publication source observation. */
     fun nextSourceOrderIdentity(): SourceOrderIdentity
 
-    fun nextRuntimeRevision(): RuntimeRevision
-
+    /** Atomically reserves the source identity and revision for one runtime publication. */
     fun reserveRuntimePublication(): SourceOrderReservation
 }
 
@@ -81,10 +86,6 @@ class AtomicConnectionScopedSourceOrderSequencer(
 
     override fun nextSourceOrderIdentity(): SourceOrderIdentity = synchronized(allocationLock) {
         SourceOrderIdentity(sourceOrder.incrementAndGet())
-    }
-
-    override fun nextRuntimeRevision(): RuntimeRevision = synchronized(allocationLock) {
-        RuntimeRevision(runtimeRevision.incrementAndGet())
     }
 
     override fun reserveRuntimePublication(): SourceOrderReservation =

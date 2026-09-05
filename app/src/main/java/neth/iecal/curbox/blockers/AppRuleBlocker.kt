@@ -478,7 +478,9 @@ class AppRuleBlocker {
                 lifecycleGeneration = LifecycleGeneration(connectionGeneration)
             )
         )
-        val runtimeRevision = sourceOrderSequencer.nextRuntimeRevision()
+        // The initial accepted snapshot is state, not a runtime publication. Zero is the
+        // nonnegative sentinel before the first source-time publication reservation.
+        val runtimeRevision = RuntimeRevision(0L)
         latestRuntimeRevision = runtimeRevision
         val worker = SerializedDecisionWorker(
             lifecycleGeneration = LifecycleGeneration(connectionGeneration.coerceAtLeast(1L)),
