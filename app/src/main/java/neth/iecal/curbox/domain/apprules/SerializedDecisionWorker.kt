@@ -110,7 +110,9 @@ data class RecheckPlanUpdate(
     val lifecycleGeneration: LifecycleGeneration,
     val acceptedRuntimeRevision: RuntimeRevision,
     val packageName: String,
-    val plan: AppRuleRecheckPlan?
+    val plan: AppRuleRecheckPlan?,
+    /** Identity of the boundary being cancelled, when this update removes an existing plan. */
+    val expectedRegistrationSourceOrderIdentity: SourceOrderIdentity? = null
 )
 
 enum class StopReason {
@@ -180,6 +182,7 @@ class SerializedDecisionWorker internal constructor(
     private val stateLock = Any()
     private val pendingUsageResetPackages = mutableSetOf<String>()
     private val wallClockBoundaries = mutableMapOf<String, Long>()
+    private val boundarySourceOrderIdentities = mutableMapOf<String, SourceOrderIdentity>()
     private var currentLifecycleGeneration = lifecycleGeneration
     private var currentAcceptedRuntime = acceptedRuntime
     private var evidenceModule = ForegroundEvidenceModule()
@@ -251,6 +254,7 @@ class SerializedDecisionWorker internal constructor(
             evidenceModule = ForegroundEvidenceModule()
             sessionPersistence.clear()
             wallClockBoundaries.clear()
+            boundarySourceOrderIdentities.clear()
             accepting.set(true)
         }
     }
@@ -261,6 +265,7 @@ class SerializedDecisionWorker internal constructor(
         synchronized(stateLock) {
             currentLifecycleGeneration = request.lifecycleGeneration
             wallClockBoundaries.clear()
+            boundarySourceOrderIdentities.clear()
         }
         requests.close()
         workerJob.cancel()
@@ -424,6 +429,7 @@ class SerializedDecisionWorker internal constructor(
                 nowElapsedRealtimeMs = request.observation.capturedAtElapsedMs
             )
         )
+        var expectedRegistrationSourceOrderIdentity: SourceOrderIdentity? = null
         synchronized(stateLock) {
             if (!accepting.get() ||
                 request.lifecycleGeneration != currentLifecycleGeneration ||
@@ -431,8 +437,11 @@ class SerializedDecisionWorker internal constructor(
             ) return
             if (plan == null) {
                 wallClockBoundaries.remove(packageName)
+                expectedRegistrationSourceOrderIdentity =
+                    boundarySourceOrderIdentities.remove(packageName)
             } else {
                 wallClockBoundaries[packageName] = plan.dueAtWallClockMs
+                boundarySourceOrderIdentities[packageName] = request.sourceOrderIdentity
             }
         }
         try {
@@ -442,7 +451,9 @@ class SerializedDecisionWorker internal constructor(
                     lifecycleGeneration = request.lifecycleGeneration,
                     acceptedRuntimeRevision = accepted.runtimeRevision,
                     packageName = packageName,
-                    plan = plan
+                    plan = plan,
+                    expectedRegistrationSourceOrderIdentity =
+                        expectedRegistrationSourceOrderIdentity
                 )
             )
         } catch (error: CancellationException) {
@@ -457,12 +468,13 @@ class SerializedDecisionWorker internal constructor(
         accepted: AcceptedRuleRuntimeSnapshot,
         packageName: String
     ) {
-        synchronized(stateLock) {
+        val expectedRegistrationSourceOrderIdentity = synchronized(stateLock) {
             if (!accepting.get() ||
                 request.lifecycleGeneration != currentLifecycleGeneration ||
                 accepted.runtimeRevision != currentAcceptedRuntime.runtimeRevision
             ) return
             wallClockBoundaries.remove(packageName)
+            boundarySourceOrderIdentities.remove(packageName)
         }
         try {
             onRecheckPlan?.invoke(
@@ -471,7 +483,9 @@ class SerializedDecisionWorker internal constructor(
                     lifecycleGeneration = request.lifecycleGeneration,
                     acceptedRuntimeRevision = accepted.runtimeRevision,
                     packageName = packageName,
-                    plan = null
+                    plan = null,
+                    expectedRegistrationSourceOrderIdentity =
+                        expectedRegistrationSourceOrderIdentity
                 )
             )
         } catch (error: CancellationException) {

@@ -15,11 +15,14 @@ import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
+import neth.iecal.curbox.domain.apprules.AppRuleRecheckPlan
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.LifecycleGeneration
+import neth.iecal.curbox.domain.apprules.ObservationKind
 import neth.iecal.curbox.domain.apprules.RecheckPlanUpdate
 import neth.iecal.curbox.domain.apprules.RuntimeRevision
+import neth.iecal.curbox.domain.apprules.SignalFact
 import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
@@ -722,7 +725,21 @@ class AppRuleBlockerRecheckTest {
         setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
         val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
         coordinator.accept(snapshotWithSplitAllowances())
-        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 60_000L, 60_000L, 0L)
+        invokePrivate(
+            blocker,
+            "applyRecheckPlan",
+            RecheckPlanUpdate(
+                sourceOrderIdentity = SourceOrderIdentity(1L),
+                lifecycleGeneration = LifecycleGeneration(1L),
+                acceptedRuntimeRevision = RuntimeRevision(0L),
+                packageName = PACKAGE,
+                plan = AppRuleRecheckPlan(
+                    delayMillis = 60_000L,
+                    maxDelayMillis = 60_000L,
+                    dueAtWallClockMs = System.currentTimeMillis() + 60_000L
+                )
+            )
+        )
 
         sendWindowEvent(blocker, PACKAGE)
 
@@ -1497,8 +1514,12 @@ class AppRuleBlockerRecheckTest {
     fun removingPlanCancelsPendingProductionRecoveryWake() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         val wakeQueue = ArrayDeque<Runnable>()
+        var wallClockMs = 1_000_000L
+        var elapsedRealtimeMs = 5_000L
         var primaryAttempts = 0
         val blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { wallClockMs }
+            elapsedRealtimeMsProvider = { elapsedRealtimeMs }
             recheckPostDelayed = { _, _ ->
                 primaryAttempts++
                 false
@@ -1511,7 +1532,21 @@ class AppRuleBlockerRecheckTest {
         setField(blocker, "service", service)
         setField(blocker, "setupReady", true)
 
-        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        invokePrivate(
+            blocker,
+            "applyRecheckPlan",
+            RecheckPlanUpdate(
+                sourceOrderIdentity = SourceOrderIdentity(1L),
+                lifecycleGeneration = LifecycleGeneration(1L),
+                acceptedRuntimeRevision = RuntimeRevision(0L),
+                packageName = PACKAGE,
+                plan = AppRuleRecheckPlan(
+                    delayMillis = 1_000L,
+                    maxDelayMillis = 20_000L,
+                    dueAtWallClockMs = wallClockMs + 1_000L
+                )
+            )
+        )
         assertEquals(3, primaryAttempts)
         val recoveryToken = scheduledAlarmToken(blocker)
         assertTrue(
@@ -1550,6 +1585,151 @@ class AppRuleBlockerRecheckTest {
         assertTrue(
             "plan removal must remove the paired alarm token",
             (getField(blocker, "scheduledAlarms") as Map<*, *>).isEmpty()
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun stalePlanCancellationCannotRemoveReplacementRegistration() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        var wallClockMs = 1_000_000L
+        var elapsedRealtimeMs = 5_000L
+        var primaryAttempts = 0
+        val blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { wallClockMs }
+            elapsedRealtimeMsProvider = { elapsedRealtimeMs }
+            recheckPostDelayed = { _, _ ->
+                primaryAttempts++
+                false
+            }
+        }
+        setField(blocker, "service", service)
+        setField(blocker, "setupReady", true)
+        val plan = AppRuleRecheckPlan(
+            delayMillis = 1_000L,
+            maxDelayMillis = 20_000L,
+            dueAtWallClockMs = wallClockMs + 1_000L
+        )
+        fun applyPlan(sourceOrder: Long, nextPlan: AppRuleRecheckPlan?) {
+            invokePrivate(
+                blocker,
+                "applyRecheckPlan",
+                RecheckPlanUpdate(
+                    sourceOrderIdentity = SourceOrderIdentity(sourceOrder),
+                    lifecycleGeneration = LifecycleGeneration(1L),
+                    acceptedRuntimeRevision = RuntimeRevision(0L),
+                    packageName = PACKAGE,
+                    plan = nextPlan
+                )
+            )
+        }
+
+        applyPlan(1L, plan)
+        val oldToken = scheduledAlarmToken(blocker)
+        applyPlan(2L, plan)
+        val replacementToken = scheduledAlarmToken(blocker)
+        assertTrue("replacement must use a new registration token", oldToken != replacementToken)
+        assertEquals(6, primaryAttempts)
+
+        // This is the old worker update arriving after a newer plan has installed its recovery.
+        applyPlan(1L, null)
+
+        val alarmsAfterStaleCancel = getField(blocker, "scheduledAlarms") as Map<*, *>
+        assertEquals(
+            "a stale plan cancellation must not remove the replacement alarm",
+            replacementToken,
+            getField(alarmsAfterStaleCancel[PACKAGE]!!, "token")
+        )
+        assertTrue(
+            "a stale plan cancellation must retain the replacement recovery callback",
+            (getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).containsKey(PACKAGE)
+        )
+
+        applyPlan(2L, null)
+        assertTrue((getField(blocker, "scheduledAlarms") as Map<*, *>).isEmpty())
+        assertTrue((getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).isEmpty())
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun staleNotVisibleCancellationCannotRemoveReplacementRegistration() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        var wallClockMs = 1_000_000L
+        var elapsedRealtimeMs = 5_000L
+        var useReplacementObservation = false
+        var replacementToken = Long.MIN_VALUE
+        lateinit var blocker: AppRuleBlocker
+        blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { wallClockMs }
+            elapsedRealtimeMsProvider = { elapsedRealtimeMs }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                if (useReplacementObservation) {
+                    if (replacementToken == Long.MIN_VALUE) {
+                        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 60_000L, 60_000L, 0L)
+                        replacementToken = scheduledAlarmToken(blocker)
+                    }
+                    AppRuleBlocker.ActiveWindowSnapshot(packageName = OTHER_PACKAGE)
+                } else {
+                    AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+                }
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = emptySet(),
+                    hasApplicationWindow = false,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            recheckPostDelayed = { _, _ -> false }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 60_000L, 60_000L, 0L)
+        val oldToken = scheduledAlarmToken(blocker)
+        val evidenceModule = getField(blocker, "foregroundEvidenceModule")!!
+        evidenceModule.javaClass.getDeclaredField("lastRealSignal").apply {
+            isAccessible = true
+            set(
+                evidenceModule,
+                SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = PACKAGE,
+                    eventWallMs = wallClockMs,
+                    eventElapsedMs = elapsedRealtimeMs
+                )
+            )
+        }
+
+        useReplacementObservation = true
+        invokePrivate(
+            blocker,
+            "checkCurrentlyVisibleApplications",
+            ObservationKind.REAL_EVENT,
+            0,
+            null
+        )
+
+        assertTrue("the observation must install a replacement registration", replacementToken != oldToken)
+        val alarmsAfterStaleCancel = getField(blocker, "scheduledAlarms") as Map<*, *>
+        assertTrue(
+            "the replacement alarm must still be registered: ${alarmsAfterStaleCancel.keys}",
+            alarmsAfterStaleCancel.containsKey(PACKAGE)
+        )
+        assertEquals(
+            "a stale NotVisible cancellation must not remove the replacement alarm",
+            replacementToken,
+            getField(alarmsAfterStaleCancel[PACKAGE]!!, "token")
+        )
+        assertTrue(
+            "a stale NotVisible cancellation must retain the replacement recovery callback",
+            (getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).containsKey(PACKAGE)
         )
         blocker.onDestroy()
     }
