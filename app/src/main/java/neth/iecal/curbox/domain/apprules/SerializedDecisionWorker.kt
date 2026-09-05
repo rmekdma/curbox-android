@@ -61,7 +61,8 @@ data class DecisionRequest(
 enum class SubmissionResult {
     ACCEPTED,
     REJECTED_NOT_READY,
-    REJECTED_STALE
+    REJECTED_STALE,
+    REJECTED_OVERLAP
 }
 
 /** The only result collaborator exposed by the worker. */
@@ -143,6 +144,7 @@ class SerializedDecisionWorker internal constructor(
     acceptedRuntime: AcceptedRuleRuntimeSnapshot,
     private val repository: CurrentUseDaySessionRepository,
     private val outcomeSink: DecisionOutcomeSink,
+    private val usageResetRepository: UsageResetRepository,
     private val workerScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
     private val onNonFatalError: (Throwable) -> Unit = {},
     private val onEvaluation: ((
@@ -151,19 +153,33 @@ class SerializedDecisionWorker internal constructor(
         String,
         AppRulesEvaluation
     ) -> Unit)? = null,
+    private val onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
     private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository)
 ) {
+    private sealed interface Work {
+        data class Decision(val request: DecisionRequest) : Work
+
+        data class UsageReset(
+            val request: UsageResetRequest,
+            val resetAtElapsedMs: Long
+        ) : Work
+    }
+
     private val accepting = AtomicBoolean(true)
-    private val requests = Channel<DecisionRequest>(Channel.UNLIMITED)
+    private val requests = Channel<Work>(Channel.UNLIMITED)
     private val stateLock = Any()
+    private val pendingUsageResetPackages = mutableSetOf<String>()
     private var currentLifecycleGeneration = lifecycleGeneration
     private var currentAcceptedRuntime = acceptedRuntime
     private var evidenceModule = ForegroundEvidenceModule()
     private val sessionPersistence = SerializedForegroundSessionPersistence(repository)
     private val workerJob: Job = workerScope.launch {
-        for (request in requests) {
+        for (work in requests) {
             try {
-                process(request)
+                when (work) {
+                    is Work.Decision -> process(work.request)
+                    is Work.UsageReset -> processUsageReset(work)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -180,11 +196,33 @@ class SerializedDecisionWorker internal constructor(
             if (request.lifecycleGeneration != currentLifecycleGeneration) {
                 return SubmissionResult.REJECTED_STALE
             }
-            return if (requests.trySend(request).isSuccess) {
+            return if (requests.trySend(Work.Decision(request)).isSuccess) {
                 SubmissionResult.ACCEPTED
             } else {
                 SubmissionResult.REJECTED_NOT_READY
             }
+        }
+    }
+
+    /** Enqueues a usage reset behind all earlier foreground work owned by this worker. */
+    internal fun submitUsageReset(
+        request: UsageResetRequest,
+        resetAtElapsedMs: Long
+    ): SubmissionResult = synchronized(stateLock) {
+        if (!accepting.get()) return@synchronized SubmissionResult.REJECTED_NOT_READY
+        if (UsageResetCommandPolicy.hasPendingOverlap(
+                request.packageNames,
+                pendingUsageResetPackages
+            )
+        ) {
+            return@synchronized SubmissionResult.REJECTED_OVERLAP
+        }
+        pendingUsageResetPackages += request.packageNames
+        if (requests.trySend(Work.UsageReset(request, resetAtElapsedMs)).isSuccess) {
+            SubmissionResult.ACCEPTED
+        } else {
+            pendingUsageResetPackages.removeAll(request.packageNames)
+            SubmissionResult.REJECTED_NOT_READY
         }
     }
 
@@ -323,6 +361,42 @@ class SerializedDecisionWorker internal constructor(
         )
     }
 
+    private suspend fun processUsageReset(work: Work.UsageReset) {
+        val restarts = sessionPersistence.usageResetRestarts(work.request)
+        try {
+            val result = usageResetRepository.resetAndStartSessions(
+                request = work.request,
+                restarts = restarts
+            )
+            sessionPersistence.applyUsageReset(
+                request = work.request,
+                result = result,
+                resetAtElapsedMs = work.resetAtElapsedMs,
+                restarts = restarts
+            )
+            publishUsageResetComplete(work.request, succeeded = true)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+            publishUsageResetComplete(work.request, succeeded = false)
+        } finally {
+            synchronized(stateLock) {
+                pendingUsageResetPackages.removeAll(work.request.packageNames)
+            }
+        }
+    }
+
+    private fun publishUsageResetComplete(request: UsageResetRequest, succeeded: Boolean) {
+        try {
+            onUsageResetComplete(request, succeeded)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+        }
+    }
+
     private fun acceptRuntimePublication(request: DecisionRequest): AcceptedRuleRuntimeSnapshot? =
         synchronized(stateLock) {
             if (!accepting.get() || request.lifecycleGeneration != currentLifecycleGeneration) {
@@ -414,14 +488,19 @@ private class SerializedForegroundSessionPersistence(
         val usageTrackingDecision = runtime.usageTrackingDecision
         val recordingEnabled = usageTrackingDecision.shouldRecordSessions
         val existingPackages = active.keys.toList()
+        val suppressLaunchForRotation = mutableSetOf<String>()
         for (packageName in existingPackages) {
             val session = active[packageName] ?: continue
+            val policyRotated = session.recordingEnabled != recordingEnabled ||
+                session.statisticsTracked != usageTrackingDecision.recordStatistics
             val remainsVisible = packageName in visiblePackages &&
                 session.useDayId == currentUseDayId &&
-                session.recordingEnabled == recordingEnabled &&
-                session.statisticsTracked == usageTrackingDecision.recordStatistics
+                !policyRotated
             if (!flush(session, nowWallMs, nowElapsedMs)) return false
             if (!remainsVisible) {
+                if (packageName in visiblePackages) {
+                    suppressLaunchForRotation += packageName
+                }
                 repository.finishSession(session.sessionId, nowWallMs)
                 active.remove(packageName)
             }
@@ -435,7 +514,9 @@ private class SerializedForegroundSessionPersistence(
                 generationStartedAtMs = runtime.useDayGenerationStartedAtMs,
                 statisticsTracked = usageTrackingDecision.recordStatistics
             )
-            if (usageTrackingDecision.recordStatistics) {
+            if (usageTrackingDecision.recordStatistics &&
+                packageName !in suppressLaunchForRotation
+            ) {
                 repository.recordLaunch(
                     useDayId = currentUseDayId,
                     packageName = packageName,
@@ -455,6 +536,52 @@ private class SerializedForegroundSessionPersistence(
             )
         }
         return true
+    }
+
+    fun usageResetRestarts(request: UsageResetRequest): List<UsageResetSessionRestart> =
+        active.values
+            .filter { it.packageName in request.packageNames }
+            .map { session ->
+                UsageResetSessionRestart(
+                    useDayId = request.useDayId,
+                    packageName = session.packageName,
+                    startedAtMs = request.resetAtMs,
+                    generationStartedAtMs = request.generationStartedAtMs,
+                    activeSessionId = session.sessionId,
+                    persistedThroughMs = session.lastCommittedWallMs.coerceAtMost(
+                        request.resetAtMs
+                    ),
+                    statisticsTracked = session.statisticsTracked,
+                    recordLaunch = true
+                )
+            }
+
+    fun applyUsageReset(
+        request: UsageResetRequest,
+        result: UsageResetResult,
+        resetAtElapsedMs: Long,
+        restarts: List<UsageResetSessionRestart>
+    ) {
+        restarts.forEach { restart ->
+            val restartedSessionId = checkNotNull(
+                result.restartedSessionIds[restart.packageName]
+            ) {
+                "usage reset did not return a replacement session for ${restart.packageName}"
+            }
+            check(restartedSessionId != 0L) {
+                "usage reset returned an invalid replacement session for ${restart.packageName}"
+            }
+            val session = active[restart.packageName] ?: return@forEach
+            active[restart.packageName] = session.copy(
+                useDayId = request.useDayId,
+                sessionId = restartedSessionId,
+                lastCommittedWallMs = request.resetAtMs,
+                lastCommittedElapsedMs = maxOf(
+                    resetAtElapsedMs,
+                    session.lastCommittedElapsedMs
+                )
+            )
+        }
     }
 
     fun clear() {

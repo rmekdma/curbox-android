@@ -209,7 +209,9 @@ class AppBlockerService : BaseBlockingService() {
         try {
             appRuleBlocker.setup(this)
             if (appUsageTrackerReady) {
-                appUsageTracker.handoffForegroundOwnershipToDecisionWorker()
+                appUsageTracker.handoffForegroundOwnershipToDecisionWorker(
+                    onUsageReset = appRuleBlocker::submitUsageReset
+                )
             }
             appRuleBlockerReady = true
         } catch (t: Throwable) {
