@@ -200,27 +200,19 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Target refactor phase:** `Phase 1`과 `Phase 2`를 기본 경로로 하고, `Phase 3`과 `Phase 4`는 각각의
   조건을 충족할 때만 수행한다.
 
-### AR 010 refresh ordering 위험 재현됨, Phase 2 serialized publication 필요
+### AR 010 refresh ordering 위험 재현 후 serialized publication으로 닫힘
 
-- **Status / Severity:** `확정 미해결` / `P2`
+- **Status / Severity:** `닫힘` / `P2`
 - **Exact trigger:** `INTENT_ACTION_REFRESH_APP_RULES` broadcast가 빠르게 연속 도착하고 동시에 DataStore settings emission이 발생한다. 서로 다른 refresh coroutine이 lock을 기다리는 동안 settings snapshot과 package scope의 관찰 시점이 교차한다.
-- **Current behavior:** 현재 구현은 settings collector와 refresh receiver 양쪽에서 `refreshMutex`를 사용하지만, lock 진입 전에 이미 수신된 stale emission을 식별하지 않는다. 결정론적 interleaving에서 latest refresh가 먼저 publish된 뒤 stale snapshot이 최종 상태를 덮어쓰고, runtime generation도 stale publication에 맞춰 증가하며, 최종 상태에서 실행한 visible reconciliation이 stale denial을 평가했다.
-- **Impact:** 최신 제한 설정 대신 오래된 snapshot, override 또는 reset time으로 평가하거나 refresh 직후 visible check가 stale 정책을 사용할 수 있다. 이 경로는 현재 결정론적 harness에서 재현됐으므로 Phase 2 serialized publication 계약이 필요하다.
+- **Current behavior:** settings collector와 refresh receiver는 source observation 시점에 `SourceOrderIdentity`와 `RuntimeRevision`을 할당한다. 두 경로는 `refreshMutex` 안에서 revision을 확인하고 snapshot, override/reset inputs, recheck generation을 함께 반영한 뒤 같은 critical section에서 worker publication까지 이어진다. 이미 수용된 revision보다 오래된 emission은 snapshot과 generation을 변경하지 않는다.
+- **Impact:** ticket03의 결정론적 interleaving에서 latest refresh 뒤 stale publication이 snapshot을 덮어쓰고 visible warning을 표시하는 회귀가 재현됐지만, ticket14 fix 후에는 최신 snapshot과 lifecycle만 visible reconciliation에 도달한다. 별도의 actor나 publication abstraction은 추가하지 않았다.
 - **Evidence:**
-  - [AppRuleBlocker.kt:196](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L196)부터 [AppRuleBlocker.kt:212](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L212)의 settings collector와 mutex
-- [AppRuleBlocker.kt:558](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L558)부터 [AppRuleBlocker.kt:581](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L581)의 refresh receiver
-  - [AppRuleBlocker.kt:840](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L840)부터 [AppRuleBlocker.kt:865](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L865)의 snapshot generation과 예약 취소
-  - [AppRuleBlocker.kt:851](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L851)의 `applySettingsSnapshot`이 snapshot, override/reset inputs, generation과 recheck 취소를 실제로 함께 publish하는 유일한 production apply path다. `rg`로 확인한 production 호출은 settings collector의 [AppRuleBlocker.kt:209](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L209)부터 [AppRuleBlocker.kt:212](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L212), refresh receiver의 [AppRuleBlocker.kt:583](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L583)부터 [AppRuleBlocker.kt:588](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L588)뿐이며, 두 경로 모두 동일한 `refreshMutex.withLock { applySettingsSnapshot(...) }` critical section으로 수렴한다. receiver의 package scope/settings 읽기는 그 lock 안에서 apply 전에 일어나고, visible reconciliation은 lock 밖에서 post되므로 snapshot publication 순서에 추가 ordering identity를 제공하지 않는다.
-  - [AppRuleBlockerRefreshOrderingRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRefreshOrderingRedTest.kt)의 instrumentation test는 위 공통 production publication critical section을 실제 `Mutex`와 실제 `applySettingsSnapshot`으로 호출한다. Android broadcast registration과 DataStore collector scheduling 자체를 재현하는 대신, 두 외부 endpoint가 공유하고 다른 ordering 동작을 추가하지 않는 지점에서 `CompletableDeferred`로 stale settings emission을 lock 진입 전에 멈추고 latest refresh를 먼저 publish한 뒤 stale emission을 재개한다. 이는 endpoint scheduling을 검증한다는 주장이 아니라, 두 endpoint에서 가능한 snapshot publication 순서를 직접 강제하는 증거다.
-  - Connected device `iPlay50_mini_Pro - 13`에서 `connectedFullDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=neth.iecal.curbox.blockers.AppRuleBlockerRefreshOrderingRedTest`를 실행했다. 1개 테스트 중 1개가 의도된 RED assertion으로 실패했고, latest refresh generation `1` 뒤 stale publication이 generation `2`로 최종 snapshot을 `stale`로 되돌렸다. 최종 상태에서 실제 `checkCurrentlyVisibleApplications`를 실행한 reconciliation의 `AppRulesEvaluation.isAllowed`가 `false`였고 warning activity user outcome도 기록됐다.
-- **Mitigation or decision needed:** 100회 stress burst는 보조 증거로만 취급하며 이 결과를 닫힘 근거로 사용하지 않는다. Phase 2는 다음 최소 ordering contract를 구현해야 한다.
-  1. settings collector와 refresh receiver는 하나의 serialized snapshot publication path를 공유한다.
-  2. 각 publication은 source order를 식별할 수 있는 monotonic ordering identity 또는 동등한 순서 보존 수단을 가지며, 이미 수용된 최신 publication 뒤의 stale emission은 snapshot을 되돌리지 않는다.
-  3. snapshot, override/reset inputs와 recheck generation은 한 번의 원자적 publication으로 수용되며, accepted publication의 visible reconciliation만 그 generation을 사용한다.
-  4. visible check와 그 외 side effect는 capture한 generation이 아직 최신일 때만 결과를 게시한다.
-  이 계약은 actor, Flow, lock, public interface 중 어느 구현을 선택할지는 결정하지 않는다.
-- **Acceptance criteria:** deterministic test가 두 production endpoint의 공통 publication path에서 위 interleaving을 실제로 강제하고 final snapshot, generation과 실제 visible reconciliation/user outcome을 검증한다. 현재 테스트는 최종 snapshot 회귀와 stale denial warning outcome을 재현했으므로 AR 010은 `확정 미해결`로 남긴다. 100회 stress 결과만으로 AR 010을 닫지 않는다. Phase 2가 위 ordering contract 또는 동등한 fix를 구현하고 같은 deterministic test가 통과한 뒤에만 `닫힘`으로 바꾼다.
-- **Target refactor phase:** `Phase 0 재현 gate`; 재현될 때만 `Phase 2 serialized publication path`.
+  - [AppRuleBlocker.kt](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt)의 settings collector, refresh receiver, `applySettingsSnapshot`, `refreshPackageScope`와 existing `RuntimePublication` path
+  - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 delayed stale runtime publication regression. latest runtime revision, lifecycle generation `1`, and allowed package decision remain authoritative.
+  - [AppRuleBlockerRefreshOrderingRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRefreshOrderingRedTest.kt)의 deterministic interleaving. The same device and command first reproduced the ticket03 failure, then passed after ticket14: final snapshot was `latest`, recheck generation stayed at the latest value, lifecycle generation stayed `1`, visible `AppRulesEvaluation.isAllowed` was `true`, and no warning activity was launched.
+- **Mitigation or decision:** ticket14 implements the minimum serialized ordering contract. Source order and runtime revision are allocated before waiting; accepted runtime publication and worker handoff remain under the existing mutex; stale revisions are ignored by the blocker and the existing worker revision gate. No actor, Flow, or new publication abstraction was added.
+- **Acceptance criteria:** met. The deterministic test forces the interleaving and verifies final snapshot, recheck generation, lifecycle generation, visible evaluation, and user outcome. The focused worker regression verifies that a delayed stale publication cannot replace the latest accepted runtime. Stress results were not used as closure evidence.
+- **Target refactor phase:** `Phase 2 serialized publication path` completed for this trigger. Ticket15 destroy/reconnect and ticket16 coordinator remain out of scope.
 
 ## `c17677ae`에서 이미 닫힌 항목
 

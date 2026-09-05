@@ -499,6 +499,69 @@ class SerializedDecisionWorkerTest {
         }
     }
 
+    @Test
+    fun latestRuntimePublicationRemainsAuthoritativeAfterDelayedStalePublication() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(repository, outcomes)
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(
+                    request(
+                        sourceOrder = 2L,
+                        lifecycle = 1L,
+                        packageName = TARGET_PACKAGE,
+                        runtimePublication = RuntimePublication(
+                            runtimeRevision = RuntimeRevision(3L),
+                            candidateRuntime = runtime(allowedMinutes = 10L)
+                        )
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitCount(1))
+            assertEquals(RuntimeRevision(3L), outcomes.values.single().acceptedRuntimeRevision)
+            assertEquals(LifecycleGeneration(1L), outcomes.values.single().lifecycleGeneration)
+            assertTrue(
+                "latest runtime should allow the visible package",
+                outcomes.values.single().packageDecisions.single().isAllowed
+            )
+
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(
+                    request(
+                        sourceOrder = 1L,
+                        lifecycle = 1L,
+                        packageName = TARGET_PACKAGE,
+                        runtimePublication = RuntimePublication(
+                            runtimeRevision = RuntimeRevision(2L),
+                            candidateRuntime = runtime(allowedMinutes = 0L)
+                        )
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitIdle())
+            assertEquals(
+                "stale runtime publication must not publish a second visible outcome",
+                1,
+                outcomes.values.size
+            )
+
+            worker.submit(request(3L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
+            assertTrue(outcomes.awaitCount(2))
+            val finalOutcome = outcomes.values.last()
+            assertEquals(RuntimeRevision(3L), finalOutcome.acceptedRuntimeRevision)
+            assertEquals(LifecycleGeneration(1L), finalOutcome.lifecycleGeneration)
+            assertTrue(
+                "the worker must continue using the latest visible policy",
+                finalOutcome.packageDecisions.single().isAllowed
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
     private fun worker(
         repository: RecordingRepository,
         sink: RecordingOutcomeSink,

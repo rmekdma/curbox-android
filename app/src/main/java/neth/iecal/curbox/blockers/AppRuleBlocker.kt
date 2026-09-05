@@ -341,18 +341,29 @@ class AppRuleBlocker {
             try {
                 service.dataStoreManager.settings.collect { settings ->
                     if (!isReadyForChecks(connectionGeneration)) return@collect
+                    // Allocate ordering at the source observation, before this emission can wait
+                    // for the shared publication path.
+                    val sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity()
+                    val runtimeRevision = sourceOrderSequencer.nextRuntimeRevision()
                     // Serialize settings emissions with the explicit refresh receiver. A burst of
                     // DataStore writes must not let an older refresh publish after a newer one.
                     val changed = refreshMutex.withLock {
                         if (isReadyForChecks(connectionGeneration)) {
-                            applySettingsSnapshot(settings)
+                            val changed = applySettingsSnapshot(settings, runtimeRevision)
+                            if (isAcceptedRuntimeRevision(runtimeRevision)) {
+                                submitRuntimePublication(
+                                    connectionGeneration = connectionGeneration,
+                                    sourceOrderIdentity = sourceOrderIdentity,
+                                    runtimeRevision = runtimeRevision
+                                )
+                            }
+                            changed
                         } else {
                             false
                         }
                     }
                     if (!isReadyForChecks(connectionGeneration)) return@collect
                     if (changed) {
-                        submitRuntimePublication(connectionGeneration)
                         postVisibleApplicationCheck(
                             connectionGeneration = connectionGeneration,
                             observationKind = ObservationKind.REFRESH
@@ -532,15 +543,34 @@ class AppRuleBlocker {
         )
     }
 
+    /**
+     * Compatibility path for the existing private scheduler test seam. Production refresh paths
+     * allocate both identities before entering their serialized publication section below.
+     */
     private fun submitRuntimePublication(connectionGeneration: Long) {
+        val sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity()
+        val runtimeRevision = sourceOrderSequencer.nextRuntimeRevision()
+        synchronized(runtimeLock) {
+            latestRuntimeRevision = runtimeRevision
+        }
+        submitRuntimePublication(
+            connectionGeneration = connectionGeneration,
+            sourceOrderIdentity = sourceOrderIdentity,
+            runtimeRevision = runtimeRevision
+        )
+    }
+
+    private fun submitRuntimePublication(
+        connectionGeneration: Long,
+        sourceOrderIdentity: SourceOrderIdentity,
+        runtimeRevision: RuntimeRevision
+    ) {
         val normalizedConnectionGeneration = connectionGeneration.coerceAtLeast(1L)
         if (!isReadyForChecks(normalizedConnectionGeneration)) return
-        val revision = sourceOrderSequencer.nextRuntimeRevision()
-        latestRuntimeRevision = revision
         val nowWallMs = observationWallClockMs()
         val nowElapsedMs = observationElapsedRealtimeMs()
         val request = DecisionRequest(
-            sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity(),
+            sourceOrderIdentity = sourceOrderIdentity,
             lifecycleGeneration = LifecycleGeneration(normalizedConnectionGeneration),
             reason = ObservationKind.REFRESH,
             observation = ForegroundFacts(
@@ -550,7 +580,7 @@ class AppRuleBlocker {
                 displayState = DisplayState.UNLOCKED
             ),
             runtimePublication = RuntimePublication(
-                runtimeRevision = revision,
+                runtimeRevision = runtimeRevision,
                 candidateRuntime = ruleRuntimeSnapshot()
             )
         )
@@ -1073,20 +1103,31 @@ class AppRuleBlocker {
             if (intent?.action != INTENT_ACTION_REFRESH_APP_RULES) return
             if (!isReadyForChecks()) return
             val connectionGeneration = lifecycleGeneration.get()
+            // The broadcast is the source observation. Keep its revision with the coroutine even
+            // if the coroutine later waits for the shared publication path.
+            val sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity()
+            val runtimeRevision = sourceOrderSequencer.nextRuntimeRevision()
             // Settings flow is authoritative. This action exists for the same UI to service
             // refresh path as the legacy blocker and simply triggers a harmless re-read.
             scope.launch {
                 try {
                     if (!isReadyForChecks(connectionGeneration)) return@launch
-                    val changed = refreshMutex.withLock {
+                    refreshMutex.withLock {
                         if (!isReadyForChecks(connectionGeneration)) return@withLock false
-                        val packageScopeChanged = refreshPackageScope()
+                        val packageScopeChanged = refreshPackageScope(runtimeRevision)
                         val settings = service.dataStoreManager.settings.first()
                         if (!isReadyForChecks(connectionGeneration)) return@withLock false
-                        packageScopeChanged || applySettingsSnapshot(settings)
+                        val settingsChanged = applySettingsSnapshot(settings, runtimeRevision)
+                        if (isAcceptedRuntimeRevision(runtimeRevision)) {
+                            submitRuntimePublication(
+                                connectionGeneration = connectionGeneration,
+                                sourceOrderIdentity = sourceOrderIdentity,
+                                runtimeRevision = runtimeRevision
+                            )
+                        }
+                        packageScopeChanged || settingsChanged
                     }
                     if (!isReadyForChecks(connectionGeneration)) return@launch
-                    if (changed) submitRuntimePublication(connectionGeneration)
                     // A refresh is also useful when the package reader returned the same set:
                     // the window/root provider may have recovered since the last event.
                     postVisibleApplicationCheck(
@@ -1383,7 +1424,10 @@ class AppRuleBlocker {
         }
     }
 
-    private fun refreshPackageScope(): Boolean {
+    /** Keep the existing private no-argument test seam for the unversioned setup refresh. */
+    private fun refreshPackageScope(): Boolean = refreshPackageScope(null)
+
+    private fun refreshPackageScope(runtimeRevision: RuntimeRevision?): Boolean {
         if (!::service.isInitialized) return false
         val reader = packageScopeReader ?: return false
         val previousLaunchable = launchablePackages
@@ -1394,6 +1438,9 @@ class AppRuleBlocker {
             val nextLaunchable = reader.readLaunchablePackages()
             val nextEssential = reader.readEssentialPackages()
             synchronized(runtimeLock) {
+                if (runtimeRevision != null &&
+                    runtimeRevision.value <= latestRuntimeRevision.value
+                ) return false
                 launchablePackages = nextLaunchable
                 essentialPackages = nextEssential
             }
@@ -1405,6 +1452,9 @@ class AppRuleBlocker {
             // conservative fallback when the package provider is unavailable.
             val fallbackEssential = setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
             synchronized(runtimeLock) {
+                if (runtimeRevision != null &&
+                    runtimeRevision.value <= latestRuntimeRevision.value
+                ) return false
                 essentialPackages = fallbackEssential
             }
             logNonFatal(error)
@@ -1432,7 +1482,14 @@ class AppRuleBlocker {
      * Publishes the settings inputs as one generation. DataStore also emits for unrelated
      * settings, so only a real rule, override, or use-day clock change invalidates boundary jobs.
      */
-    private fun applySettingsSnapshot(settings: Settings): Boolean {
+    /** Keep the existing private one-argument test seam for direct snapshot checks. */
+    private fun applySettingsSnapshot(settings: Settings): Boolean =
+        applySettingsSnapshot(settings, null)
+
+    private fun applySettingsSnapshot(
+        settings: Settings,
+        runtimeRevision: RuntimeRevision?
+    ): Boolean {
         val candidate = try {
             settings.appRuleSnapshot.normalized().takeIf { it.isValid }
         } catch (error: CancellationException) {
@@ -1448,6 +1505,10 @@ class AppRuleBlocker {
         )
         synchronized(runtimeLock) {
             if (destroyed) return false
+            if (runtimeRevision != null &&
+                runtimeRevision.value <= latestRuntimeRevision.value
+            ) return false
+            runtimeRevision?.let { latestRuntimeRevision = it }
             val previousSnapshot = snapshot.snapshot()
             val nextSnapshot = candidate ?: previousSnapshot
             val changed = nextSnapshot != previousSnapshot ||
@@ -1470,6 +1531,11 @@ class AppRuleBlocker {
             return true
         }
     }
+
+    private fun isAcceptedRuntimeRevision(runtimeRevision: RuntimeRevision): Boolean =
+        synchronized(runtimeLock) {
+            latestRuntimeRevision == runtimeRevision
+        }
 
     private fun captureRuleRuntime(): RuleRuntime = synchronized(runtimeLock) {
         RuleRuntime(
