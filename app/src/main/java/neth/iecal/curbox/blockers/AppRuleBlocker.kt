@@ -343,27 +343,19 @@ class AppRuleBlocker {
                     if (!isReadyForChecks(connectionGeneration)) return@collect
                     // Allocate ordering at the source observation, before this emission can wait
                     // for the shared publication path.
-                    val sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity()
-                    val runtimeRevision = sourceOrderSequencer.nextRuntimeRevision()
+                    val reservation = sourceOrderSequencer.reserveRuntimePublication()
                     // Serialize settings emissions with the explicit refresh receiver. A burst of
                     // DataStore writes must not let an older refresh publish after a newer one.
-                    val changed = refreshMutex.withLock {
-                        if (isReadyForChecks(connectionGeneration)) {
-                            val changed = applySettingsSnapshot(settings, runtimeRevision)
-                            if (isAcceptedRuntimeRevision(runtimeRevision)) {
-                                submitRuntimePublication(
-                                    connectionGeneration = connectionGeneration,
-                                    sourceOrderIdentity = sourceOrderIdentity,
-                                    runtimeRevision = runtimeRevision
-                                )
-                            }
-                            changed
-                        } else {
-                            false
-                        }
+                    val accepted = refreshMutex.withLock {
+                        applyAndSubmitRuntimePublication(
+                            connectionGeneration = connectionGeneration,
+                            settings = settings,
+                            sourceOrderIdentity = reservation.sourceOrderIdentity,
+                            runtimeRevision = reservation.runtimeRevision
+                        )
                     }
                     if (!isReadyForChecks(connectionGeneration)) return@collect
-                    if (changed) {
+                    if (accepted) {
                         postVisibleApplicationCheck(
                             connectionGeneration = connectionGeneration,
                             observationKind = ObservationKind.REFRESH
@@ -543,20 +535,38 @@ class AppRuleBlocker {
         )
     }
 
+    private fun applyAndSubmitRuntimePublication(
+        connectionGeneration: Long,
+        settings: Settings,
+        sourceOrderIdentity: SourceOrderIdentity,
+        runtimeRevision: RuntimeRevision
+    ): Boolean {
+        if (!isReadyForChecks(connectionGeneration)) return false
+        applySettingsSnapshot(settings, runtimeRevision)
+        val accepted = isAcceptedRuntimeRevision(runtimeRevision)
+        if (accepted) {
+            submitRuntimePublication(
+                connectionGeneration = connectionGeneration,
+                sourceOrderIdentity = sourceOrderIdentity,
+                runtimeRevision = runtimeRevision
+            )
+        }
+        return accepted
+    }
+
     /**
      * Compatibility path for the existing private scheduler test seam. Production refresh paths
      * allocate both identities before entering their serialized publication section below.
      */
     private fun submitRuntimePublication(connectionGeneration: Long) {
-        val sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity()
-        val runtimeRevision = sourceOrderSequencer.nextRuntimeRevision()
+        val reservation = sourceOrderSequencer.reserveRuntimePublication()
         synchronized(runtimeLock) {
-            latestRuntimeRevision = runtimeRevision
+            latestRuntimeRevision = reservation.runtimeRevision
         }
         submitRuntimePublication(
             connectionGeneration = connectionGeneration,
-            sourceOrderIdentity = sourceOrderIdentity,
-            runtimeRevision = runtimeRevision
+            sourceOrderIdentity = reservation.sourceOrderIdentity,
+            runtimeRevision = reservation.runtimeRevision
         )
     }
 
@@ -1105,8 +1115,7 @@ class AppRuleBlocker {
             val connectionGeneration = lifecycleGeneration.get()
             // The broadcast is the source observation. Keep its revision with the coroutine even
             // if the coroutine later waits for the shared publication path.
-            val sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity()
-            val runtimeRevision = sourceOrderSequencer.nextRuntimeRevision()
+            val reservation = sourceOrderSequencer.reserveRuntimePublication()
             // Settings flow is authoritative. This action exists for the same UI to service
             // refresh path as the legacy blocker and simply triggers a harmless re-read.
             scope.launch {
@@ -1114,18 +1123,16 @@ class AppRuleBlocker {
                     if (!isReadyForChecks(connectionGeneration)) return@launch
                     refreshMutex.withLock {
                         if (!isReadyForChecks(connectionGeneration)) return@withLock false
-                        val packageScopeChanged = refreshPackageScope(runtimeRevision)
+                        val packageScopeChanged = refreshPackageScope(reservation.runtimeRevision)
                         val settings = service.dataStoreManager.settings.first()
                         if (!isReadyForChecks(connectionGeneration)) return@withLock false
-                        val settingsChanged = applySettingsSnapshot(settings, runtimeRevision)
-                        if (isAcceptedRuntimeRevision(runtimeRevision)) {
-                            submitRuntimePublication(
-                                connectionGeneration = connectionGeneration,
-                                sourceOrderIdentity = sourceOrderIdentity,
-                                runtimeRevision = runtimeRevision
-                            )
-                        }
-                        packageScopeChanged || settingsChanged
+                        val accepted = applyAndSubmitRuntimePublication(
+                            connectionGeneration = connectionGeneration,
+                            settings = settings,
+                            sourceOrderIdentity = reservation.sourceOrderIdentity,
+                            runtimeRevision = reservation.runtimeRevision
+                        )
+                        packageScopeChanged || accepted
                     }
                     if (!isReadyForChecks(connectionGeneration)) return@launch
                     // A refresh is also useful when the package reader returned the same set:
