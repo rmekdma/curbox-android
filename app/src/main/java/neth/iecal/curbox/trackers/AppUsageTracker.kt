@@ -87,6 +87,7 @@ class AppUsageTracker {
     private var lastCleanupGenerationStartedAtMs = Long.MIN_VALUE
     private var pendingSettingsSnapshot: Settings? = null
     private var destroying = false
+    private var workerUsageResetHandler: ((Set<String>, String) -> Boolean)? = null
     private val foregroundSessionOwnership = ForegroundSessionOwnership()
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var screenOn = true
@@ -123,6 +124,7 @@ class AppUsageTracker {
     fun setup(service: BaseBlockingService) {
         this.service = service
         foregroundSessionOwnership.returnToTracker()
+        workerUsageResetHandler = null
         crashLogger = CrashLogger(service)
         ownPackage = service.packageName
         val database = AppDatabase.getInstance(service)
@@ -270,10 +272,18 @@ class AppUsageTracker {
         }
     }
 
-    internal fun handoffForegroundOwnershipToDecisionWorker() {
-        foregroundSessionOwnership.handoffToWorker {
-            stopHeartbeat()
-            endAllSessions()
+    internal fun handoffForegroundOwnershipToDecisionWorker(
+        onUsageReset: (Set<String>, String) -> Boolean = { _, _ -> false }
+    ) {
+        workerUsageResetHandler = onUsageReset
+        try {
+            foregroundSessionOwnership.handoffToWorker {
+                stopHeartbeat()
+                endAllSessions()
+            }
+        } catch (error: Throwable) {
+            workerUsageResetHandler = null
+            throw error
         }
     }
 
@@ -291,6 +301,20 @@ class AppUsageTracker {
             .filter(String::isNotEmpty)
             .toSet()
         if (normalizedPackages.isEmpty()) return
+
+        if (foregroundSessionOwnership.isWorkerOwner()) {
+            val handled = try {
+                workerUsageResetHandler?.invoke(normalizedPackages, requestId) ?: false
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+                false
+            }
+            if (handled) return
+            logNonFatal(IllegalStateException("serialized foreground reset handler is unavailable"))
+            return
+        }
 
         // The UI timestamp is only a delivery hint.  All packages in one command share the
         // service-main acceptance time, so a delayed cross-process broadcast cannot replay an old
@@ -1053,6 +1077,7 @@ class AppUsageTracker {
 
     fun onDestroy() {
         destroying = true
+        workerUsageResetHandler = null
         val resetWasActive = activeUsageResetCommands > 0
         val shutdownSnapshots = if (!resetWasActive) {
             activeSessions.values.map {

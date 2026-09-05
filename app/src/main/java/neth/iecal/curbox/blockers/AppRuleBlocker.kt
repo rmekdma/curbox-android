@@ -30,6 +30,7 @@ import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
+import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.AppRuleOverrideState
@@ -72,7 +73,10 @@ import neth.iecal.curbox.domain.apprules.RuntimePublication
 import neth.iecal.curbox.domain.apprules.RuntimeRevision
 import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
 import neth.iecal.curbox.domain.apprules.SignalFact
+import neth.iecal.curbox.domain.apprules.SubmissionResult
 import neth.iecal.curbox.domain.apprules.StopReason
+import neth.iecal.curbox.domain.apprules.UsageResetCommandPolicy
+import neth.iecal.curbox.domain.apprules.UsageResetRequest
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationFormatter
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationStateCalculator
@@ -80,6 +84,7 @@ import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDayResetTime
+import neth.iecal.curbox.utils.UsageResetManager
 import java.util.concurrent.atomic.AtomicLong
 
 /** Enforces the new atomic app-rule snapshot without changing the legacy blocker. */
@@ -107,6 +112,7 @@ class AppRuleBlocker {
     private lateinit var service: BaseBlockingService
     private lateinit var crashLogger: CrashLogger
     private lateinit var sessionRepository: CurrentUseDaySessionRepository
+    private lateinit var usageResetRepository: RoomUsageResetRepository
     private lateinit var enforcement: AppRuleEnforcement
     private val snapshot = AppRuleSnapshotCoordinator()
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -253,6 +259,7 @@ class AppRuleBlocker {
             database.appUsageDao(),
             database
         )
+        usageResetRepository = RoomUsageResetRepository(database)
         enforcement = AppRuleEnforcement(sessionRepository)
         packageScopeReader = AppRulePackageScopeReader.fromContext(service)
         refreshPackageScope()
@@ -422,6 +429,8 @@ class AppRuleBlocker {
             workerScope = scope,
             onNonFatalError = ::logNonFatal,
             onEvaluation = ::observeWorkerEvaluation,
+            usageResetRepository = usageResetRepository,
+            onUsageResetComplete = ::publishUsageResetComplete,
             enforcement = enforcement
         )
         decisionWorker = worker
@@ -567,6 +576,56 @@ class AppRuleBlocker {
         if (eventPackageName.isBlank()) return
 
         submitForegroundDecision(event, ObservationKind.REAL_EVENT)
+    }
+
+    /** Enqueues a reset behind the worker's already accepted foreground observations. */
+    internal fun submitUsageReset(packages: Set<String>, requestId: String): Boolean {
+        val normalizedPackages = packages.map(String::trim)
+            .filter(String::isNotEmpty)
+            .toSet()
+        if (normalizedPackages.isEmpty() || !isReadyForChecks()) return false
+        val runtime = captureRuleRuntime()
+        val resetAtMs = UsageResetCommandPolicy.acceptedAt(observationWallClockMs())
+        val request = UsageResetRequest(
+            useDayId = ConfigurableUseDayCalculator(resetTime = runtime.resetTime).idAt(resetAtMs),
+            generationStartedAtMs = runtime.useDayGenerationStartedAtMs,
+            packageNames = normalizedPackages,
+            resetAtMs = resetAtMs,
+            requestId = requestId
+        )
+        val result = decisionWorker?.submitUsageReset(
+            request = request,
+            resetAtElapsedMs = observationElapsedRealtimeMs()
+        )
+        if (result == SubmissionResult.ACCEPTED) return true
+        publishUsageResetComplete(request, succeeded = false)
+        return true
+    }
+
+    private fun publishUsageResetComplete(request: UsageResetRequest, succeeded: Boolean) {
+        try {
+            service.sendBroadcast(
+                Intent(UsageResetManager.ACTION_USAGE_RESET)
+                    .setPackage(service.packageName)
+                    .putStringArrayListExtra(
+                        UsageResetManager.EXTRA_PACKAGES,
+                        ArrayList(request.packageNames)
+                    )
+                    .putExtra(UsageResetManager.EXTRA_RESET_AT_MS, request.resetAtMs)
+                    .putExtra(UsageResetManager.EXTRA_REQUEST_ID, request.requestId)
+                    .putExtra(UsageResetManager.EXTRA_RESULT_OK, succeeded)
+            )
+            if (succeeded) {
+                service.sendBroadcast(
+                    Intent(INTENT_ACTION_REFRESH_APP_RULES)
+                        .setPackage(service.packageName)
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logNonFatal(error)
+        }
     }
 
     private fun submitForegroundDecision(

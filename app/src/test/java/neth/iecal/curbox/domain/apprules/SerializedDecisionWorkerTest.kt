@@ -168,6 +168,110 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun usageResetRestartsWorkerOwnedSessionBeforeTheNextCheckpoint() {
+        val repository = RecordingRepository()
+        val resetRepository = RecordingUsageResetRepository(repository)
+        val outcomes = RecordingOutcomeSink()
+        val resetCompleted = CountDownLatch(1)
+        var resetSucceeded = false
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            usageResetRepository = resetRepository,
+            onUsageResetComplete = { _, succeeded ->
+                resetSucceeded = succeeded
+                resetCompleted.countDown()
+            }
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            assertTrue(outcomes.awaitCount(1))
+            val oldSessionId = repository.persistedSessions()
+                .first { it.packageName == TARGET_PACKAGE }
+                .id
+
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitUsageReset(
+                    request = UsageResetRequest(
+                        useDayId = "1970-01-01",
+                        generationStartedAtMs = 0L,
+                        packageNames = setOf(TARGET_PACKAGE),
+                        resetAtMs = 2_000L,
+                        requestId = "reset-1"
+                    ),
+                    resetAtElapsedMs = 2_000L
+                )
+            )
+            assertTrue(resetCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertTrue("reset did not complete successfully", resetSucceeded)
+
+            val restart = resetRepository.commands.single().restarts.single()
+            assertEquals(oldSessionId, restart.activeSessionId)
+            assertTrue("explicit reset must count a fresh launch", restart.recordLaunch)
+            val restartedSessionId = resetRepository.restartedSessionIds.single().second
+            assertTrue(restartedSessionId != oldSessionId)
+
+            worker.submit(request(2L, 1L, OTHER_PACKAGE, capturedAtMs = 3_000L))
+            assertTrue(outcomes.awaitCount(2))
+            assertTrue(
+                "next checkpoint used the stale pre-reset session ID",
+                repository.committedCheckpoints.any { it.sessionId == restartedSessionId }
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun statisticsPolicyBoundaryDoesNotCountStillVisibleAppAsAnotherLaunch() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            usageTrackingDecision = AppUsageTrackingPolicy.decide(
+                statisticsTrackingEnabled = false,
+                hasActiveTimeBasedRules = true
+            )
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            assertTrue(outcomes.awaitCount(1))
+
+            worker.submit(
+                request(
+                    sourceOrder = 2L,
+                    lifecycle = 1L,
+                    packageName = TARGET_PACKAGE,
+                    capturedAtMs = 2_000L,
+                    runtimePublication = RuntimePublication(
+                        runtimeRevision = RuntimeRevision(2L),
+                        candidateRuntime = runtime(
+                            usageTrackingDecision = AppUsageTrackingPolicy.decide(
+                                statisticsTrackingEnabled = true,
+                                hasActiveTimeBasedRules = true
+                            )
+                        )
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitCount(2))
+
+            assertTrue(
+                "policy rotation was counted as a current-use-day launch",
+                repository.launchEvents.isEmpty()
+            )
+            assertTrue(
+                "policy rotation was counted as a calendar launch",
+                repository.statisticsLaunches.isEmpty()
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun rapidSwitchesAreSerializedAndPersistedRowsMatchPublishedDecisions() {
         val repository = RecordingRepository()
         val outcomes = RecordingOutcomeSink()
@@ -234,13 +338,15 @@ class SerializedDecisionWorkerTest {
     }
 
     private fun worker(
-        repository: CurrentUseDaySessionRepository,
+        repository: RecordingRepository,
         sink: RecordingOutcomeSink,
         acceptedRuntime: AcceptedRuleRuntimeSnapshot = acceptedRuntime(
             RuntimeRevision(1L),
             usageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
         ),
-        usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
+        usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true),
+        usageResetRepository: UsageResetRepository = RecordingUsageResetRepository(repository),
+        onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> }
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = LifecycleGeneration(1L),
         acceptedRuntime = acceptedRuntime.copy(
@@ -249,7 +355,9 @@ class SerializedDecisionWorkerTest {
             )
         ),
         repository = repository,
-        outcomeSink = sink
+        outcomeSink = sink,
+        usageResetRepository = usageResetRepository,
+        onUsageResetComplete = onUsageResetComplete
     )
 
     private fun request(
@@ -435,7 +543,57 @@ class SerializedDecisionWorkerTest {
         override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) = Unit
 
         fun persistedSessions(): List<ForegroundSession> = synchronized(sessions) { sessions.toList() }
+
+        fun restartSession(restart: UsageResetSessionRestart): Long {
+            synchronized(sessions) {
+                val oldIndex = sessions.indexOfFirst { it.id == restart.activeSessionId }
+                if (oldIndex >= 0) {
+                    sessions.removeAt(oldIndex)
+                }
+                val id = nextId.getAndIncrement()
+                sessions += ForegroundSession(
+                    id = id,
+                    useDayId = restart.useDayId,
+                    packageName = restart.packageName,
+                    startedAtMs = restart.startedAtMs,
+                    statisticsTracked = restart.statisticsTracked
+                )
+                return id
+            }
+        }
     }
+
+    private class RecordingUsageResetRepository(
+        private val repository: RecordingRepository
+    ) : UsageResetRepository {
+        val commands = Collections.synchronizedList(mutableListOf<ResetCommand>())
+        val restartedSessionIds = Collections.synchronizedList(mutableListOf<Pair<String, Long>>())
+
+        override suspend fun reset(request: UsageResetRequest): UsageResetResult =
+            resetAndStartSessions(request, emptyList())
+
+        override suspend fun resetAndStartSessions(
+            request: UsageResetRequest,
+            restarts: List<UsageResetSessionRestart>
+        ): UsageResetResult {
+            commands += ResetCommand(request, restarts)
+            val restarted = restarts.map { restart ->
+                val id = repository.restartSession(restart)
+                restartedSessionIds += restart.packageName to id
+                restart.packageName to id
+            }.toMap()
+            return UsageResetResult(
+                request = request,
+                delta = UsageResetDelta(emptyMap(), emptyMap()),
+                restartedSessionIds = restarted
+            )
+        }
+    }
+
+    private data class ResetCommand(
+        val request: UsageResetRequest,
+        val restarts: List<UsageResetSessionRestart>
+    )
 
     private data class CheckpointCommit(
         val sessionId: Long,
