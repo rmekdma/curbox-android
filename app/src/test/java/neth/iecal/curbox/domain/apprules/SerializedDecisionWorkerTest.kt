@@ -3,6 +3,7 @@ package neth.iecal.curbox.domain.apprules
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
@@ -562,9 +563,102 @@ class SerializedDecisionWorkerTest {
         }
     }
 
+    @Test
+    fun supersedingNoOpRuntimePublicationDoesNotLoseLatestVisibleOutcome() {
+        val repository = RecordingRepository()
+        val latestRuntimeRevision = AtomicReference(RuntimeRevision(3L))
+        val published = Collections.synchronizedList(mutableListOf<DecisionOutcome>())
+        val evaluationStarted = CountDownLatch(1)
+        val releaseEvaluation = CountDownLatch(1)
+        val blockFirstEvaluation = AtomicBoolean(true)
+        val sink = object : DecisionOutcomeSink {
+            override fun publish(outcome: DecisionOutcome) {
+                if (outcome.acceptedRuntimeRevision == latestRuntimeRevision.get()) {
+                    published += outcome
+                }
+            }
+        }
+        val worker = worker(
+            repository = repository,
+            sink = sink,
+            onEvaluation = { _, _, _, _ ->
+                if (blockFirstEvaluation.compareAndSet(true, false)) {
+                    evaluationStarted.countDown()
+                    assertTrue(releaseEvaluation.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+                }
+            }
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(
+                    request(
+                        sourceOrder = 1L,
+                        lifecycle = 1L,
+                        packageName = TARGET_PACKAGE,
+                        runtimePublication = RuntimePublication(
+                            runtimeRevision = RuntimeRevision(3L),
+                            candidateRuntime = runtime(allowedMinutes = 10L)
+                        )
+                    )
+                )
+            )
+            assertTrue(
+                "the first visible evaluation did not enter the forced interleaving",
+                evaluationStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+
+            latestRuntimeRevision.set(RuntimeRevision(4L))
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(
+                    request(
+                        sourceOrder = 2L,
+                        lifecycle = 1L,
+                        packageName = TARGET_PACKAGE,
+                        runtimePublication = RuntimePublication(
+                            runtimeRevision = RuntimeRevision(4L),
+                            candidateRuntime = runtime(allowedMinutes = 10L)
+                        )
+                    )
+                )
+            )
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(
+                    request(
+                        sourceOrder = 3L,
+                        lifecycle = 1L,
+                        packageName = TARGET_PACKAGE,
+                        capturedAtMs = 2_000L
+                    )
+                )
+            )
+            releaseEvaluation.countDown()
+
+            val deadline = System.nanoTime() +
+                TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
+            while (System.nanoTime() < deadline && published.isEmpty()) {
+                Thread.yield()
+            }
+            assertEquals(1, published.size)
+            val finalOutcome = published.single()
+            assertEquals(RuntimeRevision(4L), finalOutcome.acceptedRuntimeRevision)
+            assertEquals(LifecycleGeneration(1L), finalOutcome.lifecycleGeneration)
+            assertEquals(TARGET_PACKAGE, finalOutcome.packageDecisions.single().packageName)
+            assertTrue(
+                "the visible replacement must use the latest unchanged allow result",
+                finalOutcome.packageDecisions.single().isAllowed
+            )
+        } finally {
+            releaseEvaluation.countDown()
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
     private fun worker(
         repository: RecordingRepository,
-        sink: RecordingOutcomeSink,
+        sink: DecisionOutcomeSink,
         acceptedRuntime: AcceptedRuleRuntimeSnapshot = acceptedRuntime(
             RuntimeRevision(1L),
             usageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)

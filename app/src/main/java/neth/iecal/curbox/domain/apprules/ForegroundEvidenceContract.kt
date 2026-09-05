@@ -22,6 +22,12 @@ value class LifecycleGeneration(val value: Long) {
     }
 }
 
+/** A source observation's ordering pair, reserved as one connection-scoped operation. */
+data class SourceOrderReservation(
+    val sourceOrderIdentity: SourceOrderIdentity,
+    val runtimeRevision: RuntimeRevision
+)
+
 /** The raw observation signal supplied by a source adapter. */
 enum class ObservationKind {
     REAL_EVENT,
@@ -55,6 +61,8 @@ interface ConnectionScopedSourceOrderSequencer {
     fun nextSourceOrderIdentity(): SourceOrderIdentity
 
     fun nextRuntimeRevision(): RuntimeRevision
+
+    fun reserveRuntimePublication(): SourceOrderReservation
 }
 
 /** Simple production-capable connection-scoped allocator. */
@@ -64,17 +72,28 @@ class AtomicConnectionScopedSourceOrderSequencer(
 ) : ConnectionScopedSourceOrderSequencer {
     private val sourceOrder = java.util.concurrent.atomic.AtomicLong(initialSourceOrder)
     private val runtimeRevision = java.util.concurrent.atomic.AtomicLong(initialRuntimeRevision)
+    private val allocationLock = Any()
 
     init {
         require(initialSourceOrder >= 0L) { "source order identity must not be negative" }
         require(initialRuntimeRevision >= 0L) { "runtime revision must not be negative" }
     }
 
-    override fun nextSourceOrderIdentity(): SourceOrderIdentity =
+    override fun nextSourceOrderIdentity(): SourceOrderIdentity = synchronized(allocationLock) {
         SourceOrderIdentity(sourceOrder.incrementAndGet())
+    }
 
-    override fun nextRuntimeRevision(): RuntimeRevision =
+    override fun nextRuntimeRevision(): RuntimeRevision = synchronized(allocationLock) {
         RuntimeRevision(runtimeRevision.incrementAndGet())
+    }
+
+    override fun reserveRuntimePublication(): SourceOrderReservation =
+        synchronized(allocationLock) {
+            SourceOrderReservation(
+                sourceOrderIdentity = SourceOrderIdentity(sourceOrder.incrementAndGet()),
+                runtimeRevision = RuntimeRevision(runtimeRevision.incrementAndGet())
+            )
+        }
 }
 
 /** Raw read state. The evidence module decides what each state means. */
