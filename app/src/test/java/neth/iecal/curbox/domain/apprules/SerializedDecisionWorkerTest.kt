@@ -67,6 +67,42 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun productionPersistenceWaitsForCommitAndEvaluatorSeesCommittedUsage() {
+        val repository = BlockingCommitRepository()
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            acceptedRuntime = acceptedRuntime(RuntimeRevision(1L), allowedMinutes = 1L)
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            assertTrue(outcomes.awaitCount(1))
+
+            worker.submit(request(2L, 1L, OTHER_PACKAGE, capturedAtMs = 61_001L))
+            assertTrue(repository.commitStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertFalse(
+                "evaluator started while the durable commit was blocked",
+                repository.secondEvaluationStarted.await(100L, TimeUnit.MILLISECONDS)
+            )
+            assertEquals("decision published while the durable commit was blocked", 1, outcomes.values.size)
+
+            repository.releaseCommit()
+            assertTrue(outcomes.awaitCount(2))
+            assertTrue(repository.secondEvaluationStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+
+            worker.submit(request(3L, 1L, TARGET_PACKAGE, capturedAtMs = 61_002L))
+            assertTrue(outcomes.awaitCount(3))
+            val finalDecision = outcomes.values.last().packageDecisions.single()
+            assertEquals(TARGET_PACKAGE, finalDecision.packageName)
+            assertFalse("evaluator did not observe the committed minute", finalDecision.isAllowed)
+        } finally {
+            repository.releaseCommit()
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun rapidSwitchesAreSerializedAndPersistedRowsMatchPublishedDecisions() {
         val repository = RecordingRepository()
         val outcomes = RecordingOutcomeSink()
@@ -134,10 +170,11 @@ class SerializedDecisionWorkerTest {
 
     private fun worker(
         repository: CurrentUseDaySessionRepository,
-        sink: RecordingOutcomeSink
+        sink: RecordingOutcomeSink,
+        acceptedRuntime: AcceptedRuleRuntimeSnapshot = acceptedRuntime(RuntimeRevision(1L))
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = LifecycleGeneration(1L),
-        acceptedRuntime = acceptedRuntime(RuntimeRevision(1L)),
+        acceptedRuntime = acceptedRuntime,
         repository = repository,
         outcomeSink = sink
     )
@@ -174,10 +211,15 @@ class SerializedDecisionWorkerTest {
         runtimePublication = runtimePublication
     )
 
-    private fun acceptedRuntime(revision: RuntimeRevision): AcceptedRuleRuntimeSnapshot =
-        AcceptedRuleRuntimeSnapshot(runtime(), revision)
+    private fun acceptedRuntime(
+        revision: RuntimeRevision,
+        allowedMinutes: Long = 0L
+    ): AcceptedRuleRuntimeSnapshot = AcceptedRuleRuntimeSnapshot(
+        runtime(allowedMinutes),
+        revision
+    )
 
-    private fun runtime(): RuleRuntimeSnapshot = RuleRuntimeSnapshot(
+    private fun runtime(allowedMinutes: Long = 0L): RuleRuntimeSnapshot = RuleRuntimeSnapshot(
         snapshot = AppRuleSnapshot(
             appGroups = listOf(
                 AppRuleAppGroup(
@@ -199,7 +241,7 @@ class SerializedDecisionWorkerTest {
                     startMinute = 0,
                     endMinute = 0,
                     scope = AppRuleScope.forGroup(TARGET_GROUP_ID),
-                    allowedMinutes = 0L
+                    allowedMinutes = allowedMinutes
                 )
             )
         ),
@@ -316,6 +358,30 @@ class SerializedDecisionWorkerTest {
         }
 
         fun releaseRead() = releaseRead.countDown()
+    }
+
+    private class BlockingCommitRepository : RecordingRepository() {
+        val commitStarted = CountDownLatch(1)
+        val secondEvaluationStarted = CountDownLatch(1)
+        private val commitRelease = CountDownLatch(1)
+        private var evaluations = 0
+
+        override suspend fun commitSessionCheckpoint(
+            id: Long,
+            endedAtMs: Long,
+            usage: List<ForegroundUsageCheckpoint>
+        ): Boolean {
+            commitStarted.countDown()
+            commitRelease.await()
+            return super.commitSessionCheckpoint(id, endedAtMs, usage)
+        }
+
+        override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+            if (++evaluations == 2) secondEvaluationStarted.countDown()
+            return super.sessionsForUseDay(useDayId)
+        }
+
+        fun releaseCommit() = commitRelease.countDown()
     }
 
     companion object {

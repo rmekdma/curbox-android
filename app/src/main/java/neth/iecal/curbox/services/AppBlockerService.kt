@@ -207,27 +207,11 @@ class AppBlockerService : BaseBlockingService() {
             Log.e("AppUsageTracker", "Setup failed", t)
         }
         try {
-            val visibleSessionReconciler = if (appUsageTrackerReady) {
-                val reconciler: suspend (
-                    Set<String>,
-                    Long,
-                    Long
-                ) -> Boolean = { visiblePackages, nowWallMs, nowElapsedMs ->
-                    appUsageTracker.reconcileForDecision(
-                        visiblePackages = visiblePackages,
-                        nowWallMs = nowWallMs,
-                        nowElapsedMs = nowElapsedMs
-                    )
-                }
-                reconciler
-            } else {
-                null
-            }
-            appRuleBlocker.setup(this, visibleSessionReconciler)
-            appRuleBlockerReady = true
+            appRuleBlocker.setup(this)
             if (appUsageTrackerReady) {
                 appUsageTracker.handoffForegroundOwnershipToDecisionWorker()
             }
+            appRuleBlockerReady = true
         } catch (t: Throwable) {
             crashLogger.logNonFatalError(Exception(t))
             Log.e("AppRuleBlocker", "Setup failed", t)
