@@ -27,6 +27,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Regression coverage for foreground app-rule checks and their recheck boundaries. */
 @RunWith(AndroidJUnit4::class)
@@ -141,6 +142,89 @@ class AppRuleBlockerRecheckTest {
         assertEquals(0, evaluations)
         assertEquals(1, posts)
         assertTrue(removals > 0)
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun staleEvaluationCannotRegisterBoundaryAfterScreenOffInvalidation() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        var screenInteractive = true
+        val blocker = AppRuleBlocker().apply {
+            screenInteractiveProvider = { screenInteractive }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+        }
+        val repository = EmptySessionRepository()
+        val posts = mutableListOf<Long>()
+        val queued = ArrayDeque<Runnable>()
+        val invalidated = AtomicBoolean(false)
+        val callbackFinished = AtomicBoolean(false)
+        blocker.recheckPostDelayed = { runnable, delayMillis ->
+            posts += delayMillis
+            queued.addLast(runnable)
+            true
+        }
+        blocker.evaluationResultObserver = {
+            if (invalidated.compareAndSet(false, true)) {
+                screenInteractive = false
+                try {
+                    invokePrivate(blocker, "handleScreenOff")
+                } finally {
+                    callbackFinished.set(true)
+                }
+            }
+        }
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(
+            blocker,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val now = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(now)
+        setField(
+            blocker,
+            "overrideState",
+            AppRuleGuardianOverrides.grant(
+                AppRuleOverrideState(useDayId),
+                "target",
+                useDayId,
+                grantedMillis = 3_000L,
+                grantedAtMs = now
+            )
+        )
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithTargetAllowance())
+
+        sendWindowEvent(blocker)
+
+        assertTrue(
+            "the evaluation must reach the invalidation seam",
+            awaitCondition { invalidated.get() }
+        )
+        assertTrue(
+            "the stale worker callback must complete before checking the scheduler",
+            awaitCondition { callbackFinished.get() }
+        )
+        SystemClock.sleep(250L)
+        assertEquals(
+            "screen-off invalidation must discard an in-flight boundary plan",
+            0,
+            posts.size
+        )
         blocker.onDestroy()
     }
 
@@ -1009,6 +1093,156 @@ class AppRuleBlockerRecheckTest {
             )
             blocker.onDestroy()
         }
+    }
+
+    @Test
+    fun schedulerPostFailureRearmsAndEventuallyExecutesWithoutRunningBeforeWallDeadline() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val primaryQueue = ArrayDeque<Runnable>()
+        val recoveryQueue = ArrayDeque<Runnable>()
+        val primaryDelays = mutableListOf<Long>()
+        var primaryAttempts = 0
+        var evaluations = 0
+        var wallClockMs = 1_000_000L
+        var elapsedRealtimeMs = 5_000L
+        val blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { wallClockMs }
+            elapsedRealtimeMsProvider = { elapsedRealtimeMs }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            recheckPostDelayed = { runnable, delayMillis ->
+                primaryAttempts++
+                primaryDelays += delayMillis
+                if (primaryAttempts <= 3) {
+                    false
+                } else {
+                    primaryQueue.addLast(runnable)
+                    true
+                }
+            }
+            recheckRecoveryPostDelayed = { runnable, _ ->
+                recoveryQueue.addLast(runnable)
+                true
+            }
+            evaluationResultObserver = { evaluations++ }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(
+            blocker,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+
+        assertEquals(3, primaryAttempts)
+        assertTrue("exhausted posts must schedule independent recovery", recoveryQueue.isNotEmpty())
+        assertTrue(
+            "every failed retry must wait for the original wall deadline",
+            primaryDelays.all { it >= 1_000L }
+        )
+
+        recoveryQueue.removeFirst().run()
+        assertEquals(4, primaryAttempts)
+        assertTrue("re-arm must post the callback again", primaryQueue.isNotEmpty())
+        assertEquals(1_000L, primaryDelays[3])
+
+        // A callback that happens to be delivered early must be retained, not executed early.
+        primaryQueue.removeFirst().run()
+        assertEquals(0, evaluations)
+        assertTrue("early delivery must re-arm the same boundary", primaryQueue.isNotEmpty())
+
+        wallClockMs += 1_000L
+        elapsedRealtimeMs += 1_000L
+        primaryQueue.removeFirst().run()
+        assertTrue(
+            "the recovered boundary must eventually execute after its wall deadline",
+            awaitCondition { evaluations > 0 }
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun productionWakeAlarmReceiverRecomputesFromCurrentWallClock() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val wakeQueue = ArrayDeque<Runnable>()
+        var wallClockMs = 1_000_000L
+        var elapsedRealtimeMs = 5_000L
+        var evaluations = 0
+        val blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { wallClockMs }
+            elapsedRealtimeMsProvider = { elapsedRealtimeMs }
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                wakeQueue.addLast(runnable)
+                true
+            }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluations++ }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(
+            blocker,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        @Suppress("UNCHECKED_CAST")
+        val tokens = getField(blocker, "scheduledAlarmTokens") as Map<String, Long>
+        val token = tokens.getValue(PACKAGE)
+
+        wallClockMs += 2_000L
+        elapsedRealtimeMs += 2_000L
+        val receiver = getField(blocker, "schedulerWakeReceiver") as android.content.BroadcastReceiver
+        receiver.onReceive(
+            service,
+            Intent("neth.iecal.curbox.blockers.APP_RULE_SCHEDULER_WAKE")
+                .putExtra("neth.iecal.curbox.blockers.EXTRA_SCHEDULER_PACKAGE", PACKAGE)
+                .putExtra("neth.iecal.curbox.blockers.EXTRA_SCHEDULER_TOKEN", token)
+        )
+
+        assertTrue("the production alarm receiver must request a fresh wake observation", wakeQueue.isNotEmpty())
+        while (wakeQueue.isNotEmpty()) wakeQueue.removeFirst().run()
+        assertTrue(
+            "wake recovery must evaluate using the current wall clock",
+            awaitCondition { evaluations > 0 }
+        )
+        blocker.onDestroy()
     }
 
     @Test

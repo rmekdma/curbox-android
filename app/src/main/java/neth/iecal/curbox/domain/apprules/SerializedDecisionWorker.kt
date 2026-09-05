@@ -104,6 +104,15 @@ data class DecisionOutcome(
     val publicationStatus: PublicationStatus
 )
 
+/** Worker-owned boundary derivation handed to the scheduler adapter as immutable values. */
+data class RecheckPlanUpdate(
+    val sourceOrderIdentity: SourceOrderIdentity,
+    val lifecycleGeneration: LifecycleGeneration,
+    val acceptedRuntimeRevision: RuntimeRevision,
+    val packageName: String,
+    val plan: AppRuleRecheckPlan?
+)
+
 enum class StopReason {
     DESTROY,
     RECONNECT,
@@ -154,7 +163,8 @@ class SerializedDecisionWorker internal constructor(
         AppRulesEvaluation
     ) -> Unit)? = null,
     private val onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
-    private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository)
+    private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository),
+    private val onRecheckPlan: ((RecheckPlanUpdate) -> Unit)? = null
 ) {
     private sealed interface Work {
         data class Decision(val request: DecisionRequest) : Work
@@ -169,6 +179,7 @@ class SerializedDecisionWorker internal constructor(
     private val requests = Channel<Work>(Channel.UNLIMITED)
     private val stateLock = Any()
     private val pendingUsageResetPackages = mutableSetOf<String>()
+    private val wallClockBoundaries = mutableMapOf<String, Long>()
     private var currentLifecycleGeneration = lifecycleGeneration
     private var currentAcceptedRuntime = acceptedRuntime
     private var evidenceModule = ForegroundEvidenceModule()
@@ -239,6 +250,7 @@ class SerializedDecisionWorker internal constructor(
             currentAcceptedRuntime = acceptedRuntime
             evidenceModule = ForegroundEvidenceModule()
             sessionPersistence.clear()
+            wallClockBoundaries.clear()
             accepting.set(true)
         }
     }
@@ -248,6 +260,7 @@ class SerializedDecisionWorker internal constructor(
         accepting.set(false)
         synchronized(stateLock) {
             currentLifecycleGeneration = request.lifecycleGeneration
+            wallClockBoundaries.clear()
         }
         requests.close()
         workerJob.cancel()
@@ -324,6 +337,7 @@ class SerializedDecisionWorker internal constructor(
 
         val calculator = ConfigurableUseDayCalculator(resetTime = accepted.runtime.resetTime)
         val useDayId = calculator.idAt(request.observation.capturedAtWallMs)
+        val evaluatedPackages = mutableListOf<Pair<String, AppRulesEvaluation>>()
         val decisions = evaluable.mapNotNull { outcome ->
             val packageName = outcome.packageName ?: return@mapNotNull null
             val evaluation = enforcement.checkSafely(
@@ -344,10 +358,23 @@ class SerializedDecisionWorker internal constructor(
             } catch (error: Throwable) {
                 reportNonFatal(error)
             }
+            evaluatedPackages += packageName to evaluation
             PackageDecision(
                 packageName = packageName,
                 isAllowed = evaluation.isAllowed,
                 denyingRuleIds = evaluation.denyingRules.map { it.ruleId }
+            )
+        }
+        if (!isCurrent(request, accepted)) return
+        evaluatedPackages.forEach { (packageName, evaluation) ->
+            if (!isCurrent(request, accepted)) return
+            publishRecheckPlan(
+                request = request,
+                accepted = accepted,
+                packageName = packageName,
+                evaluation = evaluation,
+                useDayId = useDayId,
+                calculator = calculator
             )
         }
         if (!isCurrent(request, accepted)) return
@@ -359,6 +386,59 @@ class SerializedDecisionWorker internal constructor(
             followUp = evaluable.firstOrNull()?.followUp ?: FollowUpKind.NONE,
             publicationStatus = PublicationStatus.PUBLISHED
         )
+    }
+
+    private fun publishRecheckPlan(
+        request: DecisionRequest,
+        accepted: AcceptedRuleRuntimeSnapshot,
+        packageName: String,
+        evaluation: AppRulesEvaluation,
+        useDayId: String,
+        calculator: ConfigurableUseDayCalculator
+    ) {
+        val semanticPlan = AppRuleRecheckPlanner.nextPlan(
+            snapshot = accepted.runtime.snapshot,
+            evaluation = evaluation,
+            overrideState = accepted.runtime.overrideState,
+            useDayId = useDayId,
+            nowMs = request.observation.capturedAtWallMs,
+            useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
+            zone = calculator.zone,
+            useDayCalculator = calculator
+        )
+        val plan = semanticPlan?.copy(
+            delayMillis = AppRuleWallClockScheduler.delayUntil(
+                dueAtWallClockMs = semanticPlan.dueAtWallClockMs,
+                nowWallClockMs = request.observation.capturedAtWallMs,
+                nowElapsedRealtimeMs = request.observation.capturedAtElapsedMs
+            )
+        )
+        synchronized(stateLock) {
+            if (!accepting.get() ||
+                request.lifecycleGeneration != currentLifecycleGeneration ||
+                accepted.runtimeRevision != currentAcceptedRuntime.runtimeRevision
+            ) return
+            if (plan == null) {
+                wallClockBoundaries.remove(packageName)
+            } else {
+                wallClockBoundaries[packageName] = plan.dueAtWallClockMs
+            }
+        }
+        try {
+            onRecheckPlan?.invoke(
+                RecheckPlanUpdate(
+                    sourceOrderIdentity = request.sourceOrderIdentity,
+                    lifecycleGeneration = request.lifecycleGeneration,
+                    acceptedRuntimeRevision = accepted.runtimeRevision,
+                    packageName = packageName,
+                    plan = plan
+                )
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+        }
     }
 
     private suspend fun processUsageReset(work: Work.UsageReset) {

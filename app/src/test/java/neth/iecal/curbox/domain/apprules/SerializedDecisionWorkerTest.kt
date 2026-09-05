@@ -67,6 +67,43 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun workerOwnsWallClockBoundaryDerivationBeforePublishingOutcome() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val plans = Collections.synchronizedList(mutableListOf<RecheckPlanUpdate>())
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            onRecheckPlan = { plans += it }
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 10_000L))
+            )
+            assertTrue(outcomes.awaitCount(1))
+
+            val update = plans.single()
+            assertEquals(SourceOrderIdentity(1L), update.sourceOrderIdentity)
+            assertEquals(LifecycleGeneration(1L), update.lifecycleGeneration)
+            assertEquals(RuntimeRevision(1L), update.acceptedRuntimeRevision)
+            assertEquals(TARGET_PACKAGE, update.packageName)
+            assertTrue(update.plan != null)
+            assertTrue(update.plan!!.dueAtWallClockMs > 10_000L)
+            assertEquals(
+                update.plan!!.dueAtWallClockMs - 10_000L,
+                update.plan!!.delayMillis
+            )
+            assertTrue(
+                "boundary derivation must follow the evaluator read",
+                repository.operations.indexOf("evaluate:$TARGET_PACKAGE") >= 0
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun productionPersistenceWaitsForCommitAndEvaluatorSeesCommittedUsage() {
         val repository = BlockingCommitRepository()
         val outcomes = RecordingOutcomeSink()
@@ -301,7 +338,8 @@ class SerializedDecisionWorkerTest {
     fun staleLifecycleAndRuntimeRevisionCannotPublishSideEffects() {
         val repository = BlockingReadRepository()
         val outcomes = RecordingOutcomeSink()
-        val worker = worker(repository, outcomes)
+        val plans = Collections.synchronizedList(mutableListOf<RecheckPlanUpdate>())
+        val worker = worker(repository, outcomes, onRecheckPlan = { plans += it })
         try {
             worker.submit(request(1L, 1L, TARGET_PACKAGE))
             assertTrue(repository.readStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
@@ -314,6 +352,7 @@ class SerializedDecisionWorkerTest {
             assertTrue(repository.firstReadFinished.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
             assertTrue(outcomes.awaitIdle())
             assertTrue("stale request published: ${outcomes.values}", outcomes.values.isEmpty())
+            assertTrue("stale request scheduled: $plans", plans.isEmpty())
 
             val staleRevisionRequest = request(
                 sourceOrder = 2L,
@@ -327,6 +366,7 @@ class SerializedDecisionWorkerTest {
             assertEquals(SubmissionResult.ACCEPTED, worker.submit(staleRevisionRequest))
             assertTrue(outcomes.awaitIdle())
             assertTrue("stale revision published: ${outcomes.values}", outcomes.values.isEmpty())
+            assertTrue("stale revision scheduled: $plans", plans.isEmpty())
 
             worker.submit(request(3L, 2L, OTHER_PACKAGE, capturedAtMs = 2_000L))
             assertTrue(outcomes.awaitCount(1))
@@ -346,7 +386,8 @@ class SerializedDecisionWorkerTest {
         ),
         usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true),
         usageResetRepository: UsageResetRepository = RecordingUsageResetRepository(repository),
-        onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> }
+        onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
+        onRecheckPlan: (RecheckPlanUpdate) -> Unit = {}
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = LifecycleGeneration(1L),
         acceptedRuntime = acceptedRuntime.copy(
@@ -357,7 +398,8 @@ class SerializedDecisionWorkerTest {
         repository = repository,
         outcomeSink = sink,
         usageResetRepository = usageResetRepository,
-        onUsageResetComplete = onUsageResetComplete
+        onUsageResetComplete = onUsageResetComplete,
+        onRecheckPlan = onRecheckPlan
     )
 
     private fun request(
