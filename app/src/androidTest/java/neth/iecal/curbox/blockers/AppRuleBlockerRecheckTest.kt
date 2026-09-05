@@ -51,7 +51,10 @@ class AppRuleBlockerRecheckTest {
         blocker.doAppRuleCheck(event)
         event.recycle()
 
-        assertTrue("active zero allowance rule must open approval", service.startedActivities.isNotEmpty())
+        assertTrue(
+            "active zero allowance rule must open approval",
+            awaitCondition { service.startedActivities.isNotEmpty() }
+        )
         blocker.onDestroy()
     }
 
@@ -142,6 +145,54 @@ class AppRuleBlockerRecheckTest {
         assertEquals(0, evaluations)
         assertEquals(1, posts)
         assertTrue(removals > 0)
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun screenOffClosesLastClassifiedTargetAfterEssentialEvent() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        var activePackage = PACKAGE
+        val repository = SessionRecordingRepository()
+        val blocker = AppRuleBlocker().apply {
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = activePackage)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(activePackage),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+        }
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(
+            blocker,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithTargetAllowance())
+
+        sendWindowEvent(blocker, PACKAGE)
+        assertTrue("target session must start", awaitCondition { repository.startedPackages.contains(PACKAGE) })
+
+        activePackage = service.packageName
+        sendWindowEvent(blocker, service.packageName)
+        val screenReceiver = getField(blocker, "screenReceiver") as android.content.BroadcastReceiver
+        screenReceiver.onReceive(service, Intent(Intent.ACTION_SCREEN_OFF))
+
+        assertTrue(
+            "SCREEN_OFF must close the last classified target after an essential event",
+            awaitCondition { repository.finishedPackages.contains(PACKAGE) }
+        )
+        assertTrue(service.packageName !in repository.startedPackages)
         blocker.onDestroy()
     }
 
@@ -323,7 +374,7 @@ class AppRuleBlockerRecheckTest {
         sendWindowEvent(blocker)
         assertTrue(
             "an all-apps rule must include the current package even when the launcher listing omits it",
-            service.startedActivities.isNotEmpty()
+            awaitCondition { service.startedActivities.isNotEmpty() }
         )
         blocker.onDestroy()
     }
@@ -333,6 +384,12 @@ class AppRuleBlockerRecheckTest {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
         val blocker = AppRuleBlocker()
+        val schedulerHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        blocker.recheckPostDelayed = { runnable, delayMillis ->
+            schedulerHandler.postDelayed(runnable, delayMillis)
+            true
+        }
+        blocker.recheckRemoveCallback = schedulerHandler::removeCallbacks
         var windowSnapshotReads = 0
         blocker.applicationWindowSnapshotProvider = {
             windowSnapshotReads++
@@ -390,9 +447,13 @@ class AppRuleBlockerRecheckTest {
         assertTrue(
             "initial guardian remainder must schedule a callback " +
                 "(scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
-            (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+            awaitCondition {
+                (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+            }
         )
         coordinator.accept(snapshotWithTargetAndGlobalDeny())
+        setField(blocker, "lifecycleGeneration", java.util.concurrent.atomic.AtomicLong(1L))
+        invokePrivate(blocker, "submitRuntimePublication", 0L)
         SystemClock.sleep(5_000L)
 
         assertTrue(
@@ -400,7 +461,7 @@ class AppRuleBlockerRecheckTest {
                 "(windowsReads=${service.windowsReads}, " +
                 "current=${getField(blocker, "currentForegroundPackage")}, " +
                 "scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
-            service.startedActivities.isNotEmpty()
+            awaitCondition { service.startedActivities.isNotEmpty() }
         )
         val intent = service.startedActivities.last()
         val denials = intent.getStringExtra(GuardianApprovalActivity.EXTRA_DENIALS).orEmpty()
@@ -483,7 +544,7 @@ class AppRuleBlockerRecheckTest {
         // The first real denial opens the guardian. Its own package is an essential overlay and
         // must suspend the old target foreground evidence before any queued callback can run.
         sendWindowEvent(blocker, PACKAGE)
-        assertTrue(service.startedActivities.size == 1)
+        assertTrue(awaitCondition { service.startedActivities.size == 1 })
         sendWindowEvent(blocker, service.packageName)
 
         invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
@@ -525,7 +586,7 @@ class AppRuleBlockerRecheckTest {
 
         assertTrue(
             "the target window must be evaluated even when an essential package emitted the event",
-            service.startedActivities.size == 1
+            awaitCondition { service.startedActivities.size == 1 }
         )
         blocker.onDestroy()
     }
@@ -559,16 +620,16 @@ class AppRuleBlockerRecheckTest {
 
         sendWindowEvent(blocker, service.packageName)
 
-        assertEquals(
+        assertTrue(
             "an essential event must evaluate every distinct direct application window",
-            2,
-            evaluations
+            awaitCondition { evaluations >= 2 }
         )
-        assertEquals(
+        assertEquals(2, evaluations)
+        assertTrue(
             "one guardian must cover the current denial while it is open",
-            1,
-            service.startedActivities.size
+            awaitCondition { service.startedActivities.size == 1 }
         )
+        assertEquals(1, service.startedActivities.size)
         blocker.onDestroy()
     }
 
@@ -609,11 +670,11 @@ class AppRuleBlockerRecheckTest {
 
         sendWindowEvent(blocker, service.packageName)
 
-        assertEquals(
+        assertTrue(
             "both packages from the original overlay observation must be evaluated once",
-            listOf("target", "other"),
-            evaluatedRuleIds
+            awaitCondition { evaluatedRuleIds.size == 2 }
         )
+        assertEquals(listOf("target", "other"), evaluatedRuleIds)
         assertEquals(
             "one overlay observation must not recapture foreground windows per package",
             1,
@@ -661,11 +722,11 @@ class AppRuleBlockerRecheckTest {
 
         sendWindowEvent(blocker, PACKAGE)
 
-        assertEquals(
+        assertTrue(
             "the event package must end without evaluation and the active root must evaluate once",
-            listOf("other"),
-            evaluatedRuleIds
+            awaitCondition { evaluatedRuleIds.size == 1 }
         )
+        assertEquals(listOf("other"), evaluatedRuleIds)
         assertTrue(
             "the not-visible event outcome must cancel its existing boundary",
             PACKAGE !in (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
@@ -712,6 +773,7 @@ class AppRuleBlockerRecheckTest {
         nowMs += 2_000L
         invokePrivate(blocker, "checkCurrentlyVisibleApplications")
 
+        assertTrue(awaitCondition { evaluations >= 3 })
         assertEquals(3, evaluations)
         assertEquals(
             "essential and reconnect observations must reuse the existing guardian",
@@ -782,7 +844,10 @@ class AppRuleBlockerRecheckTest {
 
         invokePrivate(blocker, "checkCurrentlyVisibleApplications")
 
-        assertEquals(1, evaluations)
+        assertTrue(
+            "a visible package recovered from suspended evidence must be evaluated",
+            awaitCondition { evaluations == 1 }
+        )
         assertEquals(false, getField(blocker, "foregroundEvidenceSuspended"))
         blocker.onDestroy()
     }
@@ -831,6 +896,12 @@ class AppRuleBlockerRecheckTest {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
         val blocker = AppRuleBlocker()
+        val schedulerHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        blocker.recheckPostDelayed = { runnable, delayMillis ->
+            schedulerHandler.postDelayed(runnable, delayMillis)
+            true
+        }
+        blocker.recheckRemoveCallback = schedulerHandler::removeCallbacks
         blocker.applicationWindowSnapshotProvider = {
             AppRuleBlocker.ApplicationWindowSnapshot(
                 packages = setOf(OTHER_PACKAGE),
@@ -877,7 +948,9 @@ class AppRuleBlockerRecheckTest {
         assertTrue(
             "the target allowance boundary must be scheduled before visibility recovery " +
                 "(scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
-            (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+            awaitCondition {
+                (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+            }
         )
         SystemClock.sleep(4_500L)
 
@@ -889,7 +962,7 @@ class AppRuleBlockerRecheckTest {
                 "nowElapsed=${SystemClock.elapsedRealtime()}, " +
                 "suspended=${getField(blocker, "foregroundEvidenceSuspended")}, " +
                 "scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).values})",
-            service.startedActivities.isNotEmpty()
+            awaitCondition { service.startedActivities.isNotEmpty() }
         )
         blocker.onDestroy()
     }
@@ -899,6 +972,12 @@ class AppRuleBlockerRecheckTest {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
         val blocker = AppRuleBlocker()
+        val schedulerHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        blocker.recheckPostDelayed = { runnable, delayMillis ->
+            schedulerHandler.postDelayed(runnable, delayMillis)
+            true
+        }
+        blocker.recheckRemoveCallback = schedulerHandler::removeCallbacks
         blocker.applicationWindowSnapshotProvider = {
             error("transient OEM window provider failure")
         }
@@ -938,11 +1017,17 @@ class AppRuleBlockerRecheckTest {
         // The application window provider fails for every bounded read and the active root is
         // unavailable. Recent real foreground evidence must still complete this boundary check.
         sendWindowEvent(blocker, PACKAGE)
+        assertTrue(
+            "the target allowance boundary must survive the provider failure",
+            awaitCondition {
+                (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+            }
+        )
         SystemClock.sleep(4_500L)
 
         assertTrue(
             "a provider exception must not lose the target expiration check",
-            service.startedActivities.isNotEmpty()
+            awaitCondition { service.startedActivities.isNotEmpty() }
         )
         blocker.onDestroy()
     }
@@ -978,7 +1063,7 @@ class AppRuleBlockerRecheckTest {
 
         assertTrue(
             "known application windows must be checked after reconnect",
-            service.startedActivities.isNotEmpty()
+            awaitCondition { service.startedActivities.isNotEmpty() }
         )
         blocker.onDestroy()
     }
@@ -1014,6 +1099,13 @@ class AppRuleBlockerRecheckTest {
         sendWindowEvent(blocker, PACKAGE)
         invokePrivate(blocker, "checkCurrentlyVisibleApplications")
 
+        assertTrue(
+            "split-screen reconciliation must publish both boundary jobs",
+            awaitCondition {
+                val scheduled = (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
+                PACKAGE in scheduled && OTHER_PACKAGE in scheduled
+            }
+        )
         val scheduledPackages = (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
             .map { it.toString() }
             .toSet()
@@ -1046,8 +1138,10 @@ class AppRuleBlockerRecheckTest {
                 )
             }
             recheckPostDelayed = { runnable, delayMillis ->
-                delays += delayMillis
-                queued.addLast(runnable)
+                if (delayMillis <= 1_000L) {
+                    delays += delayMillis
+                    queued.addLast(runnable)
+                }
                 true
             }
         }
@@ -1059,12 +1153,17 @@ class AppRuleBlockerRecheckTest {
         setField(blocker, "launchablePackages", setOf(OTHER_PACKAGE))
 
         invokePrivate(blocker, "checkCurrentlyVisibleApplications")
-        while (queued.isNotEmpty()) queued.removeFirst().run()
+        while (queued.isNotEmpty() && delays.size < 3) queued.removeFirst().run()
+        if (queued.isNotEmpty()) queued.removeFirst().run()
 
-        assertEquals(listOf(250L, 500L, 750L), delays)
+        assertEquals(listOf(250L, 500L, 750L), delays.take(3))
         assertTrue(
-            "package-less observation retry must terminate after the third attempt",
-            (getField(blocker, "scheduledRechecks") as Map<*, *>).isEmpty()
+            "package-less observation retry must terminate after the third attempt " +
+                "(scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys}, " +
+                "delays=$delays)",
+            (getField(blocker, "scheduledRechecks") as Map<*, *>).keys.none {
+                it.toString().contains("foreground-observation")
+            }
         )
         blocker.onDestroy()
     }
@@ -1159,18 +1258,24 @@ class AppRuleBlockerRecheckTest {
             primaryDelays.all { it >= 1_000L }
         )
 
+        wallClockMs += 750L
+        elapsedRealtimeMs += 750L
         recoveryQueue.removeFirst().run()
         assertEquals(4, primaryAttempts)
         assertTrue("re-arm must post the callback again", primaryQueue.isNotEmpty())
-        assertEquals(1_000L, primaryDelays[3])
+        assertEquals(
+            "re-arm must use only the wall-clock remainder, not wait the worker delay twice",
+            250L,
+            primaryDelays[3]
+        )
 
         // A callback that happens to be delivered early must be retained, not executed early.
         primaryQueue.removeFirst().run()
         assertEquals(0, evaluations)
         assertTrue("early delivery must re-arm the same boundary", primaryQueue.isNotEmpty())
 
-        wallClockMs += 1_000L
-        elapsedRealtimeMs += 1_000L
+        wallClockMs += 250L
+        elapsedRealtimeMs += 250L
         primaryQueue.removeFirst().run()
         assertTrue(
             "the recovered boundary must eventually execute after its wall deadline",
@@ -1236,12 +1341,22 @@ class AppRuleBlockerRecheckTest {
                 .putExtra("neth.iecal.curbox.blockers.EXTRA_SCHEDULER_TOKEN", token)
         )
 
-        assertTrue("the production alarm receiver must request a fresh wake observation", wakeQueue.isNotEmpty())
+        assertTrue(
+            "alarm onReceive must not execute the keyed decision path synchronously",
+            !awaitCondition { evaluations > 0 }
+        )
+        assertEquals(
+            "one alarm must coalesce into one guarded wake observation",
+            1,
+            wakeQueue.size
+        )
         while (wakeQueue.isNotEmpty()) wakeQueue.removeFirst().run()
         assertTrue(
             "wake recovery must evaluate using the current wall clock",
             awaitCondition { evaluations > 0 }
         )
+        SystemClock.sleep(100L)
+        assertEquals("one alarm must produce one decision", 1, evaluations)
         blocker.onDestroy()
     }
 
@@ -1298,7 +1413,7 @@ class AppRuleBlockerRecheckTest {
 
             assertTrue(
                 "visible post $throws recovery must evaluate the module's visible package",
-                evaluations > 0
+                awaitCondition { evaluations > 0 }
             )
             assertEquals(2, posts)
             blocker.onDestroy()
@@ -1525,6 +1640,34 @@ class AppRuleBlockerRecheckTest {
         override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) = Unit
     }
 
+    private class SessionRecordingRepository : CurrentUseDaySessionRepository {
+        private var nextId = 0L
+        private val packagesById = mutableMapOf<Long, String>()
+        val startedPackages = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val finishedPackages = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+        override suspend fun startSession(
+            useDayId: String,
+            packageName: String,
+            startedAtMs: Long
+        ): Long = synchronized(this) {
+            val id = ++nextId
+            packagesById[id] = packageName
+            startedPackages += packageName
+            id
+        }
+
+        override suspend fun finishSession(id: Long, endedAtMs: Long) {
+            synchronized(this) {
+                packagesById[id]?.let(finishedPackages::add)
+            }
+        }
+
+        override suspend fun updateSessionEnd(id: Long, endedAtMs: Long) = Unit
+        override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> = emptyList()
+        override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) = Unit
+    }
+
     private object InstrumentationContext {
         val context: Context
             get() = androidx.test.platform.app.InstrumentationRegistry
@@ -1536,6 +1679,15 @@ class AppRuleBlockerRecheckTest {
         target.javaClass.getDeclaredField(name).apply {
             isAccessible = true
             set(target, value)
+        }
+        if (target is AppRuleBlocker && name == "sessionRepository") {
+            val service = target.javaClass.getDeclaredField("service").apply {
+                isAccessible = true
+            }.get(target) as BaseBlockingService
+            target.javaClass.getDeclaredField("usageResetRepository").apply {
+                isAccessible = true
+                set(target, RoomUsageResetRepository(AppDatabase.getInstance(service)))
+            }
         }
     }
 

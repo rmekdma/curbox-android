@@ -316,6 +316,17 @@ class SerializedDecisionWorker internal constructor(
         }
         if (!isCurrent(request, accepted)) return
 
+        evidence.outcomes
+            .filterIsInstance<ForegroundEvidenceOutcome.NotVisible>()
+            .forEach { outcome ->
+                if (!isCurrent(request, accepted)) return
+                publishRecheckCancellation(
+                    request = request,
+                    accepted = accepted,
+                    packageName = outcome.packageName
+                )
+            }
+
         if (evaluable.isEmpty()) {
             if (isCurrent(request, accepted)) {
                 publish(
@@ -432,6 +443,35 @@ class SerializedDecisionWorker internal constructor(
                     acceptedRuntimeRevision = accepted.runtimeRevision,
                     packageName = packageName,
                     plan = plan
+                )
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+        }
+    }
+
+    private fun publishRecheckCancellation(
+        request: DecisionRequest,
+        accepted: AcceptedRuleRuntimeSnapshot,
+        packageName: String
+    ) {
+        synchronized(stateLock) {
+            if (!accepting.get() ||
+                request.lifecycleGeneration != currentLifecycleGeneration ||
+                accepted.runtimeRevision != currentAcceptedRuntime.runtimeRevision
+            ) return
+            wallClockBoundaries.remove(packageName)
+        }
+        try {
+            onRecheckPlan?.invoke(
+                RecheckPlanUpdate(
+                    sourceOrderIdentity = request.sourceOrderIdentity,
+                    lifecycleGeneration = request.lifecycleGeneration,
+                    acceptedRuntimeRevision = accepted.runtimeRevision,
+                    packageName = packageName,
+                    plan = null
                 )
             )
         } catch (error: CancellationException) {
