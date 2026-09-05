@@ -46,6 +46,7 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
         val snapshot = snapshotWithNextMinuteBoundary(clock.wallClockMs)
         val decisions = mutableListOf<DecisionObservation>()
         var screenInteractive = true
+        var rejectDisplayRead = false
         var keyguardLocked = false
         val blocker = AppRuleBlocker().apply {
             wallClockMsProvider = { clock.wallClockMs }
@@ -56,7 +57,12 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
             visibleApplicationCheckPostDelayed = { runnable, delayMs ->
                 scheduler.post("wake", runnable, delayMs)
             }
-            screenInteractiveProvider = { screenInteractive }
+            screenInteractiveProvider = {
+                check(!rejectDisplayRead) {
+                    "SCREEN_OFF must not depend on a fresh display-state read"
+                }
+                screenInteractive
+            }
             keyguardLockedProvider = { keyguardLocked }
             applicationWindowSnapshotProvider = {
                 AppRuleBlocker.ApplicationWindowSnapshot(
@@ -109,6 +115,7 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
             val readsBeforeSleep = repository.readHistory.size
             val mutationsBeforeScreenOff = repository.mutationCount
             screenInteractive = false
+            rejectDisplayRead = true
             sendScreenAction(blocker, Intent.ACTION_SCREEN_OFF)
             assertTrue(
                 "screen off must finish the visible session before virtual sleep",
@@ -132,6 +139,7 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
 
             // A physical wake need not deliver an accessibility event or a screen broadcast. The
             // scheduler contract must recalculate the crossed wall boundary within its budget.
+            rejectDisplayRead = false
             screenInteractive = true
             keyguardLocked = false
             val wakeWallClockMs = clock.wallClockMs

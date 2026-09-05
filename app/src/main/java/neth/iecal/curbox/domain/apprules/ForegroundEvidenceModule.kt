@@ -62,7 +62,7 @@ class ForegroundEvidenceModule {
         }
 
         if (normalizedFacts.displayState == DisplayState.SCREEN_OFF) {
-            return screenOff(eventPackage)
+            return screenOff(eventPackage ?: activeRootPackage)
         }
 
         if (normalizedFacts.displayState == DisplayState.UNKNOWN) {
