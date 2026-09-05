@@ -24,6 +24,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import neth.iecal.curbox.data.db.AppDatabase
+import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
 
 /** Regression coverage for foreground app-rule checks and their recheck boundaries. */
@@ -60,9 +62,26 @@ class AppRuleBlockerRecheckTest {
         val repository = EmptySessionRepository()
         setField(blocker, "service", service)
         setField(blocker, "sessionRepository", repository)
+        setField(
+            blocker,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
         setField(blocker, "enforcement", AppRuleEnforcement(repository))
         setField(blocker, "setupReady", true)
         setField(blocker, "launchablePackages", setOf(PACKAGE))
+        blocker.screenInteractiveProvider = { true }
+        blocker.keyguardLockedProvider = { false }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+        }
+        blocker.applicationWindowSnapshotProvider = {
+            AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = false
+            )
+        }
         val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
         coordinator.accept(snapshotWithGlobalDeny())
 
@@ -74,7 +93,10 @@ class AppRuleBlockerRecheckTest {
 
         setField(blocker, "screenOnAwaitingUserPresent", false)
         sendWindowEvent(blocker)
-        assertTrue("the app must be checked after USER_PRESENT", service.startedActivities.isNotEmpty())
+        assertTrue(
+            "the app must be checked after USER_PRESENT",
+            awaitCondition { service.startedActivities.isNotEmpty() }
+        )
         blocker.onDestroy()
     }
 
@@ -1303,6 +1325,15 @@ class AppRuleBlockerRecheckTest {
         event.packageName = packageName
         blocker.doAppRuleCheck(event)
         event.recycle()
+    }
+
+    private fun awaitCondition(condition: () -> Boolean): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + 2_000L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (condition()) return true
+            SystemClock.sleep(10L)
+        }
+        return condition()
     }
 
     private companion object {

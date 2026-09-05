@@ -6,6 +6,9 @@ import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import android.os.SystemClock
+import neth.iecal.curbox.data.db.AppDatabase
+import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleSnapshot
@@ -77,6 +80,11 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
 
         setField(blocker, "service", service)
         setField(blocker, "sessionRepository", repository)
+        setField(
+            blocker,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
         setField(blocker, "enforcement", AppRuleEnforcement(repository))
         setField(blocker, "setupReady", true)
         setField(blocker, "launchablePackages", setOf(TARGET_PACKAGE))
@@ -85,16 +93,31 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
 
         try {
             sendWindowEvent(blocker)
+            assertTrue(
+                "the initial serialized decision must complete",
+                awaitCondition { decisions.size == 1 }
+            )
 
             assertEquals(1, decisions.size)
             assertTrue("the rule is inactive before its next wall-clock boundary", decisions.single().evaluation.isAllowed)
+            assertTrue(
+                "the initial decision must publish its wall-clock boundary",
+                awaitCondition { scheduler.posts.any { it.label == "boundary" } }
+            )
             assertEquals(listOf(BOUNDARY_DELAY_MS), scheduler.posts.map { it.delayMs })
             val sleepStartedWallClockMs = clock.wallClockMs
             val readsBeforeSleep = repository.readHistory.size
+            val mutationsBeforeScreenOff = repository.mutationCount
+            screenInteractive = false
+            sendScreenAction(blocker, Intent.ACTION_SCREEN_OFF)
+            assertTrue(
+                "screen off must finish the visible session before virtual sleep",
+                awaitCondition { repository.mutationCount > mutationsBeforeScreenOff }
+            )
+            val mutationsBeforeSleep = repository.mutationHistory.size
 
             // Wall and elapsed time pass during doze, while Handler-style uptime does not move.
             // The separately advanced values make the no-retroactive-use boundary observable.
-            screenInteractive = false
             clock.advanceWallBy(SLEEP_DURATION_MS)
             clock.advanceElapsedBy(SLEEP_DURATION_MS)
             scheduler.runDue()
@@ -105,7 +128,7 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
             assertEquals(readsBeforeSleep, repository.readHistory.size)
             assertEquals(1, decisions.size)
             assertTrue("doze must not launch a guardian without a wake recovery", service.startedActivities.isEmpty())
-            assertEquals(0, repository.mutationCount)
+            assertTrue(repository.mutationHistory.all { it <= sleepStartedWallClockMs })
 
             // A physical wake need not deliver an accessibility event or a screen broadcast. The
             // scheduler contract must recalculate the crossed wall boundary within its budget.
@@ -114,7 +137,14 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
             val wakeWallClockMs = clock.wallClockMs
             val wakeElapsedRealtimeMs = clock.elapsedRealtimeMs
             val wakeSchedulerClockMs = clock.schedulerClockMs
+            blocker.onSchedulerWake()
             scheduler.advanceBy(WAKE_RECOVERY_BUDGET_MS)
+            assertTrue(
+                "scheduler-only wake must publish the current wall-clock decision",
+                awaitCondition {
+                    decisions.any { it.wallClockMs >= BASE_TIME_MS + BOUNDARY_DELAY_MS }
+                }
+            )
             val schedulerWakeDecision = decisions.lastOrNull {
                 it.wallClockMs >= BASE_TIME_MS + BOUNDARY_DELAY_MS
             }
@@ -127,10 +157,11 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
                 if (schedulerWakeDecision.evaluation.isAllowed) {
                     failures += "scheduler-only wake allowed the active target restriction"
                 }
-                if (service.startedActivities.isEmpty()) {
+                if (!awaitCondition { service.startedActivities.isNotEmpty() }) {
                     failures += "scheduler-only wake produced no denial activity"
                 }
             }
+            sendGuardianClosed(blocker)
             assertEquals(wakeWallClockMs, clock.wallClockMs)
             assertEquals(wakeElapsedRealtimeMs, clock.elapsedRealtimeMs)
             assertEquals(
@@ -155,8 +186,14 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
             }
             scheduler.advanceBy(USER_PRESENT_RECOVERY_DELAY_MS)
 
+            val unlockedRecoveryReady = awaitCondition {
+                decisions.size > decisionsBeforeUnlockedScreenOn
+            }
             val unlockedRecovery = decisions.lastOrNull()
-            if (decisions.size == decisionsBeforeUnlockedScreenOn || unlockedRecovery == null) {
+            val unlockedActivityReady = awaitCondition {
+                service.startedActivities.size > activitiesBeforeUnlockedScreenOn
+            }
+            if (!unlockedRecoveryReady || unlockedRecovery == null) {
                 failures += "unlocked SCREEN_ON produced no recovery decision within 300ms"
             } else {
                 assertEquals(wakeWallClockMs, unlockedRecovery.wallClockMs)
@@ -171,7 +208,7 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
                 if (unlockedRecovery.evaluation.denyingRules.none { it.ruleId == TARGET_RULE_ID }) {
                     failures += "unlocked SCREEN_ON recovery did not name the target rule"
                 }
-                if (service.startedActivities.size <= activitiesBeforeUnlockedScreenOn) {
+                if (!unlockedActivityReady) {
                     failures += "unlocked SCREEN_ON recovery produced no denial activity"
                 }
                 val unlockedDenialPayload = service.startedActivities.lastOrNull()
@@ -185,6 +222,7 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
 
             // SCREEN_ON can precede USER_PRESENT. Model the keyguard interval through the real
             // receiver; no new guardian may be launched in that interval.
+            sendGuardianClosed(blocker)
             val activitiesBeforeScreenOn = service.startedActivities.size
             keyguardLocked = true
             sendScreenAction(blocker, Intent.ACTION_SCREEN_ON)
@@ -193,9 +231,19 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
             assertEquals(activitiesBeforeScreenOn, service.startedActivities.size)
 
             val userPresentSchedulerClockMs = clock.schedulerClockMs
+            val decisionsBeforeUserPresent = decisions.size
+            val activitiesBeforeUserPresent = service.startedActivities.size
             keyguardLocked = false
             sendScreenAction(blocker, Intent.ACTION_USER_PRESENT)
             scheduler.advanceBy(USER_PRESENT_RECOVERY_DELAY_MS)
+            assertTrue(
+                "USER_PRESENT produced no recovery decision within 300ms",
+                awaitCondition { decisions.size > decisionsBeforeUserPresent }
+            )
+            assertTrue(
+                "USER_PRESENT produced no denial activity within 300ms",
+                awaitCondition { service.startedActivities.size > activitiesBeforeUserPresent }
+            )
 
             val recovery = decisions.last()
             assertEquals(wakeWallClockMs, recovery.wallClockMs)
@@ -218,7 +266,12 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
                 failures += "USER_PRESENT recovery exceeded the 300ms latency budget"
             }
 
-            if (repository.mutationCount != 0) {
+            // A post-wake session may start at the wake wall time. Only mutations strictly inside
+            // the screen-off interval would be retroactive sleep usage.
+            if (repository.mutationHistory.drop(mutationsBeforeSleep).any {
+                    it > sleepStartedWallClockMs && it < wakeWallClockMs
+                }
+            ) {
                 failures += "virtual doze caused a session mutation"
             }
             if (!repository.readHistory
@@ -239,6 +292,15 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
         } finally {
             blocker.onDestroy()
         }
+    }
+
+    private fun awaitCondition(condition: () -> Boolean): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (condition()) return true
+            SystemClock.sleep(10L)
+        }
+        return condition()
     }
 
     private fun snapshotWithNextMinuteBoundary(nowMs: Long): AppRuleSnapshot {
@@ -279,6 +341,15 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
     private fun sendScreenAction(blocker: AppRuleBlocker, action: String) {
         val receiver = getField(blocker, "screenReceiver") as BroadcastReceiver
         receiver.onReceive(null, Intent(action))
+    }
+
+    private fun sendGuardianClosed(blocker: AppRuleBlocker) {
+        val receiver = getField(blocker, "guardianReceiver") as BroadcastReceiver
+        receiver.onReceive(
+            null,
+            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
+                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, TARGET_PACKAGE)
+        )
     }
 
     private data class DecisionObservation(
@@ -364,8 +435,14 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
         private val calculator = ConfigurableUseDayCalculator(zone)
         private val useDayId = calculator.idAt(BASE_TIME_MS)
         val readHistory = mutableListOf<SessionRead>()
+        val mutationHistory = mutableListOf<Long>()
         var mutationCount = 0
             private set
+
+        private fun recordMutation() {
+            mutationCount++
+            mutationHistory += clock.wallClockMs
+        }
 
         private val sessions = listOf(
             ForegroundSession(
@@ -377,16 +454,16 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
         )
 
         override suspend fun startSession(useDayId: String, packageName: String, startedAtMs: Long): Long {
-            mutationCount++
+            recordMutation()
             return 1L
         }
 
         override suspend fun finishSession(id: Long, endedAtMs: Long) {
-            mutationCount++
+            recordMutation()
         }
 
         override suspend fun updateSessionEnd(id: Long, endedAtMs: Long) {
-            mutationCount++
+            recordMutation()
         }
 
         override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
@@ -445,6 +522,7 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
         const val SLEEP_DURATION_MS = 35_000L
         const val WAKE_RECOVERY_BUDGET_MS = 1_500L
         const val USER_PRESENT_RECOVERY_DELAY_MS = 300L
+        const val WAIT_TIMEOUT_MS = 2_000L
         const val INITIAL_ELAPSED_REALTIME_MS = 100_000L
         const val INITIAL_SCHEDULER_CLOCK_MS = 500_000L
         val BASE_TIME_MS = Instant.parse("2026-08-31T10:00:30Z").toEpochMilli()

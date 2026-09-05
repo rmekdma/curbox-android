@@ -29,6 +29,7 @@ enum class ObservationKind {
     REFRESH,
     RECONNECT,
     SCREEN_WAKE,
+    SCREEN_OFF,
     USER_PRESENT
 }
 
