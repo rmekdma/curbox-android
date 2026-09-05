@@ -47,6 +47,8 @@ import neth.iecal.curbox.domain.apprules.AppRuleRecheckPlanner
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.ActiveRootFact
 import neth.iecal.curbox.domain.apprules.AndroidForegroundObservationSource
+import neth.iecal.curbox.domain.apprules.AppUsageTrackingDecision
+import neth.iecal.curbox.domain.apprules.AppUsageTrackingPolicy
 import neth.iecal.curbox.domain.apprules.ApplicationWindowsFreshness
 import neth.iecal.curbox.domain.apprules.ApplicationWindowsFact
 import neth.iecal.curbox.domain.apprules.AtomicConnectionScopedSourceOrderSequencer
@@ -123,6 +125,11 @@ class AppRuleBlocker {
     @Volatile private var resetTime = UseDayResetTime()
     @Volatile private var useDayGenerationStartedAtMs = 0L
     @Volatile private var overrideState = AppRuleOverrideState()
+    @Volatile
+    private var usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(
+        statisticsTrackingEnabled = true,
+        hasActiveTimeBasedRules = true
+    )
     private val reevaluationGate = AppRuleReevaluationGate()
     @Volatile private var lastPostedNotificationModel: LiveRuleNotificationModel? = null
     @Volatile private var activeGuardianPackage: String? = null
@@ -240,7 +247,12 @@ class AppRuleBlocker {
             onNonFatalError = ::logNonFatal
         )
         val database = AppDatabase.getInstance(service)
-        sessionRepository = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
+        sessionRepository = RoomCurrentUseDaySessionRepository(
+            database.foregroundSessionDao(),
+            database.foregroundLaunchDao(),
+            database.appUsageDao(),
+            database
+        )
         enforcement = AppRuleEnforcement(sessionRepository)
         packageScopeReader = AppRulePackageScopeReader.fromContext(service)
         refreshPackageScope()
@@ -255,6 +267,10 @@ class AppRuleBlocker {
                 overrideState = initialSettings.appRuleOverrideState
                 val initial = initialSettings.appRuleSnapshot
                 snapshot.accept(initial)
+                usageTrackingDecision = AppUsageTrackingPolicy.decide(
+                    statisticsTrackingEnabled = initialSettings.isAppUsageTrackingEnabled,
+                    hasActiveTimeBasedRules = initial.appRules.any { it.isActive }
+                )
             }
             createDecisionWorker(connectionGeneration)
         } catch (error: CancellationException) {
@@ -428,7 +444,8 @@ class AppRuleBlocker {
             evidencePolicy = ForegroundEvidencePolicySnapshot(
                 essentialPackages = essentialPackages +
                     setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
-            )
+            ),
+            usageTrackingDecision = usageTrackingDecision
         )
     }
 
@@ -1033,6 +1050,10 @@ class AppRuleBlocker {
             null
         }
         val nextReset = safeResetTime(settings.useDayResetHour, settings.useDayResetMinute)
+        val nextUsageTrackingDecision = AppUsageTrackingPolicy.decide(
+            statisticsTrackingEnabled = settings.isAppUsageTrackingEnabled,
+            hasActiveTimeBasedRules = settings.appRuleSnapshot.appRules.any { it.isActive }
+        )
         synchronized(runtimeLock) {
             if (destroyed) return false
             val previousSnapshot = snapshot.snapshot()
@@ -1040,7 +1061,8 @@ class AppRuleBlocker {
             val changed = nextSnapshot != previousSnapshot ||
                 nextReset != resetTime ||
                 settings.useDayGenerationStartedAtMs != useDayGenerationStartedAtMs ||
-                settings.appRuleOverrideState != overrideState
+                settings.appRuleOverrideState != overrideState ||
+                nextUsageTrackingDecision != usageTrackingDecision
             if (!changed) return false
 
             if (settings.appRuleOverrideState != overrideState) {
@@ -1049,6 +1071,7 @@ class AppRuleBlocker {
             resetTime = nextReset
             useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
             overrideState = settings.appRuleOverrideState
+            usageTrackingDecision = nextUsageTrackingDecision
             if (candidate != null) snapshot.accept(candidate)
             recheckGeneration.incrementAndGet()
             cancelScheduledRechecks()

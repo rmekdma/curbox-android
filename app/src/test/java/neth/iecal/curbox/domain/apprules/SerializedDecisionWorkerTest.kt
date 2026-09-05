@@ -103,6 +103,71 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun statisticsDisabledWorkerPersistsOnlyEnforcementLedger() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            usageTrackingDecision = AppUsageTrackingPolicy.decide(
+                statisticsTrackingEnabled = false,
+                hasActiveTimeBasedRules = true
+            )
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            worker.submit(request(2L, 1L, OTHER_PACKAGE, capturedAtMs = 61_001L))
+
+            assertTrue(outcomes.awaitCount(2))
+            val targetSession = repository.persistedSessions()
+                .first { it.packageName == TARGET_PACKAGE }
+            assertFalse("statistics-disabled session was marked tracked", targetSession.statisticsTracked)
+            assertTrue("statistics launch ledger was written while disabled", repository.launchEvents.isEmpty())
+            assertTrue(
+                "calendar usage checkpoints were written while disabled",
+                repository.committedCheckpoints.all { it.usage.isEmpty() }
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun statisticsEnabledWorkerPersistsLaunchesAndHourlyUsageCheckpoints() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            usageTrackingDecision = AppUsageTrackingPolicy.decide(
+                statisticsTrackingEnabled = true,
+                hasActiveTimeBasedRules = true
+            )
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            worker.submit(request(2L, 1L, OTHER_PACKAGE, capturedAtMs = 61_001L))
+
+            assertTrue(outcomes.awaitCount(2))
+            val targetSession = repository.persistedSessions()
+                .first { it.packageName == TARGET_PACKAGE }
+            assertTrue("statistics-enabled session was not marked tracked", targetSession.statisticsTracked)
+            assertEquals(2, repository.launchEvents.size)
+            assertEquals(2, repository.statisticsLaunches.size)
+
+            val targetCommit = repository.committedCheckpoints
+                .first { it.sessionId == targetSession.id }
+            assertTrue("statistics checkpoint payload was empty", targetCommit.usage.isNotEmpty())
+            assertEquals(
+                60_001L,
+                targetCommit.usage.sumOf { it.durationMs }
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun rapidSwitchesAreSerializedAndPersistedRowsMatchPublishedDecisions() {
         val repository = RecordingRepository()
         val outcomes = RecordingOutcomeSink()
@@ -171,10 +236,18 @@ class SerializedDecisionWorkerTest {
     private fun worker(
         repository: CurrentUseDaySessionRepository,
         sink: RecordingOutcomeSink,
-        acceptedRuntime: AcceptedRuleRuntimeSnapshot = acceptedRuntime(RuntimeRevision(1L))
+        acceptedRuntime: AcceptedRuleRuntimeSnapshot = acceptedRuntime(
+            RuntimeRevision(1L),
+            usageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
+        ),
+        usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = LifecycleGeneration(1L),
-        acceptedRuntime = acceptedRuntime,
+        acceptedRuntime = acceptedRuntime.copy(
+            runtime = acceptedRuntime.runtime.copy(
+                usageTrackingDecision = usageTrackingDecision
+            )
+        ),
         repository = repository,
         outcomeSink = sink
     )
@@ -213,13 +286,17 @@ class SerializedDecisionWorkerTest {
 
     private fun acceptedRuntime(
         revision: RuntimeRevision,
-        allowedMinutes: Long = 0L
+        allowedMinutes: Long = 0L,
+        usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
     ): AcceptedRuleRuntimeSnapshot = AcceptedRuleRuntimeSnapshot(
-        runtime(allowedMinutes),
+        runtime(allowedMinutes, usageTrackingDecision),
         revision
     )
 
-    private fun runtime(allowedMinutes: Long = 0L): RuleRuntimeSnapshot = RuleRuntimeSnapshot(
+    private fun runtime(
+        allowedMinutes: Long = 0L,
+        usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
+    ): RuleRuntimeSnapshot = RuleRuntimeSnapshot(
         snapshot = AppRuleSnapshot(
             appGroups = listOf(
                 AppRuleAppGroup(
@@ -248,7 +325,8 @@ class SerializedDecisionWorkerTest {
         resetTime = UseDayResetTime(),
         useDayGenerationStartedAtMs = 0L,
         launchablePackages = setOf(TARGET_PACKAGE, OTHER_PACKAGE),
-        evidencePolicy = ForegroundEvidencePolicySnapshot()
+        evidencePolicy = ForegroundEvidencePolicySnapshot(),
+        usageTrackingDecision = usageTrackingDecision
     )
 
     private fun recoveryStop(generation: LifecycleGeneration): RecoveryOnlyStop =
@@ -282,6 +360,11 @@ class SerializedDecisionWorkerTest {
 
     private open class RecordingRepository : CurrentUseDaySessionRepository {
         val operations = Collections.synchronizedList(mutableListOf<String>())
+        val launchEvents = Collections.synchronizedList(mutableListOf<String>())
+        val statisticsLaunches = Collections.synchronizedList(mutableListOf<String>())
+        val committedCheckpoints = Collections.synchronizedList(
+            mutableListOf<CheckpointCommit>()
+        )
         private val nextId = AtomicLong(1L)
         private val sessions = Collections.synchronizedList(mutableListOf<ForegroundSession>())
 
@@ -290,6 +373,34 @@ class SerializedDecisionWorkerTest {
             val id = nextId.getAndIncrement()
             sessions += ForegroundSession(id, useDayId, packageName, startedAtMs, null)
             return id
+        }
+
+        override suspend fun startSessionAtGeneration(
+            useDayId: String,
+            packageName: String,
+            startedAtMs: Long,
+            generationStartedAtMs: Long,
+            statisticsTracked: Boolean
+        ): Long {
+            val id = startSession(useDayId, packageName, startedAtMs)
+            synchronized(sessions) {
+                val index = sessions.indexOfFirst { it.id == id }
+                sessions[index] = sessions[index].copy(statisticsTracked = statisticsTracked)
+            }
+            return id
+        }
+
+        override suspend fun recordLaunch(
+            useDayId: String,
+            packageName: String,
+            launchedAtMs: Long,
+            generationStartedAtMs: Long
+        ) {
+            launchEvents += "$packageName@$launchedAtMs"
+        }
+
+        override suspend fun recordLaunchStatistics(packageName: String, launchedAtMs: Long) {
+            statisticsLaunches += "$packageName@$launchedAtMs"
         }
 
         override suspend fun finishSession(id: Long, endedAtMs: Long) {
@@ -311,6 +422,7 @@ class SerializedDecisionWorkerTest {
         ): Boolean {
             val packageName = synchronized(sessions) { sessions.first { it.id == id }.packageName }
             operations += "commit:$packageName"
+            committedCheckpoints += CheckpointCommit(id, endedAtMs, usage)
             updateSessionEnd(id, endedAtMs)
             return true
         }
@@ -324,6 +436,12 @@ class SerializedDecisionWorkerTest {
 
         fun persistedSessions(): List<ForegroundSession> = synchronized(sessions) { sessions.toList() }
     }
+
+    private data class CheckpointCommit(
+        val sessionId: Long,
+        val endedAtMs: Long,
+        val usage: List<ForegroundUsageCheckpoint>
+    )
 
     private class DelayedRepository : RecordingRepository() {
         val startStarted = CountDownLatch(1)

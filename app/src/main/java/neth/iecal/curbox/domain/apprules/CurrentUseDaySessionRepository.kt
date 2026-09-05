@@ -23,6 +23,12 @@ interface CurrentUseDaySessionRepository {
         generationStartedAtMs: Long = 0L
     ) = Unit
 
+    /** Records the calendar-keyed launch aggregate when statistics are enabled. */
+    suspend fun recordLaunchStatistics(
+        packageName: String,
+        launchedAtMs: Long
+    ) = Unit
+
     /** Starts a row in a particular use-day generation. Older fakes can use the legacy method. */
     suspend fun startSessionAtGeneration(
         useDayId: String,
