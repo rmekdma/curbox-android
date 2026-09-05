@@ -555,13 +555,11 @@ class AppRuleBlocker {
                 candidateRuntime = ruleRuntimeSnapshot()
             )
         )
-        val worker = ensureDecisionWorker(normalizedConnectionGeneration)
-        val result = worker.submit(request)
-        if (result == SubmissionResult.REJECTED_NOT_READY &&
-            isReadyForChecks(normalizedConnectionGeneration)
-        ) {
-            ensureDecisionWorker(normalizedConnectionGeneration).submit(request)
-        }
+        submitDecisionRequest(
+            request = request,
+            connectionGeneration = normalizedConnectionGeneration,
+            operation = "runtime publication"
+        )
     }
 
     private fun publishDecisionOutcome(outcome: DecisionOutcome) {
@@ -819,18 +817,53 @@ class AppRuleBlocker {
                 reason = kind,
                 observation = captured.facts
             )
-            val worker = ensureDecisionWorker(connectionGeneration)
-            val result = worker.submit(request)
-            if (result == SubmissionResult.REJECTED_NOT_READY &&
-                isReadyForChecks(connectionGeneration)
-            ) {
-                ensureDecisionWorker(connectionGeneration).submit(request)
-            }
+            submitDecisionRequest(
+                request = request,
+                connectionGeneration = connectionGeneration,
+                operation = "foreground decision"
+            )
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             logNonFatal(error)
         }
+    }
+
+    private fun submitDecisionRequest(
+        request: DecisionRequest,
+        connectionGeneration: Long,
+        operation: String
+    ): SubmissionResult {
+        val initialWorker = ensureDecisionWorker(connectionGeneration)
+        val initialResult = initialWorker.submit(request)
+        var retryWorker: SerializedDecisionWorker? = null
+        return retryRejectedWorkerSubmission(
+            initialResult = initialResult,
+            canRetry = { isReadyForChecks(connectionGeneration) },
+            retry = {
+                retryWorker = ensureDecisionWorker(connectionGeneration)
+                retryWorker!!.submit(request)
+            },
+            onRepeatedRejection = {
+                val failedWorker = retryWorker
+                if (failedWorker != null && decisionWorker === failedWorker) {
+                    failedWorker.stop(
+                        RecoveryOnlyStop(
+                            requestedAtElapsedMs = observationElapsedRealtimeMs(),
+                            reason = StopReason.REPLACEMENT,
+                            lifecycleGeneration = LifecycleGeneration(connectionGeneration)
+                        )
+                    )
+                    decisionWorker = null
+                }
+                logNonFatal(
+                    IllegalStateException(
+                        "$operation submission was rejected twice while the app-rule " +
+                            "lifecycle remained ready"
+                    )
+                )
+            }
+        )
     }
 
     private fun startNotificationTicker(connectionGeneration: Long) {
@@ -2854,6 +2887,22 @@ class AppRuleBlocker {
     @Suppress("DEPRECATION")
     private fun obtainWindowStateEvent(): AccessibilityEvent =
         AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+}
+
+internal fun retryRejectedWorkerSubmission(
+    initialResult: SubmissionResult,
+    canRetry: () -> Boolean,
+    retry: () -> SubmissionResult,
+    onRepeatedRejection: () -> Unit
+): SubmissionResult {
+    if (initialResult != SubmissionResult.REJECTED_NOT_READY || !canRetry()) {
+        return initialResult
+    }
+    val retryResult = retry()
+    if (retryResult == SubmissionResult.REJECTED_NOT_READY) {
+        onRepeatedRejection()
+    }
+    return retryResult
 }
 
 internal class ApplicationWindowProvenanceCache {
