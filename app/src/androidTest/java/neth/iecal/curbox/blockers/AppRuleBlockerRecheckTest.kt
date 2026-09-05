@@ -17,6 +17,10 @@ import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.LifecycleGeneration
+import neth.iecal.curbox.domain.apprules.RecheckPlanUpdate
+import neth.iecal.curbox.domain.apprules.RuntimeRevision
+import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import org.junit.Assert.assertEquals
@@ -1485,6 +1489,67 @@ class AppRuleBlockerRecheckTest {
         assertTrue(
             "the accepted recovery alarm must reach the decision path",
             awaitCondition { evaluations > 0 }
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun removingPlanCancelsPendingProductionRecoveryWake() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val wakeQueue = ArrayDeque<Runnable>()
+        var primaryAttempts = 0
+        val blocker = AppRuleBlocker().apply {
+            recheckPostDelayed = { _, _ ->
+                primaryAttempts++
+                false
+            }
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                wakeQueue.addLast(runnable)
+                true
+            }
+        }
+        setField(blocker, "service", service)
+        setField(blocker, "setupReady", true)
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        assertEquals(3, primaryAttempts)
+        val recoveryToken = scheduledAlarmToken(blocker)
+        assertTrue(
+            "the failed primary post must leave a production recovery callback",
+            (getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).containsKey(PACKAGE)
+        )
+
+        invokePrivate(
+            blocker,
+            "applyRecheckPlan",
+            RecheckPlanUpdate(
+                sourceOrderIdentity = SourceOrderIdentity(1L),
+                lifecycleGeneration = LifecycleGeneration(1L),
+                acceptedRuntimeRevision = RuntimeRevision(0L),
+                packageName = PACKAGE,
+                plan = null
+            )
+        )
+
+        val receiver = getField(blocker, "schedulerWakeReceiver") as android.content.BroadcastReceiver
+        receiver.onReceive(
+            service,
+            Intent("neth.iecal.curbox.blockers.APP_RULE_SCHEDULER_WAKE")
+                .putExtra("neth.iecal.curbox.blockers.EXTRA_SCHEDULER_PACKAGE", PACKAGE)
+                .putExtra("neth.iecal.curbox.blockers.EXTRA_SCHEDULER_TOKEN", recoveryToken)
+        )
+
+        assertTrue(
+            "removing a plan must invalidate its pending recovery alarm before wake delivery",
+            wakeQueue.isEmpty()
+        )
+        assertTrue(
+            "plan removal must remove the paired recovery callback",
+            (getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).isEmpty()
+        )
+        assertTrue(
+            "plan removal must remove the paired alarm token",
+            (getField(blocker, "scheduledAlarms") as Map<*, *>).isEmpty()
         )
         blocker.onDestroy()
     }
