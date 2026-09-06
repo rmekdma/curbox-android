@@ -266,6 +266,8 @@ class AppRuleBlocker {
     internal var evaluationResultObserver: ((AppRulesEvaluation) -> Unit)? = null
     /** Temporary seam for forcing concurrent same-lifecycle worker recovery interleavings. */
     internal var decisionWorkerRecoveryAfterCapture: (() -> Unit)? = null
+    /** Temporary seam for observing host publication before it reaches the worker handoff lock. */
+    internal var runtimePublicationBeforeWorkerHandoff: ((RuntimeRevision) -> Unit)? = null
     /** Temporary seam for observing the external notification publication boundary. */
     internal var notificationPostObserver: ((LiveRuleNotificationModel) -> Unit)? = null
 
@@ -576,6 +578,7 @@ class AppRuleBlocker {
         applySettingsSnapshot(settings, runtimeRevision)
         val accepted = isAcceptedRuntimeRevision(runtimeRevision)
         if (accepted) {
+            runtimePublicationBeforeWorkerHandoff?.invoke(runtimeRevision)
             submitRuntimePublication(
                 connectionGeneration = connectionGeneration,
                 sourceOrderIdentity = sourceOrderIdentity,

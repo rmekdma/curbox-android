@@ -12,7 +12,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeoutOrNull
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.data.models.AppRule
@@ -540,6 +539,8 @@ class AppRuleBlockerRefreshOrderingRedTest {
             val fixture = createProductionHandoffFixture(oldSnapshot)
             val releaseOldCapture = CompletableDeferred<Unit>()
             val oldCaptured = CompletableDeferred<Unit>()
+            val newerHandoffReached =
+                CompletableDeferred<Pair<RuntimeRevision, AppRuleSnapshot>>()
             val newerPublicationCompleted = CompletableDeferred<Unit>()
             val firstRecovery = AtomicBoolean(true)
             var oldSubmission: kotlinx.coroutines.Deferred<SubmissionResult>? = null
@@ -566,6 +567,14 @@ class AppRuleBlockerRefreshOrderingRedTest {
                 stopWorker(fixture.blocker)
 
                 val newerReservation = fixture.sourceOrderSequencer.reserveRuntimePublication()
+                fixture.blocker.runtimePublicationBeforeWorkerHandoff = { revision ->
+                    if (revision == newerReservation.runtimeRevision) {
+                        newerHandoffReached.complete(
+                            hostRuntimeRevision(fixture.blocker) to
+                                fixture.snapshotCoordinator.snapshot()
+                        )
+                    }
+                }
                 oldSubmission = async(Dispatchers.Default) {
                     invokePrivateResult(
                         fixture.blocker,
@@ -597,13 +606,12 @@ class AppRuleBlockerRefreshOrderingRedTest {
                     }
                 }
 
-                val newerCompletedBeforeOldRelease = withTimeoutOrNull(500L) {
-                    newerPublicationCompleted.await()
-                    true
-                } ?: false
+                val observedNewerHandoff = newerHandoffReached.await()
+                assertEquals(newerReservation.runtimeRevision, observedNewerHandoff.first)
+                assertEquals(latestSnapshot.normalized(), observedNewerHandoff.second)
                 assertFalse(
-                    "newer replacement bypassed the older serialized handoff",
-                    newerCompletedBeforeOldRelease
+                    "newer replacement completed while older M owned the handoff lock",
+                    newerPublicationCompleted.isCompleted
                 )
 
                 releaseOldCapture.complete(Unit)
@@ -656,6 +664,7 @@ class AppRuleBlockerRefreshOrderingRedTest {
                 oldSubmission?.join()
                 newerPublication?.join()
                 fixture.blocker.decisionWorkerRecoveryAfterCapture = null
+                fixture.blocker.runtimePublicationBeforeWorkerHandoff = null
                 fixture.blocker.onDestroy()
             }
         }
