@@ -10,6 +10,7 @@ import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
@@ -34,7 +35,14 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /** Regression coverage for foreground app-rule checks and their recheck boundaries. */
 @RunWith(AndroidJUnit4::class)
@@ -1144,6 +1152,232 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun oneCoalescedWakeProcessesIndependentDueDeadlinesWithExternalOutcomes() {
+        val zone = ZoneId.systemDefault()
+        val baseWallClockMs = ZonedDateTime.of(2026, 9, 7, 10, 0, 0, 0, zone)
+            .toInstant()
+            .toEpochMilli()
+        val baseElapsedRealtimeMs = 10_000L
+        val dueWallClockMs = baseWallClockMs + 60_000L
+        val baseUseDayId = ConfigurableUseDayCalculator(zone = zone).idAt(baseWallClockMs)
+        val targetRuleId = "independent-target-deadline"
+        val otherRuleId = "independent-other-deadline"
+        val baseLocalDateTime = ZonedDateTime.ofInstant(
+            java.time.Instant.ofEpochMilli(baseWallClockMs),
+            zone
+        )
+        val weekday = baseLocalDateTime.dayOfWeek.value % 7
+        val otherStartMinute = baseLocalDateTime.hour * 60 + baseLocalDateTime.minute + 1
+        val snapshot = AppRuleSnapshot(
+            appGroups = listOf(
+                AppRuleAppGroup("target", "Target", listOf(PACKAGE)),
+                AppRuleAppGroup("other", "Other", listOf(OTHER_PACKAGE))
+            ),
+            appRules = listOf(
+                AppRule(
+                    id = targetRuleId,
+                    name = "Target allowance boundary",
+                    weekdays = setOf(weekday),
+                    scope = AppRuleScope.forGroup("target"),
+                    allowedMinutes = 1,
+                    timeRanges = listOf(AppRuleTimeRange(0, 0))
+                ),
+                AppRule(
+                    id = otherRuleId,
+                    name = "Other schedule boundary",
+                    weekdays = setOf(weekday),
+                    scope = AppRuleScope.forGroup("other"),
+                    allowedMinutes = 2,
+                    timeRanges = listOf(
+                        AppRuleTimeRange(otherStartMinute, otherStartMinute + 1)
+                    )
+                )
+            )
+        )
+        val repository = EmptySessionRepository(
+            sessions = listOf(
+                ForegroundSession(
+                    id = 1L,
+                    useDayId = baseUseDayId,
+                    packageName = PACKAGE,
+                    startedAtMs = baseWallClockMs
+                ),
+                ForegroundSession(
+                    id = 2L,
+                    useDayId = baseUseDayId,
+                    packageName = OTHER_PACKAGE,
+                    startedAtMs = baseWallClockMs
+                )
+            )
+        )
+        val service = RecordingService().also {
+            it.attach(InstrumentationContext.context)
+            it.lastBackPressTimeStamp = 0L
+        }
+        val blocker = AppRuleBlocker()
+        val phase = AtomicReference(DeadlineEvidencePhase.INITIAL)
+        val wallClockMs = AtomicLong(baseWallClockMs)
+        val elapsedRealtimeMs = AtomicLong(baseElapsedRealtimeMs)
+        val requiredPackages = setOf(PACKAGE, OTHER_PACKAGE)
+        val planLock = Any()
+        val initialDueAt = mutableMapOf<String, Long>()
+        val tickPlanPackages = mutableSetOf<String>()
+        val tickDueAt = mutableMapOf<String, Long>()
+        val initialPlansReady = CountDownLatch(1)
+        val tickPlansReady = CountDownLatch(1)
+        val targetDenied = CountDownLatch(1)
+        val otherAllowed = CountDownLatch(1)
+        val warningPublished = CountDownLatch(1)
+        val denialActivityStarted = CountDownLatch(1)
+        val warningPackages = CopyOnWriteArrayList<String>()
+        val visibleCallbacks = CopyOnWriteArrayList<Runnable>()
+        val tickEvaluations = mutableMapOf<String, Boolean>()
+        val evaluationLock = Any()
+        service.startActivityObserver = { intent ->
+            if (intent.getStringExtra(GuardianApprovalActivity.EXTRA_PACKAGE) == PACKAGE) {
+                denialActivityStarted.countDown()
+            }
+        }
+
+        blocker.wallClockMsProvider = { wallClockMs.get() }
+        blocker.elapsedRealtimeMsProvider = { elapsedRealtimeMs.get() }
+        blocker.screenInteractiveProvider = { true }
+        blocker.keyguardLockedProvider = { false }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+        }
+        blocker.applicationWindowSnapshotProvider = {
+            AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = requiredPackages,
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = false,
+                applicationWindowCount = requiredPackages.size
+            )
+        }
+        blocker.recheckPostDelayed = { _, _ -> true }
+        blocker.recheckRemoveCallback = {}
+        blocker.visibleApplicationCheckPostDelayed = { runnable, _ ->
+            visibleCallbacks += runnable
+            true
+        }
+        blocker.visibleApplicationCheckRemoveCallbacks = {}
+        blocker.evaluationResultObserver = { evaluation ->
+            val decisions = evaluation.evaluations.associate { it.ruleId to it.isAllowed }
+            if (phase.get() == DeadlineEvidencePhase.DUE_TICK) {
+                synchronized(evaluationLock) {
+                    decisions.forEach { (ruleId, isAllowed) ->
+                        tickEvaluations[ruleId] = isAllowed
+                    }
+                }
+                if (decisions[targetRuleId] == false) targetDenied.countDown()
+                if (decisions[otherRuleId] == true) otherAllowed.countDown()
+            }
+        }
+        blocker.warningBeforeFrameworkCallObserver = { packageName ->
+            warningPackages += packageName
+            if (packageName == PACKAGE) warningPublished.countDown()
+        }
+        blocker.recheckPlanDeliveryObserver = { update ->
+            update.plan?.let { plan ->
+                synchronized(planLock) {
+                    when (phase.get() ?: DeadlineEvidencePhase.INITIAL) {
+                        DeadlineEvidencePhase.INITIAL -> {
+                            initialDueAt[update.packageName] = plan.dueAtWallClockMs
+                            if (initialDueAt.keys.containsAll(requiredPackages)) {
+                                initialPlansReady.countDown()
+                            }
+                        }
+                        DeadlineEvidencePhase.DUE_TICK -> {
+                            tickPlanPackages += update.packageName
+                            tickDueAt[update.packageName] = plan.dueAtWallClockMs
+                            if (tickPlanPackages.containsAll(requiredPackages)) {
+                                tickPlansReady.countDown()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", requiredPackages)
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        check(coordinator.accept(snapshot)) { "deterministic split-screen snapshot was rejected" }
+
+        try {
+            // One real event carries both visible application windows. The worker derives one
+            // independent plan per package before any synthetic scheduler wake is delivered.
+            sendWindowEvent(blocker, PACKAGE)
+            assertTrue(
+                "initial worker did not publish both independent boundary plans",
+                initialPlansReady.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            val firstPlans = synchronized(planLock) { initialDueAt.toMap() }
+            assertEquals(requiredPackages, firstPlans.keys)
+            assertEquals(dueWallClockMs, firstPlans[PACKAGE])
+            assertEquals(dueWallClockMs, firstPlans[OTHER_PACKAGE])
+
+            wallClockMs.set(dueWallClockMs)
+            elapsedRealtimeMs.set(baseElapsedRealtimeMs + 60_000L)
+            phase.set(DeadlineEvidencePhase.DUE_TICK)
+
+            // Two independently due alarms reach the same production wake path. The second
+            // wake is intentionally delivered before the first visible reconciliation callback.
+            blocker.onSchedulerWake()
+            blocker.onSchedulerWake()
+            assertEquals(
+                "independent due alarms must coalesce into one visible tick",
+                1,
+                visibleCallbacks.size
+            )
+            visibleCallbacks.single().run()
+
+            assertTrue(
+                "target allowance deadline did not produce an external denial",
+                targetDenied.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "other schedule deadline did not produce an external allow",
+                otherAllowed.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "coalesced tick did not publish both independent next plans",
+                tickPlansReady.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "target denial did not reach the guardian framework boundary",
+                warningPublished.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "target denial did not start the externally visible guardian activity",
+                denialActivityStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertEquals(
+                "only target denial should launch a guardian activity",
+                listOf(PACKAGE),
+                warningPackages.toList()
+            )
+            synchronized(evaluationLock) {
+                assertEquals(false, tickEvaluations[targetRuleId])
+                assertEquals(true, tickEvaluations[otherRuleId])
+            }
+            assertEquals(
+                "the other package's next allowance boundary was lost",
+                baseWallClockMs + 120_000L,
+                synchronized(planLock) { tickDueAt[OTHER_PACKAGE] }
+            )
+            assertEquals(PACKAGE, service.startedActivities.single().getStringExtra(
+                GuardianApprovalActivity.EXTRA_PACKAGE
+            ))
+        } finally {
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
     fun packageLessUnknownSlotRetriesObservationThreeTimesThenStops() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         val queued = ArrayDeque<Runnable>()
@@ -2056,6 +2290,7 @@ class AppRuleBlockerRecheckTest {
 
     private class RecordingService : BaseBlockingService() {
         val startedActivities = mutableListOf<Intent>()
+        var startActivityObserver: ((Intent) -> Unit)? = null
         var windowsReads = 0
         var visibleWindows: List<AccessibilityWindowInfo> = emptyList()
 
@@ -2065,6 +2300,7 @@ class AppRuleBlockerRecheckTest {
 
         override fun startActivity(intent: Intent) {
             startedActivities += intent
+            startActivityObserver?.invoke(intent)
         }
 
         override fun getWindows(): MutableList<AccessibilityWindowInfo> {
@@ -2171,8 +2407,14 @@ class AppRuleBlockerRecheckTest {
         return condition()
     }
 
+    private enum class DeadlineEvidencePhase {
+        INITIAL,
+        DUE_TICK
+    }
+
     private companion object {
         const val PACKAGE = "com.example.reader"
         const val OTHER_PACKAGE = "com.example.other"
+        const val WAIT_TIMEOUT_MS = 2_000L
     }
 }
