@@ -1224,6 +1224,8 @@ class AppRuleBlockerRecheckTest {
         val tickPlanPackages = mutableSetOf<String>()
         val tickDueAt = mutableMapOf<String, Long>()
         val initialPlansReady = CountDownLatch(1)
+        val initialAlarmPackages = CopyOnWriteArrayList<String>()
+        val initialAlarmsReady = CountDownLatch(1)
         val tickPlansReady = CountDownLatch(1)
         val targetDenied = CountDownLatch(1)
         val otherAllowed = CountDownLatch(1)
@@ -1254,13 +1256,20 @@ class AppRuleBlockerRecheckTest {
                 applicationWindowCount = requiredPackages.size
             )
         }
-        blocker.recheckPostDelayed = { _, _ -> true }
         blocker.recheckRemoveCallback = {}
         blocker.visibleApplicationCheckPostDelayed = { runnable, _ ->
             visibleCallbacks += runnable
             true
         }
         blocker.visibleApplicationCheckRemoveCallbacks = {}
+        blocker.alarmPublicationObserver = { packageName ->
+            if (phase.get() == DeadlineEvidencePhase.INITIAL) {
+                initialAlarmPackages += packageName
+                if (initialAlarmPackages.toSet().containsAll(requiredPackages)) {
+                    initialAlarmsReady.countDown()
+                }
+            }
+        }
         blocker.evaluationResultObserver = { evaluation ->
             val decisions = evaluation.evaluations.associate { it.ruleId to it.isAllowed }
             if (phase.get() == DeadlineEvidencePhase.DUE_TICK) {
@@ -1319,19 +1328,53 @@ class AppRuleBlockerRecheckTest {
             assertEquals(requiredPackages, firstPlans.keys)
             assertEquals(dueWallClockMs, firstPlans[PACKAGE])
             assertEquals(dueWallClockMs, firstPlans[OTHER_PACKAGE])
+            assertTrue(
+                "initial plans did not publish keyed production alarm registrations",
+                initialAlarmsReady.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertEquals(requiredPackages, initialAlarmPackages.toSet())
+            val scheduledAlarms = getField(blocker, "scheduledAlarms") as Map<*, *>
+            assertEquals(requiredPackages, scheduledAlarms.keys.toSet())
+            val initialTokens = requiredPackages.sorted().associateWith { packageName ->
+                scheduledAlarmToken(blocker, packageName)
+            }
+            assertEquals(
+                "independent packages must have distinct keyed scheduler tokens",
+                requiredPackages.size,
+                initialTokens.values.toSet().size
+            )
 
             wallClockMs.set(dueWallClockMs)
             elapsedRealtimeMs.set(baseElapsedRealtimeMs + 60_000L)
             phase.set(DeadlineEvidencePhase.DUE_TICK)
 
-            // Two independently due alarms reach the same production wake path. The second
-            // wake is intentionally delivered before the first visible reconciliation callback.
-            blocker.onSchedulerWake()
-            blocker.onSchedulerWake()
+            // Deliver both actual keyed alarm tokens through the production receiver before the
+            // first visible reconciliation callback runs. The receiver removes each keyed
+            // registration and coalesces both wakes into one guarded observation.
+            val schedulerWakeReceiver =
+                getField(blocker, "schedulerWakeReceiver") as android.content.BroadcastReceiver
+            initialTokens.toSortedMap().forEach { (packageName, token) ->
+                schedulerWakeReceiver.onReceive(
+                    service,
+                    Intent("neth.iecal.curbox.blockers.APP_RULE_SCHEDULER_WAKE")
+                        .putExtra(
+                            "neth.iecal.curbox.blockers.EXTRA_SCHEDULER_PACKAGE",
+                            packageName
+                        )
+                        .putExtra(
+                            "neth.iecal.curbox.blockers.EXTRA_SCHEDULER_TOKEN",
+                            token
+                        )
+                )
+            }
             assertEquals(
                 "independent due alarms must coalesce into one visible tick",
                 1,
                 visibleCallbacks.size
+            )
+            assertTrue(
+                "scheduler receiver must preserve the visible callback barrier",
+                synchronized(evaluationLock) { tickEvaluations.isEmpty() }
             )
             visibleCallbacks.single().run()
 
@@ -2373,9 +2416,13 @@ class AppRuleBlockerRecheckTest {
     private fun getField(target: Any, name: String): Any? =
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
 
-    private fun scheduledAlarmToken(blocker: AppRuleBlocker): Long {
+    private fun scheduledAlarmToken(
+        blocker: AppRuleBlocker,
+        packageName: String = PACKAGE
+    ): Long {
         val alarms = getField(blocker, "scheduledAlarms") as Map<*, *>
-        val registration = alarms[PACKAGE] ?: error("scheduled alarm registration is missing")
+        val registration = alarms[packageName]
+            ?: error("scheduled alarm registration is missing for $packageName")
         return getField(registration, "token") as Long
     }
 
