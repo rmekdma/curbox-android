@@ -24,6 +24,7 @@ import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.ForegroundUsageCheckpoint
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.trackers.AppUsageTracker
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -112,9 +113,11 @@ class AppRuleBlockerDestroyFaultRedTest {
                 } finally {
                     oldNotificationCompleted.countDown()
                 }
-            } else {
-                notificationGenerations += generation
             }
+        }
+        blocker.notificationUpdateObserver = {
+            val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
+            notificationGenerations += generation
         }
         fun installDeterministicRuntime() {
             val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
@@ -230,8 +233,9 @@ class AppRuleBlockerDestroyFaultRedTest {
         val service = recordingService()
         val evaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
         val notificationPostings = CopyOnWriteArrayList<LiveRuleNotificationModel>()
-        val notificationPostEntered = CountDownLatch(1)
-        val notificationPostRelease = CountDownLatch(1)
+        val notificationUpdateEntered = CountDownLatch(1)
+        val notificationUpdateRelease = CountDownLatch(1)
+        val notificationUpdateCompleted = CountDownLatch(1)
         val callbackEntered = CountDownLatch(1)
         val callbackRelease = CountDownLatch(1)
         val blockWindowProvider = AtomicReference(false)
@@ -243,11 +247,16 @@ class AppRuleBlockerDestroyFaultRedTest {
             snapshot = snapshotWithSpentTargetAllowance(),
             observer = { evaluation -> evaluations += evaluation }
         ).apply {
-            notificationPostObserver = { model ->
-                notificationPostEntered.countDown()
-                notificationPostRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                notificationPostings += model
+            notificationPostObserver = {}
+            notificationUpdateObserver = {
+                notificationUpdateEntered.countDown()
+                try {
+                    notificationUpdateRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                } finally {
+                    notificationUpdateCompleted.countDown()
+                }
             }
+            notificationPublicationObserver = { model -> notificationPostings += model }
             visibleApplicationCheckPostDelayed = { runnable, _ ->
                 callbackThread.set(Thread(runnable, "ticket15-visible-callback"))
                 true
@@ -307,6 +316,10 @@ class AppRuleBlockerDestroyFaultRedTest {
         check(callbackEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
             "visible callback did not reach its deterministic provider gate"
         }
+        repository.releaseNotificationRead()
+        check(notificationUpdateEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            "notification did not reach its final publication boundary"
+        }
         check(refreshStarted) { "refresh did not enter the tracked lifecycle work set" }
 
         val measurement = blocker.onDestroyForMeasurement(totalDrainBudgetMs = 150L)
@@ -336,8 +349,8 @@ class AppRuleBlockerDestroyFaultRedTest {
         // Release every barrier only after destroy. Generation invalidation must suppress the
         // evaluator observer, warning, notification publication, and the callback's decision.
         repository.releaseDecisionRead()
-        repository.releaseNotificationRead()
         callbackRelease.countDown()
+        notificationUpdateRelease.countDown()
         refreshMutex.unlock()
         decisionThread.get()?.join(WAIT_TIMEOUT_MS)
         callback.join(WAIT_TIMEOUT_MS)
@@ -347,6 +360,9 @@ class AppRuleBlockerDestroyFaultRedTest {
                 awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)
         ) {
             "tracked async work did not finish after its post-destroy barriers were released"
+        }
+        check(notificationUpdateCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            "notification publication barrier did not complete after destroy"
         }
 
         check(evaluations.isEmpty()) {
@@ -359,20 +375,25 @@ class AppRuleBlockerDestroyFaultRedTest {
             "notification side effect occurred after destroy: ${notificationPostings.size}"
         }
 
-        // Reconnect recovery is deliberately the documented durable path. It closes the open
-        // row from the durable fake; the new blocker below must read it afresh rather than reuse
-        // the cancelled worker's in-memory session persistence.
-        runBlocking { repository.recoverOpenSessions(useDayId) }
-        check(repository.recoverOpenSessionsCount.get() == 1) {
-            "reconnect did not use recoverOpenSessions"
-        }
-        check(repository.openSessionCount(useDayId) == 0) {
-            "recoverOpenSessions left the durable session unfinished"
-        }
-
         val recoveryEvaluated = CountDownLatch(1)
         val recoveryEvaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
         val recoveryService = recordingService()
+        // Traverse the production tracker setup, which owns the reconnect recovery call. The
+        // local repository seam only supplies a durable fixture with an actually open row.
+        val recoveryTracker = AppUsageTracker().apply {
+            sessionRepositoryOverrideForTesting = { repository }
+        }
+        try {
+            recoveryTracker.setup(recoveryService)
+            check(repository.recoverOpenSessionsCount.get() == 1) {
+                "reconnect did not use AppUsageTracker.setup recoverOpenSessions"
+            }
+            check(repository.openSessionCount(useDayId) == 0) {
+                "recoverOpenSessions left the durable session unfinished"
+            }
+        } finally {
+            recoveryTracker.onDestroy()
+        }
         val recoveryBlocker = configureBlocker(
             repository = repository,
             service = recoveryService,
@@ -400,6 +421,232 @@ class AppRuleBlockerDestroyFaultRedTest {
             }
         } finally {
             recoveryBlocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun providerReadReleasedAfterDestroyCannotRecordForegroundEvidence() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val providerEntered = CountDownLatch(1)
+        val providerRelease = CountDownLatch(1)
+        val postedCallbacks = CopyOnWriteArrayList<Runnable>()
+        val recordedEvidence = CopyOnWriteArrayList<String>()
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                postedCallbacks += runnable
+                true
+            }
+            visibleApplicationCheckRemoveCallbacks = {}
+            applicationWindowSnapshotProvider = {
+                providerEntered.countDown()
+                providerRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(TARGET_PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false,
+                    applicationWindowCount = 1
+                )
+            }
+            foregroundEvidenceRecordObserver = { recordedEvidence += it }
+        }
+        try {
+            invokePrivate(blocker, "postVisibleApplicationCheck", 0L, 0L)
+            val callback = checkNotNull(postedCallbacks.singleOrNull()) {
+                "provider-backed handler callback was not posted"
+            }
+            val callbackThread = Thread(callback, "ticket15-provider-release")
+            callbackThread.start()
+            check(providerEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "provider read did not reach its deterministic barrier"
+            }
+
+            blocker.onDestroy()
+            providerRelease.countDown()
+            callbackThread.join(WAIT_TIMEOUT_MS)
+            check(!callbackThread.isAlive) { "provider callback remained blocked after release" }
+            check(recordedEvidence.isEmpty()) {
+                "provider-backed handler recorded evidence after destroy: $recordedEvidence"
+            }
+            check(awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)) {
+                "provider callback did not drain after destroy"
+            }
+        } finally {
+            providerRelease.countDown()
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun accessibilityEventReadReleasedAfterDestroyCannotRecordForegroundEvidence() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val readCompleted = CountDownLatch(1)
+        val readRelease = CountDownLatch(1)
+        val recordedEvidence = CopyOnWriteArrayList<String>()
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            foregroundEvidenceBeforeRecordObserver = {
+                readCompleted.countDown()
+                readRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            foregroundEvidenceRecordObserver = { recordedEvidence += it }
+        }
+        val eventThread = Thread({ sendWindowEvent(blocker, TARGET_PACKAGE) }, "ticket15-event-read")
+        try {
+            eventThread.start()
+            check(readCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "accessibility event read did not reach its deterministic barrier"
+            }
+
+            blocker.onDestroy()
+            readRelease.countDown()
+            eventThread.join(WAIT_TIMEOUT_MS)
+            check(!eventThread.isAlive) { "accessibility event callback remained blocked" }
+            check(recordedEvidence.isEmpty()) {
+                "accessibility event handler recorded evidence after destroy: $recordedEvidence"
+            }
+            check(getField(blocker, "currentForegroundPackage") == null) {
+                "accessibility event handler mutated foreground state after destroy"
+            }
+        } finally {
+            readRelease.countDown()
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun usageResetCompletionBroadcastsAreIndependentlyFencedAcrossDestroy() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val completionEntered = CountDownLatch(1)
+        val completionRelease = CountDownLatch(1)
+        val broadcastEntered = CountDownLatch(1)
+        val broadcastRelease = CountDownLatch(1)
+        val broadcastCompleted = CountDownLatch(1)
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            usageResetCompletionPostObserver = { _, _ ->
+                completionEntered.countDown()
+                completionRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            usageResetBroadcastObserver = {
+                broadcastEntered.countDown()
+                try {
+                    broadcastRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                } finally {
+                    broadcastCompleted.countDown()
+                }
+            }
+        }
+        try {
+            sendWindowEvent(blocker, TARGET_PACKAGE)
+            check(awaitNonNullField(blocker, "decisionWorker")) {
+                "foreground event did not install the serialized worker"
+            }
+            repository.releaseNotificationRead()
+            repository.releaseDecisionRead()
+            check(blocker.submitUsageReset(setOf(TARGET_PACKAGE), "ticket15-reset")) {
+                "usage reset was not accepted by the serialized worker"
+            }
+            check(completionEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "usage-reset completion did not reach its production publication barrier"
+            }
+            completionRelease.countDown()
+            check(broadcastEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "usage-reset completion did not reach its actual broadcast boundary"
+            }
+
+            blocker.onDestroy()
+            broadcastRelease.countDown()
+            check(awaitAtomicZero(getField(blocker, "inFlightUsageResetCompletions") as AtomicInteger)) {
+                "usage-reset completion did not drain after destroy"
+            }
+            check(awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)) {
+                "usage-reset completion leaked into the aggregate callback drain"
+            }
+            check(broadcastCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "usage-reset broadcast boundary did not complete after destroy"
+            }
+            check(service.sentBroadcasts.isEmpty()) {
+                "usage-reset completion broadcast escaped destroy: ${service.sentBroadcasts}"
+            }
+        } finally {
+            completionRelease.countDown()
+            broadcastRelease.countDown()
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun workerRecheckPlanDeliveryCannotRegisterAfterDestroy() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val planEntered = CountDownLatch(1)
+        val planRelease = CountDownLatch(1)
+        val registrations = AtomicInteger(0)
+        val nowMs = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(nowMs)
+        runBlocking {
+            val sessionId = repository.startSession(
+                useDayId = useDayId,
+                packageName = TARGET_PACKAGE,
+                startedAtMs = nowMs - SESSION_DURATION_MS
+            )
+            repository.commitSessionCheckpoint(
+                id = sessionId,
+                endedAtMs = nowMs,
+                usage = emptyList()
+            )
+        }
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithSpentTargetAllowance(),
+            observer = {}
+        ).apply {
+            recheckPlanDeliveryObserver = {
+                planEntered.countDown()
+                planRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            recheckPostDelayed = { _, _ ->
+                registrations.incrementAndGet()
+                true
+            }
+            recheckRemoveCallback = {}
+        }
+        try {
+            sendWindowEvent(blocker, TARGET_PACKAGE)
+            repository.releaseNotificationRead()
+            repository.releaseDecisionRead()
+            check(planEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "worker-generated recheck plan did not reach its delivery barrier"
+            }
+
+            blocker.onDestroy()
+            planRelease.countDown()
+            check(awaitAtomicZero(getField(blocker, "inFlightRecheckPlans") as AtomicInteger)) {
+                "recheck-plan delivery did not drain after destroy"
+            }
+            check(registrations.get() == 0) {
+                "worker-generated recheck plan registered after destroy: ${registrations.get()}"
+            }
+        } finally {
+            planRelease.countDown()
+            blocker.onDestroy()
         }
     }
 
@@ -455,11 +702,11 @@ class AppRuleBlockerDestroyFaultRedTest {
                 notificationPostEntered.countDown()
                 try {
                     notificationPostRelease.await()
-                    notificationPostings += model
                 } finally {
                     notificationPostCompleted.countDown()
                 }
             }
+            notificationUpdateObserver = { model -> notificationPostings += model }
             recheckPostDelayed = scheduler::post
             recheckRemoveCallback = scheduler::remove
             visibleApplicationCheckPostDelayed = visibleCallbacks::post
@@ -951,6 +1198,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         keyguardLockedProvider = { false }
         evaluationResultObserver = observer
         setField(this, "service", service)
+        setField(this, "servicePackageName", service.packageName)
         setField(this, "sessionRepository", repository)
         setField(this, "usageResetRepository", RoomUsageResetRepository(AppDatabase.getInstance(service)))
         setField(this, "enforcement", AppRuleEnforcement(repository))
@@ -1006,6 +1254,7 @@ class AppRuleBlockerDestroyFaultRedTest {
 
     private class RecordingService : BaseBlockingService() {
         val startedActivities = CopyOnWriteArrayList<Intent>()
+        val sentBroadcasts = CopyOnWriteArrayList<Intent>()
 
         fun attach(context: Context) {
             attachBaseContext(context)
@@ -1013,6 +1262,10 @@ class AppRuleBlockerDestroyFaultRedTest {
 
         override fun startActivity(intent: Intent) {
             startedActivities += intent
+        }
+
+        override fun sendBroadcast(intent: Intent) {
+            sentBroadcasts += intent
         }
     }
 
@@ -1216,6 +1469,15 @@ class AppRuleBlockerDestroyFaultRedTest {
             Thread.yield()
         }
         return counter.get() > 0
+    }
+
+    private fun awaitNonNullField(target: Any, name: String): Boolean {
+        val deadlineMs = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+        while (android.os.SystemClock.elapsedRealtime() < deadlineMs) {
+            if (getField(target, name) != null) return true
+            Thread.yield()
+        }
+        return getField(target, name) != null
     }
 
     private fun awaitAtomicZero(counter: AtomicInteger): Boolean {

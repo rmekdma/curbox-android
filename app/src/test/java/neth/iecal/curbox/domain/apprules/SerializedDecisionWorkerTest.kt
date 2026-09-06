@@ -208,35 +208,33 @@ class SerializedDecisionWorkerTest {
     @Test
     fun sameLifecycleReplacementDropsOldWorkerAfterItsFinalCheck() {
         val oldRepository = RecordingRepository()
-        val published = Collections.synchronizedList(mutableListOf<DecisionOutcome>())
-        val activeToken = AtomicReference(WorkerInstanceToken(11L))
+        val published = Collections.synchronizedList(mutableListOf<Long>())
+        val activeToken = AtomicLong(11L)
         val oldPublicationEntered = CountDownLatch(1)
         val releaseOldPublication = CountDownLatch(1)
-        val sink = object : DecisionOutcomeSink {
+        fun taggedSink(token: Long) = object : DecisionOutcomeSink {
             override fun publish(outcome: DecisionOutcome) {
-                if (outcome.workerInstanceToken.value == 11L) {
+                if (token == 11L) {
                     // The worker has passed its final freshness check and entered the host
                     // publication boundary. Replace it before allowing the old publication to
                     // continue, which is the same-lifecycle race a generation cannot identify.
                     oldPublicationEntered.countDown()
                     releaseOldPublication.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 }
-                if (outcome.workerInstanceToken.value == activeToken.get().value) {
-                    published += outcome
+                if (token == activeToken.get()) {
+                    published += token
                 }
             }
         }
         val oldWorker = worker(
             repository = oldRepository,
-            sink = sink,
-            lifecycleGeneration = LifecycleGeneration(1L),
-            workerInstanceToken = WorkerInstanceToken(11L)
+            sink = taggedSink(11L),
+            lifecycleGeneration = LifecycleGeneration(1L)
         )
         val replacementWorker = worker(
             repository = RecordingRepository(),
-            sink = sink,
-            lifecycleGeneration = LifecycleGeneration(1L),
-            workerInstanceToken = WorkerInstanceToken(12L)
+            sink = taggedSink(12L),
+            lifecycleGeneration = LifecycleGeneration(1L)
         )
         try {
             assertEquals(
@@ -245,7 +243,7 @@ class SerializedDecisionWorkerTest {
             )
             assertTrue(oldPublicationEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
 
-            activeToken.set(WorkerInstanceToken(12L))
+            activeToken.set(12L)
             oldWorker.stop(
                 RecoveryOnlyStop(
                     requestedAtElapsedMs = 1_000L,
@@ -259,14 +257,14 @@ class SerializedDecisionWorkerTest {
             )
             val replacementDeadline = System.nanoTime() +
                 TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
-            while (published.none { it.workerInstanceToken.value == 12L } &&
+            while (published.none { it == 12L } &&
                 System.nanoTime() < replacementDeadline
             ) {
                 Thread.yield()
             }
             assertTrue(
                 "replacement did not publish its outcome",
-                published.any { it.workerInstanceToken.value == 12L }
+                published.any { it == 12L }
             )
 
             releaseOldPublication.countDown()
@@ -280,8 +278,8 @@ class SerializedDecisionWorkerTest {
                 oldWorker.drainSnapshot().hasWork.not()
             )
             assertEquals(
-                listOf(WorkerInstanceToken(12L)),
-                published.map(DecisionOutcome::workerInstanceToken)
+                listOf(12L),
+                published
             )
         } finally {
             releaseOldPublication.countDown()
@@ -372,7 +370,7 @@ class SerializedDecisionWorkerTest {
             repository = repository,
             sink = outcomes,
             onNonFatalError = { errors += it },
-            onEvaluation = { _, _, _, _, _ ->
+            onEvaluation = { _, _, _, _ ->
                 evaluationStarted.countDown()
                 throw CancellationException("injected evaluator cancellation")
             }
@@ -412,7 +410,7 @@ class SerializedDecisionWorkerTest {
                     acceptedRuntime = acceptedRuntime(RuntimeRevision(2L))
                 )
             },
-            onEvaluation = { _, _, _, _, evaluation -> evaluations += evaluation }
+            onEvaluation = { _, _, _, evaluation -> evaluations += evaluation }
         )
         workerReference.set(worker)
         try {
@@ -608,7 +606,7 @@ class SerializedDecisionWorkerTest {
             repository = repository,
             sink = outcomes,
             usageResetRepository = resetRepository,
-            onUsageResetComplete = { _, _, succeeded ->
+            onUsageResetComplete = { _, succeeded ->
                 resetSucceeded = succeeded
                 resetCompleted.countDown()
             }
@@ -851,7 +849,7 @@ class SerializedDecisionWorkerTest {
         val worker = worker(
             repository = repository,
             sink = sink,
-            onEvaluation = { _, _, _, _, _ ->
+            onEvaluation = { _, _, _, _ ->
                 if (blockFirstEvaluation.compareAndSet(true, false)) {
                     evaluationStarted.countDown()
                     assertTrue(releaseEvaluation.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
@@ -941,13 +939,10 @@ class SerializedDecisionWorkerTest {
         lifecycleGeneration: LifecycleGeneration = LifecycleGeneration(1L),
         usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true),
         usageResetRepository: UsageResetRepository = RecordingUsageResetRepository(repository),
-        workerInstanceToken: WorkerInstanceToken = WorkerInstanceToken(1L),
-        onUsageResetComplete: (WorkerInstanceToken, UsageResetRequest, Boolean) -> Unit =
-            { _, _, _ -> },
+        onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
         onNonFatalError: (Throwable) -> Unit = {},
         elapsedRealtimeMs: () -> Long = { System.nanoTime() / 1_000_000L },
         onEvaluation: ((
-            WorkerInstanceToken,
             DecisionRequest,
             AcceptedRuleRuntimeSnapshot,
             String,
@@ -956,7 +951,6 @@ class SerializedDecisionWorkerTest {
         onRecheckPlan: (RecheckPlanUpdate) -> Unit = {}
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = lifecycleGeneration,
-        workerInstanceToken = workerInstanceToken,
         acceptedRuntime = acceptedRuntime.copy(
             runtime = acceptedRuntime.runtime.copy(
                 usageTrackingDecision = usageTrackingDecision

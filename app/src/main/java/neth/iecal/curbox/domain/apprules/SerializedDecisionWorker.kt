@@ -102,8 +102,7 @@ data class DecisionOutcome(
     val packageDecisions: List<PackageDecision>,
     val commitStatus: CommitStatus,
     val followUp: FollowUpKind,
-    val publicationStatus: PublicationStatus,
-    val workerInstanceToken: WorkerInstanceToken = WorkerInstanceToken(0L)
+    val publicationStatus: PublicationStatus
 )
 
 /** Worker-owned boundary derivation handed to the scheduler adapter as immutable values. */
@@ -114,8 +113,7 @@ data class RecheckPlanUpdate(
     val packageName: String,
     val plan: AppRuleRecheckPlan?,
     /** Identity of the boundary being cancelled, when this update removes an existing plan. */
-    val expectedRegistrationSourceOrderIdentity: SourceOrderIdentity? = null,
-    val workerInstanceToken: WorkerInstanceToken = WorkerInstanceToken(0L)
+    val expectedRegistrationSourceOrderIdentity: SourceOrderIdentity? = null
 )
 
 enum class StopReason {
@@ -197,7 +195,6 @@ internal data class WorkerDrainSnapshot(
  */
 class SerializedDecisionWorker internal constructor(
     lifecycleGeneration: LifecycleGeneration,
-    private val workerInstanceToken: WorkerInstanceToken,
     acceptedRuntime: AcceptedRuleRuntimeSnapshot,
     private val repository: CurrentUseDaySessionRepository,
     private val outcomeSink: DecisionOutcomeSink,
@@ -208,15 +205,12 @@ class SerializedDecisionWorker internal constructor(
     },
     private val onNonFatalError: (Throwable) -> Unit = {},
     private val onEvaluation: ((
-        WorkerInstanceToken,
         DecisionRequest,
         AcceptedRuleRuntimeSnapshot,
         String,
         AppRulesEvaluation
     ) -> Unit)? = null,
-    private val onUsageResetComplete: (WorkerInstanceToken, UsageResetRequest, Boolean) -> Unit = {
-            _, _, _ ->
-    },
+    private val onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
     private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository),
     private val onRecheckPlan: ((RecheckPlanUpdate) -> Unit)? = null
 ) {
@@ -511,7 +505,6 @@ class SerializedDecisionWorker internal constructor(
             try {
             runInterruptible {
                 onEvaluation?.invoke(
-                    workerInstanceToken,
                     request,
                     accepted,
                     packageName,
@@ -605,8 +598,7 @@ class SerializedDecisionWorker internal constructor(
                         packageName = packageName,
                         plan = plan,
                         expectedRegistrationSourceOrderIdentity =
-                            expectedRegistrationSourceOrderIdentity,
-                        workerInstanceToken = workerInstanceToken
+                            expectedRegistrationSourceOrderIdentity
                     )
                 )
             }
@@ -641,8 +633,7 @@ class SerializedDecisionWorker internal constructor(
                         packageName = packageName,
                         plan = null,
                         expectedRegistrationSourceOrderIdentity =
-                            expectedRegistrationSourceOrderIdentity,
-                        workerInstanceToken = workerInstanceToken
+                            expectedRegistrationSourceOrderIdentity
                     )
                 )
             }
@@ -685,7 +676,7 @@ class SerializedDecisionWorker internal constructor(
     ) {
         try {
             runInterruptible {
-                onUsageResetComplete(workerInstanceToken, request, succeeded)
+                onUsageResetComplete(request, succeeded)
             }
         } catch (error: CancellationException) {
             throw error
@@ -739,8 +730,7 @@ class SerializedDecisionWorker internal constructor(
                     packageDecisions = packageDecisions,
                     commitStatus = commitStatus,
                     followUp = followUp,
-                    publicationStatus = publicationStatus,
-                    workerInstanceToken = workerInstanceToken
+                    publicationStatus = publicationStatus
                 )
             )
         } catch (error: CancellationException) {
