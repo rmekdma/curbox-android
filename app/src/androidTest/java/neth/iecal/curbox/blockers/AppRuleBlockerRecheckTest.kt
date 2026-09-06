@@ -1334,7 +1334,14 @@ class AppRuleBlockerRecheckTest {
             )
             assertEquals(requiredPackages, initialAlarmPackages.toSet())
             val scheduledAlarms = getField(blocker, "scheduledAlarms") as Map<*, *>
+            val scheduledRechecks = getField(blocker, "scheduledRechecks") as Map<*, *>
             assertEquals(requiredPackages, scheduledAlarms.keys.toSet())
+            assertTrue(
+                "initial plans must retain both packages in keyed rechecks",
+                requiredPackages.all { packageName ->
+                    scheduledRechecks.containsKey(packageName)
+                }
+            )
             val initialTokens = requiredPackages.sorted().associateWith { packageName ->
                 scheduledAlarmToken(blocker, packageName)
             }
@@ -1353,7 +1360,10 @@ class AppRuleBlockerRecheckTest {
             // registration and coalesces both wakes into one guarded observation.
             val schedulerWakeReceiver =
                 getField(blocker, "schedulerWakeReceiver") as android.content.BroadcastReceiver
-            initialTokens.toSortedMap().forEach { (packageName, token) ->
+            val wakeOrder = initialTokens.keys.sorted()
+            val firstPackage = wakeOrder.first()
+            val secondPackage = wakeOrder.last()
+            fun deliverSchedulerWake(packageName: String) {
                 schedulerWakeReceiver.onReceive(
                     service,
                     Intent("neth.iecal.curbox.blockers.APP_RULE_SCHEDULER_WAKE")
@@ -1363,10 +1373,39 @@ class AppRuleBlockerRecheckTest {
                         )
                         .putExtra(
                             "neth.iecal.curbox.blockers.EXTRA_SCHEDULER_TOKEN",
-                            token
+                            initialTokens.getValue(packageName)
                         )
                 )
             }
+            deliverSchedulerWake(firstPackage)
+            assertTrue(
+                "first receiver delivery must remove only its keyed alarm registration",
+                !scheduledAlarms.containsKey(firstPackage) &&
+                    scheduledAlarms.containsKey(secondPackage)
+            )
+            assertTrue(
+                "first receiver delivery must remove only its keyed recheck",
+                !scheduledRechecks.containsKey(firstPackage) &&
+                    scheduledRechecks.containsKey(secondPackage)
+            )
+            assertEquals(
+                "the first receiver delivery must already coalesce one visible callback",
+                1,
+                visibleCallbacks.size
+            )
+            deliverSchedulerWake(secondPackage)
+            assertTrue(
+                "both receiver deliveries must remove both keyed alarm registrations",
+                requiredPackages.none { packageName ->
+                    scheduledAlarms.containsKey(packageName)
+                }
+            )
+            assertTrue(
+                "both receiver deliveries must remove both keyed rechecks",
+                requiredPackages.none { packageName ->
+                    scheduledRechecks.containsKey(packageName)
+                }
+            )
             assertEquals(
                 "independent due alarms must coalesce into one visible tick",
                 1,
