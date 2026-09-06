@@ -772,7 +772,7 @@ reflection field와 temporary lambda는 migration 중 private internal test seam
 - reconnect recovery가 읽은 durable session은 현재 use-day와 generation filter를 지키고,
   destroy 중 취소된 in-memory tail을 실제 사용으로 소급하지 않는다.
 
-Ticket15 evidence (2026-09-06): `AppRuleBlocker.destroyInternal()` invalidates the lifecycle,
+Ticket15 evidence (2026-09-07): `AppRuleBlocker.destroyInternal()` invalidates the lifecycle,
 generation and worker-instance token before cleanup, tracks in-flight refresh, notification and
 callback work, and keeps production teardown on `RecoveryOnlyStop`. The candidate-only
 `onDestroyForMeasurement()` path shares one `TotalDrainDeadline` across scheduler removal,
@@ -782,6 +782,11 @@ cancellation. Deterministic barrier tests hold a final decision, refresh mutex, 
 publication and handler callback together; after invalidation they observe zero evaluator,
 warning, notification and handler publication effects, then release the barriers and verify that
 an open durable session is recovered only through the documented `recoverOpenSessions()` path.
+Independent barriers also cover the actual usage-reset completion broadcast and worker recheck-plan
+registration/delivery, while notification, warning, visible-handler, rearmed-handler, scheduled
+recheck, and alarm publication each have a final-call fence. Event and scheduled-provider tests
+release an application-window read after destroy/reconnect and verify that the adapter-local
+provenance cache is not repopulated.
 The worker test also pauses an old worker after its final check, replaces it in the same lifecycle,
 and verifies that the adapter-private typed worker-instance token allows only the replacement to
 publish. A real
@@ -795,13 +800,12 @@ Verification record for this implementation (JBR 21 at
 `SerializedDecisionWorkerTest` passed all 20 tests and `testFullDebugUnitTest` passed all 347
 tests. `compileFullDebugAndroidTestKotlin` passed, and
 `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed. On the attached iPlay50
-mini Pro Android 13 device, all seven ticket15 destroy/reconnect/barrier tests passed, the four-test
-ticket14 refresh-ordering class passed, and the destroy/fault class had 7 ticket15 passes plus 4
-adjacent fault/cancellation RED tests. The complete `connectedFullDebugAndroidTest` run reached
-78 tests with 29 failures: 2 callback-flush, 4 destroy fault/cancellation, 6 long-boundary, 15
-recheck, 1 Guardian lifecycle and 1 debug package-id fixture failure. These remain residual
-regression evidence rather than ticket15 closure failures; ticket15-specific deterministic tests
-are green.
+mini Pro Android 13 device, the 20-test destroy/fault class had 16 ticket15 deterministic passes
+and 4 adjacent fault/cancellation RED tests. The complete `connectedFullDebugAndroidTest` run
+reached 87 tests with 31 failures: 1 debug package-id fixture, 2 callback-flush, 4 destroy
+fault/cancellation, 6 long-boundary, 16 recheck/visibility, 1 virtual-doze wake, and 1 Guardian
+lifecycle failure. These remain residual regression evidence rather than ticket15 closure failures;
+the ticket15-specific deterministic tests are green.
 
 ### 6. Phase 0 RED contract → future invariant mapping
 

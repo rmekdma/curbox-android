@@ -525,6 +525,540 @@ class AppRuleBlockerDestroyFaultRedTest {
     }
 
     @Test
+    fun blockedAccessibilityEventCannotBeRetaggedOrProcessedAfterReconnect() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val originalSnapshot = runBlocking {
+            service.dataStoreManager.settings.first().appRuleSnapshot
+        }
+        runBlocking {
+            check(service.dataStoreManager.updateAppRuleSnapshot(snapshotWithGlobalDeny())) {
+                "could not install the deterministic reconnect snapshot"
+            }
+        }
+        val eventObservationEntered = CountDownLatch(1)
+        val eventObservationRelease = CountDownLatch(1)
+        val evaluationPublished = CountDownLatch(1)
+        val evaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = { evaluations += it }
+        ).apply {
+            foregroundEvidenceBeforeRecordObserver = {
+                eventObservationEntered.countDown()
+                eventObservationRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(TARGET_PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false,
+                    applicationWindowCount = 1
+                )
+            }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = TARGET_PACKAGE)
+            }
+            // Reconnect is real, but its automatic reconciliation must remain undelivered so the
+            // only candidate publication is the blocked first-generation event.
+            visibleApplicationCheckPostDelayed = { _, _ -> true }
+            visibleApplicationCheckRemoveCallbacks = {}
+        }
+        val eventThread = Thread(
+            { sendWindowEvent(blocker, TARGET_PACKAGE) },
+            "ticket15-old-accessibility-event"
+        )
+        try {
+            eventThread.start()
+            check(eventObservationEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "old accessibility event did not reach its observation barrier"
+            }
+
+            blocker.onDestroy()
+            blocker.evaluationResultObserver = null
+            blocker.setup(service)
+            // The first event resumes after this real setup, so make its fallback observation
+            // deterministic while retaining the new connection generation and worker.
+            setField(blocker, "foregroundObservationSource", null)
+            blocker.evaluationResultObserver = {
+                evaluations += it
+                evaluationPublished.countDown()
+            }
+            val latestGeneration = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
+            eventObservationRelease.countDown()
+            eventThread.join(WAIT_TIMEOUT_MS)
+            check(!eventThread.isAlive) { "blocked accessibility event remained unreleased" }
+
+            check(!evaluationPublished.await(500L, TimeUnit.MILLISECONDS)) {
+                "old event was durably processed by the latest worker: $evaluations"
+            }
+            check(evaluations.isEmpty()) {
+                "old event was durably processed by the latest worker: $evaluations"
+            }
+            check(service.startedActivities.isEmpty()) {
+                "old event produced a warning after reconnect"
+            }
+            check(
+                (getField(blocker, "lifecycleGeneration") as AtomicLong).get() ==
+                    latestGeneration
+            ) { "reconnect generation changed while releasing the old event" }
+        } finally {
+            eventObservationRelease.countDown()
+            eventThread.join(WAIT_TIMEOUT_MS)
+            blocker.onDestroy()
+            runCatching {
+                runBlocking {
+                    service.dataStoreManager.updateAppRuleSnapshot(originalSnapshot)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun staleApplicationWindowProviderCannotRepopulateCacheAfterReconnect() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val providerEntered = CountDownLatch(1)
+        val providerRelease = CountDownLatch(1)
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            applicationWindowSnapshotProvider = {
+                providerEntered.countDown()
+                providerRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(TARGET_PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false,
+                    applicationWindowCount = 1
+                )
+            }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = TARGET_PACKAGE)
+            }
+            visibleApplicationCheckPostDelayed = { _, _ -> true }
+            visibleApplicationCheckRemoveCallbacks = {}
+        }
+        val providerThread = Thread(
+            { sendWindowEvent(blocker, TARGET_PACKAGE) },
+            "ticket15-stale-provenance-provider"
+        )
+        try {
+            providerThread.start()
+            check(providerEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "application-window provider did not reach its reconnect barrier"
+            }
+
+            blocker.onDestroy()
+            blocker.setup(service)
+            setField(blocker, "foregroundObservationSource", null)
+            providerRelease.countDown()
+            providerThread.join(WAIT_TIMEOUT_MS)
+            check(!providerThread.isAlive) { "stale application-window provider remained blocked" }
+
+            val cache = getField(blocker, "applicationWindowProvenanceCache")
+            check(getField(cache!!, "cached") == null) {
+                "stale provider repopulated application provenance after reconnect"
+            }
+        } finally {
+            providerRelease.countDown()
+            providerThread.join(WAIT_TIMEOUT_MS)
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun staleScheduledProviderCannotRepopulateCacheAfterReconnect() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val providerEntered = CountDownLatch(1)
+        val providerRelease = CountDownLatch(1)
+        val queuedRechecks = CopyOnWriteArrayList<Runnable>()
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            applicationWindowSnapshotProvider = {
+                providerEntered.countDown()
+                providerRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(TARGET_PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false,
+                    applicationWindowCount = 1
+                )
+            }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = TARGET_PACKAGE)
+            }
+            recheckPostDelayed = { runnable, _ ->
+                queuedRechecks += runnable
+                true
+            }
+            recheckRemoveCallback = {}
+            visibleApplicationCheckPostDelayed = { _, _ -> true }
+            visibleApplicationCheckRemoveCallbacks = {}
+        }
+        val recheckFailure = AtomicReference<Throwable?>()
+        val recheckThread = Thread(
+            {
+                try {
+                    queuedRechecks.removeAt(0).run()
+                } catch (error: Throwable) {
+                    recheckFailure.set(error)
+                }
+            },
+            "ticket15-stale-scheduled-provider"
+        )
+        try {
+            invokePrivate(blocker, "scheduleRecheck", TARGET_PACKAGE, 0L, 20_000L, 0L)
+            check(queuedRechecks.size == 1) {
+                "scheduled recheck did not reach the deterministic queue"
+            }
+            recheckThread.start()
+            check(providerEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "scheduled provider did not reach its reconnect barrier"
+            }
+
+            blocker.onDestroy()
+            blocker.setup(service)
+            setField(blocker, "foregroundObservationSource", null)
+            providerRelease.countDown()
+            recheckThread.join(WAIT_TIMEOUT_MS)
+            check(!recheckThread.isAlive) { "stale scheduled provider remained blocked" }
+            recheckFailure.get()?.let { throw it }
+
+            val cache = getField(blocker, "applicationWindowProvenanceCache")
+            check(getField(cache!!, "cached") == null) {
+                "stale scheduled provider repopulated application provenance after reconnect"
+            }
+        } finally {
+            providerRelease.countDown()
+            recheckThread.join(WAIT_TIMEOUT_MS)
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun notificationFinalFrameworkCallCannotStartAfterDestroy() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val publicationEntered = CountDownLatch(1)
+        val publicationRelease = CountDownLatch(1)
+        val publications = CopyOnWriteArrayList<LiveRuleNotificationModel>()
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            notificationBeforeFrameworkCallObserver = { model ->
+                publicationEntered.countDown()
+                publicationRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            notificationPublicationObserver = { publications += it }
+        }
+        try {
+            blocker.updateLiveNotification(TARGET_PACKAGE)
+            check(repository.notificationReadStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "notification did not reach its deterministic read gate"
+            }
+            repository.releaseNotificationRead()
+            check(publicationEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "notification did not reach its final framework-call barrier"
+            }
+
+            blocker.onDestroy()
+            publicationRelease.countDown()
+            check(awaitAtomicZero(getField(blocker, "inFlightNotifications") as AtomicInteger)) {
+                "notification did not drain after destroy"
+            }
+            check(publications.isEmpty()) {
+                "notification manager publication escaped destroy: $publications"
+            }
+        } finally {
+            publicationRelease.countDown()
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun warningFinalFrameworkCallCannotStartAfterDestroy() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val warningEntered = CountDownLatch(1)
+        val warningRelease = CountDownLatch(1)
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            warningBeforeFrameworkCallObserver = {
+                warningEntered.countDown()
+                warningRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+        }
+        try {
+            sendWindowEvent(blocker, TARGET_PACKAGE)
+            repository.releaseNotificationRead()
+            repository.releaseDecisionRead()
+            check(warningEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "warning did not reach its final framework-call barrier"
+            }
+
+            blocker.onDestroy()
+            warningRelease.countDown()
+            check(awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)) {
+                "warning did not drain after destroy"
+            }
+            check(service.startedActivities.isEmpty()) {
+                "warning Activity publication escaped destroy"
+            }
+        } finally {
+            warningRelease.countDown()
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun visibleHandlerPostCannotStartAfterDestroyAtItsFinalBarrier() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val handlerEntered = CountDownLatch(1)
+        val handlerRelease = CountDownLatch(1)
+        val posted = AtomicInteger(0)
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            handlerBeforeFrameworkPostObserver = {
+                handlerEntered.countDown()
+                handlerRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            visibleApplicationCheckPostDelayed = { _, _ ->
+                posted.incrementAndGet()
+                true
+            }
+            visibleApplicationCheckRemoveCallbacks = {}
+        }
+        val postThread = Thread(
+            { invokePrivate(blocker, "postVisibleApplicationCheck", 0L, 0L) },
+            "ticket15-handler-final-call"
+        )
+        try {
+            postThread.start()
+            check(handlerEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "handler post did not reach its final framework-call barrier"
+            }
+
+            blocker.onDestroy()
+            handlerRelease.countDown()
+            postThread.join(WAIT_TIMEOUT_MS)
+            check(!postThread.isAlive) { "handler post remained blocked after release" }
+            check(posted.get() == 0) {
+                "handler callback was posted after destroy: ${posted.get()}"
+            }
+        } finally {
+            handlerRelease.countDown()
+            postThread.join(WAIT_TIMEOUT_MS)
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun scheduledRecheckPostCannotStartAfterDestroyAtItsFinalBarrier() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val recheckEntered = CountDownLatch(1)
+        val recheckRelease = CountDownLatch(1)
+        val registrations = AtomicInteger(0)
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            recheckBeforeFrameworkPostObserver = {
+                recheckEntered.countDown()
+                recheckRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            recheckPostDelayed = { _, _ ->
+                registrations.incrementAndGet()
+                true
+            }
+            recheckRemoveCallback = {}
+        }
+        val recheckThread = Thread(
+            {
+                invokePrivate(
+                    blocker,
+                    "scheduleRecheck",
+                    TARGET_PACKAGE,
+                    10_000L,
+                    20_000L,
+                    0L
+                )
+            },
+            "ticket15-recheck-final-call"
+        )
+        try {
+            recheckThread.start()
+            check(recheckEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "scheduled recheck did not reach its final framework-call barrier"
+            }
+
+            blocker.onDestroy()
+            recheckRelease.countDown()
+            recheckThread.join(WAIT_TIMEOUT_MS)
+            check(!recheckThread.isAlive) { "scheduled recheck remained blocked after release" }
+            check(registrations.get() == 0) {
+                "scheduled recheck was posted after destroy: ${registrations.get()}"
+            }
+        } finally {
+            recheckRelease.countDown()
+            recheckThread.join(WAIT_TIMEOUT_MS)
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun rearmedRecoveryHandlerPostCannotStartAfterDestroyAtItsFinalBarrier() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val rearmEntered = CountDownLatch(1)
+        val rearmRelease = CountDownLatch(1)
+        val recoveryPosts = AtomicInteger(0)
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            recheckPostDelayed = { _, _ -> true }
+            recheckRemoveCallback = {}
+        }
+        try {
+            invokePrivate(
+                blocker,
+                "scheduleRecheck",
+                TARGET_PACKAGE,
+                10_000L,
+                20_000L,
+                0L
+            )
+            val scheduled = getField(blocker, "scheduledRechecks") as Map<*, *>
+            val registration = checkNotNull(scheduled[TARGET_PACKAGE]) {
+                "primary recheck registration was not created"
+            }
+            val registrationToken = getField(registration, "registrationToken") as Long
+            blocker.recheckRecoveryPostDelayed = { _, _ ->
+                recoveryPosts.incrementAndGet()
+                true
+            }
+            blocker.recheckBeforeFrameworkPostObserver = {
+                rearmEntered.countDown()
+                rearmRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            val rearmThread = Thread(
+                {
+                    invokePrivate(
+                        blocker,
+                        "rearmScheduledPost",
+                        TARGET_PACKAGE,
+                        0L,
+                        0,
+                        10_000L,
+                        20_000L,
+                        null,
+                        null,
+                        registrationToken,
+                        null
+                    )
+                },
+                "ticket15-rearm-handler-final-call"
+            )
+            rearmThread.start()
+            check(rearmEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "rearmed recovery post did not reach its final framework-call barrier"
+            }
+
+            blocker.onDestroy()
+            rearmRelease.countDown()
+            rearmThread.join(WAIT_TIMEOUT_MS)
+            check(!rearmThread.isAlive) { "rearmed recovery post remained blocked after release" }
+            check(recoveryPosts.get() == 0) {
+                "rearmed recovery handler was posted after destroy: ${recoveryPosts.get()}"
+            }
+        } finally {
+            rearmRelease.countDown()
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
+    fun alarmPostCannotStartAfterDestroyAtItsFinalBarrier() {
+        val repository = DestroyRaceRepository()
+        val service = recordingService()
+        val alarmEntered = CountDownLatch(1)
+        val alarmRelease = CountDownLatch(1)
+        val alarmPublications = CopyOnWriteArrayList<String>()
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            alarmBeforeFrameworkCallObserver = {
+                alarmEntered.countDown()
+                alarmRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }
+            alarmPublicationObserver = { alarmPublications += it }
+            recheckRemoveCallback = {}
+        }
+        val alarmThread = Thread(
+            {
+                invokePrivate(
+                    blocker,
+                    "scheduleRecheck",
+                    TARGET_PACKAGE,
+                    10_000L,
+                    20_000L,
+                    0L
+                )
+            },
+            "ticket15-alarm-final-call"
+        )
+        try {
+            alarmThread.start()
+            check(alarmEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "alarm publication did not reach its final framework-call barrier"
+            }
+
+            blocker.onDestroy()
+            alarmRelease.countDown()
+            alarmThread.join(WAIT_TIMEOUT_MS)
+            check(!alarmThread.isAlive) { "alarm publication remained blocked after release" }
+            check(alarmPublications.isEmpty()) {
+                "alarm publication escaped destroy: $alarmPublications"
+            }
+        } finally {
+            alarmRelease.countDown()
+            alarmThread.join(WAIT_TIMEOUT_MS)
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
     fun usageResetCompletionBroadcastsAreIndependentlyFencedAcrossDestroy() {
         val repository = DestroyRaceRepository()
         val service = recordingService()
@@ -544,6 +1078,9 @@ class AppRuleBlockerDestroyFaultRedTest {
                 completionRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             }
             usageResetBroadcastObserver = {
+                // Keep the existing recorder boundary independent from the final-call barrier.
+            }
+            usageResetBeforeFrameworkCallObserver = {
                 broadcastEntered.countDown()
                 try {
                     broadcastRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -1515,7 +2052,8 @@ class AppRuleBlockerDestroyFaultRedTest {
 
     private fun invokePrivate(target: Any, name: String, vararg args: Any?) {
         val method = target.javaClass.declaredMethods.first {
-            it.name == name && it.parameterTypes.size == args.size
+            (it.name == name || it.name.startsWith("$name-")) &&
+                it.parameterTypes.size == args.size
         }
         method.isAccessible = true
         method.invoke(target, *args)
