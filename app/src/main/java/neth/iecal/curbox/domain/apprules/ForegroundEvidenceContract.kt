@@ -22,6 +22,14 @@ value class LifecycleGeneration(val value: Long) {
     }
 }
 
+/** Identity of one installed serialized worker, distinct from its lifecycle generation. */
+@JvmInline
+value class WorkerInstanceToken(val value: Long) {
+    init {
+        require(value >= 0L) { "worker instance token must not be negative" }
+    }
+}
+
 /** A source observation's ordering pair, reserved as one connection-scoped operation. */
 data class SourceOrderReservation(
     val sourceOrderIdentity: SourceOrderIdentity,
