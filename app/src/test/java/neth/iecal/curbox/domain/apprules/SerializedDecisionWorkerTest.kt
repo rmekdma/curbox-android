@@ -612,10 +612,9 @@ class SerializedDecisionWorkerTest {
             assertEquals(
                 SubmissionResult.ACCEPTED,
                 worker.submit(
-                    request(
+                    refreshRequest(
                         sourceOrder = 2L,
                         lifecycle = 1L,
-                        packageName = TARGET_PACKAGE,
                         runtimePublication = RuntimePublication(
                             runtimeRevision = RuntimeRevision(4L),
                             candidateRuntime = runtime(allowedMinutes = 10L)
@@ -638,11 +637,17 @@ class SerializedDecisionWorkerTest {
 
             val deadline = System.nanoTime() +
                 TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
-            while (System.nanoTime() < deadline && published.isEmpty()) {
+            while (System.nanoTime() < deadline && published.size < 2) {
                 Thread.yield()
             }
-            assertEquals(1, published.size)
-            val finalOutcome = published.single()
+            val finalOutcomes = synchronized(published) { published.toList() }
+            assertEquals(
+                "the publication-only refresh and visible request must both publish revision 4",
+                2,
+                finalOutcomes.size
+            )
+            assertTrue(finalOutcomes.all { it.acceptedRuntimeRevision == RuntimeRevision(4L) })
+            val finalOutcome = finalOutcomes.maxBy { it.sourceOrderIdentity.value }
             assertEquals(RuntimeRevision(4L), finalOutcome.acceptedRuntimeRevision)
             assertEquals(LifecycleGeneration(1L), finalOutcome.lifecycleGeneration)
             assertEquals(TARGET_PACKAGE, finalOutcome.packageDecisions.single().packageName)
@@ -717,6 +722,23 @@ class SerializedDecisionWorkerTest {
                 packages = setOf(packageName),
                 readState = ForegroundReadState.AVAILABLE
             ),
+            displayState = DisplayState.UNLOCKED
+        ),
+        runtimePublication = runtimePublication
+    )
+
+    private fun refreshRequest(
+        sourceOrder: Long,
+        lifecycle: Long,
+        runtimePublication: RuntimePublication? = null
+    ): DecisionRequest = DecisionRequest(
+        sourceOrderIdentity = SourceOrderIdentity(sourceOrder),
+        lifecycleGeneration = LifecycleGeneration(lifecycle),
+        reason = ObservationKind.REFRESH,
+        observation = ForegroundFacts(
+            capturedAtWallMs = 2_000L,
+            capturedAtElapsedMs = 2_000L,
+            signal = SignalFact(kind = ObservationKind.REFRESH),
             displayState = DisplayState.UNLOCKED
         ),
         runtimePublication = runtimePublication

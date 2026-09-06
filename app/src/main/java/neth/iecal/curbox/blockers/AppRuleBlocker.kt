@@ -128,6 +128,8 @@ class AppRuleBlocker {
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val refreshMutex = Mutex()
     private val runtimeLock = Any()
+    /** Serializes readiness, runtime capture, replacement, and installation as one handoff. */
+    private val decisionWorkerLock = Any()
     private val handler = Handler(Looper.getMainLooper())
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var notificationTickJob: kotlinx.coroutines.Job? = null
@@ -262,6 +264,8 @@ class AppRuleBlocker {
     internal var screenInteractiveProvider: (() -> Boolean)? = null
     internal var keyguardLockedProvider: (() -> Boolean)? = null
     internal var evaluationResultObserver: ((AppRulesEvaluation) -> Unit)? = null
+    /** Temporary seam for forcing concurrent same-lifecycle worker recovery interleavings. */
+    internal var decisionWorkerRecoveryAfterCapture: (() -> Unit)? = null
     /** Temporary seam for observing the external notification publication boundary. */
     internal var notificationPostObserver: ((LiveRuleNotificationModel) -> Unit)? = null
 
@@ -471,20 +475,21 @@ class AppRuleBlocker {
     }
 
     /** Fresh connection initialization only; setup has just reset its connection-scoped sequencer. */
-    private fun createDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker {
-        val acceptedRuntime = synchronized(runtimeLock) {
-            val initialRevision = RuntimeRevision(0L)
-            latestRuntimeRevision = initialRevision
-            AcceptedRuleRuntimeSnapshot(
-                runtime = ruleRuntimeSnapshotLocked(),
-                runtimeRevision = initialRevision
-            )
+    private fun createDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker =
+        synchronized(decisionWorkerLock) {
+            val acceptedRuntime = synchronized(runtimeLock) {
+                val initialRevision = RuntimeRevision(0L)
+                latestRuntimeRevision = initialRevision
+                AcceptedRuleRuntimeSnapshot(
+                    runtime = ruleRuntimeSnapshotLocked(),
+                    runtimeRevision = initialRevision
+                )
+            }
+            installDecisionWorkerLocked(connectionGeneration, acceptedRuntime)
         }
-        return createDecisionWorker(connectionGeneration, acceptedRuntime)
-    }
 
     /** Same-lifecycle recovery must inherit host freshness instead of reinitializing it. */
-    private fun createDecisionWorker(
+    private fun installDecisionWorkerLocked(
         connectionGeneration: Long,
         acceptedRuntime: AcceptedRuleRuntimeSnapshot
     ): SerializedDecisionWorker {
@@ -516,29 +521,32 @@ class AppRuleBlocker {
         return worker
     }
 
-    private fun ensureDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker {
-        decisionWorker?.let { worker ->
-            if (worker.isReadyForSubmission()) return worker
-            worker.stop(
-                RecoveryOnlyStop(
-                    requestedAtElapsedMs = observationElapsedRealtimeMs(),
-                    reason = StopReason.REPLACEMENT,
-                    lifecycleGeneration = LifecycleGeneration(connectionGeneration)
+    private fun ensureDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker =
+        synchronized(decisionWorkerLock) {
+            decisionWorker?.let { worker ->
+                if (worker.isReadyForSubmission()) return@synchronized worker
+                worker.stop(
+                    RecoveryOnlyStop(
+                        requestedAtElapsedMs = observationElapsedRealtimeMs(),
+                        reason = StopReason.REPLACEMENT,
+                        lifecycleGeneration = LifecycleGeneration(connectionGeneration)
+                    )
                 )
-            )
-            decisionWorker = null
-        }
-        check(::sessionRepository.isInitialized) { "app-rule session repository is not ready" }
-        return createDecisionWorker(
-            connectionGeneration = connectionGeneration,
-            acceptedRuntime = synchronized(runtimeLock) {
+                decisionWorker = null
+            }
+            check(::sessionRepository.isInitialized) { "app-rule session repository is not ready" }
+            val acceptedRuntime = synchronized(runtimeLock) {
                 AcceptedRuleRuntimeSnapshot(
                     runtime = ruleRuntimeSnapshotLocked(),
                     runtimeRevision = latestRuntimeRevision
                 )
             }
-        )
-    }
+            decisionWorkerRecoveryAfterCapture?.invoke()
+            installDecisionWorkerLocked(
+                connectionGeneration = connectionGeneration,
+                acceptedRuntime = acceptedRuntime
+            )
+        }
 
     private fun ruleRuntimeSnapshot(): RuleRuntimeSnapshot = synchronized(runtimeLock) {
         ruleRuntimeSnapshotLocked()
@@ -819,7 +827,8 @@ class AppRuleBlocker {
             resetAtMs = resetAtMs,
             requestId = requestId
         )
-        val result = decisionWorker?.submitUsageReset(
+        val worker = synchronized(decisionWorkerLock) { decisionWorker }
+        val result = worker?.submitUsageReset(
             request = request,
             resetAtElapsedMs = observationElapsedRealtimeMs()
         )
@@ -904,15 +913,19 @@ class AppRuleBlocker {
             },
             onRepeatedRejection = {
                 val failedWorker = retryWorker
-                if (failedWorker != null && decisionWorker === failedWorker) {
-                    failedWorker.stop(
-                        RecoveryOnlyStop(
-                            requestedAtElapsedMs = observationElapsedRealtimeMs(),
-                            reason = StopReason.REPLACEMENT,
-                            lifecycleGeneration = LifecycleGeneration(connectionGeneration)
-                        )
-                    )
-                    decisionWorker = null
+                if (failedWorker != null) {
+                    synchronized(decisionWorkerLock) {
+                        if (decisionWorker === failedWorker) {
+                            failedWorker.stop(
+                                RecoveryOnlyStop(
+                                    requestedAtElapsedMs = observationElapsedRealtimeMs(),
+                                    reason = StopReason.REPLACEMENT,
+                                    lifecycleGeneration = LifecycleGeneration(connectionGeneration)
+                                )
+                            )
+                            decisionWorker = null
+                        }
+                    }
                 }
                 logNonFatal(
                     IllegalStateException(
@@ -1118,14 +1131,16 @@ class AppRuleBlocker {
             logNonFatal(error)
         }
         handler.removeCallbacksAndMessages(null)
-        decisionWorker?.stop(
-            RecoveryOnlyStop(
-                requestedAtElapsedMs = observationElapsedRealtimeMs(),
-                reason = StopReason.DESTROY,
-                lifecycleGeneration = LifecycleGeneration(lifecycleGeneration.get())
+        synchronized(decisionWorkerLock) {
+            decisionWorker?.stop(
+                RecoveryOnlyStop(
+                    requestedAtElapsedMs = observationElapsedRealtimeMs(),
+                    reason = StopReason.DESTROY,
+                    lifecycleGeneration = LifecycleGeneration(lifecycleGeneration.get())
+                )
             )
-        )
-        decisionWorker = null
+            decisionWorker = null
+        }
         scope.cancel()
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)
         receiverLifecycle = null

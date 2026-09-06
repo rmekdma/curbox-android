@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.data.models.AppRule
@@ -43,6 +44,7 @@ import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
 import neth.iecal.curbox.domain.apprules.StopReason
 import neth.iecal.curbox.domain.apprules.SubmissionResult
 import neth.iecal.curbox.services.BaseBlockingService
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -529,6 +531,134 @@ class AppRuleBlockerRefreshOrderingRedTest {
             fixture.blocker.onDestroy()
         }
     }
+
+    @Test
+    fun concurrentReplacementCannotInstallCapturedOlderRuntimeAfterNewerPublication() =
+        runBlocking {
+            val oldSnapshot = snapshot(allowedMinutes = 0L, ruleName = "old")
+            val latestSnapshot = snapshot(allowedMinutes = 10L, ruleName = "latest")
+            val fixture = createProductionHandoffFixture(oldSnapshot)
+            val releaseOldCapture = CompletableDeferred<Unit>()
+            val oldCaptured = CompletableDeferred<Unit>()
+            val newerPublicationCompleted = CompletableDeferred<Unit>()
+            val firstRecovery = AtomicBoolean(true)
+            var oldSubmission: kotlinx.coroutines.Deferred<SubmissionResult>? = null
+            var newerPublication: kotlinx.coroutines.Deferred<Boolean>? = null
+            fixture.blocker.decisionWorkerRecoveryAfterCapture = {
+                if (firstRecovery.compareAndSet(true, false)) {
+                    oldCaptured.complete(Unit)
+                    runBlocking { releaseOldCapture.await() }
+                }
+            }
+            try {
+                val oldReservation = fixture.sourceOrderSequencer.reserveRuntimePublication()
+                assertTrue(
+                    publishSharedPublicationPath(
+                        blocker = fixture.blocker,
+                        refreshMutex = fixture.refreshMutex,
+                        source = "old runtime M",
+                        settings = Settings(appRuleSnapshot = oldSnapshot),
+                        sourceOrderIdentity = oldReservation.sourceOrderIdentity,
+                        runtimeRevision = oldReservation.runtimeRevision,
+                        timeline = fixture.timeline
+                    )
+                )
+                stopWorker(fixture.blocker)
+
+                val newerReservation = fixture.sourceOrderSequencer.reserveRuntimePublication()
+                oldSubmission = async(Dispatchers.Default) {
+                    invokePrivateResult(
+                        fixture.blocker,
+                        "submitDecisionRequest",
+                        foregroundRequest(
+                            sourceOrderIdentity =
+                                fixture.sourceOrderSequencer.nextSourceOrderIdentity(),
+                            lifecycleGeneration = LifecycleGeneration(1L)
+                        ),
+                        1L,
+                        "old replacement foreground"
+                    ) as SubmissionResult
+                }
+                oldCaptured.await()
+
+                newerPublication = async(Dispatchers.Default) {
+                    try {
+                        publishSharedPublicationPath(
+                            blocker = fixture.blocker,
+                            refreshMutex = fixture.refreshMutex,
+                            source = "newer runtime N",
+                            settings = Settings(appRuleSnapshot = latestSnapshot),
+                            sourceOrderIdentity = newerReservation.sourceOrderIdentity,
+                            runtimeRevision = newerReservation.runtimeRevision,
+                            timeline = fixture.timeline
+                        )
+                    } finally {
+                        newerPublicationCompleted.complete(Unit)
+                    }
+                }
+
+                val newerCompletedBeforeOldRelease = withTimeoutOrNull(500L) {
+                    newerPublicationCompleted.await()
+                    true
+                } ?: false
+                assertFalse(
+                    "newer replacement bypassed the older serialized handoff",
+                    newerCompletedBeforeOldRelease
+                )
+
+                releaseOldCapture.complete(Unit)
+                assertEquals(SubmissionResult.ACCEPTED, oldSubmission.await())
+                assertTrue("newer publication was not accepted", newerPublication.await())
+                assertTrue("newer publication did not finish", newerPublicationCompleted.isCompleted)
+
+                fixture.visibleChecks.clear()
+                invokePrivate(fixture.blocker, "checkCurrentlyVisibleApplications")
+                assertTrue(
+                    "final replacement did not publish a visible evaluation",
+                    awaitCondition { fixture.visibleChecks.isNotEmpty() }
+                )
+
+                val acceptedRuntime = acceptedRuntime(fixture.blocker)
+                val finalWorker = getField(fixture.blocker, "decisionWorker")
+                    as SerializedDecisionWorker
+                val failures = mutableListOf<String>()
+                if (hostRuntimeRevision(fixture.blocker) != newerReservation.runtimeRevision) {
+                    failures += "host revision was ${hostRuntimeRevision(fixture.blocker).value}"
+                }
+                if (acceptedRuntime.runtimeRevision != newerReservation.runtimeRevision) {
+                    failures += "worker revision was ${acceptedRuntime.runtimeRevision.value}"
+                }
+                if (acceptedRuntime.runtime.snapshot != latestSnapshot.normalized()) {
+                    failures += "worker snapshot was ${snapshotLabel(acceptedRuntime.runtime.snapshot)}"
+                }
+                if (fixture.snapshotCoordinator.snapshot() != latestSnapshot.normalized()) {
+                    failures += "host snapshot was ${snapshotLabel(fixture.snapshotCoordinator.snapshot())}"
+                }
+                if ((getField(finalWorker, "currentLifecycleGeneration") as Number).toLong() != 1L) {
+                    failures += "worker lifecycle generation was not 1"
+                }
+                if (fixture.visibleChecks.lastOrNull()?.isAllowed != true) {
+                    failures += "final visible result was ${fixture.visibleChecks.lastOrNull()?.isAllowed}"
+                }
+                if (fixture.service.startedActivities.isNotEmpty()) {
+                    failures += "final allow result launched ${fixture.service.startedActivities.size} warning activities"
+                }
+                if (failures.isNotEmpty()) {
+                    throw AssertionError(
+                        "concurrent production handoff failed:\n" +
+                            failures.joinToString(separator = "\n") { "- $it" } +
+                            "\ntimeline:\n" +
+                            fixture.timeline.joinToString(separator = "\n") { "- $it" }
+                    )
+                }
+            } finally {
+                releaseOldCapture.complete(Unit)
+                oldSubmission?.join()
+                newerPublication?.join()
+                fixture.blocker.decisionWorkerRecoveryAfterCapture = null
+                fixture.blocker.onDestroy()
+            }
+        }
 
     /**
      * Both production publication endpoints converge on this exact critical section:
