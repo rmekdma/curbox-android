@@ -101,6 +101,12 @@ import java.util.concurrent.atomic.AtomicLong
 @JvmInline
 private value class AppRuleWorkerInstanceToken(val value: Long)
 
+/** Adapter-local provenance identity; it never crosses the app-rule domain boundary. */
+internal data class ApplicationWindowProvenanceToken(
+    val lifecycleGeneration: Long,
+    val recheckGeneration: Long
+)
+
 /** Enforces the new atomic app-rule snapshot without changing the legacy blocker. */
 class AppRuleBlocker {
     companion object {
@@ -216,6 +222,13 @@ class AppRuleBlocker {
         val facts: ForegroundFacts
     )
 
+    private data class CapturedLifecycleBoundary(
+        val connectionGeneration: Long,
+        val recheckGeneration: Long,
+        val foregroundEvidenceSuspended: Boolean,
+        val provenanceToken: ApplicationWindowProvenanceToken
+    )
+
     private data class ScheduledRecheck(
         val registrationToken: Long,
         val originatingSourceOrderIdentity: SourceOrderIdentity?,
@@ -250,6 +263,10 @@ class AppRuleBlocker {
         val counter: AtomicInteger
     ) {
         val state = AtomicInteger(EXTERNAL_EFFECT_RESERVED)
+        /** Guarded by runtimeLock; true only while the external invocation is executing. */
+        var externalInvocationInProgress = false
+        /** Guarded by runtimeLock; covers a synchronous or asynchronous posted callback body. */
+        var postedCallbackInProgress = false
     }
 
     internal data class AppRuleDrainWorkSnapshot(
@@ -295,7 +312,8 @@ class AppRuleBlocker {
 
     private data class ObservedForegroundOutcome(
         val outcome: ForegroundEvidenceOutcome?,
-        val facts: ForegroundFacts
+        val facts: ForegroundFacts,
+        val capturedBoundary: CapturedLifecycleBoundary
     )
 
     /** Evidence snapshot kept internal so Android tests can exercise OEM failure combinations. */
@@ -336,6 +354,8 @@ class AppRuleBlocker {
     internal var visibleApplicationCheckPostDelayed: ((Runnable, Long) -> Boolean)? = null
     /** Temporary seam for observing removal of virtual wake-reconciliation callbacks. */
     internal var visibleApplicationCheckRemoveCallbacks: (() -> Unit)? = null
+    /** Deterministic seam immediately before a Handler-backed callback is posted. */
+    internal var handlerBeforeFrameworkPostObserver: (() -> Unit)? = null
     /** Temporary seams for deterministic screen and keyguard recovery contract tests. */
     internal var screenInteractiveProvider: (() -> Boolean)? = null
     internal var keyguardLockedProvider: (() -> Boolean)? = null
@@ -352,12 +372,25 @@ class AppRuleBlocker {
     internal var notificationPostObserver: ((LiveRuleNotificationModel) -> Unit)? = null
     /** Deterministic seam immediately before the real notification manager publication. */
     internal var notificationUpdateObserver: ((LiveRuleNotificationModel) -> Unit)? = null
+    /** Deterministic seam after the final notification recheck and before manager publication. */
+    internal var notificationBeforeFrameworkCallObserver:
+        ((LiveRuleNotificationModel) -> Unit)? = null
     /** Test-only recorder immediately after the real notification manager publication returns. */
     internal var notificationPublicationObserver: ((LiveRuleNotificationModel) -> Unit)? = null
     /** Deterministic seam immediately before usage-reset completion broadcasts. */
     internal var usageResetCompletionPostObserver: ((UsageResetRequest, Boolean) -> Unit)? = null
     /** Records each actual completion broadcast immediately before Context.sendBroadcast. */
     internal var usageResetBroadcastObserver: ((Intent) -> Unit)? = null
+    /** Deterministic seam after the final completion recheck and before Context.sendBroadcast. */
+    internal var usageResetBeforeFrameworkCallObserver: ((Intent) -> Unit)? = null
+    /** Deterministic seam after warning validation and before Activity.startActivity. */
+    internal var warningBeforeFrameworkCallObserver: ((String) -> Unit)? = null
+    /** Deterministic seam immediately before scheduler Handler/alarm publication. */
+    internal var recheckBeforeFrameworkPostObserver: ((String) -> Unit)? = null
+    /** Deterministic seam immediately before AlarmManager publication. */
+    internal var alarmBeforeFrameworkCallObserver: ((String) -> Unit)? = null
+    /** Test-only recorder after AlarmManager publication returns. */
+    internal var alarmPublicationObserver: ((String) -> Unit)? = null
     /** Deterministic seam at worker-generated recheck-plan delivery. */
     internal var recheckPlanDeliveryObserver: ((RecheckPlanUpdate) -> Unit)? = null
 
@@ -369,9 +402,14 @@ class AppRuleBlocker {
             setupReady = false
             currentWorkerInstanceToken = null
             // A reconnect must invalidate work captured by the previous service connection.
-            recheckGeneration.incrementAndGet()
+            val nextRecheckGeneration = recheckGeneration.incrementAndGet()
             pendingWorkerEvaluations.clear()
-            applicationWindowProvenanceCache.clear()
+            applicationWindowProvenanceCache.beginGeneration(
+                ApplicationWindowProvenanceToken(
+                    lifecycleGeneration = connectionGeneration,
+                    recheckGeneration = nextRecheckGeneration
+                )
+            )
             cancelPendingExternalEffectsLocked()
         }
         cancelledExternalEffects.forEach(::finishDrainWork)
@@ -598,15 +636,19 @@ class AppRuleBlocker {
                     runtimeRevision = initialRevision
                 )
             }
-            installDecisionWorkerLocked(connectionGeneration, acceptedRuntime)
+            checkNotNull(installDecisionWorkerLocked(connectionGeneration, acceptedRuntime))
         }
 
     /** Same-lifecycle recovery must inherit host freshness instead of reinitializing it. */
     private fun installDecisionWorkerLocked(
         connectionGeneration: Long,
-        acceptedRuntime: AcceptedRuleRuntimeSnapshot
-    ): SerializedDecisionWorker {
+        acceptedRuntime: AcceptedRuleRuntimeSnapshot,
+        requireReadyForSubmission: Boolean = false
+    ): SerializedDecisionWorker? {
         synchronized(runtimeLock) {
+            if (requireReadyForSubmission && !isReadyForChecks(connectionGeneration)) {
+                return null
+            }
             // Invalidate the old instance before stopping it. A replacement can share this
             // connection generation, so lifecycle and runtime revisions are not sufficient.
             currentWorkerInstanceToken = null
@@ -618,39 +660,42 @@ class AppRuleBlocker {
                 lifecycleGeneration = LifecycleGeneration(connectionGeneration)
             )
         )
-        val workerInstanceToken = AppRuleWorkerInstanceToken(workerInstanceSequence.incrementAndGet())
-        val worker = SerializedDecisionWorker(
-            lifecycleGeneration = LifecycleGeneration(connectionGeneration.coerceAtLeast(1L)),
-            acceptedRuntime = acceptedRuntime,
-            repository = sessionRepository,
-            outcomeSink = object : DecisionOutcomeSink {
-                override fun publish(outcome: DecisionOutcome) {
-                    publishDecisionOutcome(outcome, workerInstanceToken)
-                }
-            },
-            workerScope = scope,
-            onNonFatalError = ::logNonFatal,
-            onEvaluation = { request, accepted, packageName, evaluation ->
-                observeWorkerEvaluation(
-                    workerInstanceToken,
-                    request,
-                    accepted,
-                    packageName,
-                    evaluation
-                )
-            },
-            onRecheckPlan = { update ->
-                applyRecheckPlan(workerInstanceToken, update)
-            },
-            usageResetRepository = usageResetRepository,
-            onUsageResetComplete = { request, succeeded ->
-                publishUsageResetComplete(workerInstanceToken, request, succeeded)
-            },
-            enforcement = enforcement,
-            elapsedRealtimeMs = { observationElapsedRealtimeMs() }
-        )
-        synchronized(runtimeLock) {
-            if (isReadyForChecks() || !destroyed) {
+        val worker = synchronized(runtimeLock) {
+            if (requireReadyForSubmission && !isReadyForChecks(connectionGeneration)) {
+                return null
+            }
+            val workerInstanceToken =
+                AppRuleWorkerInstanceToken(workerInstanceSequence.incrementAndGet())
+            SerializedDecisionWorker(
+                lifecycleGeneration = LifecycleGeneration(connectionGeneration.coerceAtLeast(1L)),
+                acceptedRuntime = acceptedRuntime,
+                repository = sessionRepository,
+                outcomeSink = object : DecisionOutcomeSink {
+                    override fun publish(outcome: DecisionOutcome) {
+                        publishDecisionOutcome(outcome, workerInstanceToken)
+                    }
+                },
+                workerScope = scope,
+                onNonFatalError = ::logNonFatal,
+                onEvaluation = { request, accepted, packageName, evaluation ->
+                    observeWorkerEvaluation(
+                        workerInstanceToken,
+                        request,
+                        accepted,
+                        packageName,
+                        evaluation
+                    )
+                },
+                onRecheckPlan = { update ->
+                    applyRecheckPlan(workerInstanceToken, update)
+                },
+                usageResetRepository = usageResetRepository,
+                onUsageResetComplete = { request, succeeded ->
+                    publishUsageResetComplete(workerInstanceToken, request, succeeded)
+                },
+                enforcement = enforcement,
+                elapsedRealtimeMs = { observationElapsedRealtimeMs() }
+            ).also {
                 currentWorkerInstanceToken = workerInstanceToken
             }
         }
@@ -658,8 +703,9 @@ class AppRuleBlocker {
         return worker
     }
 
-    private fun ensureDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker =
+    private fun ensureDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker? =
         synchronized(decisionWorkerLock) {
+            if (!isReadyForChecks(connectionGeneration)) return@synchronized null
             decisionWorker?.let { worker ->
                 if (worker.isReadyForSubmission()) return@synchronized worker
                 worker.stop(
@@ -681,7 +727,8 @@ class AppRuleBlocker {
             decisionWorkerRecoveryAfterCapture?.invoke()
             installDecisionWorkerLocked(
                 connectionGeneration = connectionGeneration,
-                acceptedRuntime = acceptedRuntime
+                acceptedRuntime = acceptedRuntime,
+                requireReadyForSubmission = true
             )
         }
 
@@ -787,6 +834,11 @@ class AppRuleBlocker {
             isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken)
         }) return
         val posted = try {
+            handlerBeforeFrameworkPostObserver?.invoke()
+            if (!beginExternalEffectCall(permit) {
+                    isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken)
+                }
+            ) return
             handler.post {
                 if (!enterPostedEffect(permit)) return@post
                 try {
@@ -884,12 +936,25 @@ class AppRuleBlocker {
             return
         }
         try {
+            warningBeforeFrameworkCallObserver?.invoke(decision.packageName)
+            if (!beginExternalEffectCall(permit) {
+                    isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken)
+                }
+            ) {
+                synchronized(runtimeLock) {
+                    if (activeGuardianPackage == decision.packageName) {
+                        activeGuardianPackage = null
+                    }
+                }
+                return
+            }
             service.startActivity(createGuardianApprovalIntent(service, decision.packageName, denials))
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             logNonFatal(error)
         } finally {
+            completeExternalEffectCall(permit)
             finishExternalEffect(permit)
         }
     }
@@ -947,12 +1012,17 @@ class AppRuleBlocker {
                 }
             ) return
             if (!isCurrentWorkerRequest(workerInstanceToken, request, accepted)) return
+            if (!beginExternalEffectCall(permit) {
+                    isCurrentWorkerRequestLocked(workerInstanceToken, request, accepted)
+                }
+            ) return
             observer(evaluation)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             logNonFatal(error)
         } finally {
+            completeExternalEffectCall(permit)
             finishExternalEffect(permit)
         }
     }
@@ -1050,14 +1120,7 @@ class AppRuleBlocker {
 
     fun doAppRuleCheck(event: AccessibilityEvent?) {
         if (event == null) return
-        val capturedBoundary = synchronized(runtimeLock) {
-            if (!isReadyForChecks()) return
-            Triple(
-                lifecycleGeneration.get(),
-                recheckGeneration.get(),
-                foregroundEvidenceSuspended
-            )
-        }
+        val capturedBoundary = captureLifecycleBoundary() ?: return
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val eventPackageName = event.packageName?.toString()?.trim().orEmpty()
         if (eventPackageName.isBlank()) return
@@ -1070,15 +1133,19 @@ class AppRuleBlocker {
             recordForegroundEvidenceIfCurrent(
                 packageName = eventPackageName,
                 evidenceAtElapsedMs = observationElapsedRealtimeMs(),
-                expectedConnectionGeneration = capturedBoundary.first,
-                expectedRecheckGeneration = capturedBoundary.second,
-                requireSuspended = capturedBoundary.third
+                expectedConnectionGeneration = capturedBoundary.connectionGeneration,
+                expectedRecheckGeneration = capturedBoundary.recheckGeneration,
+                requireSuspended = capturedBoundary.foregroundEvidenceSuspended
             )
         }
         if (packageChanged) {
             updateLiveNotification(eventPackageName)
         }
-        submitForegroundDecision(event, ObservationKind.REAL_EVENT)
+        submitForegroundDecision(
+            event = event,
+            kind = ObservationKind.REAL_EVENT,
+            capturedBoundary = capturedBoundary
+        )
     }
 
     /** Called by the scheduler adapter when a delayed wall-clock plan becomes runnable. */
@@ -1147,6 +1214,25 @@ class AppRuleBlocker {
                     isReadyForChecks() && workerInstanceMatchesLocked(workerInstanceToken)
                 }
             ) return
+            fun publishBroadcast(intent: Intent): Boolean {
+                synchronized(runtimeLock) {
+                    if (!isReadyForChecks() || !workerInstanceMatchesLocked(workerInstanceToken)) {
+                        return false
+                    }
+                }
+                usageResetBroadcastObserver?.invoke(intent)
+                usageResetBeforeFrameworkCallObserver?.invoke(intent)
+                if (!beginExternalEffectCall(permit) {
+                        isReadyForChecks() && workerInstanceMatchesLocked(workerInstanceToken)
+                    }
+                ) return false
+                try {
+                    service.sendBroadcast(intent)
+                    return true
+                } finally {
+                    completeExternalEffectCall(permit)
+                }
+            }
             val completionIntent = Intent(UsageResetManager.ACTION_USAGE_RESET)
                 .setPackage(service.packageName)
                 .putStringArrayListExtra(
@@ -1156,33 +1242,15 @@ class AppRuleBlocker {
                 .putExtra(UsageResetManager.EXTRA_RESET_AT_MS, request.resetAtMs)
                 .putExtra(UsageResetManager.EXTRA_REQUEST_ID, request.requestId)
                 .putExtra(UsageResetManager.EXTRA_RESULT_OK, succeeded)
-            synchronized(runtimeLock) {
-                if (!isReadyForChecks() || !workerInstanceMatchesLocked(workerInstanceToken)) {
-                    return
-                }
-            }
-            usageResetBroadcastObserver?.invoke(completionIntent)
-            synchronized(runtimeLock) {
-                if (!isReadyForChecks() || !workerInstanceMatchesLocked(workerInstanceToken)) {
-                    return
-                }
-            }
-            service.sendBroadcast(completionIntent)
+            if (!publishBroadcast(completionIntent)) return
             if (succeeded) {
                 val refreshIntent = Intent(INTENT_ACTION_REFRESH_APP_RULES)
                     .setPackage(service.packageName)
-                synchronized(runtimeLock) {
-                    if (!isReadyForChecks() || !workerInstanceMatchesLocked(workerInstanceToken)) {
-                        return
+                if (!rearmExternalEffect(permit) {
+                        isReadyForChecks() && workerInstanceMatchesLocked(workerInstanceToken)
                     }
-                }
-                usageResetBroadcastObserver?.invoke(refreshIntent)
-                synchronized(runtimeLock) {
-                    if (!isReadyForChecks() || !workerInstanceMatchesLocked(workerInstanceToken)) {
-                        return
-                    }
-                }
-                service.sendBroadcast(refreshIntent)
+                ) return
+                publishBroadcast(refreshIntent)
             }
         } catch (error: CancellationException) {
             throw error
@@ -1196,16 +1264,19 @@ class AppRuleBlocker {
     private fun submitForegroundDecision(
         event: AccessibilityEvent?,
         kind: ObservationKind,
-        screenOffPackage: String? = null
+        screenOffPackage: String? = null,
+        capturedBoundary: CapturedLifecycleBoundary? = null
     ) {
         try {
-            val connectionGeneration = lifecycleGeneration.get().coerceAtLeast(1L)
+            val connectionGeneration = capturedBoundary?.connectionGeneration
+                ?: lifecycleGeneration.get().coerceAtLeast(1L)
             val captured = if (kind == ObservationKind.SCREEN_OFF) {
                 captureScreenOffObservation(screenOffPackage)
             } else {
                 captureForegroundObservation(
                     event = event,
-                    kind = kind
+                    kind = kind,
+                    provenanceToken = capturedBoundary?.provenanceToken
                 )
             }
             val request = DecisionRequest(
@@ -1232,6 +1303,7 @@ class AppRuleBlocker {
         operation: String
     ): SubmissionResult {
         val initialWorker = ensureDecisionWorker(connectionGeneration)
+            ?: return SubmissionResult.REJECTED_NOT_READY
         val initialResult = initialWorker.submit(request)
         var retryWorker: SerializedDecisionWorker? = null
         return retryRejectedWorkerSubmission(
@@ -1239,7 +1311,7 @@ class AppRuleBlocker {
             canRetry = { isReadyForChecks(connectionGeneration) },
             retry = {
                 retryWorker = ensureDecisionWorker(connectionGeneration)
-                retryWorker!!.submit(request)
+                retryWorker?.submit(request) ?: SubmissionResult.REJECTED_NOT_READY
             },
             onRepeatedRejection = {
                 val failedWorker = retryWorker
@@ -1400,9 +1472,17 @@ class AppRuleBlocker {
                                 recheckGeneration.get() != generation
                             ) return@launch
                         }
+                        notificationBeforeFrameworkCallObserver?.invoke(model)
+                        if (!beginExternalEffectCall(publication) {
+                                isReadyForChecks(connectionGeneration) &&
+                                    recheckGeneration.get() == generation &&
+                                    lastPostedNotificationModel == model
+                            }
+                        ) return@launch
                         service.updateForegroundNotification(model)
                         notificationPublicationObserver?.invoke(model)
                     } finally {
+                        completeExternalEffectCall(publication)
                         finishExternalEffect(publication)
                     }
                 }
@@ -1478,10 +1558,27 @@ class AppRuleBlocker {
                 return
             }
             try {
+                warningBeforeFrameworkCallObserver?.invoke(packageName)
+                if (!beginExternalEffectCall(permit) {
+                        isReadyForChecks() &&
+                            expectedLifecycleGeneration == currentLifecycleGeneration() &&
+                            recheckGeneration.get() == generation &&
+                            (workerInstanceToken == null ||
+                                workerInstanceMatchesLocked(workerInstanceToken))
+                    }
+                ) {
+                    synchronized(runtimeLock) {
+                        if (activeGuardianPackage == packageName) {
+                            activeGuardianPackage = null
+                        }
+                    }
+                    return
+                }
                 service.startActivity(
                     createGuardianApprovalIntent(service, packageName, denialRows)
                 )
             } finally {
+                completeExternalEffectCall(permit)
                 finishExternalEffect(permit)
             }
         } catch (error: CancellationException) {
@@ -1550,7 +1647,7 @@ class AppRuleBlocker {
             screenOnAwaitingUserPresent = false
             pendingSchedulerWakeGeneration = null
             pendingWorkerEvaluations.clear()
-            applicationWindowProvenanceCache.clear()
+            applicationWindowProvenanceCache.invalidate()
             cancelPendingExternalEffectsLocked()
         }
         cancelledExternalEffects.forEach(::finishDrainWork)
@@ -1706,9 +1803,9 @@ class AppRuleBlocker {
         observationAttempt: Int,
         expectedObservationRegistrationToken: Long? = null
     ) {
-        if (!isReadyForChecks()) return
-        val connectionGeneration = lifecycleGeneration.get()
-        val observationGeneration = recheckGeneration.get()
+        val observationBoundary = captureLifecycleBoundary() ?: return
+        val connectionGeneration = observationBoundary.connectionGeneration
+        val observationGeneration = observationBoundary.recheckGeneration
         try {
             val expectedRegistrationTokens = synchronized(runtimeLock) {
                 val packageNames = scheduledRechecks.keys +
@@ -1724,7 +1821,11 @@ class AppRuleBlocker {
                 essentialPackages = configuredEssentialPackages +
                     setOf(service.packageName, Constants.SYSTEM_UI_PACKAGE_NAME)
             )
-            val facts = captureForegroundFacts(event = null, kind = observationKind)
+            val facts = captureForegroundFacts(
+                event = null,
+                kind = observationKind,
+                provenanceToken = observationBoundary.provenanceToken
+            )
             val result = foregroundEvidenceModule.classify(facts, policy)
             val moduleVisiblePackages = result.outcomes
                 .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
@@ -1786,7 +1887,7 @@ class AppRuleBlocker {
                         if (outcome.decisionPermission ==
                                 neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
                         ) {
-                            dispatchSyntheticCheck(outcome.packageName, generation)
+                            dispatchSyntheticCheck(outcome.packageName, observationBoundary)
                         }
                     }
                     is ForegroundEvidenceOutcome.Unknown -> Unit
@@ -1939,7 +2040,13 @@ class AppRuleBlocker {
             // Invalidate both keyed boundary callbacks and any reconciliation callback already
             // posted for the visible display. The screen-off broadcast is the terminal signal for
             // this foreground observation; no provider retry may run until wake.
-            recheckGeneration.incrementAndGet()
+            val nextRecheckGeneration = recheckGeneration.incrementAndGet()
+            applicationWindowProvenanceCache.beginGeneration(
+                ApplicationWindowProvenanceToken(
+                    lifecycleGeneration = lifecycleGeneration.get(),
+                    recheckGeneration = nextRecheckGeneration
+                )
+            )
             suspendedForegroundPackage = packageName
             currentForegroundPackage = null
             currentForegroundEvidenceAtElapsedMs = 0L
@@ -2116,7 +2223,13 @@ class AppRuleBlocker {
             overrideState = settings.appRuleOverrideState
             usageTrackingDecision = nextUsageTrackingDecision
             if (candidate != null) snapshot.accept(candidate)
-            recheckGeneration.incrementAndGet()
+            val nextRecheckGeneration = recheckGeneration.incrementAndGet()
+            applicationWindowProvenanceCache.beginGeneration(
+                ApplicationWindowProvenanceToken(
+                    lifecycleGeneration = lifecycleGeneration.get(),
+                    recheckGeneration = nextRecheckGeneration
+                )
+            )
             true
         }
         if (changed) cancelScheduledRechecks()
@@ -2141,12 +2254,14 @@ class AppRuleBlocker {
 
     private fun captureForegroundFacts(
         event: AccessibilityEvent?,
-        kind: ObservationKind
-    ): ForegroundFacts = captureForegroundObservation(event, kind).facts
+        kind: ObservationKind,
+        provenanceToken: ApplicationWindowProvenanceToken? = null
+    ): ForegroundFacts = captureForegroundObservation(event, kind, provenanceToken).facts
 
     private fun captureForegroundObservation(
         event: AccessibilityEvent?,
-        kind: ObservationKind
+        kind: ObservationKind,
+        provenanceToken: ApplicationWindowProvenanceToken? = null
     ): CapturedForegroundObservation {
         val trigger = ObservationTrigger(
             sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity(),
@@ -2166,17 +2281,24 @@ class AppRuleBlocker {
                 source.capture(trigger)
             }
         } else {
-            captureLegacyForegroundFacts(event, trigger)
+            captureLegacyForegroundFacts(event, trigger, provenanceToken)
         }
         val factsWithProvenance = if (source != null) {
             facts.copy(
                 applicationWindows = applicationWindowProvenanceCache.resolve(
                     raw = facts.applicationWindows.toApplicationWindowSnapshot(),
-                    capturedAtElapsedMs = facts.capturedAtElapsedMs
+                    capturedAtElapsedMs = facts.capturedAtElapsedMs,
+                    expectedToken = provenanceToken
                 ).toForegroundFact()
             )
         } else {
-            facts
+            facts.copy(
+                applicationWindows = applicationWindowProvenanceCache.resolve(
+                    raw = facts.applicationWindows.toApplicationWindowSnapshot(),
+                    capturedAtElapsedMs = facts.capturedAtElapsedMs,
+                    expectedToken = provenanceToken
+                ).toForegroundFact()
+            )
         }
         val normalizedFacts = if (screenOnAwaitingUserPresent &&
             factsWithProvenance.displayState == DisplayState.UNLOCKED
@@ -2228,7 +2350,8 @@ class AppRuleBlocker {
 
     private fun captureLegacyForegroundFacts(
         event: AccessibilityEvent?,
-        trigger: ObservationTrigger
+        trigger: ObservationTrigger,
+        provenanceToken: ApplicationWindowProvenanceToken? = null
     ): ForegroundFacts {
         val eventPackage = event?.packageName
             ?.toString()
@@ -2236,7 +2359,7 @@ class AppRuleBlocker {
             ?.takeIf(String::isNotEmpty)
         val eventElapsedMs = event?.eventTime?.takeIf { it > 0L }
         val activeWindow = readActiveWindowSnapshot()
-        val applicationWindows = readApplicationWindowSnapshot()
+        val applicationWindows = readApplicationWindowSnapshot(provenanceToken)
         return ForegroundFacts(
             capturedAtWallMs = trigger.requestedAtWallMs,
             capturedAtElapsedMs = trigger.requestedAtElapsedMs,
@@ -2393,6 +2516,25 @@ class AppRuleBlocker {
             } ?: break
             postPermit = permit
             if (!startExternalEffect(permit) {
+                    isReadyForChecks(connectionGeneration) &&
+                        recheckGeneration.get() == observationGeneration
+                }
+            ) {
+                attempt++
+                continue
+            }
+            try {
+                handlerBeforeFrameworkPostObserver?.invoke()
+            } catch (error: CancellationException) {
+                finishExternalEffect(permit)
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+                finishExternalEffect(permit)
+                attempt++
+                continue
+            }
+            if (!beginExternalEffectCall(permit) {
                     isReadyForChecks(connectionGeneration) &&
                         recheckGeneration.get() == observationGeneration
                 }
@@ -2613,13 +2755,27 @@ class AppRuleBlocker {
             return
         }
         try {
-            val posted = recheckPostDelayed?.invoke(runnable, postDelay)
-                ?: postWakeCapableCallback(
+            recheckBeforeFrameworkPostObserver?.invoke(packageName)
+            val posted = if (recheckPostDelayed != null) {
+                if (!beginExternalEffectCall(postPermit) {
+                        isReadyForChecks() &&
+                            recheckGeneration.get() == generation &&
+                            isCurrentScheduledCallback(packageName, runnable, generation)
+                    }
+                ) {
+                    false
+                } else {
+                    recheckPostDelayed!!.invoke(runnable, postDelay)
+                }
+            } else {
+                postWakeCapableCallback(
                     packageName = packageName,
                     runnable = runnable,
                     delayMillis = postDelay,
-                    generation = generation
+                    generation = generation,
+                    permit = postPermit
                 )
+            }
             val armed = armPostedEffect(postPermit, posted) {
                 isReadyForChecks() &&
                     recheckGeneration.get() == generation &&
@@ -2734,7 +2890,9 @@ class AppRuleBlocker {
             nowElapsedRealtimeMs = observationElapsedRealtimeMs()
         ).coerceAtLeast(1L)
         lateinit var recoveryRunnable: Runnable
+        lateinit var recoveryPermit: ExternalEffectPermit
         recoveryRunnable = Runnable {
+            if (!enterPostedEffect(recoveryPermit)) return@Runnable
             val current = synchronized(runtimeLock) {
                 val registration = scheduledRecoveryCallbacks[packageName]
                 if (registration?.registrationToken != registrationToken ||
@@ -2747,21 +2905,27 @@ class AppRuleBlocker {
                     true
                 }
             }
-            if (!current || !isReadyForChecks() || recheckGeneration.get() != generation) return@Runnable
-            val dueAtWallClockMsForRearm = recoveryDueAtWallClockMs
-                .takeIf { it > observationWallClockMs() }
-                ?: relativeRecoveryDueAtWallClockMs(requestedRecoveryDelayMillis)
-            postScheduledRecheck(
-                packageName = packageName,
-                generation = generation,
-                delayMillis = delayMillis,
-                visibilityAttempt = visibilityAttempt,
-                postAttempt = 1,
-                maxDelayMillis = maxDelayMillis,
-                dueAtWallClockMs = dueAtWallClockMsForRearm,
-                relativeDelayMillis = requestedRecoveryDelayMillis,
-                originatingSourceOrderIdentity = originatingSourceOrderIdentity
-            )
+            try {
+                if (!current || !isReadyForChecks() || recheckGeneration.get() != generation) {
+                    return@Runnable
+                }
+                val dueAtWallClockMsForRearm = recoveryDueAtWallClockMs
+                    .takeIf { it > observationWallClockMs() }
+                    ?: relativeRecoveryDueAtWallClockMs(requestedRecoveryDelayMillis)
+                postScheduledRecheck(
+                    packageName = packageName,
+                    generation = generation,
+                    delayMillis = delayMillis,
+                    visibilityAttempt = visibilityAttempt,
+                    postAttempt = 1,
+                    maxDelayMillis = maxDelayMillis,
+                    dueAtWallClockMs = dueAtWallClockMsForRearm,
+                    relativeDelayMillis = requestedRecoveryDelayMillis,
+                    originatingSourceOrderIdentity = originatingSourceOrderIdentity
+                )
+            } finally {
+                finishExternalEffect(recoveryPermit)
+            }
         }
         val previousRecovery = synchronized(runtimeLock) {
             val current = scheduledRechecks[packageName]
@@ -2778,30 +2942,100 @@ class AppRuleBlocker {
                 generation = generation,
                 runnable = recoveryRunnable
             )
-            previousCleanup
+            val permit = reserveExternalEffectLocked(inFlightCallbacks) {
+                isReadyForChecks() &&
+                    recheckGeneration.get() == generation &&
+                    scheduledRecoveryCallbacks[packageName]?.let {
+                        it.registrationToken == registrationToken &&
+                            it.runnable === recoveryRunnable
+                    } == true
+            } ?: return
+            Triple(previousCleanup, permit, recoveryRunnable)
         }
-        previousRecovery.pendingIntent?.let(::cancelAlarm)
-        previousRecovery.recoveryRunnable?.let(::removeHandlerCallback)
-        val posted = try {
-            recheckRecoveryPostDelayed?.invoke(recoveryRunnable, recoveryDelay)
-                ?: postWakeCapableCallback(
-                    packageName = packageName,
-                    runnable = recoveryRunnable,
-                    delayMillis = recoveryDelay,
-                    generation = generation
-                )
-        } catch (error: Throwable) {
-            logNonFatal(error)
-            false
+        previousRecovery.first.pendingIntent?.let(::cancelAlarm)
+        previousRecovery.first.recoveryRunnable?.let(::removeHandlerCallback)
+        recoveryPermit = previousRecovery.second
+
+        fun postRecoveryWithPermit(
+            permit: ExternalEffectPermit,
+            useRecoveryAdapter: Boolean
+        ): Boolean {
+            if (!startExternalEffect(permit) {
+                    isReadyForChecks() &&
+                        recheckGeneration.get() == generation &&
+                        scheduledRecoveryCallbacks[packageName]?.let {
+                            it.registrationToken == registrationToken &&
+                                it.runnable === recoveryRunnable
+                        } == true
+                }
+            ) return false
+            return try {
+                recheckBeforeFrameworkPostObserver?.invoke(packageName)
+                val posted = if (useRecoveryAdapter && recheckRecoveryPostDelayed != null) {
+                    if (!beginExternalEffectCall(permit) {
+                            isReadyForChecks() &&
+                                recheckGeneration.get() == generation &&
+                                isCurrentSchedulerCallbackLocked(packageName, recoveryRunnable)
+                        }
+                    ) {
+                        false
+                    } else {
+                        recheckRecoveryPostDelayed!!.invoke(recoveryRunnable, recoveryDelay)
+                    }
+                } else if (useRecoveryAdapter) {
+                    postWakeCapableCallback(
+                        packageName = packageName,
+                        runnable = recoveryRunnable,
+                        delayMillis = recoveryDelay,
+                        generation = generation,
+                        permit = permit
+                    )
+                } else {
+                    if (!beginExternalEffectCall(permit) {
+                            isReadyForChecks() &&
+                                recheckGeneration.get() == generation &&
+                                isCurrentSchedulerCallbackLocked(packageName, recoveryRunnable)
+                        }
+                    ) {
+                        false
+                    } else {
+                        handler.postDelayed(recoveryRunnable, recoveryDelay)
+                    }
+                }
+                armPostedEffect(permit, posted) {
+                    isReadyForChecks() &&
+                        recheckGeneration.get() == generation &&
+                        isCurrentSchedulerCallback(packageName, recoveryRunnable, generation)
+                }
+            } catch (error: CancellationException) {
+                finishExternalEffect(permit)
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+                finishExternalEffect(permit)
+                false
+            }
         }
+
+        val posted = postRecoveryWithPermit(recoveryPermit, useRecoveryAdapter = true)
         if (!posted) {
             // A failed primary adapter must still have a bounded local recovery. The wake-capable
             // path is preferred; this last fallback is only for an unavailable AlarmManager.
-            val fallbackPosted = try {
-                handler.postDelayed(recoveryRunnable, recoveryDelay)
-            } catch (error: Throwable) {
-                logNonFatal(error)
+            val fallbackPermit = synchronized(runtimeLock) {
+                reserveExternalEffectLocked(inFlightCallbacks) {
+                    isReadyForChecks() &&
+                        recheckGeneration.get() == generation &&
+                        scheduledRecoveryCallbacks[packageName]?.let {
+                            it.registrationToken == registrationToken &&
+                                it.runnable === recoveryRunnable
+                        } == true
+                }
+            }
+            val fallbackPosted = if (fallbackPermit == null) {
                 false
+            } else {
+                recoveryPermit = fallbackPermit
+                postRecoveryWithPermit(fallbackPermit, useRecoveryAdapter = false)
             }
             if (!fallbackPosted) {
                 synchronized(runtimeLock) {
@@ -2821,7 +3055,8 @@ class AppRuleBlocker {
         packageName: String,
         runnable: Runnable,
         delayMillis: Long,
-        generation: Long
+        generation: Long,
+        permit: ExternalEffectPermit
     ): Boolean {
         val alarmManager = service.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
             ?: return false
@@ -2877,6 +3112,13 @@ class AppRuleBlocker {
                 removeAlarmRegistration(packageName, runnable, token)
                 return false
             }
+            alarmBeforeFrameworkCallObserver?.invoke(packageName)
+            if (!beginExternalEffectCall(permit) {
+                    isReadyForChecks() &&
+                        recheckGeneration.get() == generation &&
+                        isCurrentSchedulerCallbackLocked(packageName, runnable)
+                }
+            ) return false
             try {
                 alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
@@ -2890,6 +3132,7 @@ class AppRuleBlocker {
                     pendingIntent
                 )
             }
+            alarmPublicationObserver?.invoke(packageName)
             if (!isCurrentSchedulerCallback(packageName, runnable, generation)) {
                 removeAlarmRegistration(packageName, runnable, token)
                 return false
@@ -2898,6 +3141,8 @@ class AppRuleBlocker {
         } catch (error: Throwable) {
             removeAlarmRegistration(packageName, runnable, token)
             throw error
+        } finally {
+            completeExternalEffectCall(permit)
         }
     }
 
@@ -3000,13 +3245,13 @@ class AppRuleBlocker {
                 )
                 return
             }
-            val observed = observeForegroundOutcome(packageName)
+            val observed = observeForegroundOutcome(packageName, generation) ?: return
             when (val outcome = observed.outcome) {
                 is ForegroundEvidenceOutcome.Visible -> {
                     if (outcome.decisionPermission ==
                         neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
                     ) {
-                        dispatchSyntheticCheck(packageName, generation)
+                        dispatchSyntheticCheck(packageName, observed.capturedBoundary)
                     }
                 }
                 is ForegroundEvidenceOutcome.NotVisible -> Unit
@@ -3015,7 +3260,7 @@ class AppRuleBlocker {
                     if (shouldUseRecentForegroundEvidence(packageName, observed.facts)) {
                         dispatchSyntheticCheck(
                             packageName = packageName,
-                            generation = generation
+                            capturedBoundary = observed.capturedBoundary
                         )
                         return
                     }
@@ -3042,7 +3287,7 @@ class AppRuleBlocker {
                         // final allow/deny authority.
                         dispatchSyntheticCheck(
                             packageName = packageName,
-                            generation = generation
+                            capturedBoundary = observed.capturedBoundary
                         )
                     } else {
                         // Null, partial, keyguard, and stale evidence keep this keyed boundary
@@ -3108,7 +3353,15 @@ class AppRuleBlocker {
         packageName: String,
         generation: Long
     ) {
-        if (!isReadyForChecks() || recheckGeneration.get() != generation) return
+        val capturedBoundary = captureLifecycleBoundary(generation) ?: return
+        dispatchSyntheticCheck(packageName, capturedBoundary)
+    }
+
+    private fun dispatchSyntheticCheck(
+        packageName: String,
+        capturedBoundary: CapturedLifecycleBoundary
+    ) {
+        if (!isCurrentLifecycleBoundary(capturedBoundary)) return
         val event = try {
             obtainWindowStateEvent()
         } catch (error: CancellationException) {
@@ -3118,9 +3371,13 @@ class AppRuleBlocker {
             return
         }
         try {
-            if (!isReadyForChecks() || recheckGeneration.get() != generation) return
+            if (!isCurrentLifecycleBoundary(capturedBoundary)) return
             event.packageName = packageName
-            submitForegroundDecision(event, ObservationKind.SYNTHETIC_RECHECK)
+            submitForegroundDecision(
+                event = event,
+                kind = ObservationKind.SYNTHETIC_RECHECK,
+                capturedBoundary = capturedBoundary
+            )
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -3137,12 +3394,17 @@ class AppRuleBlocker {
     }
 
     private fun observeForegroundOutcome(
-        packageName: String
-    ): ObservedForegroundOutcome {
-        val configuredEssentialPackages = readEssentialPackagesForEvaluation()
+        packageName: String,
+        expectedRecheckGeneration: Long
+    ): ObservedForegroundOutcome? {
+        val capturedBoundary = captureLifecycleBoundary(expectedRecheckGeneration) ?: return null
+        val configuredEssentialPackages = readEssentialPackagesForEvaluation(
+            capturedBoundary.connectionGeneration
+        )
         val facts = captureForegroundFacts(
             event = null,
-            kind = ObservationKind.SYNTHETIC_RECHECK
+            kind = ObservationKind.SYNTHETIC_RECHECK,
+            provenanceToken = capturedBoundary.provenanceToken
         )
         val result = foregroundEvidenceModule.classify(
             facts = facts,
@@ -3153,7 +3415,8 @@ class AppRuleBlocker {
         )
         return ObservedForegroundOutcome(
             outcome = result.outcomes.firstOrNull { it.packageName == packageName },
-            facts = facts
+            facts = facts,
+            capturedBoundary = capturedBoundary
         )
     }
 
@@ -3175,10 +3438,12 @@ class AppRuleBlocker {
         }
     }
 
-    private fun readApplicationWindowSnapshot(): ApplicationWindowSnapshot {
+    private fun readApplicationWindowSnapshot(
+        provenanceToken: ApplicationWindowProvenanceToken? = null
+    ): ApplicationWindowSnapshot {
         applicationWindowSnapshotProvider?.let { provider ->
             return try {
-                applyApplicationWindowProvenance(provider())
+                applyApplicationWindowProvenance(provider(), provenanceToken)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -3189,7 +3454,8 @@ class AppRuleBlocker {
                         hasApplicationWindow = false,
                         hasUnknownApplicationWindow = true,
                         providerFailed = true
-                    )
+                    ),
+                    provenanceToken
                 )
             }
         }
@@ -3205,7 +3471,8 @@ class AppRuleBlocker {
                     hasApplicationWindow = false,
                     hasUnknownApplicationWindow = true,
                     providerFailed = true
-                )
+                ),
+                provenanceToken
             )
         }
         if (windows.isNullOrEmpty()) {
@@ -3215,7 +3482,8 @@ class AppRuleBlocker {
                     hasApplicationWindow = false,
                     hasUnknownApplicationWindow = true,
                     providerFailed = false
-                )
+                ),
+                provenanceToken
             )
         }
 
@@ -3265,15 +3533,18 @@ class AppRuleBlocker {
                 providerFailed = providerFailed,
                 applicationWindowCount = applicationWindowCount,
                 unknownSlotCount = unknownSlotCount
-            )
+            ),
+            provenanceToken
         )
     }
 
     private fun applyApplicationWindowProvenance(
-        raw: ApplicationWindowSnapshot
+        raw: ApplicationWindowSnapshot,
+        provenanceToken: ApplicationWindowProvenanceToken? = null
     ): ApplicationWindowSnapshot = applicationWindowProvenanceCache.resolve(
         raw = raw,
-        capturedAtElapsedMs = observationElapsedRealtimeMs()
+        capturedAtElapsedMs = observationElapsedRealtimeMs(),
+        expectedToken = provenanceToken
     )
 
     @Suppress("DEPRECATION")
@@ -3537,11 +3808,41 @@ class AppRuleBlocker {
         }
     }
 
+    private fun captureLifecycleBoundary(
+        expectedRecheckGeneration: Long? = null
+    ): CapturedLifecycleBoundary? = synchronized(runtimeLock) {
+        if (!isReadyForChecks()) return@synchronized null
+        val connectionGeneration = lifecycleGeneration.get().coerceAtLeast(1L)
+        val capturedRecheckGeneration = recheckGeneration.get()
+        if (expectedRecheckGeneration != null &&
+            capturedRecheckGeneration != expectedRecheckGeneration
+        ) {
+            return@synchronized null
+        }
+        CapturedLifecycleBoundary(
+            connectionGeneration = connectionGeneration,
+            recheckGeneration = capturedRecheckGeneration,
+            foregroundEvidenceSuspended = foregroundEvidenceSuspended,
+            provenanceToken = ApplicationWindowProvenanceToken(
+                lifecycleGeneration = connectionGeneration,
+                recheckGeneration = capturedRecheckGeneration
+            )
+        )
+    }
+
+    private fun isCurrentLifecycleBoundary(boundary: CapturedLifecycleBoundary): Boolean =
+        synchronized(runtimeLock) {
+            isReadyForChecks() &&
+                lifecycleGeneration.get().coerceAtLeast(1L) == boundary.connectionGeneration &&
+                recheckGeneration.get() == boundary.recheckGeneration
+        }
+
     private fun isReadyForChecks(): Boolean =
         setupReady && !destroyed && ::service.isInitialized && scope.isActive
 
     private fun isReadyForChecks(connectionGeneration: Long): Boolean =
-        isReadyForChecks() && lifecycleGeneration.get() == connectionGeneration
+        isReadyForChecks() &&
+            lifecycleGeneration.get().coerceAtLeast(1L) == connectionGeneration.coerceAtLeast(1L)
 
     private fun beginDrainWork(counter: AtomicInteger): () -> Unit {
         counter.incrementAndGet()
@@ -3567,6 +3868,8 @@ class AppRuleBlocker {
         if (permit.state.getAndSet(EXTERNAL_EFFECT_FINISHED) == EXTERNAL_EFFECT_FINISHED) {
             return false
         }
+        permit.externalInvocationInProgress = false
+        permit.postedCallbackInProgress = false
         pendingExternalEffects.remove(permit)
         return true
     }
@@ -3602,6 +3905,59 @@ class AppRuleBlocker {
         return started
     }
 
+    /**
+     * Linearizes the actual framework call immediately before it leaves this adapter. A destroy
+     * can cancel STARTING, but once this point is crossed the permit is counted as an in-flight
+     * call and destroy drains it instead of racing the call from outside the lock.
+     */
+    private fun beginExternalEffectCall(
+        permit: ExternalEffectPermit,
+        isCurrentLocked: () -> Boolean
+    ): Boolean {
+        var finishedByThisCall = false
+        val started = synchronized(runtimeLock) {
+            if (permit.state.get() != EXTERNAL_EFFECT_STARTING || !isCurrentLocked()) {
+                finishedByThisCall = finishExternalEffectLocked(permit)
+                false
+            } else {
+                permit.state.set(EXTERNAL_EFFECT_RUNNING)
+                permit.externalInvocationInProgress = true
+                true
+            }
+        }
+        if (finishedByThisCall) finishDrainWork(permit.counter)
+        return started
+    }
+
+    /** Marks a direct framework call complete while retaining the permit for later work. */
+    private fun completeExternalEffectCall(permit: ExternalEffectPermit) {
+        synchronized(runtimeLock) {
+            permit.externalInvocationInProgress = false
+        }
+    }
+
+    /** Rearms one multi-call permit only after the previous direct framework call has returned. */
+    private fun rearmExternalEffect(
+        permit: ExternalEffectPermit,
+        isCurrentLocked: () -> Boolean
+    ): Boolean {
+        var finishedByThisCall = false
+        val rearmed = synchronized(runtimeLock) {
+            if (permit.state.get() != EXTERNAL_EFFECT_RUNNING ||
+                permit.externalInvocationInProgress ||
+                !isCurrentLocked()
+            ) {
+                finishedByThisCall = finishExternalEffectLocked(permit)
+                false
+            } else {
+                permit.state.set(EXTERNAL_EFFECT_STARTING)
+                true
+            }
+        }
+        if (finishedByThisCall) finishDrainWork(permit.counter)
+        return rearmed
+    }
+
     /** Completes the external post handshake without invoking a framework callback under lock. */
     private fun armPostedEffect(
         permit: ExternalEffectPermit,
@@ -3610,14 +3966,17 @@ class AppRuleBlocker {
     ): Boolean {
         var finishedByThisCall = false
         synchronized(runtimeLock) {
+            permit.externalInvocationInProgress = false
             when {
                 !posted -> finishedByThisCall = finishExternalEffectLocked(permit)
-                permit.state.get() == EXTERNAL_EFFECT_RUNNING -> Unit
-                permit.state.get() != EXTERNAL_EFFECT_STARTING -> Unit
+                permit.state.get() == EXTERNAL_EFFECT_FINISHED -> Unit
+                permit.state.get() == EXTERNAL_EFFECT_RUNNING &&
+                    permit.postedCallbackInProgress -> Unit
+                permit.state.get() != EXTERNAL_EFFECT_RUNNING -> Unit
                 !isCurrentLocked() -> finishedByThisCall = finishExternalEffectLocked(permit)
                 else -> {
                     permit.state.compareAndSet(
-                        EXTERNAL_EFFECT_STARTING,
+                        EXTERNAL_EFFECT_RUNNING,
                         EXTERNAL_EFFECT_ARMED
                     )
                 }
@@ -3633,26 +3992,36 @@ class AppRuleBlocker {
 
     private fun enterPostedEffect(permit: ExternalEffectPermit): Boolean = synchronized(runtimeLock) {
         when (permit.state.get()) {
-            EXTERNAL_EFFECT_ARMED -> permit.state.compareAndSet(
-                EXTERNAL_EFFECT_ARMED,
-                EXTERNAL_EFFECT_RUNNING
-            )
-            // Test adapters may deliver a callback synchronously from postDelayed. It is still
-            // the same reserved effect and is allowed to enter before the post returns.
-            EXTERNAL_EFFECT_STARTING -> permit.state.compareAndSet(
-                EXTERNAL_EFFECT_STARTING,
-                EXTERNAL_EFFECT_RUNNING
-            )
+            EXTERNAL_EFFECT_ARMED -> {
+                permit.postedCallbackInProgress = true
+                permit.state.compareAndSet(
+                    EXTERNAL_EFFECT_ARMED,
+                    EXTERNAL_EFFECT_RUNNING
+                )
+            }
+            // Test adapters may deliver a callback synchronously from the external post. The
+            // post is already linearized, so keep the same permit counted for its callback body.
+            EXTERNAL_EFFECT_RUNNING -> {
+                if (!permit.externalInvocationInProgress) {
+                    false
+                } else {
+                    permit.postedCallbackInProgress = true
+                    true
+                }
+            }
             else -> false
         }
     }
 
-    /** Cancels only effects that have not started their framework call or callback body. */
+    /** Cancels effects that have not crossed the final framework-call linearization point. */
     private fun cancelPendingExternalEffectsLocked(): List<AtomicInteger> {
         val counters = mutableListOf<AtomicInteger>()
         pendingExternalEffects.toList().forEach { permit ->
             val state = permit.state.get()
-            if (state == EXTERNAL_EFFECT_RESERVED || state == EXTERNAL_EFFECT_ARMED) {
+            if (state == EXTERNAL_EFFECT_RESERVED ||
+                state == EXTERNAL_EFFECT_STARTING ||
+                state == EXTERNAL_EFFECT_ARMED
+            ) {
                 if (finishExternalEffectLocked(permit)) counters += permit.counter
             }
         }
@@ -3809,12 +4178,43 @@ internal class ApplicationWindowProvenanceCache {
     )
 
     private var cached: CachedObservation? = null
+    private var generationBound = false
+    private var currentToken: ApplicationWindowProvenanceToken? = null
+
+    @Synchronized
+    fun beginGeneration(token: ApplicationWindowProvenanceToken) {
+        generationBound = true
+        currentToken = token
+        cached = null
+    }
+
+    @Synchronized
+    fun invalidate() {
+        generationBound = true
+        currentToken = null
+        cached = null
+    }
 
     @Synchronized
     fun resolve(
         raw: AppRuleBlocker.ApplicationWindowSnapshot,
-        capturedAtElapsedMs: Long
+        capturedAtElapsedMs: Long,
+        expectedToken: ApplicationWindowProvenanceToken? = null
     ): AppRuleBlocker.ApplicationWindowSnapshot {
+        if (expectedToken != null) {
+            if (generationBound && currentToken != expectedToken) {
+                return raw.copy(
+                    packages = raw.packages.toSet(),
+                    stalePackages = raw.stalePackages.toSet() - raw.packages,
+                    freshness = ApplicationWindowsFreshness.FRESH,
+                    capturedAtElapsedMs = capturedAtElapsedMs
+                )
+            }
+            if (!generationBound) {
+                generationBound = true
+                currentToken = expectedToken
+            }
+        }
         val packages = raw.packages.toSet()
         val rawStalePackages = raw.stalePackages.toSet() - packages
         val resolvedNonempty = packages.isNotEmpty() &&
