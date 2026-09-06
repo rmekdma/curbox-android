@@ -21,6 +21,179 @@ import org.junit.Test
 
 class SerializedDecisionWorkerTest {
     @Test
+    fun deadlineStopTimesOutFinalDecisionAndQueuedRefreshForRecoveryOnly() {
+        val repository = BlockingReadRepository()
+        val outcomes = RecordingOutcomeSink()
+        val clock = AtomicLong(0L)
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            elapsedRealtimeMs = { clock.get() }
+        )
+        val stopper = AtomicReference<DrainResult.DeadlineDrain>()
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, TARGET_PACKAGE))
+            )
+            assertTrue(repository.readStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(refreshRequest(2L, 1L))
+            )
+
+            val stopThread = Thread {
+                stopper.set(
+                    worker.stop(
+                        DeadlineDrainStop(
+                            requestedAtElapsedMs = 0L,
+                            deadline = TotalDrainDeadline(100L),
+                            reason = StopReason.DESTROY,
+                            lifecycleGeneration = LifecycleGeneration(1L)
+                        )
+                    )
+                )
+            }
+            stopThread.start()
+            clock.set(100L)
+            stopThread.join(WAIT_TIMEOUT_MS)
+
+            val result = stopper.get()
+            assertTrue("deadline stop did not return", result != null)
+            assertFalse(result.completed)
+            assertTrue(result.timedOut)
+            assertTrue(result.remainingWork)
+            assertTrue(result.durableRecoveryRequired)
+            assertTrue("stale work published an outcome", outcomes.values.isEmpty())
+        } finally {
+            repository.releaseRead()
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun deadlineStopDrainsFinalDecisionAndQueuedRefreshBeforeAbsoluteDeadline() {
+        val repository = BlockingReadRepository()
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            elapsedRealtimeMs = { System.nanoTime() / 1_000_000L }
+        )
+        val stopper = AtomicReference<DrainResult.DeadlineDrain>()
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, TARGET_PACKAGE))
+            )
+            assertTrue(repository.readStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(refreshRequest(2L, 1L))
+            )
+
+            val stopThread = Thread {
+                val requestedAt = System.nanoTime() / 1_000_000L
+                stopper.set(
+                    worker.stop(
+                        DeadlineDrainStop(
+                            requestedAtElapsedMs = requestedAt,
+                            deadline = TotalDrainDeadline(requestedAt + WAIT_TIMEOUT_MS),
+                            reason = StopReason.DESTROY,
+                            lifecycleGeneration = LifecycleGeneration(1L)
+                        )
+                    )
+                )
+            }
+            stopThread.start()
+            val invalidationDeadline =
+                System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
+            while (worker.isReadyForSubmission() && System.nanoTime() < invalidationDeadline) {
+                Thread.yield()
+            }
+            assertFalse("deadline stop did not invalidate the worker", worker.isReadyForSubmission())
+            repository.releaseRead()
+            stopThread.join(WAIT_TIMEOUT_MS)
+
+            val result = stopper.get()
+            assertTrue("deadline stop did not return", result != null)
+            assertTrue(result.completed)
+            assertFalse(result.timedOut)
+            assertFalse(result.remainingWork)
+            assertFalse(result.durableRecoveryRequired)
+            assertTrue("stale refresh published an outcome", outcomes.values.isEmpty())
+        } finally {
+            repository.releaseRead()
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun repeatedGenerationReplacementPublishesOnlyTheLatestWorkerGeneration() {
+        val outcomes = RecordingOutcomeSink()
+        val oldRepository = BlockingReadRepository()
+        val oldWorker = worker(
+            repository = oldRepository,
+            sink = outcomes,
+            lifecycleGeneration = LifecycleGeneration(1L)
+        )
+        val currentWorker = worker(
+            repository = RecordingRepository(),
+            sink = outcomes,
+            lifecycleGeneration = LifecycleGeneration(2L)
+        )
+        val newestWorker = worker(
+            repository = RecordingRepository(),
+            sink = outcomes,
+            lifecycleGeneration = LifecycleGeneration(3L)
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                oldWorker.submit(request(1L, 1L, TARGET_PACKAGE))
+            )
+            assertTrue(oldRepository.readStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+
+            oldWorker.stop(
+                RecoveryOnlyStop(
+                    requestedAtElapsedMs = 1_000L,
+                    reason = StopReason.RECONNECT,
+                    lifecycleGeneration = LifecycleGeneration(2L)
+                )
+            )
+            oldRepository.releaseRead()
+
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                currentWorker.submit(request(2L, 2L, TARGET_PACKAGE, capturedAtMs = 2_000L))
+            )
+            assertTrue(outcomes.awaitCount(1))
+            currentWorker.stop(
+                RecoveryOnlyStop(
+                    requestedAtElapsedMs = 2_000L,
+                    reason = StopReason.RECONNECT,
+                    lifecycleGeneration = LifecycleGeneration(3L)
+                )
+            )
+
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                newestWorker.submit(request(3L, 3L, TARGET_PACKAGE, capturedAtMs = 3_000L))
+            )
+            assertTrue(outcomes.awaitCount(2))
+            assertEquals(
+                listOf(LifecycleGeneration(2L), LifecycleGeneration(3L)),
+                outcomes.values.map(DecisionOutcome::lifecycleGeneration)
+            )
+        } finally {
+            oldRepository.releaseRead()
+            oldWorker.stop(recoveryStop(LifecycleGeneration(2L)))
+            currentWorker.stop(recoveryStop(LifecycleGeneration(3L)))
+            newestWorker.stop(recoveryStop(LifecycleGeneration(3L)))
+        }
+    }
+
+    @Test
     fun submitReturnsWhileBackgroundPersistenceIsBlocked() {
         val repository = DelayedRepository()
         val outcomes = RecordingOutcomeSink()
@@ -668,10 +841,12 @@ class SerializedDecisionWorkerTest {
             RuntimeRevision(1L),
             usageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
         ),
+        lifecycleGeneration: LifecycleGeneration = LifecycleGeneration(1L),
         usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true),
         usageResetRepository: UsageResetRepository = RecordingUsageResetRepository(repository),
         onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
         onNonFatalError: (Throwable) -> Unit = {},
+        elapsedRealtimeMs: () -> Long = { System.nanoTime() / 1_000_000L },
         onEvaluation: ((
             DecisionRequest,
             AcceptedRuleRuntimeSnapshot,
@@ -680,7 +855,7 @@ class SerializedDecisionWorkerTest {
         ) -> Unit)? = null,
         onRecheckPlan: (RecheckPlanUpdate) -> Unit = {}
     ): SerializedDecisionWorker = SerializedDecisionWorker(
-        lifecycleGeneration = LifecycleGeneration(1L),
+        lifecycleGeneration = lifecycleGeneration,
         acceptedRuntime = acceptedRuntime.copy(
             runtime = acceptedRuntime.runtime.copy(
                 usageTrackingDecision = usageTrackingDecision
@@ -691,6 +866,7 @@ class SerializedDecisionWorkerTest {
         usageResetRepository = usageResetRepository,
         onUsageResetComplete = onUsageResetComplete,
         onNonFatalError = onNonFatalError,
+        elapsedRealtimeMs = elapsedRealtimeMs,
         onEvaluation = onEvaluation,
         onRecheckPlan = onRecheckPlan
     )
