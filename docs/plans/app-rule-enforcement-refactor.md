@@ -1063,6 +1063,15 @@ known-limitations 문서에 기록한다.
 - [ ] host를 도입한 경우 deletion/design gate와 위 보조 기준을 PR 또는 design record에
       기록했다. 이 기록은 qualitative 근거이며 private call order 자동 검증 결과가 아니다.
 
+**Ticket 17 decision (2026-09-07):** Phase 4 is `NO-GO` for the current implementation. The
+deterministic ticket15 destroy/reconnect tracers and the ticket16 external allow/denial tracer
+reproduced no post-fence publication, stale reconnect owner, cleanup bypass, or incorrect current
+generation result. The existing lifecycle owner and feature cleanup containment therefore remain
+the narrowest complete contract. AR 012 in the known-limitations record contains the evidence and
+the exact re-entry trigger. Only the conditional evidence-only revisit ticket
+`.scratch/app-rule-enforcement/issues/18-phase4-lifecycle-trigger-revisit.md` is published; no
+lifecycle host, coordinator, integration, or OEM implementation ticket is prepublished.
+
 ## 검증 명령과 flavor 매트릭스
 
 PowerShell에서 Gradle을 실행하기 전에 프로젝트 지침의 JBR을 설정한다.
