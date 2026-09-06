@@ -70,6 +70,10 @@ class AppUsageTracker {
     private lateinit var sessionRepository: CurrentUseDaySessionRepository
     private lateinit var usageResetRepository: RoomUsageResetRepository
 
+    /** Narrow Android-test seam; setup still owns and invokes recoverOpenSessions below. */
+    internal var sessionRepositoryOverrideForTesting:
+        ((AppDatabase) -> CurrentUseDaySessionRepository)? = null
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val usageResetCommands = Channel<UsageResetCommand>(Channel.UNLIMITED)
     private var usageResetJob: Job? = null
@@ -129,12 +133,13 @@ class AppUsageTracker {
         ownPackage = service.packageName
         val database = AppDatabase.getInstance(service)
         dao = database.appUsageDao()
-        sessionRepository = RoomCurrentUseDaySessionRepository(
-            database.foregroundSessionDao(),
-            database.foregroundLaunchDao(),
-            database.appUsageDao(),
-            database
-        )
+        sessionRepository = sessionRepositoryOverrideForTesting?.invoke(database)
+            ?: RoomCurrentUseDaySessionRepository(
+                database.foregroundSessionDao(),
+                database.foregroundLaunchDao(),
+                database.appUsageDao(),
+                database
+            )
         usageResetRepository = RoomUsageResetRepository(database)
 
         try {

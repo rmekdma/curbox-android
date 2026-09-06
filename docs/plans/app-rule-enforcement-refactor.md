@@ -783,7 +783,8 @@ publication and handler callback together; after invalidation they observe zero 
 warning, notification and handler publication effects, then release the barriers and verify that
 an open durable session is recovered only through the documented `recoverOpenSessions()` path.
 The worker test also pauses an old worker after its final check, replaces it in the same lifecycle,
-and verifies that the typed worker-instance token allows only the replacement to publish. A real
+and verifies that the adapter-private typed worker-instance token allows only the replacement to
+publish. A real
 host test repeats setup → destroy → setup on the same blocker and verifies latest-generation
 effects only. The candidate budget in these tests is measurement input only; no production
 2-second or 5-second timeout was selected. The focused JVM regression and Full, Playstore and
@@ -794,10 +795,10 @@ Verification record for this implementation (JBR 21 at
 `SerializedDecisionWorkerTest` passed all 20 tests and `testFullDebugUnitTest` passed all 347
 tests. `compileFullDebugAndroidTestKotlin` passed, and
 `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed. On the attached iPlay50
-mini Pro Android 13 device, the three ticket15 destroy/reconnect tests passed, the four-test
-ticket14 refresh-ordering class passed, and the destroy/fault class had 3 ticket15 passes plus 4
+mini Pro Android 13 device, all seven ticket15 destroy/reconnect/barrier tests passed, the four-test
+ticket14 refresh-ordering class passed, and the destroy/fault class had 7 ticket15 passes plus 4
 adjacent fault/cancellation RED tests. The complete `connectedFullDebugAndroidTest` run reached
-74 tests with 29 failures: 2 callback-flush, 4 destroy fault/cancellation, 6 long-boundary, 15
+78 tests with 29 failures: 2 callback-flush, 4 destroy fault/cancellation, 6 long-boundary, 15
 recheck, 1 Guardian lifecycle and 1 debug package-id fixture failure. These remain residual
 regression evidence rather than ticket15 closure failures; ticket15-specific deterministic tests
 are green.
