@@ -772,29 +772,35 @@ reflection field와 temporary lambda는 migration 중 private internal test seam
 - reconnect recovery가 읽은 durable session은 현재 use-day와 generation filter를 지키고,
   destroy 중 취소된 in-memory tail을 실제 사용으로 소급하지 않는다.
 
-Ticket15 evidence (2026-09-06): `AppRuleBlocker.destroyInternal()` invalidates the lifecycle
-and generation before cleanup, tracks in-flight refresh, notification and callback work, and
-keeps production teardown on `RecoveryOnlyStop`. The candidate-only
-`onDestroyForMeasurement()` path shares one `TotalDrainDeadline` with worker decision drain and
-reports completion or timeout without changing the D6 production choice. Deterministic barrier
-tests hold a final decision, refresh mutex, notification read and handler callback together;
-after invalidation they observe zero evaluator, warning, notification and handler publication
-effects, then release the barriers and verify reconnect-only durable recovery. Worker tests also
-replace generations 1, 2 and 3 and verify that only the latest surviving generation publishes.
-The candidate budget in these tests is measurement input only; no production 2-second or
-5-second timeout was selected. The focused JVM regression and Full, Playstore and F-Droid debug
-compile/build scope is recorded in the ticket handoff.
+Ticket15 evidence (2026-09-06): `AppRuleBlocker.destroyInternal()` invalidates the lifecycle,
+generation and worker-instance token before cleanup, tracks in-flight refresh, notification and
+callback work, and keeps production teardown on `RecoveryOnlyStop`. The candidate-only
+`onDestroyForMeasurement()` path shares one `TotalDrainDeadline` across scheduler removal,
+handler removal, worker drain, scope cancellation, receiver cleanup and effect drain; no stage
+restarts the budget. `DeadlineDrainStop` snapshots queued, in-flight and durable work before
+cancellation. Deterministic barrier tests hold a final decision, refresh mutex, notification
+publication and handler callback together; after invalidation they observe zero evaluator,
+warning, notification and handler publication effects, then release the barriers and verify that
+an open durable session is recovered only through the documented `recoverOpenSessions()` path.
+The worker test also pauses an old worker after its final check, replaces it in the same lifecycle,
+and verifies that the typed worker-instance token allows only the replacement to publish. A real
+host test repeats setup → destroy → setup on the same blocker and verifies latest-generation
+effects only. The candidate budget in these tests is measurement input only; no production
+2-second or 5-second timeout was selected. The focused JVM regression and Full, Playstore and
+F-Droid debug compile/build scope is recorded below.
 
 Verification record for this implementation (JBR 21 at
-`C:\Users\DELL\.jdks\jbr-21.0.11`): `testFullDebugUnitTest` passed with 346 tests;
-the focused `SerializedDecisionWorkerTest`, `AppRuleWallClockSchedulerTest` and
-`AppRuleBlockerSubmissionRecoveryTest` command passed; `compileFullDebugAndroidTestKotlin`
-passed; and `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed. On the
-attached iPlay50 mini Pro Android 13 device, the ticket15 barrier test passed and the four-test
-ticket14 refresh-ordering class passed. The complete `connectedFullDebugAndroidTest` run reached
-73 tests but had 30 failures from existing RED contracts, stale fixture dependencies and the
-debug package-id example; it is retained as residual regression evidence rather than ticket15
-closure evidence.
+`C:\Users\DELL\.jdks\jbr-21.0.11`): the focused
+`SerializedDecisionWorkerTest` passed all 20 tests and `testFullDebugUnitTest` passed all 347
+tests. `compileFullDebugAndroidTestKotlin` passed, and
+`assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed. On the attached iPlay50
+mini Pro Android 13 device, the three ticket15 destroy/reconnect tests passed, the four-test
+ticket14 refresh-ordering class passed, and the destroy/fault class had 3 ticket15 passes plus 4
+adjacent fault/cancellation RED tests. The complete `connectedFullDebugAndroidTest` run reached
+74 tests with 29 failures: 2 callback-flush, 4 destroy fault/cancellation, 6 long-boundary, 15
+recheck, 1 Guardian lifecycle and 1 debug package-id fixture failure. These remain residual
+regression evidence rather than ticket15 closure failures; ticket15-specific deterministic tests
+are green.
 
 ### 6. Phase 0 RED contract → future invariant mapping
 

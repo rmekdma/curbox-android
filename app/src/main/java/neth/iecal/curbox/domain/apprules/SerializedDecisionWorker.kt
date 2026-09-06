@@ -10,6 +10,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
@@ -101,7 +102,8 @@ data class DecisionOutcome(
     val packageDecisions: List<PackageDecision>,
     val commitStatus: CommitStatus,
     val followUp: FollowUpKind,
-    val publicationStatus: PublicationStatus
+    val publicationStatus: PublicationStatus,
+    val workerInstanceToken: WorkerInstanceToken = WorkerInstanceToken(0L)
 )
 
 /** Worker-owned boundary derivation handed to the scheduler adapter as immutable values. */
@@ -112,7 +114,8 @@ data class RecheckPlanUpdate(
     val packageName: String,
     val plan: AppRuleRecheckPlan?,
     /** Identity of the boundary being cancelled, when this update removes an existing plan. */
-    val expectedRegistrationSourceOrderIdentity: SourceOrderIdentity? = null
+    val expectedRegistrationSourceOrderIdentity: SourceOrderIdentity? = null,
+    val workerInstanceToken: WorkerInstanceToken = WorkerInstanceToken(0L)
 )
 
 enum class StopReason {
@@ -194,6 +197,7 @@ internal data class WorkerDrainSnapshot(
  */
 class SerializedDecisionWorker internal constructor(
     lifecycleGeneration: LifecycleGeneration,
+    private val workerInstanceToken: WorkerInstanceToken,
     acceptedRuntime: AcceptedRuleRuntimeSnapshot,
     private val repository: CurrentUseDaySessionRepository,
     private val outcomeSink: DecisionOutcomeSink,
@@ -204,12 +208,15 @@ class SerializedDecisionWorker internal constructor(
     },
     private val onNonFatalError: (Throwable) -> Unit = {},
     private val onEvaluation: ((
+        WorkerInstanceToken,
         DecisionRequest,
         AcceptedRuleRuntimeSnapshot,
         String,
         AppRulesEvaluation
     ) -> Unit)? = null,
-    private val onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
+    private val onUsageResetComplete: (WorkerInstanceToken, UsageResetRequest, Boolean) -> Unit = {
+            _, _, _ ->
+    },
     private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository),
     private val onRecheckPlan: ((RecheckPlanUpdate) -> Unit)? = null
 ) {
@@ -365,15 +372,17 @@ class SerializedDecisionWorker internal constructor(
         invalidateForStop(request)
         val completed = awaitWorkUntil(request.deadline)
         val completedAt = elapsedRealtimeMs().coerceAtLeast(request.requestedAtElapsedMs)
+        // Capture durable recovery before cancellation cleanup can decrement the counters or
+        // close the channel. The timeout result is the handoff record for the next process.
+        val snapshotAtDeadline = drainSnapshot()
         if (!completed) {
             workerJob.cancel()
         }
-        val snapshot = drainSnapshot()
         return DrainResult.DeadlineDrain(
             completed = completed,
             timedOut = !completed,
-            remainingWork = snapshot.hasWork,
-            durableRecoveryRequired = snapshot.hasWork,
+            remainingWork = snapshotAtDeadline.hasWork,
+            durableRecoveryRequired = snapshotAtDeadline.hasWork,
             completedAtElapsedMs = completedAt
         )
     }
@@ -500,7 +509,15 @@ class SerializedDecisionWorker internal constructor(
             )
             if (!isCurrent(request, accepted)) return
             try {
-                onEvaluation?.invoke(request, accepted, packageName, evaluation)
+            runInterruptible {
+                onEvaluation?.invoke(
+                    workerInstanceToken,
+                    request,
+                    accepted,
+                    packageName,
+                    evaluation
+                )
+            }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -537,7 +554,7 @@ class SerializedDecisionWorker internal constructor(
         )
     }
 
-    private fun publishRecheckPlan(
+    private suspend fun publishRecheckPlan(
         request: DecisionRequest,
         accepted: AcceptedRuleRuntimeSnapshot,
         packageName: String,
@@ -579,17 +596,20 @@ class SerializedDecisionWorker internal constructor(
         }
         if (!isCurrent(request, accepted)) return
         try {
-            onRecheckPlan?.invoke(
-                RecheckPlanUpdate(
-                    sourceOrderIdentity = request.sourceOrderIdentity,
-                    lifecycleGeneration = request.lifecycleGeneration,
-                    acceptedRuntimeRevision = accepted.runtimeRevision,
-                    packageName = packageName,
-                    plan = plan,
-                    expectedRegistrationSourceOrderIdentity =
-                        expectedRegistrationSourceOrderIdentity
+            runInterruptible {
+                onRecheckPlan?.invoke(
+                    RecheckPlanUpdate(
+                        sourceOrderIdentity = request.sourceOrderIdentity,
+                        lifecycleGeneration = request.lifecycleGeneration,
+                        acceptedRuntimeRevision = accepted.runtimeRevision,
+                        packageName = packageName,
+                        plan = plan,
+                        expectedRegistrationSourceOrderIdentity =
+                            expectedRegistrationSourceOrderIdentity,
+                        workerInstanceToken = workerInstanceToken
+                    )
                 )
-            )
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -597,7 +617,7 @@ class SerializedDecisionWorker internal constructor(
         }
     }
 
-    private fun publishRecheckCancellation(
+    private suspend fun publishRecheckCancellation(
         request: DecisionRequest,
         accepted: AcceptedRuleRuntimeSnapshot,
         packageName: String
@@ -612,17 +632,20 @@ class SerializedDecisionWorker internal constructor(
         }
         if (!isCurrent(request, accepted)) return
         try {
-            onRecheckPlan?.invoke(
-                RecheckPlanUpdate(
-                    sourceOrderIdentity = request.sourceOrderIdentity,
-                    lifecycleGeneration = request.lifecycleGeneration,
-                    acceptedRuntimeRevision = accepted.runtimeRevision,
-                    packageName = packageName,
-                    plan = null,
-                    expectedRegistrationSourceOrderIdentity =
-                        expectedRegistrationSourceOrderIdentity
+            runInterruptible {
+                onRecheckPlan?.invoke(
+                    RecheckPlanUpdate(
+                        sourceOrderIdentity = request.sourceOrderIdentity,
+                        lifecycleGeneration = request.lifecycleGeneration,
+                        acceptedRuntimeRevision = accepted.runtimeRevision,
+                        packageName = packageName,
+                        plan = null,
+                        expectedRegistrationSourceOrderIdentity =
+                            expectedRegistrationSourceOrderIdentity,
+                        workerInstanceToken = workerInstanceToken
+                    )
                 )
-            )
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -656,9 +679,14 @@ class SerializedDecisionWorker internal constructor(
         }
     }
 
-    private fun publishUsageResetComplete(request: UsageResetRequest, succeeded: Boolean) {
+    private suspend fun publishUsageResetComplete(
+        request: UsageResetRequest,
+        succeeded: Boolean
+    ) {
         try {
-            onUsageResetComplete(request, succeeded)
+            runInterruptible {
+                onUsageResetComplete(workerInstanceToken, request, succeeded)
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -711,7 +739,8 @@ class SerializedDecisionWorker internal constructor(
                     packageDecisions = packageDecisions,
                     commitStatus = commitStatus,
                     followUp = followUp,
-                    publicationStatus = publicationStatus
+                    publicationStatus = publicationStatus,
+                    workerInstanceToken = workerInstanceToken
                 )
             )
         } catch (error: CancellationException) {

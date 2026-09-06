@@ -7,6 +7,7 @@ import android.view.accessibility.AccessibilityEvent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import neth.iecal.curbox.data.db.AppDatabase
@@ -30,6 +31,7 @@ import java.util.AbstractList
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -38,10 +40,175 @@ import java.util.concurrent.atomic.AtomicReference
 @RunWith(AndroidJUnit4::class)
 class AppRuleBlockerDestroyFaultRedTest {
     @Test
+    fun sameHostSetupDestroySetupPublishesOnlyLatestGeneration() {
+        val service = recordingService()
+        val originalSnapshot = runBlocking {
+            service.dataStoreManager.settings.first().appRuleSnapshot
+        }
+        runBlocking {
+            check(service.dataStoreManager.updateAppRuleSnapshot(snapshotWithGlobalDeny())) {
+                "could not install the deterministic deny snapshot"
+            }
+        }
+
+        val blocker = AppRuleBlocker()
+        val postedCallbacks = CopyOnWriteArrayList<Runnable>()
+        val applicationWindowReads = AtomicInteger(0)
+        val evaluationGenerations = CopyOnWriteArrayList<Long>()
+        val evaluationAllowed = AtomicReference<Boolean>()
+        val notificationGenerations = CopyOnWriteArrayList<Long>()
+        val firstEvaluation = AtomicBoolean(true)
+        val firstNotification = AtomicBoolean(true)
+        val oldEvaluationEntered = CountDownLatch(1)
+        val oldEvaluationCompleted = CountDownLatch(1)
+        val oldEvaluationRelease = CountDownLatch(1)
+        val oldNotificationEntered = CountDownLatch(1)
+        val oldNotificationCompleted = CountDownLatch(1)
+        val oldNotificationRelease = CountDownLatch(1)
+        val latestEvaluation = CountDownLatch(1)
+
+        blocker.screenInteractiveProvider = { true }
+        blocker.keyguardLockedProvider = { false }
+        blocker.applicationWindowSnapshotProvider = {
+            applicationWindowReads.incrementAndGet()
+            AppRuleBlocker.ApplicationWindowSnapshot(
+                packages = setOf(TARGET_PACKAGE),
+                hasApplicationWindow = true,
+                hasUnknownApplicationWindow = false,
+                applicationWindowCount = 1
+            )
+        }
+        blocker.activeWindowSnapshotProvider = {
+            AppRuleBlocker.ActiveWindowSnapshot(packageName = TARGET_PACKAGE)
+        }
+        blocker.visibleApplicationCheckPostDelayed = { runnable, _ ->
+            postedCallbacks += runnable
+            true
+        }
+        // Keep the virtual callback list intact so a callback from the first setup can be
+        // delivered deliberately after the second setup.
+        blocker.visibleApplicationCheckRemoveCallbacks = {}
+        blocker.evaluationResultObserver = { evaluation ->
+            val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
+            evaluationGenerations += generation
+            evaluationAllowed.set(evaluation.isAllowed)
+            if (firstEvaluation.compareAndSet(true, false)) {
+                oldEvaluationEntered.countDown()
+                try {
+                    oldEvaluationRelease.await()
+                } finally {
+                    oldEvaluationCompleted.countDown()
+                }
+            } else {
+                latestEvaluation.countDown()
+            }
+        }
+        blocker.notificationPostObserver = { model ->
+            val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
+            if (firstNotification.compareAndSet(true, false)) {
+                oldNotificationEntered.countDown()
+                try {
+                    oldNotificationRelease.await()
+                } finally {
+                    oldNotificationCompleted.countDown()
+                }
+            } else {
+                notificationGenerations += generation
+            }
+        }
+        fun installDeterministicRuntime() {
+            val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+            check(coordinator.accept(snapshotWithGlobalDeny())) {
+                "could not install the real-host snapshot"
+            }
+            // Keep setup/teardown real while making the framework read deterministic on the
+            // attached test service, which is not an actual AccessibilityService connection.
+            setField(blocker, "foregroundObservationSource", null)
+            setField(blocker, "launchablePackages", setOf(TARGET_PACKAGE))
+            val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
+            invokePrivate(blocker, "submitRuntimePublication", generation)
+        }
+
+        try {
+            blocker.setup(service)
+            blocker.setupReceivers()
+            installDeterministicRuntime()
+            check(oldNotificationEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "first real-host setup did not reach notification publication"
+            }
+            val firstCallback = checkNotNull(postedCallbacks.firstOrNull()) {
+                "first real-host setup did not post a visible handler callback"
+            }
+            // Use the real accessibility event as the first-generation trigger; retain the
+            // setup-posted callback so it can be delivered as stale work after reconnect.
+            sendWindowEvent(blocker, TARGET_PACKAGE)
+            check(oldEvaluationEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "first real-host setup did not reach evaluator publication"
+            }
+            val readsBeforeDestroy = applicationWindowReads.get()
+
+            blocker.onDestroy()
+            check(oldEvaluationCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "destroy did not complete the cancelled old evaluator callback"
+            }
+            check(oldNotificationCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "destroy did not complete the cancelled old notification callback"
+            }
+            oldEvaluationRelease.countDown()
+            oldNotificationRelease.countDown()
+
+            blocker.setup(service)
+            blocker.setupReceivers()
+            installDeterministicRuntime()
+            val latestGeneration = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
+
+            // The first setup's callback is now stale. It must not perform another framework
+            // window read or enqueue a decision into the latest worker.
+            firstCallback.run()
+            check(applicationWindowReads.get() == readsBeforeDestroy) {
+                "stale first-generation handler performed a window read"
+            }
+
+            sendWindowEvent(blocker, TARGET_PACKAGE)
+            check(latestEvaluation.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "latest real-host setup did not publish an evaluator result"
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            check(evaluationGenerations.last() == latestGeneration) {
+                "latest evaluator publication used a stale generation: $evaluationGenerations"
+            }
+            check(notificationGenerations.isNotEmpty()) {
+                "latest real-host setup did not publish a notification"
+            }
+            check(notificationGenerations.all { it == latestGeneration }) {
+                "notification publication escaped the latest generation: $notificationGenerations"
+            }
+            check(awaitNonEmpty(service.startedActivities)) {
+                "latest real-host setup did not publish its warning; allowed=" +
+                    evaluationAllowed.get()
+            }
+        } finally {
+            blocker.onDestroy()
+            runCatching {
+                runBlocking {
+                    service.dataStoreManager.updateAppRuleSnapshot(originalSnapshot)
+                }
+            }
+        }
+    }
+
+    @Test
     fun ticket15MeasuresBoundedDestroyAndReconnectsOnlyTheLatestGeneration() {
         val nowMs = System.currentTimeMillis()
         val useDayId = ConfigurableUseDayCalculator().idAt(nowMs)
         val repository = DestroyRaceRepository()
+        runBlocking {
+            repository.startSession(
+                useDayId = useDayId,
+                packageName = TARGET_PACKAGE,
+                startedAtMs = nowMs - SESSION_DURATION_MS - 1_000L
+            )
+        }
         val durableSessionId = runBlocking {
             repository.startSession(
                 useDayId = useDayId,
@@ -55,6 +222,9 @@ class AppRuleBlockerDestroyFaultRedTest {
                 endedAtMs = nowMs,
                 usage = emptyList<ForegroundUsageCheckpoint>()
             )
+        }
+        check(repository.openSessionCount(useDayId) == 1) {
+            "the bounded destroy race must begin with an open durable session"
         }
 
         val service = recordingService()
@@ -96,6 +266,10 @@ class AppRuleBlockerDestroyFaultRedTest {
                 )
             }
         }
+        // The candidate deadline is measured by an injected monotonic clock. Every read advances
+        // one deterministic tick, so the assertion does not use a wall-clock tolerance.
+        val injectedElapsedMs = AtomicLong(0L)
+        blocker.elapsedRealtimeMsProvider = { injectedElapsedMs.getAndAdd(10L) }
         val refreshMutex = getField(blocker, "refreshMutex") as Mutex
 
         // Hold the publication mutex so a refresh is definitely in-flight when invalidation
@@ -135,13 +309,12 @@ class AppRuleBlockerDestroyFaultRedTest {
         }
         check(refreshStarted) { "refresh did not enter the tracked lifecycle work set" }
 
-        val destroyStartedAtMs = android.os.SystemClock.elapsedRealtime()
         val measurement = blocker.onDestroyForMeasurement(totalDrainBudgetMs = 150L)
-        val destroyElapsedMs =
-            android.os.SystemClock.elapsedRealtime() - destroyStartedAtMs
-
-        check(destroyElapsedMs <= 1_000L) {
-            "candidate destroy measurement was not bounded: ${destroyElapsedMs}ms"
+        check(measurement.deadlineElapsedMs - measurement.requestedAtElapsedMs == 150L) {
+            "candidate measurement did not use the injected absolute deadline"
+        }
+        check(measurement.completedAtElapsedMs >= measurement.deadlineElapsedMs) {
+            "candidate timeout did not reach its injected absolute deadline"
         }
         check(measurement.timedOut) { "blocked candidate drain unexpectedly completed" }
         check(measurement.workAtInvalidation.refreshes > 0) {
@@ -186,6 +359,17 @@ class AppRuleBlockerDestroyFaultRedTest {
             "notification side effect occurred after destroy: ${notificationPostings.size}"
         }
 
+        // Reconnect recovery is deliberately the documented durable path. It closes the open
+        // row from the durable fake; the new blocker below must read it afresh rather than reuse
+        // the cancelled worker's in-memory session persistence.
+        runBlocking { repository.recoverOpenSessions(useDayId) }
+        check(repository.recoverOpenSessionsCount.get() == 1) {
+            "reconnect did not use recoverOpenSessions"
+        }
+        check(repository.openSessionCount(useDayId) == 0) {
+            "recoverOpenSessions left the durable session unfinished"
+        }
+
         val recoveryEvaluated = CountDownLatch(1)
         val recoveryEvaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
         val recoveryService = recordingService()
@@ -204,7 +388,8 @@ class AppRuleBlockerDestroyFaultRedTest {
                 "reconnect did not publish the new generation evaluation"
             }
             check(recoveryEvaluations.single().isAllowed.not()) {
-                "reconnect did not evaluate the durable session as denied"
+                "reconnect did not evaluate the durable session as denied: " +
+                    recoveryEvaluations.single()
             }
             InstrumentationRegistry.getInstrumentation().waitForIdleSync()
             check(repository.successfulReadCount.get() >= 3) {
@@ -227,7 +412,7 @@ class AppRuleBlockerDestroyFaultRedTest {
             repository.startSession(
                 useDayId = useDayId,
                 packageName = TARGET_PACKAGE,
-                startedAtMs = nowMs - SESSION_DURATION_MS
+                startedAtMs = nowMs - SESSION_DURATION_MS - 1_000L
             )
         }
         runBlocking {
@@ -258,16 +443,22 @@ class AppRuleBlockerDestroyFaultRedTest {
             snapshot = snapshotWithSpentTargetAllowance(),
             observer = { evaluation ->
                 evaluatorEntered.countDown()
-                evaluatorRelease.await()
-                evaluations += evaluation
-                evaluatorCompleted.countDown()
+                try {
+                    evaluatorRelease.await()
+                    evaluations += evaluation
+                } finally {
+                    evaluatorCompleted.countDown()
+                }
             }
         ).apply {
             notificationPostObserver = { model ->
                 notificationPostEntered.countDown()
-                notificationPostRelease.await()
-                notificationPostings += model
-                notificationPostCompleted.countDown()
+                try {
+                    notificationPostRelease.await()
+                    notificationPostings += model
+                } finally {
+                    notificationPostCompleted.countDown()
+                }
             }
             recheckPostDelayed = scheduler::post
             recheckRemoveCallback = scheduler::remove
@@ -409,10 +600,13 @@ class AppRuleBlockerDestroyFaultRedTest {
             )
             try {
                 sendWindowEvent(recoveryBlocker, TARGET_PACKAGE)
-                if (recoveryEvaluations.singleOrNull()?.isAllowed != false) {
-                    failures += "reconnect did not evaluate the durable session as denied"
+                if (!awaitNonEmpty(recoveryEvaluations)) {
+                    failures += "reconnect did not publish a fresh durable evaluation"
+                } else if (recoveryEvaluations.single().isAllowed) {
+                    failures += "reconnect did not evaluate the durable session as denied: " +
+                        recoveryEvaluations.single()
                 }
-                if (recoveryService.startedActivities.isEmpty()) {
+                if (!awaitNonEmpty(recoveryService.startedActivities)) {
                     failures += "reconnect did not produce the durable denial warning"
                 }
                 if (repository.successfulReadCount.get() == 0) {
@@ -844,7 +1038,7 @@ class AppRuleBlockerDestroyFaultRedTest {
                 useDayId = useDayId,
                 packageName = packageName,
                 startedAtMs = startedAtMs,
-                endedAtMs = startedAtMs
+                endedAtMs = null
             )
             durableWriteCount.incrementAndGet()
             return id
@@ -889,6 +1083,23 @@ class AppRuleBlockerDestroyFaultRedTest {
         }
 
         override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) = Unit
+
+        val recoverOpenSessionsCount = AtomicInteger(0)
+
+        override suspend fun recoverOpenSessions(useDayId: String) {
+            recoverOpenSessionsCount.incrementAndGet()
+            synchronized(durableSessions) {
+                durableSessions.removeAll(
+                    durableSessions.filter { session ->
+                        session.useDayId == useDayId && session.endedAtMs == null
+                    }.toSet()
+                )
+            }
+        }
+
+        fun openSessionCount(useDayId: String): Int = synchronized(durableSessions) {
+            durableSessions.count { it.useDayId == useDayId && it.endedAtMs == null }
+        }
 
         fun releaseNotificationRead() {
             notificationReadGate.countDown()
