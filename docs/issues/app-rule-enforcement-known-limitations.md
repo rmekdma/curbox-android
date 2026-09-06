@@ -216,6 +216,17 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Acceptance criteria:** met. The deterministic tests force the source interleaving, concurrent replacement and production handoff cases, then verify final snapshot, recheck generation, accepted revision, lifecycle generation, visible evaluation, and warning or allow outcome. The focused worker regression verifies that both intended revision-4 outcomes are drained and that a delayed stale publication cannot replace the latest accepted runtime. Stress results were not used as closure evidence.
 - **Target refactor phase:** `Phase 2 serialized publication path` completed for this trigger. Ticket15 destroy/reconnect and ticket16 coordinator remain out of scope.
 
+### AR 011 Phase 3 coordinator trigger 결정 — NO-GO
+
+- **Status / Severity:** `닫힘 (NO-GO)` / `P2`
+- **Exact trigger:** 동시에 visible이고 서로 다른 independent deadline에 도달한 package들이 한 번의 scheduler wake와 visible reconciliation으로 처리될 때, 한 package의 denial 또는 다음 독립 recheck가 유실되는지 확인한다.
+- **Decision:** coordinator는 필요하지 않다. 현재 keyed package plan과 serialized worker tick은 허용 지연 안에 두 deadline을 모두 처리한다. 조건부 coordinator 티켓이나 coordinator production code를 만들지 않는다.
+- **Evidence:** [AppRuleBlockerRecheckTest.kt:1155](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L1155)의 deterministic tracer bullet은 fake wall/elapsed clocks와 callback barrier로 A/B의 due 시각을 같은 `+60,000 ms`에 맞춘다. 두 scheduler wake는 production wake path에서 visible callback 1회로 coalesce됐다. 외부 결과는 A의 denial decision과 service `startActivity` guardian launch intent, B의 `AppRulesEvaluation.isAllowed == true`, warning package가 A 하나뿐인 것, B의 다음 독립 plan이 `base + 120,000 ms`인 것으로 확인했다. Full Debug Android 13 기기 `iPlay50_mini_Pro`에서 focused test가 통과했다.
+- **Measurement boundary:** 내부 counter만 세지 않고 evaluator decision, warning package와 guardian activity intent, 다음 package별 due plan을 관찰했다. stress 또는 timing 우연에 의존하지 않고 고정 clock, 고정 snapshot, latch와 single callback 실행으로 재현한다.
+- **Residual risk:** 이 evidence는 현재 AppRuleBlocker/worker contract의 package-keyed behavior를 판정한다. OEM scheduler 변형, lifecycle host 추출과 Phase 4 cleanup contract는 검증하거나 구현하지 않았으며, 해당 변화가 생기면 이 tracer bullet을 다시 실행해야 한다.
+- **Acceptance criteria:** 충족. 독립 deadline 유실 또는 잘못된 coalescing을 외부 allow/denial로 재현하지 못했고, Phase 3 coordinator 진입 조건이 성립하지 않는다. Phase 4 판정은 ticket16에 blocked로 새로 기록하며 구현은 보류한다.
+- **Target refactor phase:** `Phase 3 coordinator decision` 완료. `Phase 4 lifecycle host`는 별도 evidence와 승인 없이는 시작하지 않는다.
+
 ## `c17677ae`에서 이미 닫힌 항목
 
 다음은 현재 커밋에서 수정됐으므로 위 미해결 목록에 다시 결함으로 올리지 않는다. 회귀가 발견되면 이 문서에 새 증거와 함께 별도 항목을 추가한다.
