@@ -470,7 +470,24 @@ class AppRuleBlocker {
         }
     }
 
+    /** Fresh connection initialization only; setup has just reset its connection-scoped sequencer. */
     private fun createDecisionWorker(connectionGeneration: Long): SerializedDecisionWorker {
+        val acceptedRuntime = synchronized(runtimeLock) {
+            val initialRevision = RuntimeRevision(0L)
+            latestRuntimeRevision = initialRevision
+            AcceptedRuleRuntimeSnapshot(
+                runtime = ruleRuntimeSnapshotLocked(),
+                runtimeRevision = initialRevision
+            )
+        }
+        return createDecisionWorker(connectionGeneration, acceptedRuntime)
+    }
+
+    /** Same-lifecycle recovery must inherit host freshness instead of reinitializing it. */
+    private fun createDecisionWorker(
+        connectionGeneration: Long,
+        acceptedRuntime: AcceptedRuleRuntimeSnapshot
+    ): SerializedDecisionWorker {
         decisionWorker?.stop(
             RecoveryOnlyStop(
                 requestedAtElapsedMs = observationElapsedRealtimeMs(),
@@ -478,16 +495,9 @@ class AppRuleBlocker {
                 lifecycleGeneration = LifecycleGeneration(connectionGeneration)
             )
         )
-        // The initial accepted snapshot is state, not a runtime publication. Zero is the
-        // nonnegative sentinel before the first source-time publication reservation.
-        val runtimeRevision = RuntimeRevision(0L)
-        latestRuntimeRevision = runtimeRevision
         val worker = SerializedDecisionWorker(
             lifecycleGeneration = LifecycleGeneration(connectionGeneration.coerceAtLeast(1L)),
-            acceptedRuntime = AcceptedRuleRuntimeSnapshot(
-                runtime = ruleRuntimeSnapshot(),
-                runtimeRevision = runtimeRevision
-            ),
+            acceptedRuntime = acceptedRuntime,
             repository = sessionRepository,
             outcomeSink = object : DecisionOutcomeSink {
                 override fun publish(outcome: DecisionOutcome) {
@@ -519,10 +529,22 @@ class AppRuleBlocker {
             decisionWorker = null
         }
         check(::sessionRepository.isInitialized) { "app-rule session repository is not ready" }
-        return createDecisionWorker(connectionGeneration)
+        return createDecisionWorker(
+            connectionGeneration = connectionGeneration,
+            acceptedRuntime = synchronized(runtimeLock) {
+                AcceptedRuleRuntimeSnapshot(
+                    runtime = ruleRuntimeSnapshotLocked(),
+                    runtimeRevision = latestRuntimeRevision
+                )
+            }
+        )
     }
 
     private fun ruleRuntimeSnapshot(): RuleRuntimeSnapshot = synchronized(runtimeLock) {
+        ruleRuntimeSnapshotLocked()
+    }
+
+    private fun ruleRuntimeSnapshotLocked(): RuleRuntimeSnapshot =
         RuleRuntimeSnapshot(
             snapshot = snapshot.snapshot(),
             resetTime = resetTime,
@@ -535,7 +557,6 @@ class AppRuleBlocker {
             ),
             usageTrackingDecision = usageTrackingDecision
         )
-    }
 
     private fun applyAndSubmitRuntimePublication(
         connectionGeneration: Long,
