@@ -798,14 +798,19 @@ F-Droid debug compile/build scope is recorded below.
 Verification record for this implementation (JBR 21 at
 `C:\Users\DELL\.jdks\jbr-21.0.11`): the focused
 `SerializedDecisionWorkerTest` passed all 20 tests and `testFullDebugUnitTest` passed all 347
-tests. `compileFullDebugAndroidTestKotlin` passed, and
+tests. `compileFullDebugKotlin compileFullDebugAndroidTestKotlin` passed, and
 `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed. On the attached iPlay50
-mini Pro Android 13 device, the 20-test destroy/fault class had 16 ticket15 deterministic passes
-and 4 adjacent fault/cancellation RED tests. The complete `connectedFullDebugAndroidTest` run
-reached 87 tests with 31 failures: 1 debug package-id fixture, 2 callback-flush, 4 destroy
-fault/cancellation, 6 long-boundary, 16 recheck/visibility, 1 virtual-doze wake, and 1 Guardian
-lifecycle failure. These remain residual regression evidence rather than ticket15 closure failures;
-the ticket15-specific deterministic tests are green.
+mini Pro Android 13 device, the ticket11–15 focused instrumentation set had 61 tests with 43
+passes: `AppRuleBlockerRecheckTest` 22/36, `AppRuleBlockerVirtualDozeWakeRedTest` 1/1,
+`AppRuleBlockerDestroyFaultRedTest` 16/20, and `AppRuleBlockerRefreshOrderingRedTest` 4/4.
+The two reproduced lifecycle-boundary tests passed; the Recheck fixture now explicitly supplies
+unlocked display providers so its evidence classification is deterministic. The destroy/fault
+class retains 4 adjacent fault/cancellation RED tests. The complete
+`connectedFullDebugAndroidTest` run reached 87 tests with 28 failures: 1 debug package-id
+fixture, 2 callback-flush, 4 destroy fault/cancellation, 6 long-boundary, 14 recheck/visibility,
+and 1 Guardian lifecycle failure; the virtual-doze wake test is green. These remain residual
+regression evidence rather than ticket15 closure failures; the ticket15-specific deterministic
+tests are green.
 
 ### 6. Phase 0 RED contract → future invariant mapping
 

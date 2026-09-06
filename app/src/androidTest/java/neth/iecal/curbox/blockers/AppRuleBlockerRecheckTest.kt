@@ -704,6 +704,8 @@ class AppRuleBlockerRecheckTest {
                     packageName = if (activeRootReads == 1) OTHER_PACKAGE else PACKAGE
                 )
             }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
             applicationWindowSnapshotProvider = {
                 applicationWindowReads++
                 AppRuleBlocker.ApplicationWindowSnapshot(

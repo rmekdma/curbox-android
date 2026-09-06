@@ -3609,7 +3609,7 @@ class AppRuleBlocker {
         if (!isNonessentialPackage(packageName)) return false
         val recorded = synchronized(runtimeLock) {
             if (!isReadyForChecks() ||
-                lifecycleGeneration.get() != expectedConnectionGeneration ||
+                lifecycleGeneration.get().coerceAtLeast(1L) != expectedConnectionGeneration ||
                 recheckGeneration.get() != expectedRecheckGeneration ||
                 foregroundEvidenceSuspended != requireSuspended
             ) return false
