@@ -1,12 +1,16 @@
 package neth.iecal.curbox.blockers
 
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import neth.iecal.curbox.data.db.AppDatabase
+import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
@@ -33,6 +37,187 @@ import java.util.concurrent.atomic.AtomicReference
 /** Phase 0 RED contracts for destroy drain and fault continuation. */
 @RunWith(AndroidJUnit4::class)
 class AppRuleBlockerDestroyFaultRedTest {
+    @Test
+    fun ticket15MeasuresBoundedDestroyAndReconnectsOnlyTheLatestGeneration() {
+        val nowMs = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(nowMs)
+        val repository = DestroyRaceRepository()
+        val durableSessionId = runBlocking {
+            repository.startSession(
+                useDayId = useDayId,
+                packageName = TARGET_PACKAGE,
+                startedAtMs = nowMs - SESSION_DURATION_MS
+            )
+        }
+        runBlocking {
+            repository.commitSessionCheckpoint(
+                id = durableSessionId,
+                endedAtMs = nowMs,
+                usage = emptyList<ForegroundUsageCheckpoint>()
+            )
+        }
+
+        val service = recordingService()
+        val evaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
+        val notificationPostings = CopyOnWriteArrayList<LiveRuleNotificationModel>()
+        val notificationPostEntered = CountDownLatch(1)
+        val notificationPostRelease = CountDownLatch(1)
+        val callbackEntered = CountDownLatch(1)
+        val callbackRelease = CountDownLatch(1)
+        val blockWindowProvider = AtomicReference(false)
+        val callbackThread = AtomicReference<Thread?>(null)
+        val decisionThread = AtomicReference<Thread?>(null)
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithSpentTargetAllowance(),
+            observer = { evaluation -> evaluations += evaluation }
+        ).apply {
+            notificationPostObserver = { model ->
+                notificationPostEntered.countDown()
+                notificationPostRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                notificationPostings += model
+            }
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                callbackThread.set(Thread(runnable, "ticket15-visible-callback"))
+                true
+            }
+            visibleApplicationCheckRemoveCallbacks = {}
+            applicationWindowSnapshotProvider = {
+                if (blockWindowProvider.get()) {
+                    callbackEntered.countDown()
+                    callbackRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                }
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(TARGET_PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false,
+                    applicationWindowCount = 1
+                )
+            }
+        }
+        val refreshMutex = getField(blocker, "refreshMutex") as Mutex
+
+        // Hold the publication mutex so a refresh is definitely in-flight when invalidation
+        // begins. The worker decision and notification use separate deterministic repository gates.
+        runBlocking { refreshMutex.lock() }
+        val refreshReceiver = getField(blocker, "refreshReceiver") as BroadcastReceiver
+        refreshReceiver.onReceive(
+            service,
+            Intent(AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
+        )
+        val refreshStarted = awaitAtomicPositive(
+            getField(blocker, "inFlightRefreshes") as AtomicInteger
+        )
+
+        blocker.updateLiveNotification(TARGET_PACKAGE)
+        check(repository.notificationReadStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            "notification did not reach its deterministic read gate"
+        }
+
+        val decision = Thread {
+            sendWindowEvent(blocker, TARGET_PACKAGE)
+        }
+        decisionThread.set(decision)
+        decision.start()
+        check(repository.secondReadStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            "decision did not reach its deterministic read gate"
+        }
+
+        blockWindowProvider.set(true)
+        invokePrivate(blocker, "postVisibleApplicationCheck", 0L, 0L)
+        val callback = checkNotNull(callbackThread.get()) {
+            "visible callback was not captured"
+        }
+        callback.start()
+        check(callbackEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            "visible callback did not reach its deterministic provider gate"
+        }
+        check(refreshStarted) { "refresh did not enter the tracked lifecycle work set" }
+
+        val destroyStartedAtMs = android.os.SystemClock.elapsedRealtime()
+        val measurement = blocker.onDestroyForMeasurement(totalDrainBudgetMs = 150L)
+        val destroyElapsedMs =
+            android.os.SystemClock.elapsedRealtime() - destroyStartedAtMs
+
+        check(destroyElapsedMs <= 1_000L) {
+            "candidate destroy measurement was not bounded: ${destroyElapsedMs}ms"
+        }
+        check(measurement.timedOut) { "blocked candidate drain unexpectedly completed" }
+        check(measurement.workAtInvalidation.refreshes > 0) {
+            "refresh was not included in the destroy measurement"
+        }
+        check(measurement.workAtInvalidation.notifications > 0) {
+            "notification was not included in the destroy measurement"
+        }
+        check(measurement.workAtInvalidation.callbacks > 0) {
+            "handler callback was not included in the destroy measurement"
+        }
+        check(measurement.workerResult?.timedOut == true) {
+            "final in-flight decision did not report the absolute deadline timeout"
+        }
+        check(measurement.workerResult?.durableRecoveryRequired == true) {
+            "timed-out durable decision was not marked for recovery"
+        }
+
+        // Release every barrier only after destroy. Generation invalidation must suppress the
+        // evaluator observer, warning, notification publication, and the callback's decision.
+        repository.releaseDecisionRead()
+        repository.releaseNotificationRead()
+        callbackRelease.countDown()
+        refreshMutex.unlock()
+        decisionThread.get()?.join(WAIT_TIMEOUT_MS)
+        callback.join(WAIT_TIMEOUT_MS)
+        check(
+            awaitAtomicZero(getField(blocker, "inFlightRefreshes") as AtomicInteger) &&
+                awaitAtomicZero(getField(blocker, "inFlightNotifications") as AtomicInteger) &&
+                awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)
+        ) {
+            "tracked async work did not finish after its post-destroy barriers were released"
+        }
+
+        check(evaluations.isEmpty()) {
+            "evaluator side effect occurred after destroy: ${evaluations.size}"
+        }
+        check(service.startedActivities.isEmpty()) {
+            "warning activity occurred after destroy"
+        }
+        check(notificationPostings.isEmpty()) {
+            "notification side effect occurred after destroy: ${notificationPostings.size}"
+        }
+
+        val recoveryEvaluated = CountDownLatch(1)
+        val recoveryEvaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
+        val recoveryService = recordingService()
+        val recoveryBlocker = configureBlocker(
+            repository = repository,
+            service = recoveryService,
+            snapshot = snapshotWithSpentTargetAllowance(),
+            observer = { evaluation ->
+                recoveryEvaluations += evaluation
+                recoveryEvaluated.countDown()
+            }
+        )
+        try {
+            sendWindowEvent(recoveryBlocker, TARGET_PACKAGE)
+            check(recoveryEvaluated.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "reconnect did not publish the new generation evaluation"
+            }
+            check(recoveryEvaluations.single().isAllowed.not()) {
+                "reconnect did not evaluate the durable session as denied"
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            check(repository.successfulReadCount.get() >= 3) {
+                "reconnect did not perform a fresh durable read"
+            }
+            check(awaitNonEmpty(recoveryService.startedActivities)) {
+                "latest reconnect generation did not publish its warning"
+            }
+        } finally {
+            recoveryBlocker.onDestroy()
+        }
+    }
+
     @Test
     fun inFlightDecisionDestroyHasNoPostDestroySideEffectsAndReconnectRecoversDurableState() {
         val nowMs = System.currentTimeMillis()
@@ -573,6 +758,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         evaluationResultObserver = observer
         setField(this, "service", service)
         setField(this, "sessionRepository", repository)
+        setField(this, "usageResetRepository", RoomUsageResetRepository(AppDatabase.getInstance(service)))
         setField(this, "enforcement", AppRuleEnforcement(repository))
         setField(this, "setupReady", true)
         setField(this, "launchablePackages", setOf(TARGET_PACKAGE))
@@ -810,6 +996,33 @@ class AppRuleBlockerDestroyFaultRedTest {
     private fun awaitBeforeDeadline(latch: CountDownLatch, deadlineMs: Long): Boolean {
         val remainingMs = (deadlineMs - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
         return latch.await(remainingMs, TimeUnit.MILLISECONDS)
+    }
+
+    private fun awaitAtomicPositive(counter: AtomicInteger): Boolean {
+        val deadlineMs = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+        while (android.os.SystemClock.elapsedRealtime() < deadlineMs) {
+            if (counter.get() > 0) return true
+            Thread.yield()
+        }
+        return counter.get() > 0
+    }
+
+    private fun awaitAtomicZero(counter: AtomicInteger): Boolean {
+        val deadlineMs = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+        while (android.os.SystemClock.elapsedRealtime() < deadlineMs) {
+            if (counter.get() == 0) return true
+            Thread.yield()
+        }
+        return counter.get() == 0
+    }
+
+    private fun awaitNonEmpty(values: List<*>): Boolean {
+        val deadlineMs = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+        while (android.os.SystemClock.elapsedRealtime() < deadlineMs) {
+            if (values.isNotEmpty()) return true
+            Thread.yield()
+        }
+        return values.isNotEmpty()
     }
 
     private fun joinBeforeDeadline(thread: Thread, deadlineMs: Long) {

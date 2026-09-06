@@ -772,6 +772,30 @@ reflection field와 temporary lambda는 migration 중 private internal test seam
 - reconnect recovery가 읽은 durable session은 현재 use-day와 generation filter를 지키고,
   destroy 중 취소된 in-memory tail을 실제 사용으로 소급하지 않는다.
 
+Ticket15 evidence (2026-09-06): `AppRuleBlocker.destroyInternal()` invalidates the lifecycle
+and generation before cleanup, tracks in-flight refresh, notification and callback work, and
+keeps production teardown on `RecoveryOnlyStop`. The candidate-only
+`onDestroyForMeasurement()` path shares one `TotalDrainDeadline` with worker decision drain and
+reports completion or timeout without changing the D6 production choice. Deterministic barrier
+tests hold a final decision, refresh mutex, notification read and handler callback together;
+after invalidation they observe zero evaluator, warning, notification and handler publication
+effects, then release the barriers and verify reconnect-only durable recovery. Worker tests also
+replace generations 1, 2 and 3 and verify that only the latest surviving generation publishes.
+The candidate budget in these tests is measurement input only; no production 2-second or
+5-second timeout was selected. The focused JVM regression and Full, Playstore and F-Droid debug
+compile/build scope is recorded in the ticket handoff.
+
+Verification record for this implementation (JBR 21 at
+`C:\Users\DELL\.jdks\jbr-21.0.11`): `testFullDebugUnitTest` passed with 346 tests;
+the focused `SerializedDecisionWorkerTest`, `AppRuleWallClockSchedulerTest` and
+`AppRuleBlockerSubmissionRecoveryTest` command passed; `compileFullDebugAndroidTestKotlin`
+passed; and `assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed. On the
+attached iPlay50 mini Pro Android 13 device, the ticket15 barrier test passed and the four-test
+ticket14 refresh-ordering class passed. The complete `connectedFullDebugAndroidTest` run reached
+73 tests but had 30 failures from existing RED contracts, stale fixture dependencies and the
+debug package-id example; it is retained as residual regression evidence rather than ticket15
+closure evidence.
+
 ### 6. Phase 0 RED contract → future invariant mapping
 
 | Ticket | Phase 0 RED evidence | Phase 1/2에서 green이 되어야 하는 invariant |

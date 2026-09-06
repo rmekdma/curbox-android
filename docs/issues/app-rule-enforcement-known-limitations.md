@@ -168,18 +168,19 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 
 ### AR 008 shutdown drain 시간과 완료 보장 미측정
 
-- **Status / Severity:** `계획된 부채` / `P2`
+- **Status / Severity:** `대표 측정 완료, 운영 숫자 선택 보류` / `P2`
 - **Exact trigger:** service가 in flight인 rule evaluation, refresh, notification job 또는 scheduled callback을 가진 채 `onDestroy()`를 호출한다.
-- **Current behavior:** `AppRuleBlocker.onDestroy()`가 먼저 lifecycle flag를 내리고 예약 callback과 scope를 cancel한 뒤 receiver를 해제한다. app rule scope의 job을 `cancelAndJoin`해 실제 종료될 때까지 기다리거나, 종료 시점에 남은 decision 수와 persistence 완료를 기록하지 않는다. callback의 readiness guard로 stale activity를 막는 의도는 있으나 drain 시간과 모든 side effect 부재를 측정한 테스트가 없다.
-- **Impact:** 정상적인 stale activity는 방지돼도 진행 중인 notification 또는 decision이 취소되는 시점, service teardown부터 Room 작업 종료까지의 시간, 재연결 후 복구에 남겨야 할 상태가 불명확하다. 느린 저장소에서 lifecycle 회귀가 생기면 원인을 관찰하기 어렵다.
+- **Current behavior:** `AppRuleBlocker.onDestroy()`는 lifecycle flag와 generation을 먼저 무효화하고, 예약 callback과 scope를 취소하며, worker를 `RecoveryOnlyStop`으로 중단한 뒤 receiver를 해제한다. `onDestroyForMeasurement()`는 production timeout으로 사용하지 않는 candidate-only `DeadlineDrainStop`을 통해 하나의 absolute deadline에서 worker decision, refresh, notification과 callback의 잔여 작업을 측정한다.
+- **Impact:** production은 D6 승인에 따라 아직 numeric drain budget이나 completion guarantee를 선택하지 않았다. 따라서 deadline 측정은 운영 threshold가 아니며, timeout 뒤 unfinished durable session state는 새 연결의 `AppUsageTracker.setup()`이 호출하는 `recoverOpenSessions()`와 generation/use-day filter를 통해서만 복구된다. 측정된 in-memory outcome이나 callback은 새 연결로 재사용하지 않는다.
 - **Evidence:**
-  - [AppRuleBlocker.kt:537](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L537)부터 [AppRuleBlocker.kt:556](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L556)의 cancel과 unregister
-  - [AppRuleBlocker.kt:413](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L413)부터 [AppRuleBlocker.kt:416](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L416)의 background notification job
-  - [AppBlockerService.kt:259](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L259)부터 [AppBlockerService.kt:303](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L303)의 feature별 cleanup containment
-- **Mitigation or decision needed:** in flight 작업 수, 시작과 종료 시각, cancellation 원인을 계측하고 bounded drain timeout을 결정한다. 안전하게 join할 수 있는 job과 다음 연결에서 복구해야 하는 durable 작업을 구분한다. AppRuleBlocker cleanup과 service cleanup의 순서를 하나의 lifecycle 계약으로 만든다.
-- **Acceptance criteria:** 지연된 repository와 반복적인 connect 및 destroy를 사용한 테스트에서 destroy 이후 evaluator, warning activity, handler callback이 0건이다. drain 시간이 정해진 timeout 안에 끝나거나, timeout 후 남는 작업이 명시된 recovery 경로로만 처리된다. 측정값과 선택한 timeout이 계획 문서에 기록된다.
-- **Target refactor phase:** `Phase 2`에서 cancellation과 drain 계약을 측정하고, `Phase 4` lifecycle host는
-  계획의 trigger가 재현될 때만 수행한다.
+  - [AppRuleBlocker.kt](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt)의 `destroyInternal()`, `DestroyDrainMeasurement`와 refresh/notification/callback counters
+  - [SerializedDecisionWorker.kt](../../app/src/main/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorker.kt)의 `TotalDrainDeadline`, `DeadlineDrainStop`과 worker drain snapshot
+  - [AppRuleBlockerDestroyFaultRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt)의 barrier 기반 ticket15 measurement: final decision, refresh, notification, callback, zero post-destroy effects와 reconnect recovery
+  - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 absolute deadline timeout/completion과 repeated generation replacement tests
+  - [AppUsageTracker.kt](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt)의 `recoverOpenSessions()` reconnect recovery path
+- **Mitigation or decision needed:** production에서는 승인된 numeric selection 전까지 `RecoveryOnlyStop`을 유지한다. candidate measurement의 timeout은 worker의 unfinished work를 durable recovery 대상으로 남기고, old generation의 evaluator, warning, notification과 handler publication은 suppress한다. 운영 timeout 숫자와 `DeadlineDrainStop` production 전환은 대표 device latency 측정과 별도 explicit approval 뒤에 결정한다.
+- **Acceptance criteria:** met for the deterministic measurement contract. Delayed repository barriers verify that destroy returns within the candidate bounded measurement, evaluator/warning/notification/handler side effects after invalidation are zero, timeout work is recovered only by reconnect, and repeated worker generations publish only generations 2 and 3 after generations 1 is stopped. No production 2-second or 5-second timeout was selected.
+- **Target refactor phase:** `Phase 2` ticket15 measurement complete; numeric selection remains a D6 follow-up, and `Phase 4` lifecycle host is still out of scope.
 
 ### AR 009 AppRuleBlocker의 책임 집중
 

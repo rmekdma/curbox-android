@@ -15,6 +15,7 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.UseDayResetTime
+import java.util.concurrent.atomic.AtomicInteger
 
 /** The complete rule inputs accepted by one serialized decision worker generation. */
 data class RuleRuntimeSnapshot(
@@ -136,11 +137,53 @@ data class RecoveryOnlyStop(
     }
 }
 
+/** One absolute elapsed-time endpoint shared by every candidate drain stage. */
+data class TotalDrainDeadline(
+    val elapsedRealtimeMs: Long
+) {
+    init {
+        require(elapsedRealtimeMs >= 0L) { "drain deadline must not be negative" }
+    }
+}
+
+/** Candidate-only drain mode. Production remains recovery-only until D6 selects a budget. */
+data class DeadlineDrainStop(
+    override val requestedAtElapsedMs: Long,
+    val deadline: TotalDrainDeadline,
+    override val reason: StopReason,
+    override val lifecycleGeneration: LifecycleGeneration
+) : StopRequest() {
+    init {
+        require(requestedAtElapsedMs >= 0L) { "elapsed time must not be negative" }
+        require(deadline.elapsedRealtimeMs >= requestedAtElapsedMs) {
+            "drain deadline must not precede stop request"
+        }
+    }
+}
+
 sealed class DrainResult {
     data class RecoveryOnly(
         val remainingWork: Boolean,
         val durableRecoveryRequired: Boolean
     ) : DrainResult()
+
+    data class DeadlineDrain(
+        val completed: Boolean,
+        val timedOut: Boolean,
+        val remainingWork: Boolean,
+        val durableRecoveryRequired: Boolean,
+        val completedAtElapsedMs: Long
+    ) : DrainResult()
+}
+
+/** Internal measurement of queued and currently executing worker work. */
+internal data class WorkerDrainSnapshot(
+    val queuedWork: Int,
+    val inFlightWork: Int,
+    val inFlightDurableWork: Int
+) {
+    val hasWork: Boolean
+        get() = queuedWork > 0 || inFlightWork > 0
 }
 
 /**
@@ -156,6 +199,9 @@ class SerializedDecisionWorker internal constructor(
     private val outcomeSink: DecisionOutcomeSink,
     private val usageResetRepository: UsageResetRepository,
     private val workerScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    private val elapsedRealtimeMs: () -> Long = {
+        System.nanoTime() / 1_000_000L
+    },
     private val onNonFatalError: (Throwable) -> Unit = {},
     private val onEvaluation: ((
         DecisionRequest,
@@ -178,6 +224,10 @@ class SerializedDecisionWorker internal constructor(
 
     private val accepting = AtomicBoolean(true)
     private val requests = Channel<Work>(Channel.UNLIMITED)
+    private val queuedWorkCount = AtomicInteger(0)
+    private val inFlightWorkCount = AtomicInteger(0)
+    private val inFlightDurableWorkCount = AtomicInteger(0)
+    private val drainMonitor = Object()
     private val stateLock = Any()
     private val pendingUsageResetPackages = mutableSetOf<String>()
     private val wallClockBoundaries = mutableMapOf<String, Long>()
@@ -189,6 +239,9 @@ class SerializedDecisionWorker internal constructor(
     private val workerJob: Job = workerScope.launch {
         try {
             for (work in requests) {
+                inFlightWorkCount.incrementAndGet()
+                inFlightDurableWorkCount.incrementAndGet()
+                queuedWorkCount.decrementAndGet()
                 try {
                     when (work) {
                         is Work.Decision -> process(work.request)
@@ -200,10 +253,19 @@ class SerializedDecisionWorker internal constructor(
                     throw error
                 } catch (error: Throwable) {
                     reportNonFatal(error)
+                } finally {
+                    inFlightDurableWorkCount.decrementAndGet()
+                    inFlightWorkCount.decrementAndGet()
+                    synchronized(drainMonitor) {
+                        drainMonitor.notifyAll()
+                    }
                 }
             }
         } finally {
             accepting.set(false)
+            synchronized(drainMonitor) {
+                drainMonitor.notifyAll()
+            }
         }
     }
 
@@ -218,9 +280,11 @@ class SerializedDecisionWorker internal constructor(
             if (request.lifecycleGeneration != currentLifecycleGeneration) {
                 return SubmissionResult.REJECTED_STALE
             }
+            queuedWorkCount.incrementAndGet()
             return if (requests.trySend(Work.Decision(request)).isSuccess) {
                 SubmissionResult.ACCEPTED
             } else {
+                queuedWorkCount.decrementAndGet()
                 SubmissionResult.REJECTED_NOT_READY
             }
         }
@@ -243,9 +307,11 @@ class SerializedDecisionWorker internal constructor(
             return@synchronized SubmissionResult.REJECTED_OVERLAP
         }
         pendingUsageResetPackages += request.packageNames
+        queuedWorkCount.incrementAndGet()
         if (requests.trySend(Work.UsageReset(request, resetAtElapsedMs)).isSuccess) {
             SubmissionResult.ACCEPTED
         } else {
+            queuedWorkCount.decrementAndGet()
             pendingUsageResetPackages.removeAll(request.packageNames)
             SubmissionResult.REJECTED_NOT_READY
         }
@@ -274,8 +340,45 @@ class SerializedDecisionWorker internal constructor(
     internal fun isReadyForSubmission(): Boolean =
         accepting.get() && workerJob.isActive
 
+    internal fun drainSnapshot(): WorkerDrainSnapshot = WorkerDrainSnapshot(
+        queuedWork = queuedWorkCount.get(),
+        inFlightWork = inFlightWorkCount.get(),
+        inFlightDurableWork = inFlightDurableWorkCount.get()
+    )
+
     /** Production currently uses recovery-only stop; it invalidates publication immediately. */
     fun stop(request: RecoveryOnlyStop): DrainResult.RecoveryOnly {
+        invalidateForStop(request)
+        val snapshot = drainSnapshot()
+        workerJob.cancel()
+        return DrainResult.RecoveryOnly(
+            remainingWork = snapshot.hasWork,
+            durableRecoveryRequired = snapshot.hasWork
+        )
+    }
+
+    /**
+     * Candidate measurement path. It waits against one absolute endpoint, then cancels any
+     * remaining worker work. It is deliberately not used by the production lifecycle yet.
+     */
+    fun stop(request: DeadlineDrainStop): DrainResult.DeadlineDrain {
+        invalidateForStop(request)
+        val completed = awaitWorkUntil(request.deadline)
+        val completedAt = elapsedRealtimeMs().coerceAtLeast(request.requestedAtElapsedMs)
+        if (!completed) {
+            workerJob.cancel()
+        }
+        val snapshot = drainSnapshot()
+        return DrainResult.DeadlineDrain(
+            completed = completed,
+            timedOut = !completed,
+            remainingWork = snapshot.hasWork,
+            durableRecoveryRequired = snapshot.hasWork,
+            completedAtElapsedMs = completedAt
+        )
+    }
+
+    private fun invalidateForStop(request: StopRequest) {
         accepting.set(false)
         synchronized(stateLock) {
             currentLifecycleGeneration = request.lifecycleGeneration
@@ -283,11 +386,22 @@ class SerializedDecisionWorker internal constructor(
             boundarySourceOrderIdentities.clear()
         }
         requests.close()
-        workerJob.cancel()
-        return DrainResult.RecoveryOnly(
-            remainingWork = true,
-            durableRecoveryRequired = true
-        )
+    }
+
+    private fun awaitWorkUntil(deadline: TotalDrainDeadline): Boolean {
+        synchronized(drainMonitor) {
+            while (drainSnapshot().hasWork) {
+                val remainingMs = deadline.elapsedRealtimeMs - elapsedRealtimeMs()
+                if (remainingMs <= 0L) return false
+                try {
+                    drainMonitor.wait(remainingMs.coerceAtMost(50L))
+                } catch (error: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return false
+                }
+            }
+        }
+        return elapsedRealtimeMs() <= deadline.elapsedRealtimeMs
     }
 
     private suspend fun process(request: DecisionRequest) {
