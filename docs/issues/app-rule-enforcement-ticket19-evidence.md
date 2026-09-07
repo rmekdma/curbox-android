@@ -100,6 +100,69 @@ This prerequisite is test infrastructure, not approval to add production lifecyc
 future hook must be test-build constrained, keep a non-bypassable production default, and be
 documented before use.
 
+## Fresh framework feasibility run (2026-09-07)
+
+The requested device run was attempted against `T811MA256GB23418064398` (`iPlay50_mini_Pro`,
+Android 13/API 33), using the repository's supported task and shell-only observation. No
+framework tracer or production visibility seam was retained.
+
+The supported install path did establish a real framework bind once:
+
+```text
+$env:JAVA_HOME = C:\Users\DELL\.jdks\jbr-21.0.11
+.\gradlew.bat :app:installAndGrantAccessibilityFullDebug
+BUILD SUCCESSFUL
+```
+
+Immediately after that run, the secure setting contained the Curbox component and
+`accessibility_enabled` was `1`. `dumpsys accessibility` reported Curbox in `Bound services`,
+and `ps -A` reported `neth.iecal.curbox.debug:app_blocker_service` (PID `27976`).
+`dumpsys activity services` identified the same process as the component's
+`BIND_ACCESSIBILITY_SERVICE` host and reported `startForegroundCount=1`. `dumpsys activity
+broadcasts` showed dynamic `ReceiverList` entries owned by that service PID, including the
+`neth.iecal.curbox.refresh.app_rules` filter. A matching shell broadcast returned
+`Broadcast completed: result=0` and appeared in broadcast history.
+
+The controlled lifecycle results were not sufficient for ticket19:
+
+- Writing an empty enabled-service list and `accessibility_enabled=0` removed Curbox from
+  framework `Bound services`; re-enabling Curbox bound it again, but the service process kept
+  the same PID (`27976`). This is not distinct old/new process identity or complete process
+  teardown.
+- After disabling and running `adb shell am force-stop neth.iecal.curbox.debug`, writing the
+  Curbox component back did not rebind. Logcat reported the exact platform failure:
+  `ActivityManager: Unable to launch app neth.iecal.curbox.debug/11210 for service Intent {
+  cmp=neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService }: process is bad`.
+  Package state also reported `stopped=true`.
+- A clean debug uninstall/install and another enable attempt reproduced the same failure with
+  the new app UID (`11211`): `Unable to launch app ... for service ...: process is bad`.
+  During the retry, the device's accessibility manager/other installed software rewrote the
+  enabled-service list; Curbox remained only in `Enabled services` while `Bound services`
+  contained LockMeOut, with no Curbox service PID. This device behavior prevents a reliable
+  automated process-restart/rebind cycle.
+
+The debug/androidTest-only IPC design was also bounded by the platform. The existing test APK
+has no endpoint in the target `:app_blocker_service` process. `UiAutomation`/adb can read secure
+settings, `dumpsys`, process identity, receiver filters, and broadcast history, but cannot read a
+private receiver callback counter, force a worker barrier, transport a worker throwable outside
+the service's containment, or observe named cleanup/notification teardown. An
+`androidTest`-only provider or service would run in the test APK/process; it cannot become an
+IPC observer inside the target's accessibility-service process. Adding a target debug component
+and production call sites for those observations would recreate the rejected production
+visibility seams and widen the release surface. No such seam was added, and no direct attach,
+manual `onServiceConnected`, subclassing, or double-callback evidence was used.
+
+At cleanup, Curbox was removed from the enabled list and had no `:app_blocker_service` PID.
+The shell reported only SafeInCloud in the secure list; `pm list packages -u` no longer reported
+`com.teqtic.lockmeout`, so Android rejected restoring that originally observed component. This
+last device discrepancy cannot be repaired from this workspace without the missing package.
+
+Conclusion: the run remains **inconclusive, gate closed, ticket19 open**. The real framework bind
+and same-process disable/enable observation are retained as feasibility evidence only; the
+required distinct process reconnect, IPC callback/effect correlation, deterministic barriers,
+fault transport, and complete teardown were not demonstrated. No lifecycle host, coordinator,
+integration, or OEM work is authorized by this result.
+
 ## Retained valid evidence
 
 - No qualifying full-service lifecycle test remains after the rejected probe was removed. The
