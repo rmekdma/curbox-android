@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
@@ -266,6 +267,7 @@ class SerializedDecisionWorker internal constructor(
                 }
             }
         } finally {
+            discardQueuedWork()
             accepting.set(false)
             synchronized(drainMonitor) {
                 drainMonitor.notifyAll()
@@ -394,6 +396,15 @@ class SerializedDecisionWorker internal constructor(
         requests.close()
     }
 
+    private fun discardQueuedWork() {
+        while (requests.tryReceive().isSuccess) {
+            queuedWorkCount.decrementAndGet()
+        }
+        synchronized(stateLock) {
+            pendingUsageResetPackages.clear()
+        }
+    }
+
     private fun awaitWorkUntil(deadline: TotalDrainDeadline): Boolean {
         synchronized(drainMonitor) {
             while (drainSnapshot().hasWork) {
@@ -492,8 +503,7 @@ class SerializedDecisionWorker internal constructor(
         for (outcome in evaluable) {
             val packageName = outcome.packageName ?: continue
             if (!isCurrent(request, accepted)) return
-            val evaluation = try {
-                enforcement.checkSafely(
+            val evaluation = when (val result = evaluateRequestSafely(
                     snapshot = accepted.runtime.snapshot,
                     packageName = packageName,
                     useDayId = useDayId,
@@ -502,38 +512,26 @@ class SerializedDecisionWorker internal constructor(
                     useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
                     availablePackages = accepted.runtime.launchablePackages,
                     essentialExcludedPackages = accepted.runtime.evidencePolicy.essentialPackages,
-                    overrides = accepted.runtime.overrideState,
-                    onNonFatalError = ::reportNonFatal
-                )
-            } catch (error: CancellationException) {
-                if (currentCoroutineContext().isActive) {
-                    try {
-                        onRequestCancellation?.invoke(error)
-                    } catch (observerCancellation: CancellationException) {
-                        throw observerCancellation
-                    } catch (observerError: Throwable) {
-                        reportNonFatal(observerError)
-                    }
-                    return
-                }
-                throw error
+                    overrides = accepted.runtime.overrideState
+                )) {
+                null -> return
+                is SafeAppRuleEvaluationResult.Success -> result.evaluation
+                SafeAppRuleEvaluationResult.RecoverableFailure -> return
             }
             if (!isCurrent(request, accepted)) return
-            if (evaluation.evaluations.isNotEmpty()) {
-                try {
-                    runInterruptible {
-                        onEvaluation?.invoke(
-                            request,
-                            accepted,
-                            packageName,
-                            evaluation
-                        )
-                    }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    reportNonFatal(error)
+            try {
+                runInterruptible {
+                    onEvaluation?.invoke(
+                        request,
+                        accepted,
+                        packageName,
+                        evaluation
+                    )
                 }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                reportNonFatal(error)
             }
             if (!isCurrent(request, accepted)) return
             evaluatedPackages += packageName to evaluation
@@ -564,6 +562,55 @@ class SerializedDecisionWorker internal constructor(
             followUp = evaluable.firstOrNull()?.followUp ?: FollowUpKind.NONE,
             publicationStatus = PublicationStatus.PUBLISHED
         )
+    }
+
+    /**
+     * Evaluator cancellation belongs to one request child. Cancellation of the worker itself
+     * still reaches the serialized owner and terminates this generation.
+     */
+    private suspend fun evaluateRequestSafely(
+        snapshot: AppRuleSnapshot,
+        packageName: String,
+        useDayId: String,
+        nowMs: Long,
+        calculator: ConfigurableUseDayCalculator,
+        useDayGenerationStartedAtMs: Long,
+        availablePackages: Set<String>,
+        essentialExcludedPackages: Set<String>,
+        overrides: AppRuleOverrideState
+    ): SafeAppRuleEvaluationResult? {
+        val workerContext = currentCoroutineContext()
+        val owningWorkerJob = workerContext[Job]
+        val requestJob = SupervisorJob(owningWorkerJob)
+        val requestScope = CoroutineScope(workerContext + requestJob)
+        return try {
+            requestScope.async {
+                enforcement.checkSafely(
+                    snapshot = snapshot,
+                    packageName = packageName,
+                    useDayId = useDayId,
+                    nowMs = nowMs,
+                    calculator = calculator,
+                    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+                    availablePackages = availablePackages,
+                    essentialExcludedPackages = essentialExcludedPackages,
+                    overrides = overrides,
+                    onNonFatalError = ::reportNonFatal
+                )
+            }.await()
+        } catch (error: CancellationException) {
+            if (owningWorkerJob?.isActive != true) throw error
+            try {
+                onRequestCancellation?.invoke(error)
+            } catch (observerCancellation: CancellationException) {
+                throw observerCancellation
+            } catch (observerError: Throwable) {
+                reportNonFatal(observerError)
+            }
+            null
+        } finally {
+            requestJob.cancel()
+        }
     }
 
     private suspend fun publishRecheckPlan(

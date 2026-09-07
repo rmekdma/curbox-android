@@ -173,6 +173,12 @@ class AppRuleBlocker {
     )
     private val reevaluationGate = AppRuleReevaluationGate()
     @Volatile private var lastPostedNotificationModel: LiveRuleNotificationModel? = null
+    private data class PendingNotificationPublication(
+        val token: Long,
+        val model: LiveRuleNotificationModel
+    )
+    private val notificationPublicationSequence = AtomicLong(0L)
+    private var pendingNotificationPublication: PendingNotificationPublication? = null
     @Volatile private var activeGuardianPackage: String? = null
     @Volatile private var currentForegroundPackage: String? = null
     @Volatile private var lastNonessentialForegroundPackage: String? = null
@@ -359,7 +365,7 @@ class AppRuleBlocker {
     internal var screenInteractiveProvider: (() -> Boolean)? = null
     internal var keyguardLockedProvider: (() -> Boolean)? = null
     internal var evaluationResultObserver: ((AppRulesEvaluation) -> Unit)? = null
-    /** Deterministic seam for observing evaluator request cancellation at the worker boundary. */
+    /** Deterministic seam for observing evaluator request cancellation at its child boundary. */
     internal var decisionRequestCancellationObserver: ((CancellationException) -> Unit)? = null
     /** Records the foreground-evidence state mutation after a provider-backed handler read. */
     internal var foregroundEvidenceRecordObserver: ((String) -> Unit)? = null
@@ -405,6 +411,7 @@ class AppRuleBlocker {
             // A reconnect must invalidate work captured by the previous service connection.
             val nextRecheckGeneration = recheckGeneration.incrementAndGet()
             pendingWorkerEvaluations.clear()
+            pendingNotificationPublication = null
             applicationWindowProvenanceCache.beginGeneration(
                 ApplicationWindowProvenanceToken(
                     lifecycleGeneration = connectionGeneration,
@@ -1434,27 +1441,39 @@ class AppRuleBlocker {
                     }
                 )
 
-                val publication = synchronized(runtimeLock) {
+                val publicationCandidate = synchronized(runtimeLock) {
                     if (isReadyForChecks(connectionGeneration) &&
                         recheckGeneration.get() == generation &&
-                        model != lastPostedNotificationModel
+                        model != lastPostedNotificationModel &&
+                        model != pendingNotificationPublication?.model
                     ) {
-                        lastPostedNotificationModel = model
-                        reserveExternalEffectLocked(inFlightNotifications) {
+                        val candidate = PendingNotificationPublication(
+                            token = notificationPublicationSequence.incrementAndGet(),
+                            model = model
+                        )
+                        pendingNotificationPublication = candidate
+                        val permit = reserveExternalEffectLocked(inFlightNotifications) {
                             isReadyForChecks(connectionGeneration) &&
                                 recheckGeneration.get() == generation &&
-                                lastPostedNotificationModel == model
+                                pendingNotificationPublication == candidate
+                        }
+                        if (permit == null) {
+                            pendingNotificationPublication = null
+                            null
+                        } else {
+                            candidate to permit
                         }
                     } else {
                         null
                     }
                 }
-                if (publication != null) {
+                if (publicationCandidate != null) {
+                    val (candidate, publication) = publicationCandidate
                     try {
                         if (!startExternalEffect(publication) {
                                 isReadyForChecks(connectionGeneration) &&
                                     recheckGeneration.get() == generation &&
-                                    lastPostedNotificationModel == model
+                                    pendingNotificationPublication == candidate
                             }
                         ) return@launch
                         notificationPostObserver?.let { postObserver ->
@@ -1479,14 +1498,28 @@ class AppRuleBlocker {
                         if (!beginExternalEffectCall(publication) {
                                 isReadyForChecks(connectionGeneration) &&
                                     recheckGeneration.get() == generation &&
-                                    lastPostedNotificationModel == model
+                                    pendingNotificationPublication == candidate
                             }
                         ) return@launch
                         service.updateForegroundNotification(model)
+                        synchronized(runtimeLock) {
+                            if (isReadyForChecks(connectionGeneration) &&
+                                recheckGeneration.get() == generation &&
+                                pendingNotificationPublication == candidate
+                            ) {
+                                lastPostedNotificationModel = model
+                                pendingNotificationPublication = null
+                            }
+                        }
                         notificationPublicationObserver?.invoke(model)
                     } finally {
                         completeExternalEffectCall(publication)
                         finishExternalEffect(publication)
+                        synchronized(runtimeLock) {
+                            if (pendingNotificationPublication == candidate) {
+                                pendingNotificationPublication = null
+                            }
+                        }
                     }
                 }
             } catch (error: CancellationException) {
@@ -1644,6 +1677,7 @@ class AppRuleBlocker {
             screenOnAwaitingUserPresent = false
             pendingSchedulerWakeGeneration = null
             pendingWorkerEvaluations.clear()
+            pendingNotificationPublication = null
             applicationWindowProvenanceCache.invalidate()
             cancelPendingExternalEffectsLocked()
         }

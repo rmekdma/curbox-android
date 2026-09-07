@@ -7,6 +7,7 @@ import neth.iecal.curbox.data.models.ForegroundSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.ZoneId
@@ -113,13 +114,18 @@ class AppRuleEnforcementTest {
         val enforcement = AppRuleEnforcement(repository, ZoneId.of("UTC"))
         val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
 
-        assertTrue(
-            enforcement.checkSafely(snapshot, "com.example.reader", "2026-08-17", now).isAllowed
+        assertSame(
+            SafeAppRuleEvaluationResult.RecoverableFailure,
+            enforcement.checkSafely(snapshot, "com.example.reader", "2026-08-17", now)
         )
         repository.fail = false
-        assertFalse(
-            enforcement.checkSafely(snapshot, "com.example.reader", "2026-08-17", now).isAllowed
-        )
+        val success = enforcement.checkSafely(
+            snapshot,
+            "com.example.reader",
+            "2026-08-17",
+            now
+        ) as SafeAppRuleEvaluationResult.Success
+        assertFalse(success.evaluation.isAllowed)
     }
 
     @Test

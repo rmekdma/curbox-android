@@ -790,6 +790,48 @@ class AppRuleBlockerDestroyFaultRedTest {
     }
 
     @Test
+    fun cancelledNotificationPublicationRetriesIdenticalModel() {
+        val repository = FaultRepository(FaultMode.HEALTHY)
+        val service = recordingService()
+        val updateEntered = CountDownLatch(1)
+        val updateCount = AtomicInteger(0)
+        val publications = CopyOnWriteArrayList<LiveRuleNotificationModel>()
+        val blocker = configureBlocker(
+            repository = repository,
+            service = service,
+            snapshot = snapshotWithGlobalDeny(),
+            observer = {}
+        ).apply {
+            notificationUpdateObserver = {
+                if (updateCount.incrementAndGet() == 1) {
+                    updateEntered.countDown()
+                    throw CancellationException("injected notification publication cancellation")
+                }
+            }
+            notificationPublicationObserver = { publications += it }
+        }
+        try {
+            blocker.updateLiveNotification(TARGET_PACKAGE)
+            check(updateEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "notification did not reach the cancellable publication boundary"
+            }
+            check(awaitAtomicZero(getField(blocker, "inFlightNotifications") as AtomicInteger)) {
+                "cancelled notification worker did not finish"
+            }
+
+            blocker.updateLiveNotification(TARGET_PACKAGE)
+            check(awaitNonEmpty(publications)) {
+                "identical notification model was not retried after cancellation"
+            }
+            check(updateCount.get() == 2) {
+                "notification dedup state did not roll back for the identical retry"
+            }
+        } finally {
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
     fun warningFinalFrameworkCallCannotStartAfterDestroy() {
         val repository = DestroyRaceRepository()
         val service = recordingService()
