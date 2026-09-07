@@ -227,26 +227,27 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Acceptance criteria:** 충족. 독립 deadline 유실 또는 잘못된 coalescing을 외부 allow/denial로 재현하지 못했고, Phase 3 coordinator 진입 조건이 성립하지 않는다. Phase 4 판정은 ticket16에 blocked로 새로 기록하며 구현은 보류한다.
 - **Target refactor phase:** `Phase 3 coordinator decision` 완료. `Phase 4 lifecycle host`는 별도 evidence와 승인 없이는 시작하지 않는다.
 
-### AR 012 Phase 4 lifecycle host trigger 결정 — 조건부 NO-GO
+### AR 012 Phase 4 lifecycle host trigger 결정 — evidence insufficient, open
 
-- **Status / Severity:** `review-open, tested AppRuleBlocker boundary에 한정한 조건부 NO-GO` / `P2`
+- **Status / Severity:** `review-open, provisional and inconclusive` / `P2`
 - **Exact triggers:** 다음 네 trigger는 서로 대체하거나 하나로 축약하지 않는다.
   1. feature 하나의 cleanup exception이 다른 feature cleanup 또는 AppRuleBlocker의 예약 취소를 다시 건너뛴다.
   2. 두 번째 독립 scheduler feature가 setup, destroy, generation과 receiver 규칙을 복사하고 그 복사가 회귀를 만든다.
   3. destroy/setup race의 결정적 instrumentation이 guard 뒤 callback, worker 또는 notification side effect를 관찰한다.
   4. reconnect ownership이 분산되어 feature가 stale service reference 또는 receiver를 유지한다.
-  Class size, reflection fixture와 책임 집중만으로는 trigger가 아니다.
-- **Measured scope:** ticket17의 instrumentation은 `AppRuleBlocker`를 `RecordingService`와 reflection seam으로 구성하고 candidate-only `onDestroyForMeasurement()`를 호출하는 component-level evidence다. full `AppBlockerService.onServiceConnected()`, 실제 service receiver registration, `AppBlockerService.onDestroy()`와 service reconnect sequence를 실행하지 않는다. `AppRuleReceiverLifecycleTest`도 receiver helper의 transactional rollback contract만 검증한다. `AppBlockerService.cleanupFeature()`의 정적 inspection은 service-level runtime tracer를 대체하지 않는다.
+  Class size, reflection fixture, 반복된 registration attempt와 책임 집중만으로는 trigger가 아니다.
+- **Measured scope:** ticket17/18의 instrumentation은 `AppRuleBlocker` component와 receiver helper를 검증한다. ticket18은 `db1066a0`에서 fault/cancellation contract를 green으로 닫았지만 framework가 bind한 `:app_blocker_service` process의 disconnect, rebind, old/new service identity와 service-wide receiver ownership은 실행하지 않는다. `0fd5d473`의 수동 attach probe는 같은 service object에 `onServiceConnected()`를 reflection으로 두 번 호출했고 append-only registration attempt를 셌으므로 qualifying framework lifecycle evidence에서 제외하고 제거했다.
 - **Evidence:**
-  - [AppRuleBlockerDestroyFaultRedTest.kt:43](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt#L43)의 same-blocker setup, destroy, setup component tracer와 [AppRuleBlockerDestroyFaultRedTest.kt:203](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt#L203)의 candidate deadline tracer는 각각 `1/1`로 통과했다.
-  - 같은 클래스의 framework-call fence tests는 deterministic barrier release 뒤 tested blocker boundary에서 evaluator, warning, notification, handler, scheduler, alarm, usage-reset broadcast와 worker recheck-plan publication이 새로 시작되지 않는 것을 확인했다. stale provider/event callback도 blocker-local evidence cache를 다시 채우지 못했다.
-  - [AppRuleBlockerRecheckTest.kt:1155](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L1155)의 component tracer는 virtual wall/elapsed clock과 scheduler receiver를 통해 external denial과 allow를 모두 관찰하고 다른 package의 다음 deadline을 보존했다.
-  - [AppRuleReceiverLifecycleTest.kt:8](../../app/src/test/java/neth/iecal/curbox/domain/apprules/AppRuleReceiverLifecycleTest.kt#L8)는 registration failure rollback과 idempotent cleanup을 `2/2`로 검증하지만 full service lifecycle evidence는 아니다.
-  - 정확한 connected baseline은 `AppRuleBlockerDestroyFaultRedTest` `16/20`이다. 네 JUnit failure 안에 ordinary persistence, evaluator, scheduler, callback-post, notification-worker continuation과 evaluator cancellation propagation, worker cancellation continuation, handler cancellation continuation의 여덟 mode가 남아 있다.
-- **Decision:** tested `AppRuleBlocker` component boundary에서는 세 번째 trigger인 post-guard side effect witness가 재현되지 않았으므로 lifecycle host extraction은 **조건부 NO-GO**다. 두 번째 trigger의 독립 scheduler caller는 아직 존재하지 않는다. 첫 번째와 네 번째 trigger의 full service setup, receiver ownership, cleanup exception와 reconnect behavior는 이번 tracer가 실행하지 않았으므로 미검증이다. 따라서 production `AppBlockerService` lifecycle 전체에 대한 NO-GO나 Phase 4의 최종 closure를 주장하지 않는다.
-- **Mitigation or decision needed:** lifecycle host는 구현하지 않는다. 먼저 ticket05/06의 여덟 fault/cancellation mode를 모두 green으로 만들어 Phase 2 completion criteria를 충족해야 한다. 그 다음에만 네 canonical trigger를 그대로 사용해 fresh Phase 4 decision을 수행한다. 다음 작업은 ticket17에 blocked 된 local working-tree draft ticket18이며, Phase2 fault/cancellation closure만 다룬다. lifecycle host, coordinator, integration 또는 OEM implementation ticket은 만들지 않는다.
-- **Acceptance criteria:** ticket17 evidence와 이 조건부 판정은 작성됐지만 parent dual review convergence 전까지 review-open이다. Phase2는 `16/20`이므로 완료되지 않았고 예외 승인도 없다. tracker는 parent가 완료 처리한다.
-- **Target refactor phase:** `Phase 2 fault/cancellation closure`가 먼저이며, 이후 `Phase 4 lifecycle host decision`을 새로 재검토한다.
+  - `AppRuleBlockerDestroyFaultRedTest`의 21개 test는 component boundary에서 cleanup, generation fence와 post-guard external effect containment을 검증하며 green이다. 실제 framework service reconnect 증거는 아니다.
+  - [AppRuleReceiverLifecycleTest.kt:8](../../app/src/test/java/neth/iecal/curbox/domain/apprules/AppRuleReceiverLifecycleTest.kt#L8)는 AppRule receiver helper의 registration failure rollback과 idempotent cleanup을 검증하지만 service-wide active ownership을 측정하지 않는다.
+  - Trigger 1과 3에 대해 남기는 관찰은 ticket17/18의 in-process component/manual harness 범위에 한정된다. 각각 feature-level cleanup/cancellation과 AppRuleBlocker의 post-guard effect containment를 보여 줄 뿐, `AppBlockerService` 전체의 cleanup ordering 또는 framework bind/rebind를 보여 주지 않는다.
+  - 두 번째 trigger의 독립 scheduler caller는 현재 production tree에 없다. 가상의 caller나 abstraction은 추가하지 않았다.
+  - 네 번째 trigger는 여전히 미검증이다. successful active receiver ownership, matching broadcast의 duplicate callback/effect, stale old/new service identity를 framework reconnect에서 관찰하지 않았다.
+  - rejected probe는 filter별 successful active registration/removal, matching broadcast delivery, duplicate callback/external effect, barrier failure transport와 fault 뒤 guaranteed final teardown을 증명하지 못했다. cleanup fault도 AppRuleBlocker cleanup 뒤에 발생해 scheduler cancellation 생존을 증명하지 않았다.
+- **Decision:** GO를 철회한다. full framework lifecycle evidence가 없으므로 lifecycle host GO와 final NO-GO 모두 판정하지 않는다. ticket19은 open이고 architecture approval gate는 닫혀 있다.
+- **Mitigation or decision needed:** lifecycle host를 구현하거나 implementation ticket을 만들지 않는다. [ticket19 provisional evidence](app-rule-enforcement-ticket19-evidence.md)의 external prerequisite대로 framework가 실제 service를 bind/rebind하는 out-of-process harness에서 active receiver ownership, matching callback와 external effect를 측정해야 한다. 실제 duplicate effect가 재현되면 먼저 per-feature idempotent setup이라는 더 좁은 remedy와 비교하고, 그 뒤에도 canonical trigger가 남을 때만 host materiality를 재평가한다.
+- **Acceptance criteria:** 미충족. dual review findings는 반영했지만 qualifying framework lifecycle run이 없으므로 tracker를 완료 처리하지 않는다. `.scratch` tracker 완료는 parent가 review convergence 뒤에만 처리한다.
+- **Target refactor phase:** `Phase 4 lifecycle host decision`은 evidence prerequisite가 충족될 때까지 open으로 유지한다.
 
 ## `c17677ae`에서 이미 닫힌 항목
 

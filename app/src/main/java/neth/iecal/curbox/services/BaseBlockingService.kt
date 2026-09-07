@@ -83,8 +83,7 @@ open class BaseBlockingService : AccessibilityService() {
         }
     }
 
-    /** Virtual only so an attached instrumentation service can exercise real feature wiring. */
-    protected open fun startForegroundService() {
+    private fun startForegroundService() {
         val channelId = "blocking_service_channel"
         val channelName = getString(R.string.blocking_service_channel_name)
 
