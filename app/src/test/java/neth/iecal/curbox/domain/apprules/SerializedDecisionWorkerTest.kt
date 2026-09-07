@@ -361,6 +361,46 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun evaluatorRequestCancellationIsContainedAndNextForegroundDecisionContinues() {
+        val repository = RecordingRepository()
+        repository.evaluatorFailure = CancellationException("injected evaluator cancellation")
+        val outcomes = RecordingOutcomeSink()
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val cancellation = AtomicReference<CancellationException?>()
+        val cancellationReached = CountDownLatch(1)
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            onNonFatalError = { errors += it },
+            onRequestCancellation = { error ->
+                cancellation.set(error)
+                cancellationReached.countDown()
+            }
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            )
+            assertTrue(cancellationReached.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertEquals("injected evaluator cancellation", cancellation.get()?.message)
+            assertTrue(worker.isReadyForSubmission())
+            assertTrue(errors.isEmpty())
+            assertTrue(outcomes.values.isEmpty())
+
+            repository.evaluatorFailure = null
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
+            )
+            assertTrue(outcomes.awaitCount(1))
+            assertFalse(outcomes.values.last().packageDecisions.single().isAllowed)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun cancellationPropagatesToTheWorkerBoundaryWithoutBeingLogged() {
         val repository = RecordingRepository()
         val outcomes = RecordingOutcomeSink()
@@ -948,6 +988,7 @@ class SerializedDecisionWorkerTest {
             String,
             AppRulesEvaluation
         ) -> Unit)? = null,
+        onRequestCancellation: ((CancellationException) -> Unit)? = null,
         onRecheckPlan: (RecheckPlanUpdate) -> Unit = {}
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = lifecycleGeneration,
@@ -963,6 +1004,7 @@ class SerializedDecisionWorkerTest {
         onNonFatalError = onNonFatalError,
         elapsedRealtimeMs = elapsedRealtimeMs,
         onEvaluation = onEvaluation,
+        onRequestCancellation = onRequestCancellation,
         onRecheckPlan = onRecheckPlan
     )
 

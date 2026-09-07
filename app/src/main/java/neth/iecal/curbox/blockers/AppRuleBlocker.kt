@@ -360,6 +360,8 @@ class AppRuleBlocker {
     internal var screenInteractiveProvider: (() -> Boolean)? = null
     internal var keyguardLockedProvider: (() -> Boolean)? = null
     internal var evaluationResultObserver: ((AppRulesEvaluation) -> Unit)? = null
+    /** Deterministic seam for observing evaluator request cancellation at the worker boundary. */
+    internal var decisionRequestCancellationObserver: ((CancellationException) -> Unit)? = null
     /** Records the foreground-evidence state mutation after a provider-backed handler read. */
     internal var foregroundEvidenceRecordObserver: ((String) -> Unit)? = null
     /** Deterministic seam after an accessibility event read and before evidence mutation. */
@@ -685,6 +687,9 @@ class AppRuleBlocker {
                         packageName,
                         evaluation
                     )
+                },
+                onRequestCancellation = { error ->
+                    decisionRequestCancellationObserver?.invoke(error)
                 },
                 onRecheckPlan = { update ->
                     applyRecheckPlan(workerInstanceToken, update)
@@ -1907,6 +1912,8 @@ class AppRuleBlocker {
                         ?: expectedRegistrationTokens[OBSERVATION_RECHECK_KEY]
                 )
             }
+        } catch (error: CancellationException) {
+            return
         } catch (error: Throwable) {
             logNonFatal(error)
         }

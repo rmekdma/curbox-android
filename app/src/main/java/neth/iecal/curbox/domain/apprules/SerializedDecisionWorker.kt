@@ -9,6 +9,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import neth.iecal.curbox.data.models.AppRuleOverrideState
@@ -210,6 +212,7 @@ class SerializedDecisionWorker internal constructor(
         String,
         AppRulesEvaluation
     ) -> Unit)? = null,
+    private val onRequestCancellation: ((CancellationException) -> Unit)? = null,
     private val onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
     private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository),
     private val onRecheckPlan: ((RecheckPlanUpdate) -> Unit)? = null
@@ -489,32 +492,48 @@ class SerializedDecisionWorker internal constructor(
         for (outcome in evaluable) {
             val packageName = outcome.packageName ?: continue
             if (!isCurrent(request, accepted)) return
-            val evaluation = enforcement.checkSafely(
-                snapshot = accepted.runtime.snapshot,
-                packageName = packageName,
-                useDayId = useDayId,
-                nowMs = request.observation.capturedAtWallMs,
-                calculator = calculator,
-                useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
-                availablePackages = accepted.runtime.launchablePackages,
-                essentialExcludedPackages = accepted.runtime.evidencePolicy.essentialPackages,
-                overrides = accepted.runtime.overrideState,
-                onNonFatalError = ::reportNonFatal
-            )
-            if (!isCurrent(request, accepted)) return
-            try {
-            runInterruptible {
-                onEvaluation?.invoke(
-                    request,
-                    accepted,
-                    packageName,
-                    evaluation
+            val evaluation = try {
+                enforcement.checkSafely(
+                    snapshot = accepted.runtime.snapshot,
+                    packageName = packageName,
+                    useDayId = useDayId,
+                    nowMs = request.observation.capturedAtWallMs,
+                    calculator = calculator,
+                    useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
+                    availablePackages = accepted.runtime.launchablePackages,
+                    essentialExcludedPackages = accepted.runtime.evidencePolicy.essentialPackages,
+                    overrides = accepted.runtime.overrideState,
+                    onNonFatalError = ::reportNonFatal
                 )
-            }
             } catch (error: CancellationException) {
+                if (currentCoroutineContext().isActive) {
+                    try {
+                        onRequestCancellation?.invoke(error)
+                    } catch (observerCancellation: CancellationException) {
+                        throw observerCancellation
+                    } catch (observerError: Throwable) {
+                        reportNonFatal(observerError)
+                    }
+                    return
+                }
                 throw error
-            } catch (error: Throwable) {
-                reportNonFatal(error)
+            }
+            if (!isCurrent(request, accepted)) return
+            if (evaluation.evaluations.isNotEmpty()) {
+                try {
+                    runInterruptible {
+                        onEvaluation?.invoke(
+                            request,
+                            accepted,
+                            packageName,
+                            evaluation
+                        )
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    reportNonFatal(error)
+                }
             }
             if (!isCurrent(request, accepted)) return
             evaluatedPackages += packageName to evaluation
