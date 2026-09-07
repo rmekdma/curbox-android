@@ -1449,13 +1449,20 @@ class AppRuleBlockerDestroyFaultRedTest {
     fun evaluatorCancellationExceptionPropagatesWhileHealthyNextEventRemainsPossible() {
         val repository = FaultRepository(FaultMode.CANCELLATION)
         val evaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
+        val cancellationObserved = AtomicReference<CancellationException?>()
+        val cancellationBoundaryReached = CountDownLatch(1)
         val service = recordingService()
         val blocker = configureBlocker(
             repository = repository,
             service = service,
             snapshot = snapshotWithGlobalDeny(),
             observer = { evaluation -> evaluations += evaluation }
-        )
+        ).also {
+            it.decisionRequestCancellationObserver = { error ->
+                cancellationObserved.set(error)
+                cancellationBoundaryReached.countDown()
+            }
+        }
 
         try {
             val thrown = try {
@@ -1467,8 +1474,14 @@ class AppRuleBlockerDestroyFaultRedTest {
             check(repository.faultExecuted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 "evaluator cancellation fault did not execute"
             }
-            check(thrown is CancellationException) {
-                "CancellationException was swallowed or replaced: $thrown"
+            check(cancellationBoundaryReached.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "CancellationException did not reach the evaluator request boundary"
+            }
+            check(cancellationObserved.get()?.message == "injected evaluator cancellation") {
+                "CancellationException was swallowed or replaced: ${cancellationObserved.get()}"
+            }
+            check(thrown == null) {
+                "nonblocking foreground callback unexpectedly escaped: $thrown"
             }
             check(evaluations.isEmpty()) {
                 "cancelled evaluation unexpectedly published a result"
@@ -1607,7 +1620,17 @@ class AppRuleBlockerDestroyFaultRedTest {
                 }
             }
 
+            val firstEventEvaluationCount = evaluations.size
             sendWindowEvent(blocker, TARGET_PACKAGE)
+            if (mode == FaultMode.SCHEDULER_FAILURE) {
+                val firstEventFailure = healthyDenialFailure(
+                    label = "${mode.name} first event",
+                    evaluations = evaluations,
+                    service = service,
+                    evaluationCountBefore = firstEventEvaluationCount
+                )
+                if (firstEventFailure.isNotEmpty()) return firstEventFailure
+            }
             if (mode != FaultMode.SCHEDULER_FAILURE &&
                 !repository.faultExecuted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             ) {
@@ -1716,8 +1739,19 @@ class AppRuleBlockerDestroyFaultRedTest {
         service: RecordingService,
         evaluationCountBefore: Int
     ): String {
+        val deadlineMs = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+        while (evaluations.size <= evaluationCountBefore &&
+            android.os.SystemClock.elapsedRealtime() < deadlineMs
+        ) {
+            Thread.yield()
+        }
         if (evaluations.size <= evaluationCountBefore) {
             return "$label prevented the next event from reaching the evaluator"
+        }
+        while (service.startedActivities.isEmpty() &&
+            android.os.SystemClock.elapsedRealtime() < deadlineMs
+        ) {
+            Thread.yield()
         }
         if (evaluations.last().isAllowed || service.startedActivities.isEmpty()) {
             return "$label next event did not produce the expected denial warning"
