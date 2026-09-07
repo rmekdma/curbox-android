@@ -15,8 +15,9 @@
 - 미해결 문제와 관찰된 한계: [`app-rule-enforcement-known-limitations.md`](../issues/app-rule-enforcement-known-limitations.md)
 
 미해결 문제의 원인, 기기 증거, 제품 선택은 마지막 링크에 기록한다. 이 계획에는 같은 내용을
-복사하지 않고 각 phase가 참조할 문제만 가리킨다. 실제 기기 검증 절차와 증거 형식은
-[`ticket-02-device-verification.md`](../../.scratch/app-rules/evidence/ticket-02-device-verification.md)를 따른다.
+복사하지 않고 각 phase가 참조할 문제만 가리킨다. 실제 기기 검증 기록에는 기기와 Android
+version, 실행 명령, test count, pass/fail, deterministic clock/barrier와 unrelated failure
+분류를 포함한다.
 
 이 문서에서 `module`, `interface`, `implementation`, `depth`, `deep`, `shallow`, `seam`,
 `adapter`, `leverage`, `locality`는 codebase-design vocabulary의 정의로 사용한다. 설계가 줄 수
@@ -789,9 +790,9 @@ release an application-window read after destroy/reconnect and verify that the a
 provenance cache is not repopulated.
 The worker test also pauses an old worker after its final check, replaces it in the same lifecycle,
 and verifies that the adapter-private typed worker-instance token allows only the replacement to
-publish. A real
-host test repeats setup → destroy → setup on the same blocker and verifies latest-generation
-effects only. The candidate budget in these tests is measurement input only; no production
+publish. A component test repeats setup → destroy → setup on the same blocker instance constructed
+with a `RecordingService` and verifies latest-generation effects only; it does not execute the full
+`AppBlockerService` lifecycle. The candidate budget in these tests is measurement input only; no production
 2-second or 5-second timeout was selected. The focused JVM regression and Full, Playstore and
 F-Droid debug compile/build scope is recorded below.
 
@@ -810,7 +811,11 @@ class retains 4 adjacent fault/cancellation RED tests. The complete
 fixture, 2 callback-flush, 4 destroy fault/cancellation, 6 long-boundary, 14 recheck/visibility,
 and 1 Guardian lifecycle failure; the virtual-doze wake test is green. These remain residual
 regression evidence rather than ticket15 closure failures; the ticket15-specific deterministic
-tests are green.
+tests are green. The four `AppRuleBlockerDestroyFaultRedTest` failures contain eight distinct
+ticket05/06 modes: ordinary persistence, evaluator, scheduler, callback-post and
+notification-worker continuation, plus evaluator cancellation propagation, worker cancellation
+continuation and handler cancellation continuation. Consequently Phase 2 is not complete, and no
+exception to its fault/cancellation completion criteria has been approved.
 
 ### 6. Phase 0 RED contract → future invariant mapping
 
@@ -1063,14 +1068,25 @@ known-limitations 문서에 기록한다.
 - [ ] host를 도입한 경우 deletion/design gate와 위 보조 기준을 PR 또는 design record에
       기록했다. 이 기록은 qualitative 근거이며 private call order 자동 검증 결과가 아니다.
 
-**Ticket 17 decision (2026-09-07):** Phase 4 is `NO-GO` for the current implementation. The
-deterministic ticket15 destroy/reconnect tracers and the ticket16 external allow/denial tracer
-reproduced no post-fence publication, stale reconnect owner, cleanup bypass, or incorrect current
-generation result. The existing lifecycle owner and feature cleanup containment therefore remain
-the narrowest complete contract. AR 012 in the known-limitations record contains the evidence and
-the exact re-entry trigger. Only the conditional evidence-only revisit ticket
-`.scratch/app-rule-enforcement/issues/18-phase4-lifecycle-trigger-revisit.md` is published; no
-lifecycle host, coordinator, integration, or OEM implementation ticket is prepublished.
+**Ticket 17 review-open decision (2026-09-07):** Phase 4 is conditionally `NO-GO` only for the
+tested `AppRuleBlocker` component boundaries. The deterministic tests construct the blocker with a
+`RecordingService`, use reflection seams, and in one case call candidate-only
+`onDestroyForMeasurement()`. They do not execute full `AppBlockerService.onServiceConnected()`,
+actual service receiver registration, `AppBlockerService.onDestroy()`, or service reconnect.
+`AppRuleReceiverLifecycleTest` verifies only the receiver helper contract. The component evidence
+reproduced no post-guard callback, worker or notification effect and preserved external allow and
+denial, but service-level cleanup exception bypass and stale service/receiver ownership remain
+unverified. The four canonical triggers above all remain active and independent; none is collapsed
+into a generic stale-artifact trigger.
+
+Phase 2 also remains open: `AppRuleBlockerDestroyFaultRedTest` is `16/20`, with four failing JUnit
+cases covering the eight persistence, evaluator, scheduler, callback-post, notification-worker,
+evaluator-cancellation, worker-cancellation and handler-cancellation modes. There is no approved
+completion exception. The next local working-tree draft is therefore a vertical Phase 2
+fault/cancellation closure ticket. Only after those contracts are green may a fresh Phase 4
+decision re-evaluate the same four triggers. No lifecycle host, coordinator, integration or OEM
+implementation ticket is authorized or has been created, and ticket17 remains review-open until parent
+review convergence.
 
 ## 검증 명령과 flavor 매트릭스
 
