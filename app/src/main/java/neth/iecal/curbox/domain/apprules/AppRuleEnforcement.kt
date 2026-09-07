@@ -7,6 +7,12 @@ import neth.iecal.curbox.utils.UseDayCalculator
 import kotlinx.coroutines.CancellationException
 import java.time.ZoneId
 
+sealed interface SafeAppRuleEvaluationResult {
+    data class Success(val evaluation: AppRulesEvaluation) : SafeAppRuleEvaluationResult
+
+    data object RecoverableFailure : SafeAppRuleEvaluationResult
+}
+
 /**
  * Small adapter used at the service boundary. It keeps Room access behind the public session
  * repository seam while leaving the actual decision deterministic and Android free.
@@ -60,17 +66,19 @@ class AppRuleEnforcement(
         essentialExcludedPackages: Set<String> = emptySet(),
         overrides: AppRuleOverrideState = AppRuleOverrideState(),
         onNonFatalError: (Throwable) -> Unit = {}
-    ): AppRulesEvaluation = try {
-        check(
-            snapshot,
-            packageName,
-            useDayId,
-            nowMs,
-            calculator,
-            useDayGenerationStartedAtMs,
-            availablePackages,
-            essentialExcludedPackages,
-            overrides
+    ): SafeAppRuleEvaluationResult = try {
+        SafeAppRuleEvaluationResult.Success(
+            check(
+                snapshot,
+                packageName,
+                useDayId,
+                nowMs,
+                calculator,
+                useDayGenerationStartedAtMs,
+                availablePackages,
+                essentialExcludedPackages,
+                overrides
+            )
         )
     } catch (error: CancellationException) {
         throw error
@@ -82,6 +90,6 @@ class AppRuleEnforcement(
         } catch (_: Throwable) {
             // Reporting must not turn a recoverable evaluator failure into a worker failure.
         }
-        AppRulesEvaluation(isAllowed = true, denyingRules = emptyList(), evaluations = emptyList())
+        SafeAppRuleEvaluationResult.RecoverableFailure
     }
 }

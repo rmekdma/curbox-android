@@ -7,6 +7,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
@@ -321,14 +328,14 @@ class SerializedDecisionWorkerTest {
         )
         try {
             worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
-            assertTrue(outcomes.awaitCount(1))
-            assertTrue(outcomes.values.single().packageDecisions.single().isAllowed)
+            assertTrue(outcomes.awaitIdle())
+            assertTrue(outcomes.values.isEmpty())
             assertEquals(1, errors.size)
 
             repository.evaluatorFailure = null
             worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
-            assertTrue(outcomes.awaitCount(2))
-            assertFalse(outcomes.values.last().packageDecisions.single().isAllowed)
+            assertTrue(outcomes.awaitCount(1))
+            assertFalse(outcomes.values.single().packageDecisions.single().isAllowed)
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
@@ -362,33 +369,26 @@ class SerializedDecisionWorkerTest {
 
     @Test
     fun evaluatorRequestCancellationIsContainedAndNextForegroundDecisionContinues() {
-        val repository = RecordingRepository()
-        repository.evaluatorFailure = CancellationException("injected evaluator cancellation")
+        val repository = RequestCancellingRepository()
         val outcomes = RecordingOutcomeSink()
         val errors = Collections.synchronizedList(mutableListOf<Throwable>())
-        val cancellation = AtomicReference<CancellationException?>()
-        val cancellationReached = CountDownLatch(1)
         val worker = worker(
             repository = repository,
             sink = outcomes,
-            onNonFatalError = { errors += it },
-            onRequestCancellation = { error ->
-                cancellation.set(error)
-                cancellationReached.countDown()
-            }
+            onNonFatalError = { errors += it }
         )
         try {
             assertEquals(
                 SubmissionResult.ACCEPTED,
                 worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
             )
-            assertTrue(cancellationReached.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
-            assertEquals("injected evaluator cancellation", cancellation.get()?.message)
+            assertTrue(repository.childCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertTrue(repository.evaluatorJob.get()?.isCancelled == true)
             assertTrue(worker.isReadyForSubmission())
             assertTrue(errors.isEmpty())
             assertTrue(outcomes.values.isEmpty())
 
-            repository.evaluatorFailure = null
+            repository.cancelNext = false
             assertEquals(
                 SubmissionResult.ACCEPTED,
                 worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
@@ -396,6 +396,107 @@ class SerializedDecisionWorkerTest {
             assertTrue(outcomes.awaitCount(1))
             assertFalse(outcomes.values.last().packageDecisions.single().isAllowed)
         } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun validEmptyEvaluationStillPublishesEvaluationAndEvidenceOutcome() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val evaluations = Collections.synchronizedList(mutableListOf<AppRulesEvaluation>())
+        val evaluationPublished = CountDownLatch(1)
+        val base = acceptedRuntime(RuntimeRevision(1L))
+        val excludedRuntime = base.copy(
+            runtime = base.runtime.copy(
+                snapshot = base.runtime.snapshot.copy(
+                    appRules = listOf(
+                        base.runtime.snapshot.appRules.single().copy(
+                            scope = AppRuleScope(
+                                includeAllApps = true,
+                                excludedGroupIds = setOf(OTHER_GROUP_ID)
+                            )
+                        )
+                    )
+                )
+            )
+        )
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            acceptedRuntime = excludedRuntime,
+            onEvaluation = { _, _, _, evaluation ->
+                evaluations += evaluation
+                evaluationPublished.countDown()
+            }
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, OTHER_PACKAGE, capturedAtMs = 1_000L))
+            )
+            assertTrue(evaluationPublished.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertTrue(outcomes.awaitCount(1))
+            assertTrue(evaluations.single().evaluations.isEmpty())
+            assertTrue(outcomes.values.single().packageDecisions.single().isAllowed)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun workerScopeCancellationDropsOldGenerationAndFreshWorkerIsRequiredForRecovery() {
+        val repository = ScopeCancellingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val scopeJob = SupervisorJob()
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            workerScope = CoroutineScope(Dispatchers.Default + scopeJob),
+            onNonFatalError = { errors += it }
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            )
+            assertTrue(repository.readStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
+            )
+
+            runBlocking { scopeJob.cancelAndJoin() }
+
+            assertTrue(errors.isEmpty())
+            assertTrue(outcomes.values.isEmpty())
+            assertFalse(worker.isReadyForSubmission())
+            assertEquals(
+                SubmissionResult.REJECTED_NOT_READY,
+                worker.submit(request(3L, 1L, TARGET_PACKAGE, capturedAtMs = 3_000L))
+            )
+
+            val recoveredOutcomes = RecordingOutcomeSink()
+            val recoveredWorker = worker(
+                repository = RecordingRepository(),
+                sink = recoveredOutcomes,
+                lifecycleGeneration = LifecycleGeneration(2L)
+            )
+            try {
+                assertEquals(
+                    SubmissionResult.ACCEPTED,
+                    recoveredWorker.submit(
+                        request(1L, 2L, TARGET_PACKAGE, capturedAtMs = 4_000L)
+                    )
+                )
+                assertTrue(recoveredOutcomes.awaitCount(1))
+                assertFalse(recoveredOutcomes.values.single().packageDecisions.single().isAllowed)
+            } finally {
+                recoveredWorker.stop(recoveryStop(LifecycleGeneration(2L)))
+            }
+        } finally {
+            scopeJob.cancel()
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
     }
@@ -988,7 +1089,7 @@ class SerializedDecisionWorkerTest {
             String,
             AppRulesEvaluation
         ) -> Unit)? = null,
-        onRequestCancellation: ((CancellationException) -> Unit)? = null,
+        workerScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
         onRecheckPlan: (RecheckPlanUpdate) -> Unit = {}
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = lifecycleGeneration,
@@ -1004,7 +1105,7 @@ class SerializedDecisionWorkerTest {
         onNonFatalError = onNonFatalError,
         elapsedRealtimeMs = elapsedRealtimeMs,
         onEvaluation = onEvaluation,
-        onRequestCancellation = onRequestCancellation,
+        workerScope = workerScope,
         onRecheckPlan = onRecheckPlan
     )
 
@@ -1229,6 +1330,33 @@ class SerializedDecisionWorkerTest {
                 )
                 return id
             }
+        }
+    }
+
+    private class RequestCancellingRepository : RecordingRepository() {
+        @Volatile var cancelNext = true
+        val evaluatorJob = AtomicReference<Job?>()
+        val childCompleted = CountDownLatch(1)
+
+        override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+            if (cancelNext) {
+                val job = checkNotNull(currentCoroutineContext()[Job])
+                evaluatorJob.set(job)
+                job.invokeOnCompletion { childCompleted.countDown() }
+                throw CancellationException("injected evaluator cancellation")
+            }
+            return super.sessionsForUseDay(useDayId)
+        }
+    }
+
+    private class ScopeCancellingRepository : RecordingRepository() {
+        val readStarted = CountDownLatch(1)
+        private val neverRelease = CompletableDeferred<Unit>()
+
+        override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+            readStarted.countDown()
+            neverRelease.await()
+            return super.sessionsForUseDay(useDayId)
         }
     }
 
