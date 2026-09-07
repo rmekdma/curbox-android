@@ -179,8 +179,8 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
   - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 absolute deadline timeout/completion, timeout 전 durable-work snapshot과 same-lifecycle worker-instance replacement tests
   - [AppUsageTracker.kt](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt)의 `recoverOpenSessions()` reconnect recovery path
 - **Mitigation or decision needed:** production에서는 승인된 numeric selection 전까지 `RecoveryOnlyStop`을 유지한다. candidate measurement의 timeout은 worker의 unfinished work를 durable recovery 대상으로 남기고, old generation의 evaluator, warning, notification과 handler publication은 suppress한다. 운영 timeout 숫자와 `DeadlineDrainStop` production 전환은 대표 device latency 측정과 별도 explicit approval 뒤에 결정한다.
-- **Acceptance criteria:** the ticket15 deterministic measurement/lifecycle contract is green: injected elapsed deadline measurement includes the final decision, refresh, final notification publication, handler, scheduler, scope and receiver cleanup; post-destroy evaluator, warning, notification, handler, usage-reset broadcast and worker recheck-plan effects are zero; timeout durable work is marked before cancellation and is recovered only through an open durable session's documented `recoverOpenSessions()` path; and repeated same-host/same-lifecycle replacement publishes only the latest generation and worker instance. This does not claim Phase 0 continuation closure: the connected destroy/fault class still has four adjacent RED tests, and the broader connected suite retains unresolved callback-flush, long-boundary, recheck, Guardian-lifecycle and debug-fixture REDs. No production 2-second or 5-second timeout was selected.
-- **Target refactor phase:** `Phase 2` ticket15 deterministic contract green; adjacent fault/cancellation and numeric D6 selection remain open, and `Phase 4` lifecycle host is still out of scope.
+- **Acceptance criteria:** the ticket15 deterministic measurement/lifecycle contract is green: injected elapsed deadline measurement includes the final decision, refresh, final notification publication, handler, scheduler, scope and receiver cleanup; post-destroy evaluator, warning, notification, handler, usage-reset broadcast and worker recheck-plan effects are zero; timeout durable work is marked before cancellation and is recovered only through an open durable session's documented `recoverOpenSessions()` path; and repeated same-host/same-lifecycle replacement publishes only the latest generation and worker instance. This does not complete Phase 2. `AppRuleBlockerDestroyFaultRedTest` remains 16/20: its four failing JUnit cases cover eight fault modes. The aggregate ordinary-fault case covers persistence, evaluator, scheduler, callback-post and notification-worker continuation; the other three cases cover evaluator `CancellationException` propagation, worker cancellation continuation and handler cancellation continuation. These are the still-open ticket05/06 fault and cancellation contracts, and no exception to the Phase 2 completion criteria has been approved. The broader connected suite also retains unresolved callback-flush, long-boundary, recheck, Guardian-lifecycle and debug-fixture REDs. No production 2-second or 5-second timeout was selected.
+- **Target refactor phase:** `Phase 2` remains open until all eight ticket05/06 fault and cancellation modes are green; ticket15's narrower deterministic lifecycle measurement contract is green. Numeric D6 selection and a fresh conditional `Phase 4` decision remain separate work.
 
 ### AR 009 AppRuleBlocker의 책임 집중
 
@@ -227,36 +227,26 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Acceptance criteria:** 충족. 독립 deadline 유실 또는 잘못된 coalescing을 외부 allow/denial로 재현하지 못했고, Phase 3 coordinator 진입 조건이 성립하지 않는다. Phase 4 판정은 ticket16에 blocked로 새로 기록하며 구현은 보류한다.
 - **Target refactor phase:** `Phase 3 coordinator decision` 완료. `Phase 4 lifecycle host`는 별도 evidence와 승인 없이는 시작하지 않는다.
 
-### AR 012 Phase 4 lifecycle host trigger 결정 — NO-GO
+### AR 012 Phase 4 lifecycle host trigger 결정 — 조건부 NO-GO
 
-- **Status / Severity:** `닫힘 (NO-GO), 재방문 조건만 유지` / `P2`
-- **Exact trigger:** destroy 또는 reconnect가 lifecycle generation을 무효화한 뒤, 이전
-  generation이 소유한 artifact가 외부 framework publication 경계를 넘거나 현재 generation의
-  외부 allow 또는 denial을 바꾸는 결정적 재현이 생긴다. stale service, receiver, provider
-  cache, durable state 또는 cleanup bypass는 이 같은 외부 위반을 일으킬 때만 trigger의 원인으로
-  인정한다. class size, reflection fixture와 책임 집중도만으로는 trigger가 아니다.
-- **Current behavior:** `AppRuleBlocker`는 destroy 전에 readiness, lifecycle/recheck generation,
-  worker-instance identity와 pending external-effect permits를 무효화하고, production은
-  `RecoveryOnlyStop`으로 worker와 scheduler를 취소한다. candidate measurement만 하나의
-  absolute `TotalDrainDeadline`을 사용한다. reconnect는 새 source, scope와 worker를 만들고
-  `AppUsageTracker.setup()`의 `recoverOpenSessions()`를 통해 durable recovery를 수행한다.
-  `AppBlockerService`와 `AppRuleReceiverLifecycle`은 feature cleanup과 receiver rollback을
-  독립적으로 contain한다.
+- **Status / Severity:** `review-open, tested AppRuleBlocker boundary에 한정한 조건부 NO-GO` / `P2`
+- **Exact triggers:** 다음 네 trigger는 서로 대체하거나 하나로 축약하지 않는다.
+  1. feature 하나의 cleanup exception이 다른 feature cleanup 또는 AppRuleBlocker의 예약 취소를 다시 건너뛴다.
+  2. 두 번째 독립 scheduler feature가 setup, destroy, generation과 receiver 규칙을 복사하고 그 복사가 회귀를 만든다.
+  3. destroy/setup race의 결정적 instrumentation이 guard 뒤 callback, worker 또는 notification side effect를 관찰한다.
+  4. reconnect ownership이 분산되어 feature가 stale service reference 또는 receiver를 유지한다.
+  Class size, reflection fixture와 책임 집중만으로는 trigger가 아니다.
+- **Measured scope:** ticket17의 instrumentation은 `AppRuleBlocker`를 `RecordingService`와 reflection seam으로 구성하고 candidate-only `onDestroyForMeasurement()`를 호출하는 component-level evidence다. full `AppBlockerService.onServiceConnected()`, 실제 service receiver registration, `AppBlockerService.onDestroy()`와 service reconnect sequence를 실행하지 않는다. `AppRuleReceiverLifecycleTest`도 receiver helper의 transactional rollback contract만 검증한다. `AppBlockerService.cleanupFeature()`의 정적 inspection은 service-level runtime tracer를 대체하지 않는다.
 - **Evidence:**
-  - [AppRuleBlockerDestroyFaultRedTest.kt:43](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt#L43)의 same-host setup, destroy, setup tracer와 [AppRuleBlockerDestroyFaultRedTest.kt:203](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt#L203)의 ticket15 absolute-deadline destroy/reconnect tracer가 각각 `1/1`로 통과했다.
-  - 같은 클래스의 [final framework-call fences](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt#L749)와 [in-flight destroy/reconnect contract](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt#L1191)는 barrier release 뒤 post-destroy evaluator, warning, notification, handler, scheduler, alarm, usage-reset broadcast와 worker recheck-plan publication을 0건으로 확인했다. stale provider/event callback은 reconnect 뒤 evidence cache를 다시 채우지 못했다.
-  - [AppRuleBlockerRecheckTest.kt:1155](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L1155)의 ticket16 tracer가 virtual wall/elapsed clock과 production scheduler receiver를 통해 independent external denial과 external allow를 모두 관찰하고, 다른 package의 다음 deadline을 보존했다.
-  - [AppRuleReceiverLifecycleTest.kt:8](../../app/src/test/java/neth/iecal/curbox/domain/apprules/AppRuleReceiverLifecycleTest.kt#L8)와 [AppBlockerService.kt:272](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L272)의 receiver rollback 및 feature별 cleanup containment.
-- **Decision:** Phase 4 lifecycle host extraction은 필요하지 않다. 위 결정적 증거는 현재 cleanup,
-  reconnect, generation fence와 external allow 또는 denial publication contract를 만족하며,
-  host가 해결할 material failure를 보여주지 않는다. AR 009의 AppRuleBlocker 책임 집중은
-  계획된 구조 부채로 남기되, line count나 reflection fixture만으로 host를 도입하지 않는다.
-- **Mitigation or decision needed:** lifecycle host는 만들지 않는다. 다음 재방문은 ticket 17에
-  blocked 된 [조건부 decision ticket](../../.scratch/app-rule-enforcement/issues/18-phase4-lifecycle-trigger-revisit.md)에서만 허용한다. 그 ticket은 새 독립 lifecycle caller, cleanup regression 또는 post-fence external effect가 실제로 생긴 경우에만 deterministic evidence를 다시 수집하며, host, coordinator, integration과 OEM 구현 ticket을 선행 출판하지 않는다.
-- **Acceptance criteria:** 충족. ticket 17의 predeclared GO trigger를 결정적 tracer로 평가했고, GO
-  witness가 없으므로 NO-GO를 기록했다. ticket 17은 parent dual review 전 tracker를 done으로
-  표시하지 않는다.
-- **Target refactor phase:** `Phase 4 lifecycle host decision` 완료, 구현은 defer.
+  - [AppRuleBlockerDestroyFaultRedTest.kt:43](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt#L43)의 same-blocker setup, destroy, setup component tracer와 [AppRuleBlockerDestroyFaultRedTest.kt:203](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt#L203)의 candidate deadline tracer는 각각 `1/1`로 통과했다.
+  - 같은 클래스의 framework-call fence tests는 deterministic barrier release 뒤 tested blocker boundary에서 evaluator, warning, notification, handler, scheduler, alarm, usage-reset broadcast와 worker recheck-plan publication이 새로 시작되지 않는 것을 확인했다. stale provider/event callback도 blocker-local evidence cache를 다시 채우지 못했다.
+  - [AppRuleBlockerRecheckTest.kt:1155](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L1155)의 component tracer는 virtual wall/elapsed clock과 scheduler receiver를 통해 external denial과 allow를 모두 관찰하고 다른 package의 다음 deadline을 보존했다.
+  - [AppRuleReceiverLifecycleTest.kt:8](../../app/src/test/java/neth/iecal/curbox/domain/apprules/AppRuleReceiverLifecycleTest.kt#L8)는 registration failure rollback과 idempotent cleanup을 `2/2`로 검증하지만 full service lifecycle evidence는 아니다.
+  - 정확한 connected baseline은 `AppRuleBlockerDestroyFaultRedTest` `16/20`이다. 네 JUnit failure 안에 ordinary persistence, evaluator, scheduler, callback-post, notification-worker continuation과 evaluator cancellation propagation, worker cancellation continuation, handler cancellation continuation의 여덟 mode가 남아 있다.
+- **Decision:** tested `AppRuleBlocker` component boundary에서는 세 번째 trigger인 post-guard side effect witness가 재현되지 않았으므로 lifecycle host extraction은 **조건부 NO-GO**다. 두 번째 trigger의 독립 scheduler caller는 아직 존재하지 않는다. 첫 번째와 네 번째 trigger의 full service setup, receiver ownership, cleanup exception와 reconnect behavior는 이번 tracer가 실행하지 않았으므로 미검증이다. 따라서 production `AppBlockerService` lifecycle 전체에 대한 NO-GO나 Phase 4의 최종 closure를 주장하지 않는다.
+- **Mitigation or decision needed:** lifecycle host는 구현하지 않는다. 먼저 ticket05/06의 여덟 fault/cancellation mode를 모두 green으로 만들어 Phase 2 completion criteria를 충족해야 한다. 그 다음에만 네 canonical trigger를 그대로 사용해 fresh Phase 4 decision을 수행한다. 다음 작업은 ticket17에 blocked 된 local working-tree draft ticket18이며, Phase2 fault/cancellation closure만 다룬다. lifecycle host, coordinator, integration 또는 OEM implementation ticket은 만들지 않는다.
+- **Acceptance criteria:** ticket17 evidence와 이 조건부 판정은 작성됐지만 parent dual review convergence 전까지 review-open이다. Phase2는 `16/20`이므로 완료되지 않았고 예외 승인도 없다. tracker는 parent가 완료 처리한다.
+- **Target refactor phase:** `Phase 2 fault/cancellation closure`가 먼저이며, 이후 `Phase 4 lifecycle host decision`을 새로 재검토한다.
 
 ## `c17677ae`에서 이미 닫힌 항목
 
