@@ -36,9 +36,7 @@ import neth.iecal.curbox.trackers.WebsiteUsageTracker
 import neth.iecal.curbox.ui.overlay.ReelsOverlayManager
 
 @Suppress("DEPRECATION")
-// Instrumentation needs to subclass the real service so setup/reconnect/destroy execute as one
-// production lifecycle. The subclass only suppresses the framework foreground token call.
-open class AppBlockerService : BaseBlockingService() {
+class AppBlockerService : BaseBlockingService() {
 
     private val focusModeBlocker = FocusModeBlocker()
     private val autoDnd = AutoDnd()

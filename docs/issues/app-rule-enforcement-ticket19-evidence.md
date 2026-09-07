@@ -1,104 +1,126 @@
-# Ticket19 Phase4 service lifecycle evidence
+# Ticket19 Phase 4 service lifecycle evidence
 
-Status: GO at the architecture approval gate. This is evidence and decision work only.
+Status: **provisional and inconclusive; ticket19 remains open.** The GO recorded by `0fd5d473`
+was withdrawn after dual review. The architecture approval gate remains closed.
 
 Baseline: `db1066a0`, with ticket18 green and final.
 
-## Scope and tracer
+## Rejected probe
 
-`AppBlockerServiceLifecycleProbeTest` is the smallest attached service-level tracer used for
-this decision. It attaches a real `AppBlockerService` instance to a recording `Context`, then
-drives the actual `onCreate`, `onServiceConnected`, reconnect, accessibility event, and
-`onDestroy` boundaries on the main looper. Setup therefore runs the service's real feature
-wiring, including AppRuleBlocker setup and all service feature receiver registration. The
-recording context observes the API 33 five-argument `registerReceiver` path as well as the
-legacy overloads.
+The `0fd5d473` probe is not qualifying full-service lifecycle evidence and has been removed.
+It instantiated an `AppBlockerService` subclass directly, attached a `Context` through
+reflection, and invoked `onServiceConnected()` twice on the same object. Android did not bind,
+disconnect, or rebind the accessibility service, and the sequence did not run as a framework
+managed `:app_blocker_service` process lifecycle. It therefore cannot be described as an actual
+service reconnect and cannot establish old and new service identities.
 
-The probe uses deterministic barriers and observers, not stress or timing luck:
+The probe also had these evidence defects:
 
-- A foreground evidence barrier holds an accessibility event across reconnect. The reconnect
-  must advance the lifecycle generation, and the old event must not publish an evaluation or
-  warning.
-- A notification framework-call barrier holds the real notification path immediately before
-  publication. Destroy runs while it is held, then the barrier is released and the probe checks
-  that no post-destroy notification publication occurs.
-- The recording context fault-injects exactly one receiver unregister failure. The probe checks
-  AppRuleBlocker ownership, later feature cleanup, and the final receiver lifecycle state.
-- The settings collector is explicitly cancelled after real setup. Deterministic framework facts
-  and a queued runtime snapshot then measure denial, allow, activity launch, and notification
-  publication without relying on scheduler races.
+- Its receiver list was an append-only registration-attempt log. It did not retain filter and
+  active ownership only after successful registration, remove ownership only after successful
+  unregister, or deliver a matching broadcast to prove a duplicate callback and external effect.
+- It observed repeated non-AppRule registration attempts but did not compare the narrower
+  per-feature idempotent setup remedy. Registration attempts alone establish neither trigger 4
+  nor lifecycle-host materiality.
+- Worker and barrier failures were not transported to the test thread independently of service
+  error containment. A timeout or worker exception could be swallowed, so a green assertion did
+  not prove that the intended interleaving completed.
+- The cleanup fault occurred after AppRuleBlocker cleanup. It only showed that one later receiver
+  cleanup was attempted after a `FocusModeBlocker` unregister failure; it did not prove that
+  AppRuleBlocker scheduler cancellation survives an earlier cleanup failure.
+- Private reflection and direct settings/runtime publication manipulation dominated the fixture.
+  That bypassed the real settings and refresh boundary needed for service-level evidence.
+- Making `AppBlockerService` open and foreground startup protected/open widened production APIs
+  solely for this rejected harness. Those changes have been removed.
 
-The probe uses two narrowly scoped production testability seams. `AppBlockerService` is open so
-an attached instrumentation subclass can execute the real service lifecycle. The protected open
-`BaseBlockingService.startForegroundService` lets that subclass suppress only the framework
-foreground token call, which cannot succeed on a manually attached service. Without these seams,
-the service crashes in framework attachment before feature setup; a manually created service
-cannot obtain the system token needed by `Service.startForeground`. Neither seam changes runtime
-behavior or introduces a host, coordinator, integration, or OEM abstraction. The probe's
-`startActivity` override records the real denial call while containing the external activity.
+No result or log count from the rejected probe is retained as trigger evidence. No qualifying
+full-service lifecycle test remains after the probe's deletion. The retained trigger 1 and 3
+observations below are limited to the in-process component/manual harness scope and are not
+framework service evidence.
 
-## Independent canonical trigger results
+## Independent canonical trigger status
 
-1. **Cleanup exception bypass.** The probe injects a failure while unregistering the
-   `FocusModeBlocker` receiver. All five AppRuleBlocker receiver unregister attempts occur before
-   that failure, and a later `ReelBlocker` receiver unregister is still attempted. Destroy
-   completes, the AppRule receiver lifecycle is cleared, and the blocked notification has zero
-   post-destroy publications. The cleanup containment trigger was not reproduced.
+The four triggers remain independent and open for the full framework lifecycle:
 
-2. **Second independent scheduler caller duplication regression.** A repository search found
-   only AppRuleBlocker's own scheduler state, `scheduleRecheck*` implementation, and its
-   `schedulerWakeReceiver` path. No independent production caller of the scheduler exists in
-   the current tree. This absence is recorded; no second caller or production abstraction was
-   invented.
-
-3. **Post-guard destroy/setup side effect.** The probe holds the notification path after its
-   final generation guard, destroys the actual service, and releases the barrier. No notification
-   publication occurs afterward. The accessibility event held across reconnect produces no old
-   generation evaluation or warning. The current generation produces one denial evaluation and
-   one real `startActivity` call, while the subsequent allow evaluation produces no additional
-   activity. The post-guard callback, worker, and notification side-effect trigger was not
-   reproduced.
-
-4. **Stale service or receiver ownership after reconnect.** The same real service instance is
-   reconnected. AppRuleBlocker transactionally unregisters and reclaims its five receivers, but
-   non-AppRule feature receiver identities are registered again without an intervening
-   service-level unregister boundary. This is deterministic receiver ownership evidence at the
-   service boundary. It does not claim that an OEM delivered a duplicate broadcast or that a
-   stale service object survived outside this in-process observation.
-
-The attached run logged:
-
-```text
-reconnect generation 1->2 registrations 15->30; duplicateNonApp=10; appRuleReclaimed=5
-destroy cleanup fault=1; unregisterAttempts=15; laterReceiverAttempted=true; notificationPublications=0
-```
+1. **Cleanup exception bypass:** unverified at the framework-bound service boundary. The
+   ticket17/18 in-process component/manual harness retains only feature-level cleanup and
+   cancellation observations. It does not establish full-service cleanup ordering. Existing
+   service code contains feature cleanup individually, but no deterministic service test injects
+   a fault before AppRuleBlocker cleanup and observes its scheduler cancellation plus final
+   teardown. The rejected probe's narrower claim was only that a later receiver unregister was
+   attempted after a later feature fault.
+2. **Second independent scheduler caller duplication regression:** absent in the current
+   production tree. AppRuleBlocker remains the only owner of its recheck scheduler and wake
+   receiver. No caller or production abstraction was invented.
+3. **Post-guard destroy/setup side effect:** not reproduced at the tested AppRuleBlocker
+   component/manual harness boundary, where ticket18's deterministic fault/cancellation tests
+   remain green. This observation is limited to that blocker boundary. The rejected probe's
+   barrier sequence is not retained as evidence because worker or barrier failures could be
+   swallowed. The framework-bound service/process lifecycle is still unverified.
+4. **Stale service or receiver ownership after reconnect:** unverified. No successful active
+   receiver ownership duplication, matching duplicate broadcast callback, stale old/new service
+   identity, or duplicate external effect has been observed under a real framework reconnect.
 
 ## Decision
 
-GO is warranted narrowly because canonical trigger 4 is deterministically reproduced at the
-actual service lifecycle boundary, and a lifecycle host would materially remove the asymmetric
-ownership boundary by making feature setup, reconnect invalidation, receiver teardown, and
-service destroy one owner. Triggers 1 and 3 were exercised and contained; trigger 2 is absent.
+There is insufficient evidence for GO or a final NO-GO. Ticket19 remains open, the approval gate
+stays closed, and no lifecycle host, coordinator, integration, OEM work, or implementation ticket
+is authorized or published.
 
-This result requires explicit user architecture approval before any lifecycle host or coordinator
-implementation is attempted. No lifecycle host, integration work, OEM work, or implementation
-ticket was published by this change.
+A lifecycle host cannot be judged materially necessary until a qualifying baseline first proves
+a duplicate external effect and compares the narrower per-feature idempotent setup remedy. If the
+narrow remedy removes the effect, the decision is NO-GO. GO can be reconsidered only if at least
+one canonical trigger remains deterministic and a lifecycle host materially removes it better
+than that narrower remedy.
 
-## Verification
+## Exact external prerequisite
 
-All commands used `JAVA_HOME=C:\Users\DELL\.jdks\jbr-21.0.11`.
+The next qualifying run requires an out-of-process framework lifecycle harness on a controlled
+Android device or emulator. It must:
 
-- `./gradlew.bat connectedFullDebugAndroidTest
-  "-Pandroid.testInstrumentationRunnerArguments.class=neth.iecal.curbox.services.AppBlockerServiceLifecycleProbeTest"`:
-  2/2 passed on `iPlay50_mini_Pro - 13`, including the final actual activity allow/denial
-  assertions.
-- `./gradlew.bat connectedFullDebugAndroidTest
-  "-Pandroid.testInstrumentationRunnerArguments.class=neth.iecal.curbox.blockers.AppRuleBlockerDestroyFaultRedTest"`:
-  21/21 passed on the same device.
-- `./gradlew.bat testFullDebugUnitTest`: 350/350 passed.
-- `./gradlew.bat assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug`: all three
-  succeeded.
-- `git diff --check`: clean before commit.
+1. Enable the manifest-declared accessibility service through Android, verify that it runs in
+   `:app_blocker_service`, and drive real framework disconnect/rebind or process restart while
+   recording callback order and distinct old/new process and service instance identities.
+2. Report receiver ownership over IPC only after successful registration, including receiver
+   identity, owner, and `IntentFilter`; remove it only after successful unregister and preserve
+   operation ordering.
+3. Send a matching broadcast after reconnect and correlate active registrations with per-feature
+   callback count and an externally visible publication. Trigger 4 requires an actual duplicate
+   callback/effect, not a repeated registration attempt.
+4. Expose deterministic barriers whose entered, released, timed-out, and failed states are
+   reported to the instrumentation process. Worker throwables must fail the test outside service
+   error containment, and the test must prove the worker is blocked before lifecycle mutation.
+5. Inject a named cleanup failure before the cleanup whose survival is claimed, automatically
+   clear the fault in `finally`, disable the accessibility service, and verify complete receiver,
+   worker, notification, and process teardown.
+6. Re-run the same observation with the narrow per-feature idempotent setup remedy before any
+   lifecycle-host materiality claim.
 
-The builds retain existing KSP/JDK source-target and test `AccessibilityEvent` deprecation
-warnings; none are failures.
+This prerequisite is test infrastructure, not approval to add production lifecycle APIs. Any
+future hook must be test-build constrained, keep a non-bypassable production default, and be
+documented before use.
+
+## Retained valid evidence
+
+- No qualifying full-service lifecycle test remains after the rejected probe was removed. The
+  following observations remain valid only at their stated component/manual harness boundaries:
+- `AppRuleBlockerDestroyFaultRedTest` remains valid component-level fault/cancellation evidence;
+  it does not represent a framework service reconnect.
+- `AppRuleReceiverLifecycleTest` remains valid for transactional rollback and idempotent cleanup
+  of the AppRule receiver helper; it does not measure service-wide active receiver ownership.
+- `AppBlockerServiceTest` remains valid for its narrow synchronous cancellation containment
+  contract; it does not drive Android service binding.
+
+## Verification of the correction
+
+- `git diff --check`: clean.
+- `testFullDebugUnitTest`: Gradle task `UP-TO-DATE`; the report aggregate is 350 tests with
+  zero failures, errors, or skips.
+- `connectedFullDebugAndroidTest` filtered to
+  `neth.iecal.curbox.blockers.AppRuleBlockerDestroyFaultRedTest`: 21/21 passed on
+  `iPlay50_mini_Pro - 13`.
+- `assembleFullDebug`, `assemblePlaystoreDebug`, and `assembleFdroidDebug`: all passed.
+- `AppBlockerService.kt` and `BaseBlockingService.kt` match their exact `0fd5d473^` contents;
+  the deleted `AppBlockerServiceLifecycleProbeTest` is not present.
+- The build emitted the repository's existing KSP/Kotlin compatibility and deprecation warnings;
+  no new failure was reported. No framework-bound lifecycle probe was run or retained.
