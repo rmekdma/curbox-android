@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <permission
+        android:name="neth.iecal.curbox.debug.permission.TICKET19_OBSERVER"
+        android:protectionLevel="signature" />
+
+    <application
+        android:appComponentFactory="neth.iecal.curbox.debug.Ticket19DebugAppComponentFactory"
+        tools:replace="android:appComponentFactory">
+
+        <service
+            android:name="neth.iecal.curbox.debug.Ticket19ObserverService"
+            android:exported="true"
+            android:permission="neth.iecal.curbox.debug.permission.TICKET19_OBSERVER"
+            android:process=":app_blocker_service" />
+
+        <provider
+            android:name="neth.iecal.curbox.debug.Ticket19ObserverProvider"
+            android:authorities="neth.iecal.curbox.debug.ticket19.observer"
+            android:exported="true"
+            android:process=":app_blocker_service" />
+    </application>
+</manifest>
