@@ -129,6 +129,13 @@ function Assert-PackageNotStopped {
     Write-Trace 'package stopped=false'
 }
 
+function Get-LogcatCursor {
+    $tail = Invoke-AdbCommand @('shell', 'logcat', '-d', '-v', 'epoch', '-t', '1') -Quiet
+    $match = [regex]::Match($tail, '(?m)^\s*(?<cursor>\d+\.\d+)\s+')
+    if (-not $match.Success) { throw "unable to capture non-destructive logcat cursor: $tail" }
+    return $match.Groups['cursor'].Value
+}
+
 function Invoke-ObserverCommand([string]$Method, [long]$Argument = 0) {
     $raw = Invoke-AdbCommand @('shell', 'content', 'call', '--uri', $observerUri,
         '--method', $Method, '--arg', $Argument.ToString()) -Quiet
@@ -346,8 +353,9 @@ $primaryError = $null
 $restoreError = $null
 $traceCompleted = $false
 Write-Trace "start serial=$Serial services=$($initialServices -join ':') accessibility_enabled=$initialAccessibilityEnabled"
+$runLogCursor = Get-LogcatCursor
+Write-Trace "run logcat cursor=$runLogCursor (non-destructive; existing logs preserved)"
 try {
-    Invoke-AdbCommand @('shell', 'logcat', '-c') | Out-Null
     Invoke-AdbCommand @('shell', 'am', 'start', '-W', '-n',
         "$packageName/neth.iecal.curbox.ui.activity.FragmentActivity") | Out-Null
     Assert-PackageNotStopped
@@ -479,12 +487,16 @@ try {
     if ($activeServiceRecord.Success) {
         throw "AppBlockerService remained active: $($activeServiceRecord.Value.Trim())"
     }
-    $runLog = Invoke-AdbCommand @('shell', 'logcat', '-d', '-v', 'epoch') -Quiet
+    $runLog = Invoke-AdbCommand @(
+        'shell', 'logcat', '-d', '-v', 'epoch', '-T', $runLogCursor
+    ) -Quiet
     $newPid = [int]$afterKill.processPid
+    $pidPattern = "(?:$oldPid|$newPid)"
+    $leakPattern = "(?m)^\s*\d+\.\d+\s+$pidPattern\s+\d+\s+E ActivityThread:\s+(?:android\.app\.IntentReceiverLeaked:\s+)?Service neth\.iecal\.curbox\.services\.AppBlockerService has leaked IntentReceiver rikka\.shizuku\.ShizukuProvider\`$1@[0-9a-f]+ that was originally registered here\. Are you missing a call to unregisterReceiver\(\)\?\s*`$"
     $shizukuLines = @($runLog -split "`n" | Where-Object {
-        $_ -match '(?i)(Shizuku|IntentReceiverLeaked)' -and $_ -match "\s($oldPid|$newPid)\s"
+        $_ -match $leakPattern
     })
-    Write-Trace "run-specific Shizuku/IntentReceiver lines count=$($shizukuLines.Count) lines=$($shizukuLines -join ' | ')"
+    Write-Trace "run-cursor/exact-PID Shizuku IntentReceiverLeaked signature lines count=$($shizukuLines.Count) lines=$($shizukuLines -join ' | ')"
     $traceCompleted = $true
 } catch {
     $primaryError = $_
