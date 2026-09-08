@@ -154,6 +154,25 @@ function Invoke-ObserverCommand([string]$Method, [string]$Argument = '0') {
     return $json | ConvertFrom-Json
 }
 
+function Get-ActivityState {
+    return Invoke-AdbCommand @('shell', 'dumpsys', 'activity', 'activities') -Quiet
+}
+
+function Get-TopResumedActivity([string]$ActivityState) {
+    $match = [regex]::Match(
+        $ActivityState,
+        '(?m)^\s*(?:topResumedActivity|ResumedActivity):.*?\s(?<component>[^\s}]+/[^\s}]+)'
+    )
+    if (-not $match.Success) { return '' }
+    return $match.Groups['component'].Value
+}
+
+function Test-GuardianActivityPresent([string]$ActivityState) {
+    return $ActivityState -match [regex]::Escape(
+        "$packageName/neth.iecal.curbox.ui.activity.GuardianApprovalActivity"
+    )
+}
+
 function Wait-Until {
     param(
         [string]$Description,
@@ -300,28 +319,122 @@ function Assert-NoActiveProcessFilters([int]$ProcessId, [string]$Stage) {
     Assert-SystemFilterCount $ProcessId 0 $Stage
 }
 
+function Ensure-CurboxBoundForRuleCleanup([string]$Stage) {
+    if (Test-FrameworkBound) { return }
+    Invoke-AdbCommand @('shell', 'am', 'start', '-W', '-n',
+        "$packageName/neth.iecal.curbox.ui.activity.FragmentActivity") | Out-Null
+    Assert-PackageNotStopped
+    $current = @(Get-EnabledServices)
+    if (@($current | Where-Object { Test-CurboxComponent $_ }).Count -gt 0) {
+        Disable-Curbox "$Stage rebind-disable"
+    }
+    Enable-Curbox "$Stage rebind-enable"
+    Wait-Until "$Stage current framework bind" { Test-FrameworkBound }
+    Wait-ReadySnapshot "$Stage current observer setup" | Out-Null
+}
+
+function Remove-TemporaryCalculatorRule {
+    param([string]$Token, [string]$Stage, [int]$Attempts = 3)
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Ensure-CurboxBoundForRuleCleanup "$Stage attempt $attempt"
+            $before = Invoke-ObserverCommand 'snapshot'
+            $beforeFailures = @($before.failures).Count
+            $beforeCleanupAcks = [long]$before.ruleCleanupCompletionCount
+            $removal = Invoke-ObserverCommand 'remove_calculator_denial_rule' $Token
+            if (@($removal.failures).Count -ne $beforeFailures) {
+                throw "temporary rule removal command failed: $($removal | ConvertTo-Json -Depth 12 -Compress)"
+            }
+            Wait-Until "$Stage removal refresh publication" {
+                (Invoke-ObserverCommand 'snapshot').runtimePublicationCount -gt
+                    $before.runtimePublicationCount
+            }
+            $completed = Invoke-ObserverCommand 'await_calculator_rule_cleanup' $Token
+            if (@($completed.failures).Count -ne $beforeFailures -or
+                $completed.ruleCleanupCompletionCount -le $beforeCleanupAcks) {
+                throw "temporary rule cleanup completion ACK failed: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+            }
+            foreach ($name in @(
+                'refreshes', 'notifications', 'usageResetCompletions',
+                'recheckPlans', 'workerQueued', 'workerInFlight'
+            )) {
+                if ([int]$completed.workCounts.$name -ne 0) {
+                    throw "$Stage removal work $name was not quiescent: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+                }
+            }
+            $scopedAcks = @($completed.events | Where-Object {
+                $_.name -eq 'temporary_rule_cleanup_scoped_quiescence' -and
+                $_.detail -match [regex]::Escape("token=$Token")
+            })
+            if ($scopedAcks.Count -lt 1) {
+                throw "$Stage scoped quiescence ACK missing: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+            }
+            $verified = Invoke-ObserverCommand 'verify_calculator_rule_absent' $Token
+            if (@($verified.failures).Count -ne $beforeFailures -or
+                $verified.temporaryRulePresent -or
+                $verified.temporaryRuleEffectivePresent -or
+                $verified.temporaryRulePendingPresent -or
+                $verified.temporaryRuleEditingPresent) {
+                throw "temporary rule absence is uncertain: $($verified | ConvertTo-Json -Depth 12 -Compress)"
+            }
+            Write-Trace "$Stage verified token=$Token effective=false pending=false editing=false attempt=$attempt"
+            return $verified
+        } catch {
+            $lastError = $_
+            Write-Trace "$Stage attempt=$attempt failed: $($_.Exception.Message)"
+            if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds 250 }
+        }
+    }
+    throw $lastError
+}
+
 function Assert-RealCalculatorDenial {
     param([int]$ExpectedServicePid)
     $token = [guid]::NewGuid().ToString()
     $triggeredAt = Get-Date -Format o
+    $preflight = Invoke-ObserverCommand 'preflight_calculator_rule'
+    Assert-NoFailures $preflight
+    if (-not $preflight.ruleMutationPreflightReady) {
+        throw "temporary Calculator rule preflight rejected: $($preflight.ruleMutationPreflightReason)"
+    }
     $beforeInstall = Invoke-ObserverCommand 'snapshot'
+    $script:temporaryRuleToken = $token
     $install = Invoke-ObserverCommand 'install_calculator_denial_rule' $token
     Assert-NoFailures $install
     if (-not $install.temporaryRulePresent) {
         throw "temporary Calculator denial rule is not effective: $($install | ConvertTo-Json -Depth 12 -Compress)"
     }
-    $script:temporaryRuleToken = $token
     Wait-Until 'temporary Calculator rule refresh publication' {
         (Invoke-ObserverCommand 'snapshot').runtimePublicationCount -gt
             $beforeInstall.runtimePublicationCount
     }
-    Invoke-ObserverCommand 'await_quiescence' '15000' | Out-Null
-    Invoke-ObserverCommand 'reset_observation' | Out-Null
-    Invoke-ObserverCommand 'arm_external_outcome' $token | Out-Null
-    Invoke-AdbCommand @('shell', 'input', 'keyevent', 'HOME') | Out-Null
-    Start-Sleep -Milliseconds 1500
+    $installQuiescent = Invoke-ObserverCommand 'await_quiescence' '15000'
+    Assert-NoFailures $installQuiescent
+    Assert-WorkCountsZero $installQuiescent 'temporary Calculator install quiescence'
     Invoke-AdbCommand @('shell', 'am', 'force-stop', 'com.android.calculator2') | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Invoke-AdbCommand @('shell', 'input', 'keyevent', 'HOME') | Out-Null
+    Start-Sleep -Milliseconds 500
+    $baselineQuiescent = Invoke-ObserverCommand 'await_quiescence' '15000'
+    Assert-NoFailures $baselineQuiescent
+    Assert-WorkCountsZero $baselineQuiescent 'external outcome baseline quiescence'
+    $baselineActivities = Get-ActivityState
+    if (Test-GuardianActivityPresent $baselineActivities) {
+        throw 'GuardianApprovalActivity was present before the external outcome window was armed'
+    }
+    $reset = Invoke-ObserverCommand 'reset_observation'
+    Assert-NoFailures $reset
+    Assert-WorkCountsZero $reset 'external outcome reset baseline'
+    if ($reset.evaluationCount -ne 0 -or $reset.warningFrameworkBoundaryCount -ne 0 -or
+        $reset.externalOutcomeWindowState -ne 'DISARMED') {
+        throw "external outcome reset baseline was not clean: $($reset | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $armed = Invoke-ObserverCommand 'arm_external_outcome' $token
+    Assert-NoFailures $armed
+    if ($armed.externalOutcomeWindowState -ne 'ARMED' -or
+        $armed.externalOutcomeToken -ne $token) {
+        throw "external outcome one-shot window did not arm: $($armed | ConvertTo-Json -Depth 12 -Compress)"
+    }
     $resolved = (Invoke-AdbCommand @(
         'shell', 'cmd', 'package', 'resolve-activity', '--brief',
         '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER',
@@ -343,9 +456,11 @@ function Assert-RealCalculatorDenial {
         Wait-Until 'real Calculator denial and warning boundary' {
             $script:latestSnapshot = Invoke-ObserverCommand 'snapshot'
             return $script:latestSnapshot.externalOutcomeToken -eq $token -and
-                $script:latestSnapshot.lastEvaluatedPackage -eq 'com.android.calculator2' -and
-                $script:latestSnapshot.deniedEvaluationCount -ge 1 -and
-                $script:latestSnapshot.warningFrameworkBoundaryCount -ge 1
+                $script:latestSnapshot.externalOutcomeWindowState -eq 'CONSUMED' -and
+                $script:latestSnapshot.externalOutcomeRequestAccepted -and
+                $script:latestSnapshot.externalOutcomeEvaluationDenied -and
+                $script:latestSnapshot.externalOutcomeDeniedPublished -and
+                $script:latestSnapshot.externalOutcomeWarningCalled
         } 20
     } catch {
         $diagnostic = Invoke-ObserverCommand 'snapshot'
@@ -365,20 +480,40 @@ function Assert-RealCalculatorDenial {
         $outcome.warningFrameworkBoundaryCount -lt 1) {
         throw "unexpected real denial counts: $($outcome | ConvertTo-Json -Depth 12 -Compress)"
     }
+    $sourceIdentity = [long]$outcome.externalOutcomeSourceIdentity
+    if ($sourceIdentity -le 0) { throw 'causal source identity was not captured' }
+    $requestEvents = @($outcome.events | Where-Object {
+        $_.name -eq 'causal_request_accepted' -and
+        $_.detail -match [regex]::Escape("token=$token") -and
+        $_.detail -match 'kind=REAL_EVENT package=com\.android\.calculator2' -and
+        $_.detail -match [regex]::Escape("sourceIdentity=$sourceIdentity")
+    })
     $evaluationEvents = @($outcome.events | Where-Object {
-        $_.name -eq 'evaluation_completed' -and $_.detail -match [regex]::Escape("token=$token") -and
-        $_.detail -match 'package=com\.android\.calculator2 allowed=False'
+        $_.name -eq 'causal_evaluation_completed' -and
+        $_.detail -match [regex]::Escape("token=$token") -and
+        $_.detail -match 'package=com\.android\.calculator2 allowed=false' -and
+        $_.detail -match [regex]::Escape("sourceIdentity=$sourceIdentity")
+    })
+    $publishedEvents = @($outcome.events | Where-Object {
+        $_.name -eq 'causal_denied_outcome_published' -and
+        $_.detail -match [regex]::Escape("token=$token") -and
+        $_.detail -match [regex]::Escape("sourceIdentity=$sourceIdentity")
     })
     $warningEvents = @($outcome.events | Where-Object {
-        $_.name -eq 'warning_framework_boundary' -and $_.detail -match [regex]::Escape("token=$token") -and
-        $_.detail -match 'package=com\.android\.calculator2'
+        $_.name -eq 'causal_warning_framework_call' -and
+        $_.detail -match [regex]::Escape("token=$token") -and
+        $_.detail -match 'package=com\.android\.calculator2' -and
+        $_.detail -match [regex]::Escape("sourceIdentity=$sourceIdentity")
     })
-    if ($evaluationEvents.Count -lt 1 -or $warningEvents.Count -lt 1) {
-        throw "UUID-correlated evaluator/warning events missing: $($outcome | ConvertTo-Json -Depth 12 -Compress)"
+    if ($requestEvents.Count -ne 1 -or $evaluationEvents.Count -ne 1 -or
+        $publishedEvents.Count -ne 1 -or $warningEvents.Count -ne 1) {
+        throw "causal request/evaluator/outcome/warning chain missing: $($outcome | ConvertTo-Json -Depth 12 -Compress)"
     }
-    $activities = Invoke-AdbCommand @('shell', 'dumpsys', 'activity', 'activities') -Quiet
-    if ($activities -notmatch 'neth\.iecal\.curbox\.debug/neth\.iecal\.curbox\.ui\.activity\.GuardianApprovalActivity') {
-        throw 'GuardianApprovalActivity was not observable in the Android activity stack'
+    $activities = Get-ActivityState
+    $topResumed = Get-TopResumedActivity $activities
+    $expectedGuardian = "$packageName/neth.iecal.curbox.ui.activity.GuardianApprovalActivity"
+    if ($topResumed -ne $expectedGuardian) {
+        throw "GuardianApprovalActivity was not newly top-resumed after warning: top=$topResumed"
     }
     $mainPidText = (Invoke-AdbCommand @('shell', 'pidof', $packageName) -Quiet).Trim()
     $mainPid = 0
@@ -390,26 +525,15 @@ function Assert-RealCalculatorDenial {
     }
     Write-Trace "real external denial boundary token=$token snapshot=$($outcome | ConvertTo-Json -Depth 12 -Compress)"
     Invoke-AdbCommand @('shell', 'input', 'keyevent', 'BACK') | Out-Null
-    $beforeRemoval = Invoke-ObserverCommand 'snapshot'
-    $removal = Invoke-ObserverCommand 'remove_calculator_denial_rule' $token
-    Assert-NoFailures $removal
-    if ($removal.temporaryRulePresent) {
-        throw "temporary Calculator rule removal was deferred and cannot quiesce this run: $($removal | ConvertTo-Json -Depth 12 -Compress)"
-    }
+    $cleaned = Remove-TemporaryCalculatorRule $token 'real external denial cleanup'
     $script:temporaryRuleToken = $null
-    Wait-Until 'temporary Calculator rule removal publication' {
-        (Invoke-ObserverCommand 'snapshot').runtimePublicationCount -gt
-            $beforeRemoval.runtimePublicationCount
-    }
-    $cleaned = Invoke-ObserverCommand 'snapshot'
-    Assert-NoFailures $cleaned
     if ($cleaned.deniedEvaluationCount -ne $outcome.deniedEvaluationCount -or
         $cleaned.warningFrameworkBoundaryCount -ne $outcome.warningFrameworkBoundaryCount) {
         throw 'real denial evaluator/external effect counts changed during cleanup quiescence'
     }
     Write-Trace "real external denial cleanup snapshot pendingLifecycleCallbacks=$($cleaned.workCounts.callbacks) snapshot=$($cleaned | ConvertTo-Json -Depth 12 -Compress)"
-    Write-Trace "real external denial token=$token triggeredAt=$triggeredAt calculator=$calculatorComponent servicePid=$ExpectedServicePid mainPid=$mainPid guardianActivity=present"
-    return [pscustomobject]@{ Token = $token; ServicePid = $ExpectedServicePid; MainPid = $mainPid }
+    Write-Trace "real external denial token=$token sourceIdentity=$sourceIdentity triggeredAt=$triggeredAt calculator=$calculatorComponent servicePid=$ExpectedServicePid mainPid=$mainPid guardianActivity=top-resumed"
+    return [pscustomobject]@{ Token = $token; SourceIdentity = $sourceIdentity; ServicePid = $ExpectedServicePid; MainPid = $mainPid }
 }
 
 function Assert-ScopedTeardown([string]$Stage) {
@@ -428,6 +552,9 @@ function Assert-ScopedTeardown([string]$Stage) {
 $initialServices = @(Get-EnabledServices)
 $initialAccessibilityEnabled = Get-AccessibilityEnabled
 $initialWakefulness = Get-Wakefulness
+if ($initialWakefulness -notin @('Awake', 'Dozing')) {
+    throw "refusing to mutate from unsupported wakefulness baseline: $initialWakefulness"
+}
 if (@($initialServices | Where-Object {
     $_ -match '(?i)(lock\s*me\s*out|lockmeout|com\.teqtic)'
 }).Count -ne 0) {
@@ -440,7 +567,9 @@ $script:ownedServices = @($initialServices)
 $script:ownedEnabled = $initialAccessibilityEnabled
 $script:temporaryRuleToken = $null
 $primaryError = $null
-$restoreError = $null
+$ruleCleanupError = $null
+$accessibilityRestoreError = $null
+$wakeRestoreError = $null
 $traceCompleted = $false
 Write-Trace "start serial=$Serial services=$($initialServices -join ':') accessibility_enabled=$initialAccessibilityEnabled wakefulness=$initialWakefulness"
 $runLogCursor = Get-LogcatCursor
@@ -614,16 +743,11 @@ try {
 } finally {
     if ($null -ne $script:temporaryRuleToken) {
         try {
-            $cleanup = Invoke-ObserverCommand `
-                'remove_calculator_denial_rule' $script:temporaryRuleToken
-            Assert-NoFailures $cleanup
-            if ($cleanup.temporaryRulePresent) {
-                throw 'temporary Calculator rule remained effective after cleanup request'
-            }
-            Write-Trace "temporary rule cleanup verified token=$script:temporaryRuleToken"
+            Remove-TemporaryCalculatorRule `
+                $script:temporaryRuleToken 'final temporary rule cleanup' | Out-Null
             $script:temporaryRuleToken = $null
         } catch {
-            Write-Trace "temporary rule cleanup unavailable: $($_.Exception.Message)"
+            $ruleCleanupError = $_
         }
     }
     try {
@@ -635,40 +759,36 @@ try {
         Set-OwnedAccessibilityState $initialServices $initialAccessibilityEnabled 'final restoration'
         Assert-AccessibilityState $initialServices $initialAccessibilityEnabled 'final restoration exact verification'
     } catch {
-        $restoreError = $_
+        $accessibilityRestoreError = $_
     }
-    if ($initialWakefulness -ne 'Awake') {
-        try {
+    try {
+        if ($initialWakefulness -eq 'Dozing') {
             Invoke-AdbCommand @('shell', 'input', 'keyevent', 'SLEEP') | Out-Null
-            Wait-Until 'original non-awake device state' {
-                (Get-Wakefulness) -ne 'Awake'
-            }
-            Write-Trace "wakefulness restoration verified state=$(Get-Wakefulness)"
-        } catch {
-            if ($null -eq $restoreError) {
-                $restoreError = $_
-            } else {
-                $restoreError = [System.Management.Automation.ErrorRecord]::new(
-                    [AggregateException]::new(
-                        'accessibility and wakefulness restoration both failed',
-                        [Exception[]]@($restoreError.Exception, $_.Exception)
-                    ),
-                    'Ticket19RestorationFailed',
-                    [System.Management.Automation.ErrorCategory]::InvalidResult,
-                    $null
-                )
-            }
+        } elseif ((Get-Wakefulness) -ne 'Awake') {
+            Invoke-AdbCommand @('shell', 'input', 'keyevent', 'WAKEUP') | Out-Null
+            Invoke-AdbCommand @('shell', 'wm', 'dismiss-keyguard') | Out-Null
         }
+        Wait-Until "exact $initialWakefulness wakefulness restoration" {
+            (Get-Wakefulness) -ceq $initialWakefulness
+        }
+        Write-Trace "wakefulness restoration verified state=$(Get-Wakefulness)"
+    } catch {
+        $wakeRestoreError = $_
     }
 }
 
-if ($null -ne $primaryError -and $null -ne $restoreError) {
+$failures = @(@(
+    $primaryError,
+    $ruleCleanupError,
+    $accessibilityRestoreError,
+    $wakeRestoreError
+) | Where-Object { $null -ne $_ })
+if ($failures.Count -gt 1) {
     throw [AggregateException]::new(
-        'ticket19 trace and accessibility restoration both failed',
-        [Exception[]]@($primaryError.Exception, $restoreError.Exception)
+        'ticket19 trace and restoration failures',
+        [Exception[]]@($failures | ForEach-Object { $_.Exception })
     )
 }
-if ($null -ne $primaryError) { throw $primaryError }
-if ($null -ne $restoreError) { throw $restoreError }
+if ($failures.Count -eq 1) { throw $failures[0] }
 if (-not $traceCompleted) { throw 'ticket19 trace did not reach its scoped completion point' }
 Write-Trace "TRACE_COMPLETE scoped assertions passed; decision remains INCONCLUSIVE, ticket open, gate closed; restored services=$((Get-EnabledServices) -join ':') accessibility_enabled=$(Get-AccessibilityEnabled)"
