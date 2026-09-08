@@ -115,8 +115,13 @@ The final run started at 2026-09-08T11:21:15.5292639+09:00 and exited 0 at
   inactive, service/protection scopes inactive, process filters zero, and no active
   AppBlockerService ServiceRecord. This is not a claim that every library-owned resource completed
   clean teardown.
-- Run-specific logcat contained IntentReceiverLeaked for
-  rikka.shizuku.ShizukuProvider$1 at the PID 4200 destroy and again at the PID 5468 destroy.
+- The recorded lifecycle run contained the exact AppBlockerService
+  `IntentReceiverLeaked`/`rikka.shizuku.ShizukuProvider$1` signature at the PID 4200 destroy and
+  again at PID 5468. Follow-up hardening removed its destructive `logcat -c`. The controller now
+  captures the last epoch timestamp before mutation with
+  `adb shell logcat -d -v epoch -t 1`, preserves all existing logs, and queries only the new
+  interval with `adb shell logcat -d -v epoch -T <captured-cursor>`. It accepts only the full leak
+  signature and the two PIDs from that run.
   Because old-PID filters were zero and no stale or duplicate delivery survived reconnect, this
   is classified only as a Shizuku teardown anomaly. No canonical stale-ownership failure was
   reproduced, so no Shizuku/integration remedy or lifecycle host was implemented.
@@ -173,3 +178,7 @@ authorized.
   each APK had zero Ticket19 observer/AIDL matches.
 - The builds emitted the repository's existing Kotlin/KSP compatibility and JDK 21 source/target 8
   deprecation warnings. No verification failed.
+- Follow-up static verification reported `PowerShell parser: OK`, no remaining logcat clear
+  command, and two of two exact Shizuku signature samples matched. A read-only device probe captured
+  cursor `1788843614.875`; `adb shell logcat -d -v epoch -T 1788843614.875` succeeded and returned
+  three lines without clearing the device log buffer.
