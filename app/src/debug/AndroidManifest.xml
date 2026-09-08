@@ -20,6 +20,7 @@
             android:name="neth.iecal.curbox.debug.Ticket19ObserverProvider"
             android:authorities="neth.iecal.curbox.debug.ticket19.observer"
             android:exported="true"
+            android:permission="android.permission.DUMP"
             android:process=":app_blocker_service" />
     </application>
 </manifest>

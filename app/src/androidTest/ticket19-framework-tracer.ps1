@@ -8,6 +8,7 @@ $packageName = 'neth.iecal.curbox.debug'
 $serviceClass = 'neth.iecal.curbox.services.AppBlockerService'
 $serviceComponent = "$packageName/$serviceClass"
 $observerUri = 'content://neth.iecal.curbox.debug.ticket19.observer'
+$refreshAction = 'neth.iecal.curbox.refresh.app_rules'
 
 function Write-Trace([string]$Message) {
     Write-Host "$(Get-Date -Format o) $Message"
@@ -45,9 +46,25 @@ function Test-CurboxComponent([string]$Component) {
         $Component -eq "$packageName/.services.AppBlockerService"
 }
 
-function Set-AccessibilityState([string[]]$Services, [int]$Enabled) {
+function Assert-AccessibilityState {
+    param([string[]]$ExpectedServices, [int]$ExpectedEnabled, [string]$Stage)
+    $actualServices = @(Get-EnabledServices)
+    $actualEnabled = Get-AccessibilityEnabled
+    if (($actualServices -join ':') -cne ($ExpectedServices -join ':') -or
+        $actualEnabled -ne $ExpectedEnabled) {
+        throw "$Stage concurrent accessibility change: expected services=$($ExpectedServices -join ':') enabled=$ExpectedEnabled; actual services=$($actualServices -join ':') enabled=$actualEnabled"
+    }
+    Write-Trace "$Stage verified services=$($actualServices -join ':') accessibility_enabled=$actualEnabled"
+}
+
+function Set-OwnedAccessibilityState {
+    param([string[]]$Services, [int]$Enabled, [string]$Stage)
+    Assert-AccessibilityState $script:ownedServices $script:ownedEnabled "$Stage pre-write"
     Invoke-AdbCommand @('shell', 'settings', 'put', 'secure',
         'accessibility_enabled', '0') | Out-Null
+    Assert-AccessibilityState $script:ownedServices 0 "$Stage disabled"
+    $script:ownedEnabled = 0
+    Assert-AccessibilityState $script:ownedServices $script:ownedEnabled "$Stage pre-list-write"
     if ($Services.Count -eq 0) {
         Invoke-AdbCommand @('shell', 'settings', 'delete', 'secure',
             'enabled_accessibility_services') | Out-Null
@@ -55,23 +72,33 @@ function Set-AccessibilityState([string[]]$Services, [int]$Enabled) {
         Invoke-AdbCommand @('shell', 'settings', 'put', 'secure',
             'enabled_accessibility_services', ($Services -join ':')) | Out-Null
     }
+    # Android 13 may derive the global flag when the list value changes, but leaves it unchanged
+    # when the same list is written. Own the observed boolean only after the list is exact, then
+    # converge it with the explicit final flag write below.
+    $actualAfterList = @(Get-EnabledServices)
+    $actualEnabledAfterList = Get-AccessibilityEnabled
+    if (($actualAfterList -join ':') -cne ($Services -join ':') -or
+        $actualEnabledAfterList -notin @(0, 1)) {
+        throw "$Stage list write result was not exact: expected services=$($Services -join ':'); actual services=$($actualAfterList -join ':') enabled=$actualEnabledAfterList"
+    }
+    $script:ownedServices = @($Services)
+    $script:ownedEnabled = $actualEnabledAfterList
+    Write-Trace "$Stage list-written verified services=$($actualAfterList -join ':') platform_accessibility_enabled=$actualEnabledAfterList"
     Invoke-AdbCommand @('shell', 'settings', 'put', 'secure',
         'accessibility_enabled', $Enabled.ToString()) | Out-Null
+    Assert-AccessibilityState $script:ownedServices $Enabled "$Stage complete"
+    $script:ownedEnabled = $Enabled
 }
 
-function Enable-Curbox {
-    $before = @(Get-EnabledServices)
-    $after = @($before | Where-Object { -not (Test-CurboxComponent $_) }) +
+function Enable-Curbox([string]$Stage) {
+    $after = @($script:ownedServices | Where-Object { -not (Test-CurboxComponent $_) }) +
         @($serviceComponent)
-    Write-Trace "enable before=$($before -join ':') after=$($after -join ':')"
-    Set-AccessibilityState $after 1
+    Set-OwnedAccessibilityState $after 1 $Stage
 }
 
-function Disable-Curbox {
-    $before = @(Get-EnabledServices)
-    $after = @($before | Where-Object { -not (Test-CurboxComponent $_) })
-    Write-Trace "disable before=$($before -join ':') after=$($after -join ':')"
-    Set-AccessibilityState $after $(if ($after.Count -eq 0) { 0 } else { 1 })
+function Disable-Curbox([string]$Stage) {
+    $after = @($script:ownedServices | Where-Object { -not (Test-CurboxComponent $_) })
+    Set-OwnedAccessibilityState $after $(if ($after.Count -eq 0) { 0 } else { 1 }) $Stage
 }
 
 function Test-FrameworkBound {
@@ -150,6 +177,10 @@ function Assert-Ready($Snapshot) {
             throw "invalid receiver ownership: $($receiver | ConvertTo-Json -Compress)"
         }
     }
+    $serviceWide = @($Snapshot.serviceWideReceiverOwnership)
+    if ($serviceWide.Count -ne 15 -or @($serviceWide | Where-Object { $_.identity -eq 0 }).Count -ne 0) {
+        throw "invalid service-wide receiver ownership: $($serviceWide | ConvertTo-Json -Compress)"
+    }
     Assert-NoFailures $Snapshot
 }
 
@@ -158,55 +189,137 @@ function Wait-ReadySnapshot([string]$Description) {
     Wait-Until $Description {
         $script:latestSnapshot = Invoke-ObserverCommand 'snapshot'
         return $script:latestSnapshot.appRuleSetupReady -and
-            $script:latestSnapshot.activeReceiverCount -eq 5
+            $script:latestSnapshot.activeReceiverCount -eq 5 -and
+            @($script:latestSnapshot.serviceWideReceiverOwnership).Count -eq 15
     }
     Assert-Ready $script:latestSnapshot
     return $script:latestSnapshot
 }
 
-function Send-Refresh {
+function Send-Refresh([string]$Stage) {
+    $token = [guid]::NewGuid().ToString()
+    $sentAt = Get-Date -Format o
     $output = Invoke-AdbCommand @('shell', 'am', 'broadcast', '-a',
-        'neth.iecal.curbox.refresh.app_rules', '-p', $packageName)
+        $refreshAction, '-p', $packageName, '--es', 'ticket19_run_token', $token)
     if ($output -notmatch 'result=0') { throw "matching broadcast failed: $output" }
+    Write-Trace "$Stage sent token=$token sentAt=$sentAt"
+    return [pscustomobject]@{ Token = $token; SentAt = $sentAt }
 }
 
-function Get-LatestRefreshDelivery {
+function Get-CorrelatedRefreshDelivery([string]$Token, [int]$ExpectedPid) {
     $dump = Invoke-AdbCommand @('shell', 'dumpsys', 'activity', 'broadcasts') -Quiet
     $pattern = '(?ms)Historical Broadcast background #\d+:\s+BroadcastRecord\{[^\r\n]*neth\.iecal\.curbox\.refresh\.app_rules\}.*?(?=\r?\n\s*Historical Broadcast background #|\r?\n\s*Historical broadcasts summary)'
-    $record = [regex]::Match($dump, $pattern)
-    if (-not $record.Success) { throw 'matching broadcast history record not found' }
-    $deliveries = [regex]::Matches($record.Value, '(?m)^\s*Deliver .*#\d+:.*$')
-    return [pscustomobject]@{
-        Count = $deliveries.Count
-        Lines = @($deliveries | ForEach-Object { $_.Value.Trim() })
-        Record = $record.Value.Trim()
+    $records = @([regex]::Matches($dump, $pattern) | Where-Object {
+        $_.Value -match [regex]::Escape($Token)
+    })
+    if ($records.Count -ne 1) {
+        throw "token-correlated broadcast record count expected=1 actual=$($records.Count) token=$Token"
+    }
+    $deliveries = [regex]::Matches($records[0].Value, '(?m)^\s*Deliver .*#\d+:.*$')
+    if ($deliveries.Count -ne 1 -or
+        $deliveries[0].Value -notmatch "\s$ExpectedPid\s+$([regex]::Escape("$packageName`:app_blocker_service"))/") {
+        throw "token-correlated delivery mismatch token=$Token expectedPid=$ExpectedPid record=$($records[0].Value.Trim())"
+    }
+    return $deliveries[0].Value.Trim()
+}
+
+function Assert-WorkCountsZero($Snapshot, [string]$Stage) {
+    foreach ($property in $Snapshot.workCounts.PSObject.Properties) {
+        if ([int]$property.Value -ne 0) { throw "$Stage work count $($property.Name)=$($property.Value)" }
     }
 }
 
-function Assert-SingleRefresh([string]$Stage) {
-    Invoke-ObserverCommand 'reset_observation' | Out-Null
-    Send-Refresh
-    $script:latestSnapshot = $null
-    Wait-Until "$Stage runtime publication" {
-        $script:latestSnapshot = Invoke-ObserverCommand 'snapshot'
-        return $script:latestSnapshot.runtimePublicationCount -ge 1
+function Get-EffectFingerprint($Snapshot) {
+    return @($Snapshot.runtimePublicationCount, $Snapshot.notificationPublicationCount,
+        $Snapshot.evaluationCount, $Snapshot.allowedEvaluationCount, $Snapshot.deniedEvaluationCount,
+        $Snapshot.warningFrameworkBoundaryCount, @($Snapshot.failures).Count) -join ','
+}
+
+function Assert-QuiescentStable($Before, [string]$Stage) {
+    $after = Invoke-ObserverCommand 'await_quiescence' 15000
+    Assert-NoFailures $after
+    Assert-WorkCountsZero $after $Stage
+    if ((Get-EffectFingerprint $Before) -ne (Get-EffectFingerprint $after)) {
+        throw "$Stage effect counts changed after quiescence"
     }
-    Start-Sleep -Milliseconds 300
-    $stable = Invoke-ObserverCommand 'snapshot'
-    Assert-NoFailures $stable
-    $delivery = Get-LatestRefreshDelivery
-    if ($delivery.Count -ne 1 -or
-        $delivery.Lines[0] -notmatch [regex]::Escape("$packageName`:app_blocker_service") -or
-        $stable.runtimePublicationCount -ne 1) {
+    return $after
+}
+
+function Assert-SingleRefresh([string]$Stage, [int]$ExpectedPid) {
+    Invoke-ObserverCommand 'reset_observation' | Out-Null
+    $sent = Send-Refresh $Stage
+    Wait-Until "$Stage production callback entered" {
+        (Invoke-ObserverCommand 'snapshot').runtimePublicationCount -ge 1
+    }
+    $snapshot = Invoke-ObserverCommand 'await_quiescence' 15000
+    Assert-NoFailures $snapshot
+    Assert-WorkCountsZero $snapshot $Stage
+    $stable = Assert-QuiescentStable $snapshot $Stage
+    $delivery = Get-CorrelatedRefreshDelivery $sent.Token $ExpectedPid
+    if ($stable.runtimePublicationCount -ne 1) {
         throw "$Stage was not single-delivery: $($stable | ConvertTo-Json -Depth 12 -Compress)"
     }
-    Write-Trace "$Stage delivery=$($delivery.Lines -join ' | ')"
+    Write-Trace "$Stage correlated delivery token=$($sent.Token) line=$delivery"
     Write-Trace "$Stage snapshot=$($stable | ConvertTo-Json -Depth 12 -Compress)"
 }
 
-function Assert-Teardown([string]$Stage) {
+function Get-ActiveServiceProcessFilters([int]$ProcessId) {
+    $dump = Invoke-AdbCommand @('shell', 'dumpsys', 'activity', 'broadcasts') -Quiet
+    $active = ($dump -split '(?m)^\s*Historical broadcasts \[', 2)[0]
+    $processName = [regex]::Escape("$packageName`:app_blocker_service")
+    $matches = [regex]::Matches(
+        $active,
+        "(?m)^.*BroadcastFilter\{(?<id>[0-9a-f]+).*ReceiverList\{[^\r\n]*\s$ProcessId\s+$processName[/\s].*$"
+    )
+    return @($matches | ForEach-Object { $_.Groups['id'].Value } | Sort-Object -Unique)
+}
+
+function Assert-SystemFilterCount([int]$ProcessId, [int]$Expected, [string]$Stage) {
+    $filters = @(Get-ActiveServiceProcessFilters $ProcessId)
+    if ($filters.Count -ne $Expected) {
+        throw "$Stage system filter count expected=$Expected actual=$($filters.Count) ids=$($filters -join ',')"
+    }
+    Write-Trace "$Stage system filters pid=$ProcessId count=$($filters.Count) ids=$($filters -join ',')"
+}
+
+function Assert-NoActiveProcessFilters([int]$ProcessId, [string]$Stage) {
+    Assert-SystemFilterCount $ProcessId 0 $Stage
+}
+
+function Try-RealAllowedEvaluation {
+    Invoke-ObserverCommand 'reset_observation' | Out-Null
+    try {
+        Invoke-AdbCommand @('shell', 'input', 'keyevent', 'HOME') | Out-Null
+        Invoke-AdbCommand @('shell', 'monkey', '-p', 'com.android.calculator2', '1') | Out-Null
+        $script:latestSnapshot = $null
+        Wait-Until 'real Calculator accessibility evaluation' {
+            $script:latestSnapshot = Invoke-ObserverCommand 'snapshot'
+            return $script:latestSnapshot.lastEvaluatedPackage -eq 'com.android.calculator2' -and
+                $script:latestSnapshot.evaluationCount -ge 1 -and
+                $script:latestSnapshot.allowedEvaluationCount -ge 1
+        } 20
+    } catch {
+        $snapshot = Invoke-ObserverCommand 'snapshot'
+        $window = Invoke-AdbCommand @('shell', 'dumpsys', 'window', 'windows') -Quiet
+        $focus = [regex]::Match($window, '(?m)^\s*mCurrentFocus=.*$').Value.Trim()
+        Write-Trace "real external allow INCONCLUSIVE blocker=$($_.Exception.Message) focus=$focus snapshot=$($snapshot | ConvertTo-Json -Depth 12 -Compress)"
+        return $false
+    }
+    $quiescent = Invoke-ObserverCommand 'await_quiescence' 15000
+    Assert-NoFailures $quiescent
+    Assert-WorkCountsZero $quiescent 'real allowed evaluation'
+    $window = Invoke-AdbCommand @('shell', 'dumpsys', 'window', 'windows') -Quiet
+    if ($window -notmatch 'mCurrentFocus=.*com\.android\.calculator2') {
+        throw 'allowed evaluator outcome was not paired with an externally focused Calculator window'
+    }
+    $stable = Assert-QuiescentStable $quiescent 'real allowed evaluation'
+    Write-Trace "real external allow focused=com.android.calculator2 snapshot=$($stable | ConvertTo-Json -Depth 12 -Compress)"
+    return $true
+}
+
+function Assert-ScopedTeardown([string]$Stage) {
     $script:latestSnapshot = $null
-    Wait-Until "$Stage teardown" {
+    Wait-Until "$Stage AppRule teardown" {
         $script:latestSnapshot = Invoke-ObserverCommand 'snapshot'
         return $script:latestSnapshot.appRuleDestroyed -and
             $script:latestSnapshot.activeReceiverCount -eq 0 -and
@@ -214,44 +327,72 @@ function Assert-Teardown([string]$Stage) {
             -not $script:latestSnapshot.protectionScopeActive
     }
     Assert-NoFailures $script:latestSnapshot
-    Write-Trace "$Stage snapshot=$($script:latestSnapshot | ConvertTo-Json -Depth 12 -Compress)"
+    Write-Trace "$Stage scoped snapshot=$($script:latestSnapshot | ConvertTo-Json -Depth 12 -Compress)"
 }
 
 $initialServices = @(Get-EnabledServices)
 $initialAccessibilityEnabled = Get-AccessibilityEnabled
+if (@($initialServices | Where-Object {
+    $_ -match '(?i)(lock\s*me\s*out|lockmeout|com\.teqtic)'
+}).Count -ne 0) {
+    throw "refusing to mutate a baseline containing intentionally removed Lock Me Out: $($initialServices -join ':')"
+}
+if (@($initialServices | Where-Object { $_ -match '(?i)safeincloud' }).Count -eq 0) {
+    throw "refusing to mutate because SafeInCloud is absent: $($initialServices -join ':')"
+}
+$script:ownedServices = @($initialServices)
+$script:ownedEnabled = $initialAccessibilityEnabled
+$primaryError = $null
+$restoreError = $null
+$traceCompleted = $false
 Write-Trace "start serial=$Serial services=$($initialServices -join ':') accessibility_enabled=$initialAccessibilityEnabled"
 try {
+    Invoke-AdbCommand @('shell', 'logcat', '-c') | Out-Null
     Invoke-AdbCommand @('shell', 'am', 'start', '-W', '-n',
         "$packageName/neth.iecal.curbox.ui.activity.FragmentActivity") | Out-Null
     Assert-PackageNotStopped
 
-    Enable-Curbox
+    Enable-Curbox 'initial enable'
     Wait-Until 'initial framework bind' { Test-FrameworkBound }
     $initialPid = Get-ServicePid
     if ($initialPid -le 0) { throw 'initial service PID missing' }
     $initial = Wait-ReadySnapshot 'initial observer setup'
     if ($initial.processPid -ne $initialPid) { throw 'observer PID did not match service PID' }
+    $initialSystemFilters = @(Get-ActiveServiceProcessFilters $initialPid)
+    if ($initialSystemFilters.Count -lt 15) {
+        throw "system exposed fewer than 15 service-process filters: $($initialSystemFilters.Count)"
+    }
+    Write-Trace "initial system filters pid=$initialPid count=$($initialSystemFilters.Count) ids=$($initialSystemFilters -join ',')"
     Write-Trace "initial snapshot=$($initial | ConvertTo-Json -Depth 12 -Compress)"
-    Assert-SingleRefresh 'baseline'
+    Assert-SingleRefresh 'baseline' $initialPid
+    $externalAllowObserved = Try-RealAllowedEvaluation
 
     Invoke-ObserverCommand 'reset_observation' | Out-Null
     Invoke-ObserverCommand 'arm_runtime_barrier' 15000 | Out-Null
-    Send-Refresh
+    $barrierBroadcast = Send-Refresh 'barrier'
     Wait-Until 'runtime barrier entered' {
         (Invoke-ObserverCommand 'snapshot').barrierState -eq 'ENTERED'
     }
     $entered = Invoke-ObserverCommand 'snapshot'
-    Write-Trace "barrier entered snapshot=$($entered | ConvertTo-Json -Depth 12 -Compress)"
+    Write-Trace "barrier entered token=$($barrierBroadcast.Token) snapshot=$($entered | ConvertTo-Json -Depth 12 -Compress)"
 
-    Disable-Curbox
+    Disable-Curbox 'same-PID disable'
     Wait-Until 'same-PID framework disable' { -not (Test-FrameworkBound) }
-    Assert-Teardown 'same-PID'
+    Assert-ScopedTeardown 'same-PID'
     Invoke-ObserverCommand 'release_runtime_barrier' | Out-Null
-    $released = Invoke-ObserverCommand 'snapshot'
-    Assert-NoFailures $released
-    if ($released.barrierState -ne 'RELEASED') { throw 'barrier was not released' }
+    $continued = Invoke-ObserverCommand 'await_refresh_continuation' 15000
+    Assert-NoFailures $continued
+    Assert-WorkCountsZero $continued 'post-barrier continuation'
+    if ($continued.barrierState -ne 'RELEASED' -or
+        $continued.refreshContinuationCompletionCount -ne 1) {
+        throw "post-barrier continuation acknowledgement missing: $($continued | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $continuedStable = Assert-QuiescentStable $continued 'post-barrier continuation'
+    Get-CorrelatedRefreshDelivery $barrierBroadcast.Token $initialPid | Out-Null
+    Assert-NoActiveProcessFilters $initialPid 'same-PID disabled'
+    Write-Trace "post-barrier stable snapshot=$($continuedStable | ConvertTo-Json -Depth 12 -Compress)"
 
-    Enable-Curbox
+    Enable-Curbox 'same-PID enable'
     Wait-Until 'same-PID framework rebind' { Test-FrameworkBound }
     $rebound = Wait-ReadySnapshot 'same-PID new service instance'
     if ($rebound.processPid -ne $initialPid) { throw 'same-PID branch changed process' }
@@ -260,7 +401,13 @@ try {
         throw 'same-PID rebind did not create a new service identity'
     }
     Write-Trace "same-PID rebound snapshot=$($rebound | ConvertTo-Json -Depth 12 -Compress)"
-    Assert-SingleRefresh 'same-PID rebind'
+    Assert-SystemFilterCount $initialPid $initialSystemFilters.Count 'same-PID rebind'
+    $initialServiceWideIds = @($initial.serviceWideReceiverOwnership | ForEach-Object { $_.identity }) -join ','
+    $reboundServiceWideIds = @($rebound.serviceWideReceiverOwnership | ForEach-Object { $_.identity }) -join ','
+    if ($initialServiceWideIds -eq $reboundServiceWideIds) {
+        throw 'same-PID rebind retained every service-wide receiver identity'
+    }
+    Assert-SingleRefresh 'same-PID rebind' $initialPid
 
     $beforeNarrow = Invoke-ObserverCommand 'snapshot'
     Invoke-ObserverCommand 'reapply_app_rule_receivers' | Out-Null
@@ -269,20 +416,21 @@ try {
     $beforeIds = @($beforeNarrow.receiverOwnership | ForEach-Object { $_.identity }) -join ','
     $afterIds = @($afterNarrow.receiverOwnership | ForEach-Object { $_.identity }) -join ','
     if ($beforeIds -ne $afterIds) { throw 'narrow receiver reapply changed receiver identity' }
-    Assert-SingleRefresh 'narrow receiver reapply'
+    Assert-SystemFilterCount $initialPid $initialSystemFilters.Count 'narrow AppRule reapply'
+    Assert-SingleRefresh 'narrow receiver reapply' $initialPid
 
     Invoke-ObserverCommand 'reset_observation' | Out-Null
     Invoke-ObserverCommand 'fail_next_runtime_publication' | Out-Null
-    Send-Refresh
+    $failureBroadcast = Send-Refresh 'deterministic failure'
     Wait-Until 'deterministic failure transport' {
         @((Invoke-ObserverCommand 'snapshot').failures).Count -eq 1
     }
-    $transported = Invoke-ObserverCommand 'snapshot'
-    $failureDelivery = Get-LatestRefreshDelivery
+    $transported = Invoke-ObserverCommand 'await_quiescence' 15000
     if ($transported.failures[0].stage -ne 'runtime_publication_injected' -or
-        $transported.runtimePublicationCount -ne 1 -or $failureDelivery.Count -ne 1) {
+        $transported.runtimePublicationCount -ne 1) {
         throw "unexpected transported failure: $($transported | ConvertTo-Json -Depth 12 -Compress)"
     }
+    Get-CorrelatedRefreshDelivery $failureBroadcast.Token $initialPid | Out-Null
     Write-Trace "failure transported snapshot=$($transported | ConvertTo-Json -Depth 12 -Compress)"
 
     Invoke-ObserverCommand 'reset_observation' | Out-Null
@@ -304,8 +452,8 @@ try {
         Invoke-AdbCommand @('shell', 'am', 'start', '-W', '-n',
             "$packageName/neth.iecal.curbox.ui.activity.FragmentActivity") | Out-Null
         Assert-PackageNotStopped
-        Disable-Curbox
-        Enable-Curbox
+        Disable-Curbox 'distinct-PID fallback disable'
+        Enable-Curbox 'distinct-PID fallback enable'
         Wait-Until 'framework rebind after explicit launch' { Test-FrameworkBound }
     }
     $afterKill = Wait-ReadySnapshot 'distinct-process observer setup'
@@ -314,11 +462,14 @@ try {
     }
     Write-Trace "distinct PID before=$($beforeKill | ConvertTo-Json -Depth 12 -Compress)"
     Write-Trace "distinct PID after=$($afterKill | ConvertTo-Json -Depth 12 -Compress)"
-    Assert-SingleRefresh 'distinct-PID rebind'
+    Assert-NoActiveProcessFilters $oldPid 'distinct-PID old process'
+    Assert-SystemFilterCount $afterKill.processPid $initialSystemFilters.Count 'distinct-PID rebind'
+    Assert-SingleRefresh 'distinct-PID rebind' $afterKill.processPid
 
-    Disable-Curbox
+    Disable-Curbox 'final disable'
     Wait-Until 'final framework disable' { -not (Test-FrameworkBound) }
-    Assert-Teardown 'final'
+    Assert-ScopedTeardown 'final'
+    Assert-NoActiveProcessFilters $afterKill.processPid 'final disabled'
     $activityServices = Invoke-AdbCommand @('shell', 'dumpsys', 'activity', 'services',
         $packageName) -Quiet
     $activeServiceRecord = [regex]::Match(
@@ -328,9 +479,36 @@ try {
     if ($activeServiceRecord.Success) {
         throw "AppBlockerService remained active: $($activeServiceRecord.Value.Trim())"
     }
-    Write-Trace 'PASS canonical lifecycle trace completed without duplicate callback/effect'
+    $runLog = Invoke-AdbCommand @('shell', 'logcat', '-d', '-v', 'epoch') -Quiet
+    $newPid = [int]$afterKill.processPid
+    $shizukuLines = @($runLog -split "`n" | Where-Object {
+        $_ -match '(?i)(Shizuku|IntentReceiverLeaked)' -and $_ -match "\s($oldPid|$newPid)\s"
+    })
+    Write-Trace "run-specific Shizuku/IntentReceiver lines count=$($shizukuLines.Count) lines=$($shizukuLines -join ' | ')"
+    $traceCompleted = $true
+} catch {
+    $primaryError = $_
 } finally {
-    try { Invoke-ObserverCommand 'release_runtime_barrier' | Out-Null } catch {}
-    try { Set-AccessibilityState $initialServices $initialAccessibilityEnabled } catch {}
-    Write-Trace "finish services=$((Get-EnabledServices) -join ':') accessibility_enabled=$(Get-AccessibilityEnabled)"
+    try {
+        Invoke-ObserverCommand 'release_runtime_barrier' | Out-Null
+    } catch {
+        Write-Trace "barrier release during cleanup unavailable: $($_.Exception.Message)"
+    }
+    try {
+        Set-OwnedAccessibilityState $initialServices $initialAccessibilityEnabled 'final restoration'
+        Assert-AccessibilityState $initialServices $initialAccessibilityEnabled 'final restoration exact verification'
+    } catch {
+        $restoreError = $_
+    }
 }
+
+if ($null -ne $primaryError -and $null -ne $restoreError) {
+    throw [AggregateException]::new(
+        'ticket19 trace and accessibility restoration both failed',
+        [Exception[]]@($primaryError.Exception, $restoreError.Exception)
+    )
+}
+if ($null -ne $primaryError) { throw $primaryError }
+if ($null -ne $restoreError) { throw $restoreError }
+if (-not $traceCompleted) { throw 'ticket19 trace did not reach its scoped completion point' }
+Write-Trace "TRACE_COMPLETE scoped assertions passed; decision remains INCONCLUSIVE, ticket open, gate closed; restored services=$((Get-EnabledServices) -join ':') accessibility_enabled=$(Get-AccessibilityEnabled)"

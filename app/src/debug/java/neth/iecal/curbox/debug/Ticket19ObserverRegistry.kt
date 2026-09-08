@@ -15,6 +15,7 @@ import java.lang.reflect.Field
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 internal object Ticket19ObserverRegistry {
     private const val REFRESH_ACTION = "neth.iecal.curbox.refresh.app_rules"
@@ -35,6 +36,12 @@ internal object Ticket19ObserverRegistry {
     private var serviceIdentity = 0
     private var runtimePublicationCount = 0L
     private var notificationPublicationCount = 0L
+    private var evaluationCount = 0L
+    private var allowedEvaluationCount = 0L
+    private var deniedEvaluationCount = 0L
+    private var warningFrameworkBoundaryCount = 0L
+    private var refreshContinuationCompletionCount = 0L
+    private var lastEvaluatedPackage = ""
     private var failNextRuntimePublication = false
     private var runtimeBarrier: RuntimeBarrier? = null
     private val failures = mutableListOf<FailureRecord>()
@@ -90,6 +97,8 @@ internal object Ticket19ObserverRegistry {
                 }
                 "arm_runtime_barrier" -> armRuntimeBarrier(argument)
                 "release_runtime_barrier" -> releaseRuntimeBarrier()
+                "await_refresh_continuation" -> awaitRefreshContinuation(argument)
+                "await_quiescence" -> awaitQuiescence(argument)
                 "fail_next_runtime_publication" -> synchronized(lock) {
                     failNextRuntimePublication = true
                     recordEventLocked("runtime_failure_armed", "")
@@ -116,6 +125,38 @@ internal object Ticket19ObserverRegistry {
             synchronized(lock) {
                 notificationPublicationCount += 1L
                 recordEventLocked("notification_published", model.title)
+            }
+        }
+        val previousForegroundObserver = blocker.foregroundEvidenceRecordObserver
+        blocker.foregroundEvidenceRecordObserver = { packageName ->
+            previousForegroundObserver?.invoke(packageName)
+            synchronized(lock) {
+                lastEvaluatedPackage = packageName
+                recordEventLocked("foreground_evidence", packageName)
+            }
+        }
+        val previousEvaluationObserver = blocker.evaluationResultObserver
+        blocker.evaluationResultObserver = { evaluation ->
+            previousEvaluationObserver?.invoke(evaluation)
+            synchronized(lock) {
+                evaluationCount += 1L
+                if (evaluation.isAllowed) {
+                    allowedEvaluationCount += 1L
+                } else {
+                    deniedEvaluationCount += 1L
+                }
+                recordEventLocked(
+                    "evaluation_completed",
+                    "package=$lastEvaluatedPackage allowed=${evaluation.isAllowed}"
+                )
+            }
+        }
+        val previousWarningObserver = blocker.warningBeforeFrameworkCallObserver
+        blocker.warningBeforeFrameworkCallObserver = { packageName ->
+            previousWarningObserver?.invoke(packageName)
+            synchronized(lock) {
+                warningFrameworkBoundaryCount += 1L
+                recordEventLocked("warning_framework_boundary", packageName)
             }
         }
     }
@@ -187,6 +228,43 @@ internal object Ticket19ObserverRegistry {
         }
     }
 
+    private fun awaitRefreshContinuation(timeoutMs: Long) {
+        require(timeoutMs in 1_000L..30_000L) {
+            "continuation timeout must be between 1000ms and 30000ms"
+        }
+        synchronized(lock) {
+            require(runtimeBarrier?.state == "RELEASED") {
+                "runtime barrier must be released before awaiting continuation"
+            }
+        }
+        awaitQuiescenceInternal(timeoutMs)
+        synchronized(lock) {
+            refreshContinuationCompletionCount += 1L
+            recordEventLocked("refresh_continuation_completed", "")
+        }
+    }
+
+    private fun awaitQuiescence(timeoutMs: Long) {
+        awaitQuiescenceInternal(timeoutMs)
+        synchronized(lock) {
+            recordEventLocked("app_rule_quiescence_acknowledged", "")
+        }
+    }
+
+    private fun awaitQuiescenceInternal(timeoutMs: Long) {
+        require(timeoutMs in 1_000L..30_000L) {
+            "quiescence timeout must be between 1000ms and 30000ms"
+        }
+        val blocker = synchronized(lock) { blockerRef?.get() }
+            ?: error("no current AppRuleBlocker")
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (appRuleWorkCounts(blocker).values.all { it == 0 }) return
+            Thread.sleep(10L)
+        }
+        error("AppRule work did not quiesce within ${timeoutMs}ms")
+    }
+
     private fun reapplyAppRuleReceivers() {
         val blocker = synchronized(lock) { blockerRef?.get() }
             ?: error("no current AppRuleBlocker")
@@ -225,6 +303,7 @@ internal object Ticket19ObserverRegistry {
         val protectionScopeActive = service
             ?.let { readFieldOrNull(it, "protectionScope") as? CoroutineScope }
             ?.isActive
+        val workCounts = blocker?.let(::appRuleWorkCounts).orEmpty()
 
         return synchronized(lock) {
             JSONObject().apply {
@@ -241,8 +320,16 @@ internal object Ticket19ObserverRegistry {
                 put("protectionScopeActive", protectionScopeActive ?: JSONObject.NULL)
                 put("activeReceiverCount", activeReceiverCount)
                 put("receiverOwnership", receiverOwnership(blocker, activeRegistrations))
+                put("serviceWideReceiverOwnership", serviceWideReceiverOwnership(service, blocker))
                 put("runtimePublicationCount", runtimePublicationCount)
                 put("notificationPublicationCount", notificationPublicationCount)
+                put("evaluationCount", evaluationCount)
+                put("allowedEvaluationCount", allowedEvaluationCount)
+                put("deniedEvaluationCount", deniedEvaluationCount)
+                put("warningFrameworkBoundaryCount", warningFrameworkBoundaryCount)
+                put("lastEvaluatedPackage", lastEvaluatedPackage)
+                put("refreshContinuationCompletionCount", refreshContinuationCompletionCount)
+                put("workCounts", JSONObject(workCounts))
                 put("barrierState", runtimeBarrier?.state ?: "DISARMED")
                 put(
                     "barrierEnteredAtElapsedMs",
@@ -280,6 +367,23 @@ internal object Ticket19ObserverRegistry {
         val registered = readFieldOrNull(lifecycle, "registered") as? Collection<*>
         return registered?.filterNotNull().orEmpty()
     }
+
+    private fun appRuleWorkCounts(blocker: AppRuleBlocker): Map<String, Int> {
+        val counts = linkedMapOf(
+            "refreshes" to atomicIntField(blocker, "inFlightRefreshes"),
+            "notifications" to atomicIntField(blocker, "inFlightNotifications"),
+            "callbacks" to atomicIntField(blocker, "inFlightCallbacks"),
+            "usageResetCompletions" to atomicIntField(blocker, "inFlightUsageResetCompletions"),
+            "recheckPlans" to atomicIntField(blocker, "inFlightRecheckPlans")
+        )
+        val worker = readFieldOrNull(blocker, "decisionWorker")
+        counts["workerQueued"] = worker?.let { atomicIntField(it, "queuedWorkCount") } ?: 0
+        counts["workerInFlight"] = worker?.let { atomicIntField(it, "inFlightWorkCount") } ?: 0
+        return counts
+    }
+
+    private fun atomicIntField(instance: Any, name: String): Int =
+        (readFieldOrNull(instance, name) as? AtomicInteger)?.get() ?: 0
 
     private fun receiverOwnership(
         blocker: AppRuleBlocker?,
@@ -336,6 +440,50 @@ internal object Ticket19ObserverRegistry {
         }
     }
 
+    private fun serviceWideReceiverOwnership(
+        service: AppBlockerService?,
+        blocker: AppRuleBlocker?
+    ): JSONArray {
+        val receivers = mutableListOf<Pair<String, Any?>>()
+        if (blocker != null) {
+            listOf(
+                "refreshReceiver",
+                "packageReceiver",
+                "screenReceiver",
+                "schedulerWakeReceiver",
+                "guardianReceiver"
+            ).forEach { fieldName ->
+                receivers += "AppRuleBlocker.$fieldName" to readFieldOrNull(blocker, fieldName)
+            }
+        }
+        if (service != null) {
+            listOf(
+                Triple("FocusModeBlocker.refreshReceiver", "focusModeBlocker", "refreshReceiver"),
+                Triple("ReelBlocker.refreshReceiver", "reelBlocker", "refreshReceiver"),
+                Triple("KeywordBlocker.refreshReceiver", "keywordBlocker", "refreshReceiver"),
+                Triple("GrayScaleFilter.refreshReceiver", "grayScaleFilter", "refreshReceiver"),
+                Triple("UiHider.refreshReceiver", "uiHider", "refreshReceiver"),
+                Triple("NodePicker.receiver", "nodePicker", "receiver"),
+                Triple("ReelsCountTracker.refreshReceiver", "reelsCountTracker", "refreshReceiver"),
+                Triple("MindfulMessage.intentReceiver", "mindfulMessage", "intentReceiver"),
+                Triple("AppUsageTracker.screenReceiver", "appUsageTracker", "screenReceiver"),
+                Triple("AppUsageTracker.usageResetReceiver", "appUsageTracker", "usageResetReceiver")
+            ).forEach { (name, ownerField, receiverField) ->
+                val owner = readFieldOrNull(service, ownerField)
+                receivers += name to owner?.let { readFieldOrNull(it, receiverField) }
+            }
+        }
+        return JSONArray().apply {
+            receivers.forEach { (name, receiver) ->
+                put(JSONObject().apply {
+                    put("name", name)
+                    put("identity", receiver?.let(System::identityHashCode) ?: 0)
+                    put("ownerServiceIdentity", serviceIdentity)
+                })
+            }
+        }
+    }
+
     private data class ReceiverDefinition(
         val fieldName: String,
         val actions: List<String>,
@@ -348,6 +496,12 @@ internal object Ticket19ObserverRegistry {
         runtimeBarrier = null
         runtimePublicationCount = 0L
         notificationPublicationCount = 0L
+        evaluationCount = 0L
+        allowedEvaluationCount = 0L
+        deniedEvaluationCount = 0L
+        warningFrameworkBoundaryCount = 0L
+        refreshContinuationCompletionCount = 0L
+        lastEvaluatedPackage = ""
         failNextRuntimePublication = false
         failures.clear()
         if (clearEvents) events.clear()

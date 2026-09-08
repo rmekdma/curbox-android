@@ -1,198 +1,175 @@
 # Ticket19 Phase 4 service lifecycle evidence
 
-Status: **NO-GO for lifecycle-host materiality; ticket19 remains open.** The GO recorded by
-`0fd5d473` was withdrawn after dual review. A qualifying framework tracer now reproduces no
-canonical trigger, so the architecture approval gate remains closed.
+Status: **INCONCLUSIVE. Ticket19 remains open and the architecture gate remains closed.**
 
-Baseline: `db1066a0`, with ticket18 green and final.
+Baseline: 0433dbbd plus the debug/androidTest-only tracer changes recorded by the follow-up
+commit. The withdrawn 0fd5d473 manual attach probe remains rejected: it did not use a
+framework-managed accessibility lifecycle, measured append-only attempts, and widened production
+test surfaces. None of its results are retained.
 
-## Rejected probe
+## User state and restoration contract
 
-The `0fd5d473` probe is not qualifying full-service lifecycle evidence and has been removed.
-It instantiated an `AppBlockerService` subclass directly, attached a `Context` through
-reflection, and invoked `onServiceConnected()` twice on the same object. Android did not bind,
-disconnect, or rebind the accessibility service, and the sequence did not run as a framework
-managed `:app_blocker_service` process lifecycle. It therefore cannot be described as an actual
-service reconnect and cannot establish old and new service identities.
+The user removed Lock Me Out because it malfunctioned. That was an external user action, not a
+tracer effect. Lock Me Out must never be restored. The run baseline and final verified state were:
 
-The probe also had these evidence defects:
+    enabled_accessibility_services=com.safeincloud/.autofill.chrome.ChromeAutofillService
+    accessibility_enabled=1
 
-- Its receiver list was an append-only registration-attempt log. It did not retain filter and
-  active ownership only after successful registration, remove ownership only after successful
-  unregister, or deliver a matching broadcast to prove a duplicate callback and external effect.
-- It observed repeated non-AppRule registration attempts but did not compare the narrower
-  per-feature idempotent setup remedy. Registration attempts alone establish neither trigger 4
-  nor lifecycle-host materiality.
-- Worker and barrier failures were not transported to the test thread independently of service
-  error containment. A timeout or worker exception could be swallowed, so a green assertion did
-  not prove that the intended interleaving completed.
-- The cleanup fault occurred after AppRuleBlocker cleanup. It only showed that one later receiver
-  cleanup was attempted after a `FocusModeBlocker` unregister failure; it did not prove that
-  AppRuleBlocker scheduler cancellation survives an earlier cleanup failure.
-- Private reflection and direct settings/runtime publication manipulation dominated the fixture.
-  That bypassed the real settings and refresh boundary needed for service-level evidence.
-- Making `AppBlockerService` open and foreground startup protected/open widened production APIs
-  solely for this rejected harness. Those changes have been removed.
+The controller rejects any baseline containing Lock Me Out and any baseline missing SafeInCloud
+before mutation. Before every settings overwrite it verifies the exact ordered service list and
+global flag it owns. It verifies each resulting list, adopts Android's observed boolean after the
+list write, then explicitly writes and verifies the target flag. A concurrent list or pre-write
+flag change aborts instead of being overwritten. Primary and restoration failures are preserved
+together, and TRACE_COMPLETE is printed only after exact restoration.
 
-No result or log count from the rejected probe is retained as trigger evidence. No qualifying
-full-service lifecycle test remains after the probe's deletion. The retained trigger 1 and 3
-observations below are limited to the in-process component/manual harness scope and are not
-framework service evidence.
+An intermediate run exposed a device behavior relevant to this contract. At
+2026-09-08T11:09:21+09:00, changing the enabled list from SafeInCloud to
+SafeInCloud plus Curbox synchronously changed accessibility_enabled from 0 to 1. At
+11:19:18, writing an already-equal SafeInCloud-only list left the flag at 0. The initial
+implementation incorrectly required the first behavior in both cases and stopped before its
+final flag write. The user state was immediately restored and verified as SafeInCloud-only/1.
+The final controller owns either boolean only after exact list verification and always converges
+to the requested final flag.
 
-## Corrected 2026-09-07 feasibility record
+The supported installAndGrantAccessibilityFullDebug task is not used as a restoration primitive.
+It replaces enabled_accessibility_services with Curbox and does not set accessibility_enabled.
 
-The earlier force-stop branch is not platform-blocker evidence. The command order was disable,
-`adb shell am force-stop neth.iecal.curbox.debug`, then write the Curbox component. The package
-state was `stopped=true` when ActivityManager emitted `Unable to launch app ... for service ...:
-process is bad`. An explicitly stopped package is not eligible for that rebind attempt. The run
-did not clear the stopped state with an app launch before enabling, so the procedure was invalid
-for a distinct-process lifecycle conclusion. The old shell capture did not retain per-command
-timestamps; none are reconstructed here.
+The earlier force-stop attempt remains procedurally invalid evidence. Its ordered commands were:
 
-The supported Gradle task also has narrower behavior than its name suggests. Its implementation
-writes only Curbox to `enabled_accessibility_services`, replacing the complete list, and launches
-the app. It does **not** write `accessibility_enabled`. Therefore
-`installAndGrantAccessibilityFullDebug` must not be used as a list-preserving enable/restore
-primitive.
+    adb shell settings put secure accessibility_enabled 0
+    adb shell am force-stop neth.iecal.curbox.debug
+    adb shell settings put secure enabled_accessibility_services neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService
 
-There was an external user action after that attempt. The user changed Accessibility settings and
-removed Lock Me Out because it was malfunctioning. Every later observation in that interval was
-confounded by that user change and cannot be attributed to the shell sequence. Curbox cleanup did
-succeed. Lock Me Out was removed by the user, must not be restored, and creates no restoration
-obligation. The preserved user baseline for the qualifying run below was exactly:
+The package was stopped=true when ActivityManager reported that it could not launch the service.
+No app launch cleared the stopped state before the list write, so that output cannot establish a
+platform rebind limitation. The old capture did not retain per-command timestamps and none are
+reconstructed. Afterward the user manually changed Accessibility settings and removed Lock Me Out;
+all observations in that interval are confounded by the external user action. Curbox cleanup
+succeeded, and there is no Lock Me Out restoration obligation.
 
-```text
-enabled_accessibility_services=com.safeincloud/.autofill.chrome.ChromeAutofillService
-accessibility_enabled=1
-```
+## Debug-only observation surface
 
-## Retained debug-only framework tracer
+The observer service, provider, component factory, registry, AIDL, and controller exist only in
+src/debug or src/androidTest. Android creates the real final AppBlockerService and the debug
+component factory observes that instance; the tracer does not subclass, attach, or directly call
+onServiceConnected.
 
-The replacement tracer is target `src/debug` and `src/androidTest` only. The debug manifest adds
-a signature-permission-protected bound observer service and a runtime shell/signature-checked
-provider in `:app_blocker_service`. A debug `CoreComponentFactory` observes the real framework
-instantiation of `AppBlockerService`; it does not instantiate, attach, subclass, open, or directly
-invoke the production service. Reflection remains inside the debug APK and reads the actual
-service, AppRuleBlocker, successful receiver-lifecycle registrations, coroutine scopes, and
-service/receiver identities. Shell control uses the provider; the signed test APK uses AIDL.
+The exported AIDL observer service retains the custom signature permission. The shell provider
+requires android.permission.DUMP in the debug manifest and independently requires
+Binder.getCallingUid() == Process.SHELL_UID in call, query, getType, insert, delete, and update.
+It no longer accepts the app UID or a signature-matched UID.
 
-The controller stores the exact initial service list and global flag, launches the app and verifies
-`stopped=false`, merges Curbox without removing SafeInCloud, and performs each framework change in
-this order:
+The registry reports the current process token/PID, service generation and identity, five
+successful AppRule registrations, 15 service-wide receiver object identities, work counters,
+publication/evaluation counters, named failures, and run events. Runtime publication is explicitly
+an internal pre-worker signal, not an external allow or denial.
 
-```text
-adb shell settings put secure accessibility_enabled 0
-adb shell settings put secure enabled_accessibility_services <exact merged or restored list>
-adb shell settings put secure accessibility_enabled <exact desired flag>
-```
+## Final framework run
 
-Its `finally` repeats that order with the exact starting list and flag. It never adds or restores
-Lock Me Out.
+Device: T811MA256GB23418064398, iPlay50_mini_Pro, Android 13/API 33.
 
-## Qualifying device run (2026-09-08)
+Exact controller command:
 
-Device: `T811MA256GB23418064398`, `iPlay50_mini_Pro`, Android 13/API 33.
+    & C:\Users\DELL\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe -NoProfile -File app\src\androidTest\ticket19-framework-tracer.ps1 -Serial T811MA256GB23418064398
 
-Build/install command and result:
+The final run started at 2026-09-08T11:21:15.5292639+09:00 and exited 0 at
+11:22:46.5563862. Scoped observations:
 
-```text
-$env:JAVA_HOME='C:\Users\DELL\.jdks\jbr-21.0.11'
-.\gradlew.bat :app:installFullDebug
-Installed APK 'app-full-debug.apk' on 'iPlay50_mini_Pro - 13'
-BUILD SUCCESSFUL in 1m 2s
-```
+- Android reported Curbox under bound accessibility services. The initial target PID was 4200,
+  process token 7fa2f72c-f672-4b33-bc45-0b780dadaab6, service generation 2, and service identity
+  199232946.
+- The registry reported 15 nonzero service-wide receiver identities: five AppRule receivers and
+  representative receivers owned by FocusMode, ReelBlocker, KeywordBlocker, GrayScale, UiHider,
+  NodePicker, ReelsCount, MindfulMessage, and AppUsageTracker.
+- ActivityManager reported 16 active filters in PID 4200. The extra process filter is consistent
+  with the Shizuku receiver registered outside those 15 feature fields. The count was 0 after
+  disable, 16 after same-PID rebind, 16 after narrow AppRule receiver reapply, 0 for the killed
+  PID, 16 in the replacement PID, and 0 after final disable. This directly covers the rejected
+  15-to-30 duplication concern at the observable process-filter level; no doubling survived.
+- Every refresh used a UUID extra and the controller selected the one historical BroadcastRecord
+  containing that token. Baseline token 2f98aa47-e01e-41b5-9406-d2e497ac9416 had one Deliver
+  +3ms to PID 4200. Same-PID token 1c84202a-f172-49fe-86d7-8e16a5194db3 had one Deliver +4ms.
+  Narrow-reapply token af9a5252-dc2b-4414-9b37-6aed62118147 had one Deliver +4ms. Distinct-PID
+  token b52e1ee4-7239-4ed0-aa3e-6992659c3cbe had one Deliver +7ms to PID 5468.
+- For each refresh, the controller waited until the production callback entered, then waited for
+  refresh, notification, callback, usage-reset, recheck, queued-worker, and in-flight-worker
+  counters to reach zero. A second quiescence acknowledgement proved the internal publication,
+  notification, evaluator, warning-boundary, and failure counts stayed stable. No fixed delay or
+  uncorrelated latest-history lookup remains.
+- Barrier token 54868a79-568f-4816-b1d6-ca37b1ea9fa4 entered the production refresh callback.
+  Framework disable destroyed the AppRule instance and removed active process filters. After
+  release, refreshContinuationCompletionCount became 1 only after the resumed callback returned
+  through its finally path; all work counters were zero and the second quiescence snapshot kept
+  downstream/internal publication, warning, notification, evaluation, and failure counts stable.
+- Same-PID enable retained PID/token but created service generation 3, identity 133459050, and new
+  service-wide receiver identities. Reapplying only AppRule setupReceivers retained the five Java
+  receiver identities, kept 16 system filters, and retained one correlated callback. This is the
+  required narrower per-feature idempotent comparison.
+- The injected runtime-publication failure crossed IPC as
+  runtime_publication_injected/IllegalStateException. Its UUID record had one framework delivery;
+  quiescence completed and the failure was reset before lifecycle work.
+- Process termination changed PID 4200 to 5468 and token to
+  26dab301-4fbc-4a53-92e5-2c08d2da9575 while stopped=false. Android rebound automatically.
+  The killed PID had zero active filters and the replacement had 16.
+- Final disable established only scoped facts: AppRule destroyed, five AppRule registrations
+  inactive, service/protection scopes inactive, process filters zero, and no active
+  AppBlockerService ServiceRecord. This is not a claim that every library-owned resource completed
+  clean teardown.
+- Run-specific logcat contained IntentReceiverLeaked for
+  rikka.shizuku.ShizukuProvider$1 at the PID 4200 destroy and again at the PID 5468 destroy.
+  Because old-PID filters were zero and no stale or duplicate delivery survived reconnect, this
+  is classified only as a Shizuku teardown anomaly. No canonical stale-ownership failure was
+  reproduced, so no Shizuku/integration remedy or lifecycle host was implemented.
+- Exact final restoration was verified before TRACE_COMPLETE:
+  SafeInCloud-only and accessibility_enabled=1. Lock Me Out was never added.
 
-The first controller attempt started at `2026-09-08T05:50:18.7133900+09:00` from the exact
-SafeInCloud-only baseline. It wrote global `0`, the merged SafeInCloud+Curbox list, then global `1`
-at `05:50:22.110` through `05:50:22.451`. It timed out because the script inspected only the first
-line of the multiline `Bound services` block. Its `finally` restored SafeInCloud-only/global `1`
-at `05:50:54.088` through `05:50:54.617`. A manual diagnostic using the same ordered settings
-writes then proved the platform bind at `05:51:50.441`: `dumpsys accessibility` listed both
-SafeInCloud and `Curbox App Blocker` under `Bound services`, the package was `stopped=false`, and
-`pidof neth.iecal.curbox.debug:app_blocker_service` returned `18594`. This was a parser defect, not
-a platform limitation.
+## Unresolved required evidence
 
-After correcting the multiline parser, the exact qualifying command was:
+Real external allow or denial remains unresolved. Two safe actual framework event attempts were
+made without changing user rule data: Settings at 11:12:32 and Calculator after HOME at
+11:21:28. Calculator produced foreground_evidence=com.android.calculator2 in the real bound
+service, proving framework event arrival, but evaluationCount, allowedEvaluationCount,
+deniedEvaluationCount, and warningFrameworkBoundaryCount all remained zero for 20 seconds.
+Creating a temporary denying or allowing rule would mutate user DataStore/Room state; directly
+calling the service or blocker would cease to be framework evidence. Therefore no external
+allow/denial claim is made.
 
-```text
-& C:\Users\DELL\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe `
-  -NoProfile -File app\src\androidTest\ticket19-framework-tracer.ps1 `
-  -Serial T811MA256GB23418064398
-```
+Trigger 1 also remains unresolved at the required ordering. In production
+AppBlockerService.onDestroy calls super.onDestroy and then AppRuleBlocker cleanup as its first
+feature cleanup. The final service cannot be subclassed, and the debug component factory has only
+an instantiation callback, not a hook inside onDestroy before that first cleanup. A debug-only
+fault can be injected into AppRule itself or after AppRule cleanup, but neither proves that an
+earlier feature cleanup fault permits AppRule scheduler/receiver/worker cleanup. Adding the
+required pre-cleanup hook to production, opening the final service, or directly invoking destroy
+would violate the accepted safety/evidence constraints. No fault-ordering claim is made.
 
-The final run began at `2026-09-08T05:54:58.8193111+09:00` from SafeInCloud-only/global `1`.
-The app launch completed and package state was `stopped=false` at `05:55:02.109`. Curbox was merged
-at `05:55:02.223`; ordered writes completed by `05:55:02.554`; framework bind was observed at
-`05:55:02.675`.
+Trigger 2's independent scheduler caller remains absent. Trigger 3 has scoped barrier evidence
+with no post-destroy continuation effect, but lacks the required external allow/denial boundary.
+Trigger 4 has scoped receiver/filter/process evidence with no stale delivery, while the Shizuku
+leak warning remains an anomaly rather than a reproduced stale owner.
 
-Observed results:
+## Decision
 
-- Initial target-process PID `19694`, service generation `2`, service identity `27349121`, five
-  successful active AppRule receiver/filter registrations, active service/protection scopes, and
-  setup ready. The refresh receiver belonged to PID `19694` in ActivityManager's `ReceiverList`.
-- Baseline refresh at `05:55:05.150`: `Broadcast completed: result=0`, exactly one framework
-  `Deliver +4ms #0` to PID `19694`, and exactly one runtime publication external effect.
-- The runtime barrier reported `ARMED` then `ENTERED` before lifecycle mutation. Framework disable
-  completed at `05:55:13.918`; IPC then reported AppRule destroyed, lifecycle generation `2`, zero
-  active receiver registrations, and both service/protection scopes inactive. Releasing the
-  barrier produced no post-destroy second publication or transported failure.
-- Same-PID framework enable created service generation `3`, identity `231067270`, and five new
-  active receiver identities while retaining PID `19694`. A matching refresh had exactly one
-  `Deliver +3ms #0` and one runtime publication.
-- Reapplying only `AppRuleBlocker.setupReceivers()` retained five active registrations and the same
-  receiver identities. The next matching refresh again had exactly one `Deliver +4ms #0` and one
-  runtime publication. This is the required narrower per-feature idempotent comparison.
-- The named injected runtime-publication failure crossed IPC deterministically as
-  `runtime_publication_injected`, `IllegalStateException`, with one framework delivery and one
-  runtime-publication attempt. It was reset before subsequent lifecycle work.
-- Target-process termination changed PID `19694` to `20458` and process token
-  `3feec10a-8cad-4a5b-a57d-848130ac4f05` to
-  `ac1dd45f-65b0-421a-b6a7-32b154a7a786`. Package state remained `stopped=false`; Android
-  automatically rebound the accessibility service. The new process had service generation `1`,
-  identity `29036551`, five new active receiver identities, and exactly one `Deliver +5ms #0` plus
-  one runtime publication for the matching refresh.
-- Final framework disable completed at `05:55:49.861`. IPC reported destroyed, zero active
-  receivers, inactive scopes, and no failures. ActivityManager had no active AppBlockerService
-  `ServiceRecord`; its remaining connection-history rows were marked `DEAD`.
-- The controller printed `PASS canonical lifecycle trace completed without duplicate
-  callback/effect` at `05:55:51.1847097`. Its `finally` restored the exact initial state and at
-  `05:55:52.9523292` printed SafeInCloud-only/global `1`.
-
-After adding each successful lifecycle-registration object's identity to the IPC snapshot, the
-final validation run (`06:25:44.423` through `06:26:40.503`) also passed. It directly reported five
-nonzero registration identities while active and zero registration identities after teardown,
-changed PID `22235` to `22720`, and again restored SafeInCloud-only/global `1`.
-
-This run does not claim trigger 1. No fault was ordered before AppRule cleanup, so no AppRule
-cleanup-survival conclusion follows from the injected runtime-publication failure.
-
-## Independent canonical trigger status and decision
-
-1. **Cleanup exception bypass:** still unverified at the required fault ordering. No claim.
-2. **Second independent scheduler caller:** absent from the production tree; no duplicate owner
-   was added.
-3. **Post-guard destroy/setup side effect:** not reproduced. The entered barrier, actual framework
-   disable, complete teardown, and release produced no second publication.
-4. **Stale service/receiver ownership after reconnect:** not reproduced. Same-PID rebind replaced
-   service and receiver identities cleanly; distinct-PID rebind replaced process, service, and
-   receiver identities; each matching broadcast produced one delivery and one external effect.
-
-Decision: **NO-GO for lifecycle-host materiality; ticket19 remains open and the architecture gate
-remains closed.** The qualifying baseline reproduced no canonical trigger, and the narrower
-per-feature idempotent setup also retained one delivery/effect. A lifecycle host therefore has no
-demonstrated defect to remedy. No lifecycle host, coordinator, integration, OEM work, or
-implementation ticket is authorized by this result.
+**INCONCLUSIVE. Ticket19 remains open and the architecture approval gate remains closed.**
+The run adds valid framework lifecycle evidence but does not satisfy Trigger 1 fault ordering or
+the real external allow/denial prerequisite. It therefore supports neither a ticket-level NO-GO
+nor GO. No lifecycle host, coordinator, integration, OEM work, or implementation ticket is
+authorized.
 
 ## Verification
 
-- `:app:connectedFullDebugAndroidTest` filtered to `Ticket19ObserverBinderTest`: 1/1 passed on the
-  physical device.
-- `testFullDebugUnitTest assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug`: passed in
-  3m 44s.
-- `assembleFullRelease assemblePlaystoreRelease assembleFdroidRelease`: passed in 14m 22s.
-- `rg` found no Ticket19 observer class, authority, permission, or debug component factory in any
-  Full, Playstore, or F-Droid release merged manifest.
-- `aapt2 dump xmltree` found none of those names in each release APK manifest. `dexdump` found no
-  Ticket19 observer/AIDL class in two Full, three Playstore, or two F-Droid release dex files.
-- The builds emitted the repository's existing KSP/Kotlin compatibility and deprecation warnings;
-  no new build failure was reported.
+- compileFullDebugKotlin plus compileFullDebugAndroidTestKotlin: BUILD SUCCESSFUL in 21s.
+- Final connectedFullDebugAndroidTest filtered to Ticket19ObserverBinderTest: 2/2 passed,
+  BUILD SUCCESSFUL in 24s. This includes AIDL access and non-shell rejection for all provider
+  entrypoints. On this API 33 device ContentResolver normalizes getType's remote SecurityException
+  to null, so the test also invokes getType directly and verifies its SHELL_UID guard.
+- installFullDebug: installed on one physical device, BUILD SUCCESSFUL in 8s before the final run.
+- testFullDebugUnitTest, assembleFullDebug, assemblePlaystoreDebug, assembleFdroidDebug,
+  assembleFullRelease, assemblePlaystoreRelease, and assembleFdroidRelease ran together:
+  BUILD SUCCESSFUL in 2m 44s.
+- The Full, Playstore, and F-Droid release merged manifests each had zero matches for the observer
+  class, authority, permission, component factory, or AIDL name. aapt2 reported zero such manifest
+  matches in all three release APKs. dexdump inspected 2 Full, 3 Playstore, and 2 F-Droid dex files;
+  each APK had zero Ticket19 observer/AIDL matches.
+- The builds emitted the repository's existing Kotlin/KSP compatibility and JDK 21 source/target 8
+  deprecation warnings. No verification failed.
