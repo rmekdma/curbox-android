@@ -1,5 +1,6 @@
 package neth.iecal.curbox.debug
 
+import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
@@ -10,9 +11,18 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.blockers.AppRuleBlocker
+import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
+import neth.iecal.curbox.data.models.Settings
+import neth.iecal.curbox.domain.apprules.AcceptedRuleRuntimeSnapshot
+import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
+import neth.iecal.curbox.domain.apprules.DecisionOutcome
+import neth.iecal.curbox.domain.apprules.DecisionOutcomeSink
+import neth.iecal.curbox.domain.apprules.DecisionRequest
+import neth.iecal.curbox.domain.apprules.ObservationKind
+import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
 import neth.iecal.curbox.services.AppBlockerService
 import org.json.JSONArray
 import org.json.JSONObject
@@ -35,6 +45,7 @@ internal object Ticket19ObserverRegistry {
     private const val CALCULATOR_PACKAGE = "com.android.calculator2"
     private const val TEMP_GROUP_PREFIX = "ticket19-calculator-group-"
     private const val TEMP_RULE_PREFIX = "ticket19-calculator-rule-"
+    private const val EXTERNAL_OUTCOME_WINDOW_MS = 10_000L
 
     private val lock = Any()
     private val processToken = UUID.randomUUID().toString()
@@ -53,7 +64,21 @@ internal object Ticket19ObserverRegistry {
     private var lastEvaluatedPackage = ""
     private var externalOutcomeToken = ""
     private var externalOutcomeArmedAtElapsedMs: Long? = null
+    private var externalOutcomeWindowState = "DISARMED"
+    private var externalOutcomeSourceIdentity: Long? = null
+    private var externalOutcomeRequestAccepted = false
+    private var externalOutcomeEvaluationDenied = false
+    private var externalOutcomeDeniedPublished = false
+    private var externalOutcomeWarningCalled = false
+    private var causalWrappedWorkerIdentity = 0
     private var temporaryRulePresent = false
+    private var temporaryRuleEffectivePresent = false
+    private var temporaryRulePendingPresent = false
+    private var temporaryRuleEditingPresent = false
+    private var temporaryRuleOwnedToken = ""
+    private var ruleMutationPreflightReady = false
+    private var ruleMutationPreflightReason = "not checked"
+    private var ruleCleanupCompletionCount = 0L
     private var failNextRuntimePublication = false
     private var runtimeBarrier: RuntimeBarrier? = null
     private val failures = mutableListOf<FailureRecord>()
@@ -120,8 +145,11 @@ internal object Ticket19ObserverRegistry {
                     recordEventLocked("runtime_failure_armed", "")
                 }
                 "reapply_app_rule_receivers" -> reapplyAppRuleReceivers()
+                "preflight_calculator_rule" -> preflightCalculatorRuleMutation()
                 "install_calculator_denial_rule" -> installCalculatorDenialRule(argument)
                 "remove_calculator_denial_rule" -> removeCalculatorDenialRule(argument)
+                "await_calculator_rule_cleanup" -> awaitCalculatorRuleCleanup(argument)
+                "verify_calculator_rule_absent" -> verifyCalculatorRuleAbsent(argument)
                 "arm_external_outcome" -> armExternalOutcome(argument)
                 "terminate_process" -> terminateProcess(longArgument(name, argument))
                 else -> error("unknown ticket19 observer command: $name")
@@ -166,8 +194,7 @@ internal object Ticket19ObserverRegistry {
                 }
                 recordEventLocked(
                     "evaluation_completed",
-                    "token=$externalOutcomeToken package=$lastEvaluatedPackage " +
-                        "allowed=${evaluation.isAllowed}"
+                    "package=$lastEvaluatedPackage allowed=${evaluation.isAllowed}"
                 )
             }
         }
@@ -176,11 +203,46 @@ internal object Ticket19ObserverRegistry {
             previousWarningObserver?.invoke(packageName)
             synchronized(lock) {
                 warningFrameworkBoundaryCount += 1L
-                recordEventLocked(
-                    "warning_framework_boundary",
-                    "token=$externalOutcomeToken package=$packageName"
-                )
+                val sourceIdentity = externalOutcomeSourceIdentity
+                if (externalOutcomeWindowState == "CONSUMED" &&
+                    externalOutcomeDeniedPublished &&
+                    packageName == CALCULATOR_PACKAGE &&
+                    sourceIdentity != null
+                ) {
+                    externalOutcomeWarningCalled = true
+                    recordEventLocked(
+                        "causal_warning_framework_call",
+                        "token=$externalOutcomeToken package=$packageName " +
+                            "sourceIdentity=$sourceIdentity"
+                    )
+                }
+                recordEventLocked("warning_framework_boundary", packageName)
             }
+        }
+    }
+
+    private fun preflightCalculatorRuleMutation() {
+        val service = synchronized(lock) { serviceRef?.get() }
+            ?: error("no current AppBlockerService")
+        val state = runBlocking(Dispatchers.IO) {
+            inspectRuleState(service, token = null)
+        }
+        val reasons = buildList {
+            if (state.hasAnyTemporaryRule) add("existing ticket19 temporary rule")
+            if (state.hasPendingAppRules) add("pending APP_RULES change")
+            if (state.timeDelayCanDefer) add("active settings change delay")
+            if (state.tamperCanDefer) add("active tamper-gated settings delay")
+        }
+        synchronized(lock) {
+            ruleMutationPreflightReady = reasons.isEmpty()
+            ruleMutationPreflightReason = reasons.joinToString().ifEmpty { "ready" }
+            recordEventLocked(
+                "temporary_rule_preflight",
+                "ready=$ruleMutationPreflightReady reason=$ruleMutationPreflightReason"
+            )
+        }
+        check(reasons.isEmpty()) {
+            "temporary Calculator rule preflight rejected: ${reasons.joinToString()}"
         }
     }
 
@@ -190,12 +252,17 @@ internal object Ticket19ObserverRegistry {
             ?: error("no current AppBlockerService")
         val groupId = TEMP_GROUP_PREFIX + token
         val ruleId = TEMP_RULE_PREFIX + token
-        val present = runBlocking(Dispatchers.IO) {
+        synchronized(lock) {
+            temporaryRuleOwnedToken = token
+            recordEventLocked("temporary_rule_ownership", "token=$token")
+        }
+        val state = runBlocking(Dispatchers.IO) {
+            val preflight = inspectRuleState(service, token = null)
+            check(!preflight.hasAnyTemporaryRule) { "ticket19 temporary rule already exists" }
+            check(!preflight.hasPendingAppRules) { "pending APP_RULES change exists" }
+            check(!preflight.timeDelayCanDefer) { "settings change delay can defer cleanup" }
+            check(!preflight.tamperCanDefer) { "tamper gate can defer cleanup" }
             val current = service.dataStoreManager.settings.first().appRuleSnapshot
-            val cleaned = current.copy(
-                appGroups = current.appGroups.filterNot { it.id.startsWith(TEMP_GROUP_PREFIX) },
-                appRules = current.appRules.filterNot { it.id.startsWith(TEMP_RULE_PREFIX) }
-            )
             val group = AppRuleAppGroup(
                 id = groupId,
                 name = "Ticket19 Calculator",
@@ -211,19 +278,19 @@ internal object Ticket19ObserverRegistry {
                 allowedMinutes = 0L
             )
             check(service.dataStoreManager.updateAppRuleSnapshot(
-                cleaned.copy(
-                    appGroups = cleaned.appGroups + group,
-                    appRules = cleaned.appRules + rule
+                current.copy(
+                    appGroups = current.appGroups + group,
+                    appRules = current.appRules + rule
                 )
             )) { "temporary Calculator rule was rejected" }
-            service.dataStoreManager.settings.first().appRuleSnapshot.appRules.any {
-                it.id == ruleId
-            }
+            inspectRuleState(service, token)
         }
-        check(present) { "temporary Calculator rule was not effective after write" }
+        check(state.effectivePresent && state.editingPresent && !state.pendingPresent) {
+            "temporary Calculator rule was not consistently effective after write: $state"
+        }
         synchronized(lock) {
             externalOutcomeToken = token
-            temporaryRulePresent = true
+            updateTemporaryRuleStateLocked(state)
             recordEventLocked("temporary_rule_installed", "token=$token ruleId=$ruleId")
         }
     }
@@ -232,35 +299,275 @@ internal object Ticket19ObserverRegistry {
         val token = requireUuid(argument)
         val service = synchronized(lock) { serviceRef?.get() }
             ?: error("no current AppBlockerService")
-        val ruleId = TEMP_RULE_PREFIX + token
-        val effectivePresent = runBlocking(Dispatchers.IO) {
-            val current = service.dataStoreManager.settings.first().appRuleSnapshot
-            check(service.dataStoreManager.updateAppRuleSnapshot(
+        val state = runBlocking(Dispatchers.IO) {
+            @Suppress("UNCHECKED_CAST")
+            val dataStore = readField(
+                service.dataStoreManager,
+                "settingsDataStore"
+            ) as androidx.datastore.core.DataStore<Settings>
+            dataStore.updateData { current ->
+                val pendingContainsToken = current.settingsChangeDelayConfig2.pendingChanges.any {
+                    it.field == GatedSettingsField.APP_RULES.name &&
+                        (it.newValueJson.contains(TEMP_GROUP_PREFIX + token) ||
+                            it.newValueJson.contains(TEMP_RULE_PREFIX + token))
+                }
+                check(!pendingContainsToken) {
+                    "owned temporary rule reached pending APP_RULES state"
+                }
                 current.copy(
-                    appGroups = current.appGroups.filterNot { it.id == TEMP_GROUP_PREFIX + token },
-                    appRules = current.appRules.filterNot { it.id == ruleId }
+                    appRuleSnapshot = current.appRuleSnapshot.copy(
+                        appGroups = current.appRuleSnapshot.appGroups.filterNot {
+                            it.id == TEMP_GROUP_PREFIX + token
+                        },
+                        appRules = current.appRuleSnapshot.appRules.filterNot {
+                            it.id == TEMP_RULE_PREFIX + token
+                        }
+                    )
                 )
-            )) { "temporary Calculator rule removal was rejected" }
-            service.dataStoreManager.settings.first().appRuleSnapshot.appRules.any {
-                it.id == ruleId
             }
+            service.sendBroadcast(Intent(REFRESH_ACTION).setPackage(service.packageName))
+            inspectRuleState(service, token)
+        }
+        check(!state.effectivePresent && !state.pendingPresent && !state.editingPresent) {
+            "temporary Calculator rule remained after transactional removal: $state"
         }
         synchronized(lock) {
-            temporaryRulePresent = effectivePresent
+            updateTemporaryRuleStateLocked(state)
             recordEventLocked(
                 "temporary_rule_removal_requested",
-                "token=$token effectivePresent=$effectivePresent"
+                "token=$token effective=false pending=false editing=false"
             )
+        }
+    }
+
+    private fun awaitCalculatorRuleCleanup(argument: String?) {
+        val token = requireUuid(argument)
+        val service = synchronized(lock) { serviceRef?.get() }
+            ?: error("no current AppBlockerService")
+        val blocker = synchronized(lock) { blockerRef?.get() }
+            ?: error("no current AppRuleBlocker")
+        val completedWork = awaitRuleCleanupWork(blocker, 15_000L)
+        val state = runBlocking(Dispatchers.IO) { inspectRuleState(service, token) }
+        check(!state.effectivePresent && !state.pendingPresent && !state.editingPresent) {
+            "temporary Calculator rule cleanup is not complete: $state"
+        }
+        runOnMainThread("temporary_rule_cleanup_main_queue_ack") { Unit }
+        val quiescentWork = awaitRuleCleanupWork(blocker, 15_000L)
+        check(completedWork.getValue("callbacks") == quiescentWork.getValue("callbacks")) {
+            "temporary rule lifecycle callback ownership changed after worker completion: " +
+                "$completedWork -> $quiescentWork"
+        }
+        synchronized(lock) {
+            updateTemporaryRuleStateLocked(state)
+            ruleCleanupCompletionCount += 1L
+            recordEventLocked(
+                "temporary_rule_cleanup_completed",
+                "token=$token count=$ruleCleanupCompletionCount " +
+                    "pendingLifecycleCallbacks=${quiescentWork.getValue("callbacks")}"
+            )
+            recordEventLocked(
+                "temporary_rule_cleanup_scoped_quiescence",
+                "token=$token pendingLifecycleCallbacks=${quiescentWork.getValue("callbacks")}"
+            )
+        }
+    }
+
+    private fun awaitRuleCleanupWork(
+        blocker: AppRuleBlocker,
+        timeoutMs: Long
+    ): Map<String, Int> {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        var counts = appRuleWorkCounts(blocker)
+        while (SystemClock.elapsedRealtime() < deadline) {
+            counts = appRuleWorkCounts(blocker)
+            if (counts.filterKeys { it != "callbacks" }.values.all { it == 0 }) return counts
+            Thread.sleep(10L)
+        }
+        error("AppRule removal refresh/worker work did not complete within ${timeoutMs}ms: $counts")
+    }
+
+    private fun verifyCalculatorRuleAbsent(argument: String?) {
+        val token = requireUuid(argument)
+        val service = synchronized(lock) { serviceRef?.get() }
+            ?: error("no current AppBlockerService")
+        val state = runBlocking(Dispatchers.IO) { inspectRuleState(service, token) }
+        synchronized(lock) { updateTemporaryRuleStateLocked(state) }
+        check(!state.effectivePresent && !state.pendingPresent && !state.editingPresent) {
+            "temporary Calculator rule remains in a settings view: $state"
         }
     }
 
     private fun armExternalOutcome(argument: String?) {
         val token = requireUuid(argument)
+        val blocker = synchronized(lock) { blockerRef?.get() }
+            ?: error("no current AppRuleBlocker")
+        installCausalWorkerObservers(blocker)
         synchronized(lock) {
             externalOutcomeToken = token
             externalOutcomeArmedAtElapsedMs = SystemClock.elapsedRealtime()
+            externalOutcomeWindowState = "ARMED"
+            externalOutcomeSourceIdentity = null
+            externalOutcomeRequestAccepted = false
+            externalOutcomeEvaluationDenied = false
+            externalOutcomeDeniedPublished = false
+            externalOutcomeWarningCalled = false
             recordEventLocked("external_outcome_armed", "token=$token")
         }
+    }
+
+    private fun installCausalWorkerObservers(blocker: AppRuleBlocker) {
+        val worker = readField(blocker, "decisionWorker") as SerializedDecisionWorker
+        val workerIdentity = System.identityHashCode(worker)
+        synchronized(lock) {
+            if (causalWrappedWorkerIdentity == workerIdentity) return
+        }
+        val evaluationField = findField(worker, "onEvaluation")
+        @Suppress("UNCHECKED_CAST")
+        val previousEvaluation = evaluationField.get(worker) as? ((
+            DecisionRequest,
+            AcceptedRuleRuntimeSnapshot,
+            String,
+            AppRulesEvaluation
+        ) -> Unit)
+        evaluationField.set(
+            worker,
+            { request: DecisionRequest,
+                accepted: AcceptedRuleRuntimeSnapshot,
+                packageName: String,
+                evaluation: AppRulesEvaluation ->
+                observeCausalEvaluation(request, packageName, evaluation)
+                previousEvaluation?.invoke(request, accepted, packageName, evaluation)
+            }
+        )
+        val outcomeField = findField(worker, "outcomeSink")
+        val previousOutcome = outcomeField.get(worker) as DecisionOutcomeSink
+        outcomeField.set(worker, object : DecisionOutcomeSink {
+            override fun publish(outcome: DecisionOutcome) {
+                observeCausalOutcome(outcome)
+                previousOutcome.publish(outcome)
+            }
+        })
+        synchronized(lock) {
+            causalWrappedWorkerIdentity = workerIdentity
+            recordEventLocked("causal_worker_observers_installed", "worker=$workerIdentity")
+        }
+    }
+
+    private fun observeCausalEvaluation(
+        request: DecisionRequest,
+        packageName: String,
+        evaluation: AppRulesEvaluation
+    ) {
+        synchronized(lock) {
+            if (externalOutcomeWindowState != "ARMED") return
+            val armedAt = externalOutcomeArmedAtElapsedMs ?: return
+            val now = SystemClock.elapsedRealtime()
+            if (now - armedAt > EXTERNAL_OUTCOME_WINDOW_MS) {
+                externalOutcomeWindowState = "EXPIRED"
+                recordEventLocked("external_outcome_window_expired", "token=$externalOutcomeToken")
+                return
+            }
+            val signal = request.observation.signal
+            if (request.reason != ObservationKind.REAL_EVENT ||
+                signal.kind != ObservationKind.REAL_EVENT ||
+                signal.eventPackage != CALCULATOR_PACKAGE ||
+                packageName != CALCULATOR_PACKAGE
+            ) return
+            val sourceIdentity = request.sourceOrderIdentity.value
+            externalOutcomeWindowState = "CONSUMED"
+            externalOutcomeSourceIdentity = sourceIdentity
+            externalOutcomeRequestAccepted = true
+            externalOutcomeEvaluationDenied = !evaluation.isAllowed
+            recordEventLocked(
+                "causal_request_accepted",
+                "token=$externalOutcomeToken kind=${request.reason} package=$packageName " +
+                    "sourceIdentity=$sourceIdentity"
+            )
+            recordEventLocked(
+                "causal_evaluation_completed",
+                "token=$externalOutcomeToken package=$packageName allowed=${evaluation.isAllowed} " +
+                    "sourceIdentity=$sourceIdentity"
+            )
+        }
+    }
+
+    private fun observeCausalOutcome(outcome: DecisionOutcome) {
+        synchronized(lock) {
+            val sourceIdentity = externalOutcomeSourceIdentity ?: return
+            if (externalOutcomeWindowState != "CONSUMED" ||
+                outcome.sourceOrderIdentity.value != sourceIdentity
+            ) return
+            val denied = outcome.packageDecisions.any {
+                it.packageName == CALCULATOR_PACKAGE && !it.isAllowed
+            }
+            if (!denied) return
+            externalOutcomeDeniedPublished = true
+            recordEventLocked(
+                "causal_denied_outcome_published",
+                "token=$externalOutcomeToken package=$CALCULATOR_PACKAGE " +
+                    "sourceIdentity=$sourceIdentity"
+            )
+        }
+    }
+
+    private data class TemporaryRuleState(
+        val effectivePresent: Boolean,
+        val pendingPresent: Boolean,
+        val editingPresent: Boolean,
+        val hasAnyTemporaryRule: Boolean,
+        val hasPendingAppRules: Boolean,
+        val timeDelayCanDefer: Boolean,
+        val tamperCanDefer: Boolean
+    )
+
+    private suspend fun inspectRuleState(
+        service: AppBlockerService,
+        token: String?
+    ): TemporaryRuleState {
+        val effective = service.dataStoreManager.settings.first()
+        val editing = service.dataStoreManager.settingsForEditing.first()
+        val groupId = token?.let { TEMP_GROUP_PREFIX + it }
+        val ruleId = token?.let { TEMP_RULE_PREFIX + it }
+        fun hasOwned(snapshot: neth.iecal.curbox.data.models.AppRuleSnapshot): Boolean =
+            if (token == null) {
+                snapshot.appGroups.any { it.id.startsWith(TEMP_GROUP_PREFIX) } ||
+                    snapshot.appRules.any { it.id.startsWith(TEMP_RULE_PREFIX) }
+            } else {
+                snapshot.appGroups.any { it.id == groupId } ||
+                    snapshot.appRules.any { it.id == ruleId }
+            }
+        val pendingAppRules = effective.settingsChangeDelayConfig2.pendingChanges.filter {
+            it.field == GatedSettingsField.APP_RULES.name
+        }
+        val pendingPresent = if (token == null) {
+            pendingAppRules.any {
+                it.newValueJson.contains(TEMP_GROUP_PREFIX) ||
+                    it.newValueJson.contains(TEMP_RULE_PREFIX)
+            }
+        } else {
+            pendingAppRules.any {
+                it.newValueJson.contains(groupId!!) || it.newValueJson.contains(ruleId!!)
+            }
+        }
+        val delay = effective.settingsChangeDelayConfig2
+        return TemporaryRuleState(
+            effectivePresent = hasOwned(effective.appRuleSnapshot),
+            pendingPresent = pendingPresent,
+            editingPresent = hasOwned(editing.appRuleSnapshot),
+            hasAnyTemporaryRule = hasOwned(effective.appRuleSnapshot) ||
+                hasOwned(editing.appRuleSnapshot) || pendingPresent,
+            hasPendingAppRules = pendingAppRules.isNotEmpty(),
+            timeDelayCanDefer = delay.isEnabled && delay.delayMinutes > 0,
+            tamperCanDefer = delay.requireTamperProtectionOff &&
+                effective.antiUninstallConfig2.isEnabled
+        )
+    }
+
+    private fun updateTemporaryRuleStateLocked(state: TemporaryRuleState) {
+        temporaryRuleEffectivePresent = state.effectivePresent
+        temporaryRulePendingPresent = state.pendingPresent
+        temporaryRuleEditingPresent = state.editingPresent
+        temporaryRulePresent = state.effectivePresent || state.pendingPresent || state.editingPresent
     }
 
     private fun requireUuid(argument: String?): String {
@@ -444,7 +751,23 @@ internal object Ticket19ObserverRegistry {
                     "externalOutcomeArmedAtElapsedMs",
                     externalOutcomeArmedAtElapsedMs ?: JSONObject.NULL
                 )
+                put("externalOutcomeWindowState", externalOutcomeWindowState)
+                put(
+                    "externalOutcomeSourceIdentity",
+                    externalOutcomeSourceIdentity ?: JSONObject.NULL
+                )
+                put("externalOutcomeRequestAccepted", externalOutcomeRequestAccepted)
+                put("externalOutcomeEvaluationDenied", externalOutcomeEvaluationDenied)
+                put("externalOutcomeDeniedPublished", externalOutcomeDeniedPublished)
+                put("externalOutcomeWarningCalled", externalOutcomeWarningCalled)
                 put("temporaryRulePresent", temporaryRulePresent)
+                put("temporaryRuleEffectivePresent", temporaryRuleEffectivePresent)
+                put("temporaryRulePendingPresent", temporaryRulePendingPresent)
+                put("temporaryRuleEditingPresent", temporaryRuleEditingPresent)
+                put("temporaryRuleOwnedToken", temporaryRuleOwnedToken)
+                put("ruleMutationPreflightReady", ruleMutationPreflightReady)
+                put("ruleMutationPreflightReason", ruleMutationPreflightReason)
+                put("ruleCleanupCompletionCount", ruleCleanupCompletionCount)
                 put("refreshContinuationCompletionCount", refreshContinuationCompletionCount)
                 put("workCounts", JSONObject(workCounts))
                 put("barrierState", runtimeBarrier?.state ?: "DISARMED")
@@ -621,6 +944,12 @@ internal object Ticket19ObserverRegistry {
         lastEvaluatedPackage = ""
         externalOutcomeToken = ""
         externalOutcomeArmedAtElapsedMs = null
+        externalOutcomeWindowState = "DISARMED"
+        externalOutcomeSourceIdentity = null
+        externalOutcomeRequestAccepted = false
+        externalOutcomeEvaluationDenied = false
+        externalOutcomeDeniedPublished = false
+        externalOutcomeWarningCalled = false
         failNextRuntimePublication = false
         failures.clear()
         if (clearEvents) events.clear()

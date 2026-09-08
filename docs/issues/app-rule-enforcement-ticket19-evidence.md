@@ -134,48 +134,68 @@ The user subsequently authorized temporary Debug Curbox rule-data mutation on th
 The debug-only provider now adds one UUID-scoped Calculator group and zero-minute, full-day rule
 through `DataStoreManager.updateAppRuleSnapshot`; it never calls AppRuleBlocker or a service
 event method. The controller waits for the resulting production refresh publication before
-launching Calculator. It removes only the matching UUID rule/group through the same API after
-capturing the outcome.
+launching Calculator. Before mutation it rejects an existing pending APP_RULES change, an active
+settings-delay gate, a tamper gate that could defer cleanup, or an existing ticket19 rule. Cleanup
+uses a debug-only transaction on DataStoreManager's existing singleton to remove only the matching
+UUID rule/group from the latest value, preserving unrelated concurrent values.
 
 Exact successful controller command:
 
     & .\app\src\androidTest\ticket19-framework-tracer.ps1 -Serial 'T811MA256GB23418064398'
 
-The qualifying rerun started at 2026-09-08T18:56:05.1386213+09:00 and printed TRACE_COMPLETE at
-18:57:28.3501746 with exit code 0. The device started Dozing, so the controller captured that
+The qualifying rerun started at 2026-09-08T19:39:58.5420614+09:00 and printed TRACE_COMPLETE at
+19:41:21.9400921 with exit code 0. The device started Dozing, so the controller captured that
 state, woke and unlocked the display before expecting accessibility events, and restored Dozing
 after all accessibility restoration checks. Earlier 16:54 and 16:57 attempts timed out with
 zero foreground/evaluator observations while the screen was off; the 17:03 diagnostic run proved
 the hypothesis by reaching denial immediately after wake/unlock.
 
-The successful external outcome used UUID 1d5f3345-746c-47a9-8690-d7f6293963af. An explicit
+The successful external outcome used UUID 21d74803-b5b5-43ba-8339-52ce11da14c0. After install
+publication and work quiesced, the controller returned HOME, verified
+the Guardian activity was absent, reset the observer to a zero-count baseline, and armed a
+10-second UUID one-shot window. An explicit
 `am force-stop com.android.calculator2` followed by
 `am start -W -n com.android.calculator2/.Calculator --es ticket19_run_token <UUID>` reported a
-COLD, Status-ok launch. In service PID 23699 the registry recorded three evaluator completions,
-all denied, zero allowed, and one warning framework boundary; every evaluator/warning record
-contained the same UUID and `com.android.calculator2`. `dumpsys activity activities` contained
-`neth.iecal.curbox.debug/neth.iecal.curbox.ui.activity.GuardianApprovalActivity`, and the Curbox
-main process PID 23572 was distinct from service PID 23699. This is qualifying real external
-denial evidence reached only through an Android framework accessibility event.
+COLD, Status-ok launch. In service PID 28721 the debug registry wrapped the current worker's
+existing value collaborators and consumed the window on the first accepted DecisionRequest whose
+request reason and signal kind were both REAL_EVENT and whose event/evaluation package was
+`com.android.calculator2`. Source identity 20 then appeared on exactly one causal request record,
+its denied evaluation, its denied DecisionOutcome, and the warning-before-framework-call record.
+The registry also counted three total evaluator completions, all denied, zero allowed, and one
+warning framework boundary. After that warning, `dumpsys activity activities` reported
+`neth.iecal.curbox.debug/neth.iecal.curbox.ui.activity.GuardianApprovalActivity` as top-resumed;
+it was absent at baseline. Curbox main PID 28532 was distinct from service PID 28721. The UUID is
+therefore an armed-window correlation value rather than a value stamped onto unrelated callbacks.
 
 The active zero-minute rule legitimately retained three scheduled lifecycle callbacks. After
-the Guardian activity was closed, the UUID rule/group were removed and their refresh publication
-completed without changing the denial or warning counts. Actual framework disable then reduced
-all work counters, the five AppRule registrations, and PID 23699's system filters to zero. The
+the Guardian activity was closed, removal attempt 1 verified the UUID group/rule absent from the
+effective value, pending APP_RULES JSON, and settingsForEditing view. The resulting refresh and
+worker work completed, a main-queue boundary was crossed, and scoped quiescence held with those
+three lifecycle-owned callbacks unchanged and with denial/warning counts stable. Actual framework
+disable then reduced all work counters, the five AppRule registrations, and PID 28721's system
+filters to zero. The
 same PID rebound with a new service identity and no temporary rule before the barrier and other
 lifecycle branches continued. This scopes quiescence to the lifecycle boundary that owns the
 long-lived callbacks rather than misclassifying an active scheduled recheck as a completed task.
 
 The run then reproduced the prior barrier completion, narrow AppRule reapply, deterministic
-failure transport, and distinct-process checks. Process termination changed PID 23699/token
-3c5c1596-3ef9-40ab-b8ae-c616d225c322 to PID 24808/token
-737769a3-1e7a-476d-bc6c-64463fd9b176. Exact-PID, post-cursor log inspection found six Shizuku
+failure transport, and distinct-process checks. Process termination changed PID 28721/token
+571fef4e-2ef1-416d-b5c6-ba077c3f20e4 to PID 29834/token
+1016d49c-80c9-4980-84f6-e656f97e1d82. Exact-PID, post-cursor log inspection found six Shizuku
 leak signature lines, the paired headline/exception lines for three actual framework destroys.
 Filters reached zero after each relevant disable or old-process exit, so the classification
 remains a teardown anomaly, not stale ownership or delivery.
 
 The run removed the temporary rule, restored SafeInCloud-only/accessibility_enabled=1, never
 added Lock Me Out, and restored the initial Dozing state before TRACE_COMPLETE.
+
+The 19:34:25 diagnostic run established a sharper cleanup boundary: the three scheduled callbacks
+do not disappear on rule removal alone, although every settings view is already clean. Its first
+cleanup ACK incorrectly required every lifecycle work counter to be zero and the run exited 1.
+The restoration-grade finally path still verified the UUID absent and restored SafeInCloud-only,
+accessibility_enabled=1, and exact Dozing. The qualifying rerun replaces that overbroad condition
+with removal refresh/worker completion plus scoped stability, while retaining the subsequent real
+framework disable requirement that drains all three callbacks to zero.
 
 ## Remaining required evidence
 
@@ -202,15 +222,16 @@ coordinator, integration, OEM work, or implementation ticket is authorized.
 
 ## Verification
 
-- compileFullDebugKotlin plus compileFullDebugAndroidTestKotlin plus installFullDebug:
-  BUILD SUCCESSFUL in 36s before the final rerun.
+- compileFullDebugKotlin plus compileFullDebugAndroidTestKotlin: BUILD SUCCESSFUL in 18s.
+- compileFullDebugKotlin plus installFullDebug after the scoped-cleanup correction:
+  BUILD SUCCESSFUL in 26s before the qualifying rerun.
 - Final connectedFullDebugAndroidTest filtered to Ticket19ObserverBinderTest: 2/2 passed,
-  BUILD SUCCESSFUL in 20s. This includes AIDL access and non-shell rejection for all provider
+  BUILD SUCCESSFUL in 22s. This includes AIDL access and non-shell rejection for all provider
   entrypoints. On this API 33 device ContentResolver normalizes getType's remote SecurityException
   to null, so the test also invokes getType directly and verifies its SHELL_UID guard.
 - testFullDebugUnitTest, assembleFullDebug, assemblePlaystoreDebug, assembleFdroidDebug,
   assembleFullRelease, assemblePlaystoreRelease, and assembleFdroidRelease ran together:
-  BUILD SUCCESSFUL in 2m 49s.
+  BUILD SUCCESSFUL in 1m 10s.
 - The Full, Playstore, and F-Droid release merged manifests each had zero matches for the observer
   class, authority, permission, component factory, or AIDL name. aapt2 reported zero such manifest
   matches in all three release APKs. dexdump inspected 2 Full, 3 Playstore, and 2 F-Droid dex files;
