@@ -64,7 +64,7 @@ successful AppRule registrations, 15 service-wide receiver object identities, wo
 publication/evaluation counters, named failures, and run events. Runtime publication is explicitly
 an internal pre-worker signal, not an external allow or denial.
 
-## Final framework run
+## Framework lifecycle baseline run
 
 Device: T811MA256GB23418064398, iPlay50_mini_Pro, Android 13/API 33.
 
@@ -128,16 +128,56 @@ The final run started at 2026-09-08T11:21:15.5292639+09:00 and exited 0 at
 - Exact final restoration was verified before TRACE_COMPLETE:
   SafeInCloud-only and accessibility_enabled=1. Lock Me Out was never added.
 
-## Unresolved required evidence
+## External outcome extension run
 
-Real external allow or denial remains unresolved. Two safe actual framework event attempts were
-made without changing user rule data: Settings at 11:12:32 and Calculator after HOME at
-11:21:28. Calculator produced foreground_evidence=com.android.calculator2 in the real bound
-service, proving framework event arrival, but evaluationCount, allowedEvaluationCount,
-deniedEvaluationCount, and warningFrameworkBoundaryCount all remained zero for 20 seconds.
-Creating a temporary denying or allowing rule would mutate user DataStore/Room state; directly
-calling the service or blocker would cease to be framework evidence. Therefore no external
-allow/denial claim is made.
+The user subsequently authorized temporary Debug Curbox rule-data mutation on this test device.
+The debug-only provider now adds one UUID-scoped Calculator group and zero-minute, full-day rule
+through `DataStoreManager.updateAppRuleSnapshot`; it never calls AppRuleBlocker or a service
+event method. The controller waits for the resulting production refresh publication before
+launching Calculator. It removes only the matching UUID rule/group through the same API after
+capturing the outcome.
+
+Exact successful controller command:
+
+    & .\app\src\androidTest\ticket19-framework-tracer.ps1 -Serial 'T811MA256GB23418064398'
+
+The qualifying rerun started at 2026-09-08T18:56:05.1386213+09:00 and printed TRACE_COMPLETE at
+18:57:28.3501746 with exit code 0. The device started Dozing, so the controller captured that
+state, woke and unlocked the display before expecting accessibility events, and restored Dozing
+after all accessibility restoration checks. Earlier 16:54 and 16:57 attempts timed out with
+zero foreground/evaluator observations while the screen was off; the 17:03 diagnostic run proved
+the hypothesis by reaching denial immediately after wake/unlock.
+
+The successful external outcome used UUID 1d5f3345-746c-47a9-8690-d7f6293963af. An explicit
+`am force-stop com.android.calculator2` followed by
+`am start -W -n com.android.calculator2/.Calculator --es ticket19_run_token <UUID>` reported a
+COLD, Status-ok launch. In service PID 23699 the registry recorded three evaluator completions,
+all denied, zero allowed, and one warning framework boundary; every evaluator/warning record
+contained the same UUID and `com.android.calculator2`. `dumpsys activity activities` contained
+`neth.iecal.curbox.debug/neth.iecal.curbox.ui.activity.GuardianApprovalActivity`, and the Curbox
+main process PID 23572 was distinct from service PID 23699. This is qualifying real external
+denial evidence reached only through an Android framework accessibility event.
+
+The active zero-minute rule legitimately retained three scheduled lifecycle callbacks. After
+the Guardian activity was closed, the UUID rule/group were removed and their refresh publication
+completed without changing the denial or warning counts. Actual framework disable then reduced
+all work counters, the five AppRule registrations, and PID 23699's system filters to zero. The
+same PID rebound with a new service identity and no temporary rule before the barrier and other
+lifecycle branches continued. This scopes quiescence to the lifecycle boundary that owns the
+long-lived callbacks rather than misclassifying an active scheduled recheck as a completed task.
+
+The run then reproduced the prior barrier completion, narrow AppRule reapply, deterministic
+failure transport, and distinct-process checks. Process termination changed PID 23699/token
+3c5c1596-3ef9-40ab-b8ae-c616d225c322 to PID 24808/token
+737769a3-1e7a-476d-bc6c-64463fd9b176. Exact-PID, post-cursor log inspection found six Shizuku
+leak signature lines, the paired headline/exception lines for three actual framework destroys.
+Filters reached zero after each relevant disable or old-process exit, so the classification
+remains a teardown anomaly, not stale ownership or delivery.
+
+The run removed the temporary rule, restored SafeInCloud-only/accessibility_enabled=1, never
+added Lock Me Out, and restored the initial Dozing state before TRACE_COMPLETE.
+
+## Remaining required evidence
 
 Trigger 1 also remains unresolved at the required ordering. In production
 AppBlockerService.onDestroy calls super.onDestroy and then AppRuleBlocker cleanup as its first
@@ -148,30 +188,29 @@ earlier feature cleanup fault permits AppRule scheduler/receiver/worker cleanup.
 required pre-cleanup hook to production, opening the final service, or directly invoking destroy
 would violate the accepted safety/evidence constraints. No fault-ordering claim is made.
 
-Trigger 2's independent scheduler caller remains absent. Trigger 3 has scoped barrier evidence
-with no post-destroy continuation effect, but lacks the required external allow/denial boundary.
-Trigger 4 has scoped receiver/filter/process evidence with no stale delivery, while the Shizuku
-leak warning remains an anomaly rather than a reproduced stale owner.
+Trigger 2's independent scheduler caller remains absent. Trigger 3 now has scoped actual-framework
+barrier, post-resume completion, teardown/quiescence, and real external denial evidence. Trigger 4
+has scoped receiver/filter/process evidence with no stale delivery, while the Shizuku leak warning
+remains an anomaly rather than a reproduced stale owner.
 
 ## Decision
 
 **INCONCLUSIVE. Ticket19 remains open and the architecture approval gate remains closed.**
-The run adds valid framework lifecycle evidence but does not satisfy Trigger 1 fault ordering or
-the real external allow/denial prerequisite. It therefore supports neither a ticket-level NO-GO
-nor GO. No lifecycle host, coordinator, integration, OEM work, or implementation ticket is
-authorized.
+The runs add valid framework lifecycle and external denial evidence, but do not satisfy Trigger 1
+fault ordering. They therefore support neither a ticket-level NO-GO nor GO. No lifecycle host,
+coordinator, integration, OEM work, or implementation ticket is authorized.
 
 ## Verification
 
-- compileFullDebugKotlin plus compileFullDebugAndroidTestKotlin: BUILD SUCCESSFUL in 21s.
+- compileFullDebugKotlin plus compileFullDebugAndroidTestKotlin plus installFullDebug:
+  BUILD SUCCESSFUL in 36s before the final rerun.
 - Final connectedFullDebugAndroidTest filtered to Ticket19ObserverBinderTest: 2/2 passed,
-  BUILD SUCCESSFUL in 24s. This includes AIDL access and non-shell rejection for all provider
+  BUILD SUCCESSFUL in 20s. This includes AIDL access and non-shell rejection for all provider
   entrypoints. On this API 33 device ContentResolver normalizes getType's remote SecurityException
   to null, so the test also invokes getType directly and verifies its SHELL_UID guard.
-- installFullDebug: installed on one physical device, BUILD SUCCESSFUL in 8s before the final run.
 - testFullDebugUnitTest, assembleFullDebug, assemblePlaystoreDebug, assembleFdroidDebug,
   assembleFullRelease, assemblePlaystoreRelease, and assembleFdroidRelease ran together:
-  BUILD SUCCESSFUL in 2m 44s.
+  BUILD SUCCESSFUL in 2m 49s.
 - The Full, Playstore, and F-Droid release merged manifests each had zero matches for the observer
   class, authority, permission, component factory, or AIDL name. aapt2 reported zero such manifest
   matches in all three release APKs. dexdump inspected 2 Full, 3 Playstore, and 2 F-Droid dex files;

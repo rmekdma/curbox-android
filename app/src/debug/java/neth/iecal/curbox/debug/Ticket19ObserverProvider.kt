@@ -17,7 +17,7 @@ class Ticket19ObserverProvider : ContentProvider() {
         return Bundle().apply {
             putString(
                 RESULT_KEY,
-                Ticket19ObserverRegistry.command(method, arg?.toLongOrNull() ?: 0L)
+                Ticket19ObserverRegistry.command(method, arg)
             )
         }
     }

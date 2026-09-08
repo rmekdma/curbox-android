@@ -5,8 +5,14 @@ import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.blockers.AppRuleBlocker
+import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.services.AppBlockerService
 import org.json.JSONArray
 import org.json.JSONObject
@@ -26,6 +32,9 @@ internal object Ticket19ObserverRegistry {
     private const val GUARDIAN_OPENED_ACTION =
         "neth.iecal.curbox.guardian.approval.opened"
     private const val MAX_EVENTS = 100
+    private const val CALCULATOR_PACKAGE = "com.android.calculator2"
+    private const val TEMP_GROUP_PREFIX = "ticket19-calculator-group-"
+    private const val TEMP_RULE_PREFIX = "ticket19-calculator-rule-"
 
     private val lock = Any()
     private val processToken = UUID.randomUUID().toString()
@@ -42,6 +51,9 @@ internal object Ticket19ObserverRegistry {
     private var warningFrameworkBoundaryCount = 0L
     private var refreshContinuationCompletionCount = 0L
     private var lastEvaluatedPackage = ""
+    private var externalOutcomeToken = ""
+    private var externalOutcomeArmedAtElapsedMs: Long? = null
+    private var temporaryRulePresent = false
     private var failNextRuntimePublication = false
     private var runtimeBarrier: RuntimeBarrier? = null
     private val failures = mutableListOf<FailureRecord>()
@@ -88,6 +100,10 @@ internal object Ticket19ObserverRegistry {
     }
 
     fun command(name: String, argument: Long): String {
+        return command(name, argument.toString())
+    }
+
+    fun command(name: String, argument: String?): String {
         try {
             when (name) {
                 "snapshot" -> Unit
@@ -95,16 +111,19 @@ internal object Ticket19ObserverRegistry {
                     resetObservationLocked(clearEvents = true)
                     recordEventLocked("observation_reset", "")
                 }
-                "arm_runtime_barrier" -> armRuntimeBarrier(argument)
+                "arm_runtime_barrier" -> armRuntimeBarrier(longArgument(name, argument))
                 "release_runtime_barrier" -> releaseRuntimeBarrier()
-                "await_refresh_continuation" -> awaitRefreshContinuation(argument)
-                "await_quiescence" -> awaitQuiescence(argument)
+                "await_refresh_continuation" -> awaitRefreshContinuation(longArgument(name, argument))
+                "await_quiescence" -> awaitQuiescence(longArgument(name, argument))
                 "fail_next_runtime_publication" -> synchronized(lock) {
                     failNextRuntimePublication = true
                     recordEventLocked("runtime_failure_armed", "")
                 }
                 "reapply_app_rule_receivers" -> reapplyAppRuleReceivers()
-                "terminate_process" -> terminateProcess(argument)
+                "install_calculator_denial_rule" -> installCalculatorDenialRule(argument)
+                "remove_calculator_denial_rule" -> removeCalculatorDenialRule(argument)
+                "arm_external_outcome" -> armExternalOutcome(argument)
+                "terminate_process" -> terminateProcess(longArgument(name, argument))
                 else -> error("unknown ticket19 observer command: $name")
             }
         } catch (error: Throwable) {
@@ -147,7 +166,8 @@ internal object Ticket19ObserverRegistry {
                 }
                 recordEventLocked(
                     "evaluation_completed",
-                    "package=$lastEvaluatedPackage allowed=${evaluation.isAllowed}"
+                    "token=$externalOutcomeToken package=$lastEvaluatedPackage " +
+                        "allowed=${evaluation.isAllowed}"
                 )
             }
         }
@@ -156,10 +176,101 @@ internal object Ticket19ObserverRegistry {
             previousWarningObserver?.invoke(packageName)
             synchronized(lock) {
                 warningFrameworkBoundaryCount += 1L
-                recordEventLocked("warning_framework_boundary", packageName)
+                recordEventLocked(
+                    "warning_framework_boundary",
+                    "token=$externalOutcomeToken package=$packageName"
+                )
             }
         }
     }
+
+    private fun installCalculatorDenialRule(argument: String?) {
+        val token = requireUuid(argument)
+        val service = synchronized(lock) { serviceRef?.get() }
+            ?: error("no current AppBlockerService")
+        val groupId = TEMP_GROUP_PREFIX + token
+        val ruleId = TEMP_RULE_PREFIX + token
+        val present = runBlocking(Dispatchers.IO) {
+            val current = service.dataStoreManager.settings.first().appRuleSnapshot
+            val cleaned = current.copy(
+                appGroups = current.appGroups.filterNot { it.id.startsWith(TEMP_GROUP_PREFIX) },
+                appRules = current.appRules.filterNot { it.id.startsWith(TEMP_RULE_PREFIX) }
+            )
+            val group = AppRuleAppGroup(
+                id = groupId,
+                name = "Ticket19 Calculator",
+                selectedPackages = listOf(CALCULATOR_PACKAGE)
+            )
+            val rule = AppRule(
+                id = ruleId,
+                name = "Ticket19 Calculator deny",
+                weekdays = (0..6).toSet(),
+                startMinute = 0,
+                endMinute = 0,
+                scope = AppRuleScope.forGroup(groupId),
+                allowedMinutes = 0L
+            )
+            check(service.dataStoreManager.updateAppRuleSnapshot(
+                cleaned.copy(
+                    appGroups = cleaned.appGroups + group,
+                    appRules = cleaned.appRules + rule
+                )
+            )) { "temporary Calculator rule was rejected" }
+            service.dataStoreManager.settings.first().appRuleSnapshot.appRules.any {
+                it.id == ruleId
+            }
+        }
+        check(present) { "temporary Calculator rule was not effective after write" }
+        synchronized(lock) {
+            externalOutcomeToken = token
+            temporaryRulePresent = true
+            recordEventLocked("temporary_rule_installed", "token=$token ruleId=$ruleId")
+        }
+    }
+
+    private fun removeCalculatorDenialRule(argument: String?) {
+        val token = requireUuid(argument)
+        val service = synchronized(lock) { serviceRef?.get() }
+            ?: error("no current AppBlockerService")
+        val ruleId = TEMP_RULE_PREFIX + token
+        val effectivePresent = runBlocking(Dispatchers.IO) {
+            val current = service.dataStoreManager.settings.first().appRuleSnapshot
+            check(service.dataStoreManager.updateAppRuleSnapshot(
+                current.copy(
+                    appGroups = current.appGroups.filterNot { it.id == TEMP_GROUP_PREFIX + token },
+                    appRules = current.appRules.filterNot { it.id == ruleId }
+                )
+            )) { "temporary Calculator rule removal was rejected" }
+            service.dataStoreManager.settings.first().appRuleSnapshot.appRules.any {
+                it.id == ruleId
+            }
+        }
+        synchronized(lock) {
+            temporaryRulePresent = effectivePresent
+            recordEventLocked(
+                "temporary_rule_removal_requested",
+                "token=$token effectivePresent=$effectivePresent"
+            )
+        }
+    }
+
+    private fun armExternalOutcome(argument: String?) {
+        val token = requireUuid(argument)
+        synchronized(lock) {
+            externalOutcomeToken = token
+            externalOutcomeArmedAtElapsedMs = SystemClock.elapsedRealtime()
+            recordEventLocked("external_outcome_armed", "token=$token")
+        }
+    }
+
+    private fun requireUuid(argument: String?): String {
+        val value = argument.orEmpty()
+        UUID.fromString(value)
+        return value
+    }
+
+    private fun longArgument(name: String, argument: String?): Long =
+        argument?.toLongOrNull() ?: error("$name requires a long argument")
 
     private fun observeRuntimePublication() {
         var barrier: RuntimeBarrier? = null
@@ -328,6 +439,12 @@ internal object Ticket19ObserverRegistry {
                 put("deniedEvaluationCount", deniedEvaluationCount)
                 put("warningFrameworkBoundaryCount", warningFrameworkBoundaryCount)
                 put("lastEvaluatedPackage", lastEvaluatedPackage)
+                put("externalOutcomeToken", externalOutcomeToken)
+                put(
+                    "externalOutcomeArmedAtElapsedMs",
+                    externalOutcomeArmedAtElapsedMs ?: JSONObject.NULL
+                )
+                put("temporaryRulePresent", temporaryRulePresent)
                 put("refreshContinuationCompletionCount", refreshContinuationCompletionCount)
                 put("workCounts", JSONObject(workCounts))
                 put("barrierState", runtimeBarrier?.state ?: "DISARMED")
@@ -502,6 +619,8 @@ internal object Ticket19ObserverRegistry {
         warningFrameworkBoundaryCount = 0L
         refreshContinuationCompletionCount = 0L
         lastEvaluatedPackage = ""
+        externalOutcomeToken = ""
+        externalOutcomeArmedAtElapsedMs = null
         failNextRuntimePublication = false
         failures.clear()
         if (clearEvents) events.clear()
