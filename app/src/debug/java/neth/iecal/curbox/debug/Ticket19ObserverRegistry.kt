@@ -62,6 +62,7 @@ internal object Ticket19ObserverRegistry {
     private const val MUTATION_BROADCAST_KEY_EXTRA = "ticket19_mutation_broadcast_key"
 
     private val lock = Any()
+    private val mutationReceiverTransitionLock = Any()
     private val gson = Gson()
     private val processToken = UUID.randomUUID().toString()
     private val processStartedAtElapsedMs = SystemClock.elapsedRealtime()
@@ -789,24 +790,32 @@ internal object Ticket19ObserverRegistry {
         productionReceiver: BroadcastReceiver,
         stage: String
     ) {
-        val shouldRestore = synchronized(lock) {
-            mutationRefreshProductionReceiverDetached
-        }
-        if (!shouldRestore) return
-        try {
-            ContextCompat.registerReceiver(
-                service,
-                productionReceiver,
-                IntentFilter(REFRESH_ACTION),
-                ContextCompat.RECEIVER_EXPORTED
-            )
-            synchronized(lock) { mutationRefreshProductionReceiverDetached = false }
-        } catch (error: Throwable) {
-            synchronized(lock) {
-                mutationRefreshProductionReceiverDetached = true
-                mutationRefreshState = "FAILED"
+        synchronized(mutationReceiverTransitionLock) {
+            val shouldRestore = synchronized(lock) {
+                mutationRefreshProductionReceiverDetached
             }
-            recordFailure(stage, error)
+            if (!shouldRestore) return
+            try {
+                ContextCompat.registerReceiver(
+                    service,
+                    productionReceiver,
+                    IntentFilter(REFRESH_ACTION),
+                    ContextCompat.RECEIVER_EXPORTED
+                )
+                synchronized(lock) {
+                    mutationRefreshProductionReceiverDetached = false
+                    recordEventLocked(
+                        "mutation_refresh_production_receiver_restored",
+                        "stage=$stage"
+                    )
+                }
+            } catch (error: Throwable) {
+                synchronized(lock) {
+                    mutationRefreshProductionReceiverDetached = true
+                    mutationRefreshState = "FAILED"
+                }
+                recordFailure(stage, error)
+            }
         }
     }
 
@@ -815,19 +824,21 @@ internal object Ticket19ObserverRegistry {
         productionReceiver: BroadcastReceiver,
         stage: String
     ) {
-        synchronized(lock) { mutationRefreshReceiver }?.let {
-            unregisterMutationReceiver(service, it, passThrough = false, stage)
-        }
-        synchronized(lock) { mutationRefreshPassThroughReceiver }?.let {
-            unregisterMutationReceiver(service, it, passThrough = true, stage)
-        }
-        if (debugMutationReceiversAreClean()) {
-            restoreProductionRefreshReceiver(service, productionReceiver, stage)
-        }
-        synchronized(lock) {
-            clearProductionBoundaryCapturesLocked(
-                IllegalStateException("$stage cleared pending production boundary captures")
-            )
+        synchronized(mutationReceiverTransitionLock) {
+            synchronized(lock) { mutationRefreshReceiver }?.let {
+                unregisterMutationReceiver(service, it, passThrough = false, stage)
+            }
+            synchronized(lock) { mutationRefreshPassThroughReceiver }?.let {
+                unregisterMutationReceiver(service, it, passThrough = true, stage)
+            }
+            if (debugMutationReceiversAreClean()) {
+                restoreProductionRefreshReceiver(service, productionReceiver, stage)
+            }
+            synchronized(lock) {
+                clearProductionBoundaryCapturesLocked(
+                    IllegalStateException("$stage cleared pending production boundary captures")
+                )
+            }
         }
     }
 
@@ -866,49 +877,50 @@ internal object Ticket19ObserverRegistry {
         operation: String
     ) {
         require(operation == "install" || operation == "remove")
-        val productionReceiver = readField(blocker, "refreshReceiver") as BroadcastReceiver
-        cleanupMutationReceivers(
-            service,
-            productionReceiver,
-            "mutation_refresh_receiver_cleanup"
-        )
-        check(mutationReceiversAreClean()) {
-            "previous mutation receiver cleanup failed; retry before arming another probe"
-        }
-        val refreshToken = UUID.randomUUID().toString()
-        synchronized(lock) {
-            mutationRefreshRuleToken = ruleToken
-            mutationRefreshToken = refreshToken
-            mutationRefreshOperation = operation
-            mutationRefreshState = "ARMED"
-            mutationRefreshPid = 0
-            mutationRefreshDeliveryCount = 0L
-            mutationRefreshReservationCount = 0L
-            mutationRefreshPublicationCount = 0L
-            mutationRefreshSourceIdentity = null
-            mutationRefreshRuntimeRevision = null
-            mutationRefreshBoundaryRevisionBefore = null
-            mutationRefreshObservedRevisions.clear()
-            mutationPassThroughObservations.clear()
-            mutationPassThroughByRevision.clear()
-            mutationPassThroughObservedRevisions.clear()
-            clearProductionBoundaryCapturesLocked(
-                IllegalStateException("mutation probe rearmed before boundary capture completed")
+        synchronized(mutationReceiverTransitionLock) {
+            val productionReceiver = readField(blocker, "refreshReceiver") as BroadcastReceiver
+            cleanupMutationReceivers(
+                service,
+                productionReceiver,
+                "mutation_refresh_receiver_cleanup"
             )
-            recordEventLocked(
-                "mutation_refresh_sent",
-                "operation=$operation ruleToken=$ruleToken refreshToken=$refreshToken"
-            )
-        }
+            check(mutationReceiversAreClean()) {
+                "previous mutation receiver cleanup failed; retry before arming another probe"
+            }
+            val refreshToken = UUID.randomUUID().toString()
+            synchronized(lock) {
+                mutationRefreshRuleToken = ruleToken
+                mutationRefreshToken = refreshToken
+                mutationRefreshOperation = operation
+                mutationRefreshState = "ARMED"
+                mutationRefreshPid = 0
+                mutationRefreshDeliveryCount = 0L
+                mutationRefreshReservationCount = 0L
+                mutationRefreshPublicationCount = 0L
+                mutationRefreshSourceIdentity = null
+                mutationRefreshRuntimeRevision = null
+                mutationRefreshBoundaryRevisionBefore = null
+                mutationRefreshObservedRevisions.clear()
+                mutationPassThroughObservations.clear()
+                mutationPassThroughByRevision.clear()
+                mutationPassThroughObservedRevisions.clear()
+                clearProductionBoundaryCapturesLocked(
+                    IllegalStateException("mutation probe rearmed before boundary capture completed")
+                )
+                recordEventLocked(
+                    "mutation_refresh_sent",
+                    "operation=$operation ruleToken=$ruleToken refreshToken=$refreshToken"
+                )
+            }
 
-        try {
-            service.unregisterReceiver(productionReceiver)
-            synchronized(lock) { mutationRefreshProductionReceiverDetached = true }
-        } catch (error: Throwable) {
-            synchronized(lock) { mutationRefreshState = "FAILED" }
-            recordFailure("mutation_refresh_production_receiver_detach", error)
-            throw error
-        }
+            try {
+                service.unregisterReceiver(productionReceiver)
+                synchronized(lock) { mutationRefreshProductionReceiverDetached = true }
+            } catch (error: Throwable) {
+                synchronized(lock) { mutationRefreshState = "FAILED" }
+                recordFailure("mutation_refresh_production_receiver_detach", error)
+                throw error
+            }
 
         fun readExtra(intent: Intent?, name: String): String = runCatching {
             intent?.getStringExtra(name).orEmpty()
@@ -932,6 +944,7 @@ internal object Ticket19ObserverRegistry {
         lateinit var passThroughReceiver: BroadcastReceiver
         passThroughReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
+                synchronized(mutationReceiverTransitionLock) {
                 val deliveredToken = readExtra(intent, MUTATION_TOKEN_EXTRA)
                 val shouldHandle = synchronized(lock) {
                     (mutationRefreshState == "ARMED" && deliveredToken != mutationRefreshToken) ||
@@ -941,6 +954,16 @@ internal object Ticket19ObserverRegistry {
 
                 val broadcastKey = readExtra(intent, MUTATION_BROADCAST_KEY_EXTRA)
                 val deliveredRuleToken = readExtra(intent, MUTATION_RULE_TOKEN_EXTRA)
+                synchronized(lock) {
+                    check(mutationRefreshProductionReceiverDetached) {
+                        "unowned mutation refresh reached pass-through while production was attached"
+                    }
+                    recordEventLocked(
+                        "mutation_pass_through_delegation",
+                        "key=$broadcastKey ruleToken=$deliveredRuleToken " +
+                            "token=$deliveredToken productionDetached=$mutationRefreshProductionReceiverDetached"
+                    )
+                }
                 var boundaryCapture: ProductionBoundaryCapture? = null
                 try {
                     if (broadcastKey.isEmpty() || deliveredRuleToken.isEmpty()) {
@@ -990,10 +1013,21 @@ internal object Ticket19ObserverRegistry {
                         }
                     }
                 }
+                synchronized(lock) {
+                    recordEventLocked(
+                        "mutation_pass_through_delivery_completed",
+                        "key=$broadcastKey ruleToken=$deliveredRuleToken " +
+                            "passThroughRegistered=${mutationRefreshPassThroughReceiver != null} " +
+                            "taggedRegistered=${mutationRefreshReceiver != null} " +
+                            "productionDetached=$mutationRefreshProductionReceiverDetached"
+                    )
+                }
+                }
             }
         }
         taggedReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
+                synchronized(mutationReceiverTransitionLock) {
                 val deliveredToken = readExtra(intent, MUTATION_TOKEN_EXTRA)
                 val ownsDelivery = synchronized(lock) {
                     mutationRefreshState == "ARMED" && mutationRefreshToken == deliveredToken
@@ -1097,42 +1131,44 @@ internal object Ticket19ObserverRegistry {
                         }
                     }
                 }
+                }
             }
         }
-        val passThroughFilter = IntentFilter(REFRESH_ACTION).apply { priority = -1 }
-        ContextCompat.registerReceiver(
-            service,
-            passThroughReceiver,
-            passThroughFilter,
-            ContextCompat.RECEIVER_EXPORTED
-        )
-        synchronized(lock) { mutationRefreshPassThroughReceiver = passThroughReceiver }
-        try {
-            val filter = IntentFilter(REFRESH_ACTION).apply { priority = 1_000 }
+            val passThroughFilter = IntentFilter(REFRESH_ACTION).apply { priority = -1 }
             ContextCompat.registerReceiver(
                 service,
-                taggedReceiver,
-                filter,
+                passThroughReceiver,
+                passThroughFilter,
                 ContextCompat.RECEIVER_EXPORTED
             )
-        } catch (error: Throwable) {
-            val passThroughUnregistered = unregisterMutationReceiver(
-                service,
-                passThroughReceiver,
-                passThrough = true,
-                "mutation_refresh_pass_through_cleanup"
-            )
-            if (passThroughUnregistered && debugMutationReceiversAreClean()) {
-                restoreProductionRefreshReceiver(
+            synchronized(lock) { mutationRefreshPassThroughReceiver = passThroughReceiver }
+            try {
+                val filter = IntentFilter(REFRESH_ACTION).apply { priority = 1_000 }
+                ContextCompat.registerReceiver(
                     service,
-                    productionReceiver,
-                    "mutation_refresh_production_receiver_restore"
+                    taggedReceiver,
+                    filter,
+                    ContextCompat.RECEIVER_EXPORTED
                 )
+            } catch (error: Throwable) {
+                val passThroughUnregistered = unregisterMutationReceiver(
+                    service,
+                    passThroughReceiver,
+                    passThrough = true,
+                    "mutation_refresh_pass_through_cleanup"
+                )
+                if (passThroughUnregistered && debugMutationReceiversAreClean()) {
+                    restoreProductionRefreshReceiver(
+                        service,
+                        productionReceiver,
+                        "mutation_refresh_production_receiver_restore"
+                    )
+                }
+                throw error
             }
-            throw error
-        }
-        synchronized(lock) {
-            mutationRefreshReceiver = taggedReceiver
+            synchronized(lock) {
+                mutationRefreshReceiver = taggedReceiver
+            }
         }
     }
 

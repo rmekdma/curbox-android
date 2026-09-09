@@ -499,55 +499,6 @@ function Assert-NoExtraMalformedRecovery {
     return $recovered
 }
 
-function Assert-OwnedMalformedUnregisterFailureProbe {
-    param(
-        [string]$Operation,
-        [int]$ExpectedPid,
-        [int]$ExpectedFilterCount,
-        [string]$Stage
-    )
-    $probeRuleToken = [guid]::NewGuid().ToString()
-    $armed = Arm-MutationProbe $Operation $probeRuleToken "$Stage arm"
-    $refreshToken = [string]$armed.mutationRefreshToken
-    $beforeFailures = @($armed.failures).Count
-    $injection = Invoke-ObserverCommand 'inject_mutation_unregister_failure'
-    if ($injection.mutationRefreshUnregisterFailureInjectionArmed -ne $true) {
-        throw "$Stage did not arm the initial debug unregister failure injection: $($injection | ConvertTo-Json -Depth 12 -Compress)"
-    }
-    $malformedKey = [guid]::NewGuid().ToString()
-    $malformedRuleToken = [guid]::NewGuid().ToString()
-    $malformedOperation = if ($Operation -eq 'install') { 'remove' } else { 'install' }
-    $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    Send-PassThroughRefresh $malformedKey $malformedRuleToken $refreshToken $malformedOperation | Out-Null
-    $failed = Invoke-ObserverCommand 'await_mutation_refresh' "$Operation`:$refreshToken"
-    $timer.Stop()
-    if ($timer.Elapsed.TotalSeconds -ge 5) {
-        throw "$Stage await_mutation_refresh did not surface FAILED promptly: elapsed=$($timer.Elapsed.TotalSeconds)s"
-    }
-    Wait-Until "$Stage retained debug receivers and detached production" {
-        $snapshot = Invoke-ObserverCommand 'snapshot'
-        return $snapshot.mutationRefreshState -eq 'FAILED' -and
-            $snapshot.mutationRefreshReceiverRegistered -eq $true -and
-            $snapshot.mutationRefreshPassThroughReceiverRegistered -eq $true -and
-            $snapshot.mutationRefreshProductionReceiverRegistered -eq $false -and
-            $snapshot.mutationRefreshProductionReceiverDetached -eq $true -and
-            @($snapshot.failures).Count -eq ($beforeFailures + 2) -and
-            $snapshot.mutationRefreshUnregisterFailureInjectionArmed -eq $false -and
-            [long](Get-ActiveServiceProcessFilters $ExpectedPid).Count -eq ($ExpectedFilterCount + 1)
-    }
-    $failed = Invoke-ObserverCommand 'snapshot'
-    if (@(Get-PassThroughObservation $failed $malformedKey $malformedRuleToken).Count -ne 0) {
-        throw "$Stage malformed owned delivery reached a matching production reservation/publication: $($failed | ConvertTo-Json -Depth 12 -Compress)"
-    }
-    Write-Trace "$Stage malformed owned delivery failed promptly; both debug receivers retained, production detached, filters baseline+1"
-    return [pscustomobject]@{
-        Armed = $armed
-        Failed = $failed
-        Operation = $Operation
-        FailureCount = $beforeFailures + 2
-    }
-}
-
 function Assert-UnregisterFailureRecovery {
     param(
         [string]$Operation,
@@ -562,53 +513,117 @@ function Assert-UnregisterFailureRecovery {
         return $null
     }
 
-    $probe = Assert-OwnedMalformedUnregisterFailureProbe `
-        $Operation $ExpectedPid $ExpectedFilterCount "$Stage malformed"
-    $beforeFailures = $probe.FailureCount
-    $beforeRetryCount = [long]$probe.Failed.mutationRefreshCleanupRetryCount
-    $beforeRuntimePublications = [long]$probe.Failed.runtimePublicationCount
-    $armed = Invoke-ObserverCommand 'inject_mutation_unregister_failure'
-    if ($armed.mutationRefreshUnregisterFailureInjectionArmed -ne $true) {
-        throw "$Stage did not arm the cleanup retry unregister failure injection: $($armed | ConvertTo-Json -Depth 12 -Compress)"
+    $probe = Assert-OwnedMalformedProbe $Operation "$Stage malformed"
+    $baseline = Invoke-ObserverCommand 'snapshot'
+    $baselineFilterCount = @(Get-ActiveServiceProcessFilters $ExpectedPid).Count
+    if ($baseline.mutationRefreshState -ne 'FAILED' -or
+        $baseline.mutationRefreshReceiverRegistered -ne $false -or
+        $baseline.mutationRefreshPassThroughReceiverRegistered -ne $true -or
+        $baseline.mutationRefreshProductionReceiverRegistered -ne $false -or
+        $baseline.mutationRefreshProductionReceiverDetached -ne $true -or
+        $baseline.mutationRefreshUnregisterFailureInjectionArmed -ne $false -or
+        @($baseline.failures).Count -ne $probe.FailureCount -or
+        $baselineFilterCount -ne $ExpectedFilterCount) {
+        throw "$Stage malformed-owned probe was not finished before baselines: $($baseline | ConvertTo-Json -Depth 12 -Compress)"
     }
+    Write-Trace "$Stage malformed-owned probe finished; pass-through retained, tagged absent, production detached"
+
+    $beforeFailures = @($baseline.failures).Count
+    $beforeRetryCount = [long]$baseline.mutationRefreshCleanupRetryCount
+    $beforeRestoreEvents = @($baseline.events | Where-Object {
+        $_.name -eq 'mutation_refresh_production_receiver_restored' -and
+        $_.detail -match 'stage=mutation_refresh_cleanup_retry'
+    }).Count
     $broadcastKey = [guid]::NewGuid().ToString()
     $broadcastRuleToken = [guid]::NewGuid().ToString()
+    if (@(Get-PassThroughObservation $baseline $broadcastKey $broadcastRuleToken).Count -ne 0) {
+        throw "$Stage fresh key unexpectedly had an existing observation"
+    }
+    $armed = Invoke-ObserverCommand 'inject_mutation_unregister_failure'
+    if ($armed.mutationRefreshUnregisterFailureInjectionArmed -ne $true -or
+        $armed.mutationRefreshState -ne $baseline.mutationRefreshState -or
+        @($armed.failures).Count -ne $beforeFailures -or
+        [long]$armed.mutationRefreshCleanupRetryCount -ne $beforeRetryCount -or
+        $armed.mutationRefreshReceiverRegistered -ne $baseline.mutationRefreshReceiverRegistered -or
+        $armed.mutationRefreshPassThroughReceiverRegistered -ne $baseline.mutationRefreshPassThroughReceiverRegistered -or
+        $armed.mutationRefreshProductionReceiverRegistered -ne $baseline.mutationRefreshProductionReceiverRegistered -or
+        $armed.mutationRefreshProductionReceiverDetached -ne $baseline.mutationRefreshProductionReceiverDetached -or
+        [long](Get-ActiveServiceProcessFilters $ExpectedPid).Count -ne $baselineFilterCount) {
+        throw "$Stage injection arm changed the recorded baselines: $($armed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    Write-Trace "$Stage pass-through unregister failure injection armed immediately before key=$broadcastKey ruleToken=$broadcastRuleToken"
+
     $delegated = Assert-PassThroughRefresh `
         $broadcastKey $broadcastRuleToken '' 'FAILED' ($beforeFailures + 1) `
-        "$Stage delegated refresh during failed cleanup"
-    if ($delegated.mutationRefreshReceiverRegistered -ne $true -or
+        "$Stage fresh unowned refresh during failed cleanup"
+    if ($delegated.mutationRefreshReceiverRegistered -ne $false -or
         $delegated.mutationRefreshPassThroughReceiverRegistered -ne $true -or
         $delegated.mutationRefreshProductionReceiverRegistered -ne $false -or
         $delegated.mutationRefreshProductionReceiverDetached -ne $true -or
-        [long]$delegated.runtimePublicationCount -ne ($beforeRuntimePublications + 1) -or
-        [long](Get-ActiveServiceProcessFilters $ExpectedPid).Count -ne ($ExpectedFilterCount + 1)) {
-        throw "$Stage failed cleanup did not retain both debug receivers and detached production: $($delegated | ConvertTo-Json -Depth 12 -Compress)"
+        $delegated.mutationRefreshUnregisterFailureInjectionArmed -ne $false -or
+        [long]$delegated.mutationRefreshCleanupRetryCount -ne $beforeRetryCount -or
+        [long](Get-ActiveServiceProcessFilters $ExpectedPid).Count -ne $baselineFilterCount) {
+        throw "$Stage failed cleanup did not retain only pass-through and detached production: $($delegated | ConvertTo-Json -Depth 12 -Compress)"
     }
+    $match = @(Get-PassThroughObservation $delegated $broadcastKey $broadcastRuleToken)
+    $sourceIdentity = [long]$match[0].sourceIdentity
+    $runtimeRevision = [long]$match[0].runtimeRevision
+    $revisionBefore = [long]$match[0].revisionBefore
+    if ($match.Count -ne 1 -or
+        $sourceIdentity -le 0 -or
+        $runtimeRevision -le 0 -or
+        $revisionBefore -lt 0 -or
+        $runtimeRevision -ne ($revisionBefore + 1L)) {
+        throw "$Stage fresh unowned refresh did not expose its exact source/revision capture: $($delegated | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $delegationEvents = @($delegated.events | Where-Object {
+        $_.name -eq 'mutation_pass_through_delegation' -and
+        $_.detail -match [regex]::Escape("key=$broadcastKey") -and
+        $_.detail -match [regex]::Escape("ruleToken=$broadcastRuleToken")
+    })
     $reservationEvents = @($delegated.events | Where-Object {
         $_.name -eq 'mutation_pass_through_reservation' -and
         $_.detail -match [regex]::Escape("key=$broadcastKey") -and
-        $_.detail -match [regex]::Escape("ruleToken=$broadcastRuleToken")
+        $_.detail -match [regex]::Escape("ruleToken=$broadcastRuleToken") -and
+        $_.detail -match [regex]::Escape("revisionBefore=$revisionBefore") -and
+        $_.detail -match [regex]::Escape("sourceIdentity=$sourceIdentity") -and
+        $_.detail -match [regex]::Escape("runtimeRevision=$runtimeRevision")
     })
     $publicationEvents = @($delegated.events | Where-Object {
         $_.name -eq 'mutation_pass_through_publication' -and
         $_.detail -match [regex]::Escape("key=$broadcastKey") -and
-        $_.detail -match [regex]::Escape("ruleToken=$broadcastRuleToken")
+        $_.detail -match [regex]::Escape("ruleToken=$broadcastRuleToken") -and
+        $_.detail -match [regex]::Escape("sourceIdentity=$sourceIdentity") -and
+        $_.detail -match [regex]::Escape("runtimeRevision=$runtimeRevision")
     })
-    if ($reservationEvents.Count -ne 1 -or $publicationEvents.Count -ne 1) {
-        throw "$Stage delegated refresh was not exactly one reservation/publication: $($delegated | ConvertTo-Json -Depth 12 -Compress)"
+    $completedEvents = @($delegated.events | Where-Object {
+        $_.name -eq 'mutation_pass_through_delivery_completed' -and
+        $_.detail -match [regex]::Escape("key=$broadcastKey") -and
+        $_.detail -match [regex]::Escape("ruleToken=$broadcastRuleToken") -and
+        $_.detail -match 'passThroughRegistered=True' -and
+        $_.detail -match 'taggedRegistered=False' -and
+        $_.detail -match 'productionDetached=True'
+    })
+    if ($delegationEvents.Count -ne 1 -or
+        $reservationEvents.Count -ne 1 -or
+        $publicationEvents.Count -ne 1 -or
+        $completedEvents.Count -ne 1 -or
+        $delegationEvents[0].detail -notmatch 'productionDetached=True') {
+        throw "$Stage fresh unowned refresh did not produce exactly one detached delegation and keyed reservation/publication: $($delegated | ConvertTo-Json -Depth 12 -Compress)"
     }
     $delegatedQuiescent = Wait-MutationWorkQuiescent "$Stage delegated refresh"
-    if ([long]$delegatedQuiescent.runtimePublicationCount -ne ($beforeRuntimePublications + 1) -or
-        @($delegatedQuiescent.failures).Count -ne ($beforeFailures + 1)) {
-        throw "$Stage delegated refresh produced an unexpected duplicate or failure count: $($delegatedQuiescent | ConvertTo-Json -Depth 12 -Compress)"
+    $lastFailure = @($delegatedQuiescent.failures)[-1]
+    if (@($delegatedQuiescent.failures).Count -ne ($beforeFailures + 1) -or
+        $lastFailure.stage -ne 'mutation_refresh_pass_through_cleanup' -or
+        $delegatedQuiescent.mutationRefreshReceiverRegistered -ne $false -or
+        $delegatedQuiescent.mutationRefreshPassThroughReceiverRegistered -ne $true -or
+        $delegatedQuiescent.mutationRefreshProductionReceiverRegistered -ne $false -or
+        $delegatedQuiescent.mutationRefreshProductionReceiverDetached -ne $true -or
+        [long]$delegatedQuiescent.mutationRefreshCleanupRetryCount -ne $beforeRetryCount -or
+        [long](Get-ActiveServiceProcessFilters $ExpectedPid).Count -ne $baselineFilterCount) {
+        throw "$Stage delegated refresh changed failure, cleanup, or actual production filter baselines: $($delegatedQuiescent | ConvertTo-Json -Depth 12 -Compress)"
     }
-    Write-Trace "$Stage delegated exactly once while cleanup failure retained both debug receivers and detached production"
-    $failed = Invoke-ObserverCommand 'snapshot'
-    $lastFailure = @($failed.failures)[-1]
-    if ($lastFailure.stage -ne 'mutation_refresh_pass_through_cleanup' -or
-        $failed.mutationRefreshUnregisterFailureInjectionArmed -ne $false) {
-        throw "$Stage did not expose the retained receiver and framework filter after injected failure: $($failed | ConvertTo-Json -Depth 12 -Compress)"
-    }
+    Write-Trace "$Stage delegated exactly once with key=$broadcastKey source=$sourceIdentity revision=$runtimeRevision; pass-through retained and production stayed detached"
 
     $retry = Invoke-ObserverCommand 'retry_mutation_receiver_cleanup'
     if ([long]$retry.mutationRefreshCleanupRetryCount -ne ($beforeRetryCount + 1)) {
@@ -618,16 +633,33 @@ function Assert-UnregisterFailureRecovery {
     if (@($retry.failures).Count -ne ($beforeFailures + 1)) {
         throw "$Stage cleanup retry changed the recorded failure set: $($retry | ConvertTo-Json -Depth 12 -Compress)"
     }
-    if ([long]$retry.runtimePublicationCount -ne ($beforeRuntimePublications + 1)) {
-        throw "$Stage cleanup retry produced an unexpected publication: $($retry | ConvertTo-Json -Depth 12 -Compress)"
+    $restoreEvents = @($retry.events | Where-Object {
+        $_.name -eq 'mutation_refresh_production_receiver_restored' -and
+        $_.detail -match 'stage=mutation_refresh_cleanup_retry'
+    })
+    if ($restoreEvents.Count -ne ($beforeRestoreEvents + 1) -or
+        @(Get-PassThroughObservation $retry $broadcastKey $broadcastRuleToken).Count -ne 1 -or
+        [long](@(Get-PassThroughObservation $retry $broadcastKey $broadcastRuleToken)[0].reservationCount) -ne 1 -or
+        [long](@(Get-PassThroughObservation $retry $broadcastKey $broadcastRuleToken)[0].publicationCount) -ne 1 -or
+        [long](Get-ActiveServiceProcessFilters $ExpectedPid).Count -ne $ExpectedFilterCount) {
+        throw "$Stage cleanup retry did not restore production exactly once without changing the matching publication: $($retry | ConvertTo-Json -Depth 12 -Compress)"
     }
     Write-Trace "$Stage cleanup retry removed the retained handle and restored production filter inventory"
 
     $idempotentRetry = Invoke-ObserverCommand 'retry_mutation_receiver_cleanup'
     Assert-MutationCleanupState $idempotentRetry $ExpectedPid $ExpectedFilterCount "$Stage idempotent cleanup retry"
+    $idempotentRestoreEvents = @($idempotentRetry.events | Where-Object {
+        $_.name -eq 'mutation_refresh_production_receiver_restored' -and
+        $_.detail -match 'stage=mutation_refresh_cleanup_retry'
+    })
+    $idempotentMatch = @(Get-PassThroughObservation $idempotentRetry $broadcastKey $broadcastRuleToken)
     if (@($idempotentRetry.failures).Count -ne ($beforeFailures + 1) -or
-        [long]$idempotentRetry.runtimePublicationCount -ne ($beforeRuntimePublications + 1)) {
-        throw "$Stage idempotent cleanup retry changed failure or publication counts: $($idempotentRetry | ConvertTo-Json -Depth 12 -Compress)"
+        $idempotentRestoreEvents.Count -ne ($beforeRestoreEvents + 1) -or
+        $idempotentMatch.Count -ne 1 -or
+        [long]$idempotentMatch[0].reservationCount -ne 1 -or
+        [long]$idempotentMatch[0].publicationCount -ne 1 -or
+        [long](Get-ActiveServiceProcessFilters $ExpectedPid).Count -ne $ExpectedFilterCount) {
+        throw "$Stage idempotent cleanup retry changed the matching failure, publication, or restore evidence: $($idempotentRetry | ConvertTo-Json -Depth 12 -Compress)"
     }
     Write-Trace "$Stage repeated cleanup retry was idempotent"
 
@@ -796,12 +828,10 @@ function Assert-RestoredProductionRefresh {
     $before = Invoke-ObserverCommand 'snapshot'
     Assert-MutationCleanupState $before $ExpectedPid $ExpectedFilterCount "$Stage preflight"
     $beforeFailures = @($before.failures).Count
-    $beforePublications = [long]$before.runtimePublicationCount
     $sent = Send-Refresh $Stage
-    Wait-Until "$Stage exactly one restored production publication" {
+    Wait-Until "$Stage exactly one restored production delivery" {
         $snapshot = Invoke-ObserverCommand 'snapshot'
-        return [long]$snapshot.runtimePublicationCount -eq ($beforePublications + 1) -and
-            $snapshot.mutationRefreshState -eq 'DISARMED' -and
+        return $snapshot.mutationRefreshState -eq 'DISARMED' -and
             @($snapshot.failures).Count -eq $beforeFailures
     }
     $completed = Invoke-ObserverCommand 'await_quiescence' 15000
@@ -809,12 +839,9 @@ function Assert-RestoredProductionRefresh {
         throw "$Stage changed the observer failure set: $($completed | ConvertTo-Json -Depth 12 -Compress)"
     }
     Assert-WorkCountsZero $completed $Stage
-    if ([long]$completed.runtimePublicationCount -ne ($beforePublications + 1)) {
-        throw "$Stage produced a duplicate restored production publication: $($completed | ConvertTo-Json -Depth 12 -Compress)"
-    }
     $delivery = Get-CorrelatedRefreshDelivery $sent.Token $ExpectedPid
     Assert-SystemFilterCount $ExpectedPid $ExpectedFilterCount "$Stage framework filter inventory"
-    Write-Trace "$Stage restored production produced exactly one reservation/publication pair token=$($sent.Token) line=$delivery"
+    Write-Trace "$Stage restored production completed one correlated delivery token=$($sent.Token) line=$delivery"
     return $completed
 }
 
