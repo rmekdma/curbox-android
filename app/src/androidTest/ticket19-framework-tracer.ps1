@@ -603,6 +603,74 @@ function Assert-OwnedMalformedMutationThenPassThrough {
     return $quiescent
 }
 
+function Assert-ImmediatePublicationRegression {
+    param(
+        [string]$Operation,
+        [int]$ExpectedPid,
+        [string]$Stage
+    )
+    $expectedFilterCount = @(Get-ActiveServiceProcessFilters $ExpectedPid).Count
+    if ($expectedFilterCount -le 0) {
+        throw "$Stage could not establish the pre-probe framework filter inventory"
+    }
+    $ruleToken = [guid]::NewGuid().ToString()
+    $armed = Arm-MutationProbe $Operation $ruleToken "$Stage arm"
+    $beforeFailures = @($armed.failures).Count
+    $hook = Invoke-ObserverCommand 'force_mutation_publication_before_ready'
+    if ($hook.mutationRefreshImmediatePublicationBeforeReadyArmed -ne $true) {
+        throw "$Stage could not arm the immediate-publication regression gate: $($hook | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $broadcastKey = [guid]::NewGuid().ToString()
+    $broadcastRuleToken = [guid]::NewGuid().ToString()
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $completed = Assert-PassThroughRefresh `
+        $broadcastKey $broadcastRuleToken '' 'ARMED' $beforeFailures "$Stage keyed unowned publication"
+    $timer.Stop()
+    if ($timer.Elapsed.TotalSeconds -ge 5) {
+        throw "$Stage did not complete promptly before the boundary-ready timeout: elapsed=$($timer.Elapsed.TotalSeconds)s"
+    }
+    $match = @(Get-PassThroughObservation $completed $broadcastKey $broadcastRuleToken)
+    $revisionBefore = [long]$match[0].revisionBefore
+    $runtimeRevision = [long]$match[0].runtimeRevision
+    if ($revisionBefore -lt 0 -or $runtimeRevision -ne ($revisionBefore + 1)) {
+        throw "$Stage did not preserve revisionBefore+1: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $waitEvents = @($completed.events | Where-Object {
+        $_.name -eq 'mutation_refresh_boundary_placeholder_wait' -and
+        $_.detail -match [regex]::Escape("revision=$runtimeRevision") -and
+        $_.detail -match [regex]::Escape("revisionBefore=$revisionBefore")
+    })
+    if ($waitEvents.Count -ne 1) {
+        throw "$Stage did not observe publication waiting on the exact PENDING placeholder: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $boundaryFailures = @($completed.failures | Where-Object {
+        $_.stage -match '^mutation_refresh_boundary_'
+    })
+    if ($boundaryFailures.Count -ne 0 -or
+        @($completed.failures).Count -ne $beforeFailures) {
+        throw "$Stage recorded a capture failure: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $publicationEvents = @($completed.events | Where-Object {
+        $_.name -eq 'mutation_pass_through_publication' -and
+        $_.detail -match [regex]::Escape("key=$broadcastKey") -and
+        $_.detail -match [regex]::Escape("runtimeRevision=$runtimeRevision")
+    })
+    if ($publicationEvents.Count -ne 1) {
+        throw "$Stage did not record exactly one keyed publication: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $quiescent = Wait-MutationWorkQuiescent "$Stage keyed unowned"
+    if (@($quiescent.failures).Count -ne $beforeFailures) {
+        throw "$Stage introduced a failure while draining production work: $($quiescent | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $cleaned = Invoke-ObserverCommand 'retry_mutation_receiver_cleanup'
+    Assert-MutationCleanupState $cleaned $ExpectedPid $expectedFilterCount "$Stage cleanup"
+    if (@($cleaned.failures).Count -ne $beforeFailures) {
+        throw "$Stage cleanup changed the failure set: $($cleaned | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    Write-Trace "$Stage observed publication before READY exactly once key=$broadcastKey revisionBefore=$revisionBefore runtimeRevision=$runtimeRevision"
+    return $cleaned
+}
+
 function Get-EffectFingerprint($Snapshot) {
     return @($Snapshot.runtimePublicationCount, $Snapshot.notificationPublicationCount,
         $Snapshot.evaluationCount, $Snapshot.allowedEvaluationCount, $Snapshot.deniedEvaluationCount,
@@ -771,6 +839,9 @@ function Assert-RealCalculatorDenial {
         ([long]$install.mutationRefreshCompletionCount) $installExpectedFilterCount 'temporary Calculator install normal mutation'
     $malformedQuiescent = Assert-OwnedMalformedMutationThenPassThrough 'install' `
         ([int]$install.processPid) 'temporary Calculator install malformed ownership'
+    $immediateQuiescent = Assert-ImmediatePublicationRegression 'install' `
+        ([int]$install.processPid) 'temporary Calculator install immediate publication'
+    $malformedQuiescent = $immediateQuiescent
     Invoke-AdbCommand @('shell', 'am', 'force-stop', 'com.android.calculator2') | Out-Null
     Invoke-AdbCommand @('shell', 'input', 'keyevent', 'HOME') | Out-Null
     Start-Sleep -Milliseconds 500

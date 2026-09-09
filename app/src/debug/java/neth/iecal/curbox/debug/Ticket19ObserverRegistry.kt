@@ -99,6 +99,7 @@ internal object Ticket19ObserverRegistry {
     private var mutationRefreshOperation = ""
     private var mutationRefreshState = "DISARMED"
     private var mutationRefreshProductionReceiverDetached = false
+    private var mutationRefreshBoundaryRevisionBefore: Long? = null
     private var mutationRefreshPid = 0
     private var mutationRefreshDeliveryCount = 0L
     private var mutationRefreshReservationCount = 0L
@@ -112,11 +113,12 @@ internal object Ticket19ObserverRegistry {
     private val mutationPassThroughObservations = linkedMapOf<String, PassThroughMutationObservation>()
     private val mutationPassThroughByRevision = mutableMapOf<Long, PassThroughMutationObservation>()
     private val mutationPassThroughObservedRevisions = mutableSetOf<Long>()
-    private val pendingProductionBoundaryCaptures = mutableSetOf<ProductionBoundaryCapture>()
+    private val pendingProductionBoundaryCaptures = mutableMapOf<Long, ProductionBoundaryCapture>()
     private val productionBoundaryCapturesByRevision = mutableMapOf<Long, ProductionBoundaryCapture>()
     private var mutationRefreshUncorrelatedDeliveryCount = 0L
     private var failNextMutationReceiverUnregister = false
     private var mutationRefreshCleanupRetryCount = 0L
+    private var forceImmediatePublicationBeforeReady = false
     private var failNextRuntimePublication = false
     private var runtimeBarrier: RuntimeBarrier? = null
     private val failures = mutableListOf<FailureRecord>()
@@ -146,6 +148,7 @@ internal object Ticket19ObserverRegistry {
         val ruleToken: String,
         var reservationCount: Long = 0L,
         var publicationCount: Long = 0L,
+        var revisionBefore: Long? = null,
         var reservation: SourceOrderReservation? = null
     )
 
@@ -153,9 +156,13 @@ internal object Ticket19ObserverRegistry {
         val broadcastKey: String,
         val ruleToken: String,
         val ownedCorrelation: MutationRefreshContext?,
+        val revisionBefore: Long,
+        val publicationWaiterEntered: CountDownLatch?,
         val reservationReady: CountDownLatch = CountDownLatch(1),
+        var state: String = "PENDING",
         var reservation: SourceOrderReservation? = null,
-        var failure: Throwable? = null
+        var failure: Throwable? = null,
+        var diagnosticRecorded: Boolean = false
     )
 
     private data class SequencerSnapshot(
@@ -232,18 +239,127 @@ internal object Ticket19ObserverRegistry {
         )
     }
 
+    private fun failProductionBoundaryCapture(
+        capture: ProductionBoundaryCapture,
+        stage: String,
+        error: Throwable
+    ) {
+        var shouldRecordDiagnostic = false
+        synchronized(lock) {
+            if (capture.state != "FAILED") {
+                capture.state = "FAILED"
+                capture.failure = capture.failure ?: error
+            }
+            if (pendingProductionBoundaryCaptures[capture.revisionBefore + 1L] === capture) {
+                pendingProductionBoundaryCaptures.remove(capture.revisionBefore + 1L)
+            }
+            if (productionBoundaryCapturesByRevision[capture.revisionBefore + 1L] === capture) {
+                productionBoundaryCapturesByRevision.remove(capture.revisionBefore + 1L)
+            }
+            if (!capture.diagnosticRecorded) {
+                capture.diagnosticRecorded = true
+                shouldRecordDiagnostic = true
+            }
+        }
+        capture.reservationReady.countDown()
+        if (shouldRecordDiagnostic) recordFailure(stage, error)
+    }
+
+    private fun clearProductionBoundaryCapturesLocked(cause: Throwable) {
+        val captures = pendingProductionBoundaryCaptures.values.toList() +
+            productionBoundaryCapturesByRevision.values.toList()
+        captures.forEach { capture ->
+            capture.state = "FAILED"
+            capture.failure = capture.failure ?: cause
+            capture.reservationReady.countDown()
+        }
+        pendingProductionBoundaryCaptures.clear()
+        productionBoundaryCapturesByRevision.clear()
+    }
+
+    private fun markProductionBoundaryCaptureReady(
+        capture: ProductionBoundaryCapture,
+        reservation: SourceOrderReservation
+    ) {
+        synchronized(lock) {
+            check(capture.state == "PENDING" &&
+                pendingProductionBoundaryCaptures[capture.revisionBefore + 1L] === capture &&
+                productionBoundaryCapturesByRevision[capture.revisionBefore + 1L] === capture
+            ) { "production boundary placeholder was no longer pending" }
+            check(reservation.runtimeRevision.value == capture.revisionBefore + 1L) {
+                "production boundary reservation revision mismatch: " +
+                    "expected=${capture.revisionBefore + 1L} actual=${reservation.runtimeRevision.value}"
+            }
+            capture.reservation = reservation
+            capture.state = "READY"
+            pendingProductionBoundaryCaptures.remove(capture.revisionBefore + 1L)
+            if (capture.ownedCorrelation != null) {
+                mutationRefreshBoundaryRevisionBefore = capture.revisionBefore
+                captureMutationRefreshReservation(capture.ownedCorrelation, reservation)
+            } else {
+                val observation = mutationPassThroughObservations.getOrPut(
+                    capture.broadcastKey
+                ) {
+                    PassThroughMutationObservation(
+                        key = capture.broadcastKey,
+                        ruleToken = capture.ruleToken
+                    )
+                }
+                observation.reservationCount += 1L
+                observation.revisionBefore = capture.revisionBefore
+                observation.reservation = reservation
+                mutationPassThroughByRevision[reservation.runtimeRevision.value] = observation
+                recordEventLocked(
+                    "mutation_pass_through_reservation",
+                    "key=${capture.broadcastKey} ruleToken=${capture.ruleToken} " +
+                        "revisionBefore=${capture.revisionBefore} " +
+                        "sourceIdentity=${reservation.sourceOrderIdentity.value} " +
+                        "runtimeRevision=${reservation.runtimeRevision.value} " +
+                        "count=${observation.reservationCount}"
+                )
+            }
+        }
+        capture.reservationReady.countDown()
+    }
+
     private fun invokeProductionReceiverWithExactCapture(
         blocker: AppRuleBlocker,
         productionReceiver: BroadcastReceiver,
         context: Context?,
         intent: Intent?,
-        capture: ProductionBoundaryCapture
-    ) {
+        broadcastKey: String,
+        ruleToken: String,
+        ownedCorrelation: MutationRefreshContext?
+    ): ProductionBoundaryCapture {
         val sequencer = readField(blocker, "sourceOrderSequencer")
         val allocationLock = readField(sequencer, "allocationLock")
+        var capture: ProductionBoundaryCapture? = null
         try {
-            val reservation = synchronized(allocationLock) {
+            synchronized(allocationLock) {
                 val before = sequencerSnapshot(sequencer)
+                val expectedRevision = before.runtimeRevision + 1L
+                capture = synchronized(lock) {
+                    check(productionBoundaryCapturesByRevision[expectedRevision] == null) {
+                        "duplicate production boundary placeholder revision=$expectedRevision"
+                    }
+                    val waiter = if (forceImmediatePublicationBeforeReady) {
+                        forceImmediatePublicationBeforeReady = false
+                        CountDownLatch(1)
+                    } else {
+                        null
+                    }
+                    ProductionBoundaryCapture(
+                        broadcastKey = broadcastKey,
+                        ruleToken = ruleToken,
+                        ownedCorrelation = ownedCorrelation,
+                        revisionBefore = before.runtimeRevision,
+                        publicationWaiterEntered = waiter
+                    ).also { placeholder ->
+                        pendingProductionBoundaryCaptures[expectedRevision] = placeholder
+                        productionBoundaryCapturesByRevision[expectedRevision] = placeholder
+                    }
+                }
+                val placeholder = capture ?: error("production boundary placeholder was not created")
                 productionReceiver.onReceive(context, intent)
                 val after = sequencerSnapshot(sequencer)
                 check(after.sourceOrder == before.sourceOrder + 1L &&
@@ -252,92 +368,86 @@ internal object Ticket19ObserverRegistry {
                     "production receiver did not reserve exactly one source/revision pair: " +
                         "before=$before after=$after"
                 }
-                SourceOrderReservation(
+                placeholder.publicationWaiterEntered?.let { waiter ->
+                    check(waiter.await(PRODUCTION_BOUNDARY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                        "publication observer did not wait for revision=$expectedRevision before READY"
+                    }
+                }
+                val reservation = SourceOrderReservation(
                     sourceOrderIdentity = SourceOrderIdentity(after.sourceOrder),
                     runtimeRevision = RuntimeRevision(after.runtimeRevision)
                 )
-            }
-            synchronized(lock) {
-                pendingProductionBoundaryCaptures.remove(capture)
-                check(productionBoundaryCapturesByRevision[reservation.runtimeRevision.value] == null) {
-                    "duplicate production boundary reservation revision=" +
-                        reservation.runtimeRevision.value
-                }
-                capture.reservation = reservation
-                productionBoundaryCapturesByRevision[reservation.runtimeRevision.value] = capture
-                if (capture.ownedCorrelation != null) {
-                    captureMutationRefreshReservation(capture.ownedCorrelation, reservation)
-                } else {
-                    val observation = mutationPassThroughObservations.getOrPut(
-                        capture.broadcastKey
-                    ) {
-                        PassThroughMutationObservation(
-                            key = capture.broadcastKey,
-                            ruleToken = capture.ruleToken
-                        )
-                    }
-                    observation.reservationCount += 1L
-                    observation.reservation = reservation
-                    mutationPassThroughByRevision[reservation.runtimeRevision.value] = observation
-                    recordEventLocked(
-                        "mutation_pass_through_reservation",
-                        "key=${capture.broadcastKey} ruleToken=${capture.ruleToken} " +
-                            "sourceIdentity=${reservation.sourceOrderIdentity.value} " +
-                            "runtimeRevision=${reservation.runtimeRevision.value} " +
-                            "count=${observation.reservationCount}"
-                    )
-                }
+                markProductionBoundaryCaptureReady(placeholder, reservation)
             }
         } catch (error: Throwable) {
-            synchronized(lock) {
-                pendingProductionBoundaryCaptures.remove(capture)
-                productionBoundaryCapturesByRevision.entries.removeAll { it.value === capture }
-                capture.failure = error
+            val failedCapture = capture
+            if (failedCapture != null) {
+                failProductionBoundaryCapture(
+                    failedCapture,
+                    "mutation_refresh_boundary_capture",
+                    error
+                )
+            } else {
+                recordFailure("mutation_refresh_boundary_capture", error)
             }
-            recordFailure("mutation_refresh_boundary_capture", error)
             throw error
-        } finally {
-            capture.reservationReady.countDown()
         }
+        return capture ?: error("production boundary capture was not created")
     }
 
     private fun awaitProductionBoundaryCapture(capture: ProductionBoundaryCapture) {
-        check(capture.reservationReady.await(PRODUCTION_BOUNDARY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-            "production boundary reservation timed out for key=${capture.broadcastKey}"
+        if (!capture.reservationReady.await(PRODUCTION_BOUNDARY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            val error = IllegalStateException(
+                "production boundary reservation timed out for key=${capture.broadcastKey}"
+            )
+            failProductionBoundaryCapture(capture, "mutation_refresh_boundary_timeout", error)
+            throw error
         }
         capture.failure?.let { throw IllegalStateException("production boundary capture failed", it) }
-        check(capture.reservation != null) {
-            "production boundary did not expose a reservation for key=${capture.broadcastKey}"
+        check(capture.state == "READY" && capture.reservation != null) {
+            "production boundary did not expose a READY reservation for key=${capture.broadcastKey}"
         }
     }
 
     private fun awaitProductionBoundaryReservation(revision: RuntimeRevision) {
         val capture = synchronized(lock) {
-            productionBoundaryCapturesByRevision[revision.value]
+            productionBoundaryCapturesByRevision[revision.value]?.also { placeholder ->
+                if (placeholder.state == "PENDING") {
+                    placeholder.publicationWaiterEntered?.countDown()
+                    recordEventLocked(
+                        "mutation_refresh_boundary_placeholder_wait",
+                        "revision=${revision.value} revisionBefore=${placeholder.revisionBefore}"
+                    )
+                }
+            }
         } ?: return
         val ready = capture.reservationReady.await(PRODUCTION_BOUNDARY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         val failure = capture.failure
         val reservation = capture.reservation
         synchronized(lock) {
+            if (pendingProductionBoundaryCaptures[revision.value] === capture) {
+                pendingProductionBoundaryCaptures.remove(revision.value)
+            }
             if (productionBoundaryCapturesByRevision[revision.value] === capture) {
                 productionBoundaryCapturesByRevision.remove(revision.value)
             }
         }
         if (!ready) {
-            recordFailure(
-                "mutation_refresh_boundary_publication",
+            failProductionBoundaryCapture(
+                capture,
+                "mutation_refresh_boundary_timeout",
                 IllegalStateException(
                     "production boundary reservation was not ready for revision=${revision.value}"
                 )
             )
             return
         }
-        if (failure != null) {
-            recordFailure("mutation_refresh_boundary_publication", failure)
+        if (failure != null || capture.state != "READY") {
             return
         }
         if (reservation?.runtimeRevision?.value != revision.value) {
-            recordFailure(
+            failProductionBoundaryCapture(
+                capture,
                 "mutation_refresh_boundary_publication",
                 IllegalStateException(
                     "production boundary reservation revision mismatch: " +
@@ -393,6 +503,10 @@ internal object Ticket19ObserverRegistry {
                 "inject_mutation_unregister_failure" -> synchronized(lock) {
                     failNextMutationReceiverUnregister = true
                     recordEventLocked("mutation_unregister_failure_armed", "passThrough")
+                }
+                "force_mutation_publication_before_ready" -> synchronized(lock) {
+                    forceImmediatePublicationBeforeReady = true
+                    recordEventLocked("mutation_refresh_boundary_ready_gate_armed", "")
                 }
                 "retry_mutation_receiver_cleanup" -> retryMutationReceiverCleanup()
                 "reapply_app_rule_receivers" -> reapplyAppRuleReceivers()
@@ -706,6 +820,11 @@ internal object Ticket19ObserverRegistry {
             unregisterMutationReceiver(service, it, passThrough = true, stage)
         }
         restoreProductionRefreshReceiver(service, productionReceiver, stage)
+        synchronized(lock) {
+            clearProductionBoundaryCapturesLocked(
+                IllegalStateException("$stage cleared pending production boundary captures")
+            )
+        }
     }
 
     private fun mutationReceiversAreClean(): Boolean = synchronized(lock) {
@@ -760,12 +879,14 @@ internal object Ticket19ObserverRegistry {
             mutationRefreshPublicationCount = 0L
             mutationRefreshSourceIdentity = null
             mutationRefreshRuntimeRevision = null
+            mutationRefreshBoundaryRevisionBefore = null
             mutationRefreshObservedRevisions.clear()
             mutationPassThroughObservations.clear()
             mutationPassThroughByRevision.clear()
             mutationPassThroughObservedRevisions.clear()
-            pendingProductionBoundaryCaptures.clear()
-            productionBoundaryCapturesByRevision.clear()
+            clearProductionBoundaryCapturesLocked(
+                IllegalStateException("mutation probe rearmed before boundary capture completed")
+            )
             recordEventLocked(
                 "mutation_refresh_sent",
                 "operation=$operation ruleToken=$ruleToken refreshToken=$refreshToken"
@@ -785,29 +906,16 @@ internal object Ticket19ObserverRegistry {
             intent?.getStringExtra(name).orEmpty()
         }.getOrDefault("")
 
-        fun enqueueBoundaryCapture(
-            broadcastKey: String,
-            deliveredRuleToken: String,
-            ownedCorrelation: MutationRefreshContext?
-        ): ProductionBoundaryCapture? {
-            if (ownedCorrelation == null &&
-                (broadcastKey.isEmpty() || deliveredRuleToken.isEmpty())
-            ) return null
-            return ProductionBoundaryCapture(
-                broadcastKey = broadcastKey,
-                ruleToken = deliveredRuleToken,
-                ownedCorrelation = ownedCorrelation
-            ).also { capture ->
-                synchronized(lock) { pendingProductionBoundaryCaptures.add(capture) }
-            }
-        }
-
         fun discardBoundaryCapture(capture: ProductionBoundaryCapture?) {
             capture ?: return
             synchronized(lock) {
-                pendingProductionBoundaryCaptures.remove(capture)
-                if (capture.reservation == null) {
-                    productionBoundaryCapturesByRevision.entries.removeAll { it.value === capture }
+                if (pendingProductionBoundaryCaptures[capture.revisionBefore + 1L] === capture) {
+                    pendingProductionBoundaryCaptures.remove(capture.revisionBefore + 1L)
+                }
+                if (capture.state != "READY" &&
+                    productionBoundaryCapturesByRevision[capture.revisionBefore + 1L] === capture
+                ) {
+                    productionBoundaryCapturesByRevision.remove(capture.revisionBefore + 1L)
                 }
             }
         }
@@ -827,20 +935,17 @@ internal object Ticket19ObserverRegistry {
                 val deliveredRuleToken = readExtra(intent, MUTATION_RULE_TOKEN_EXTRA)
                 var boundaryCapture: ProductionBoundaryCapture? = null
                 try {
-                    boundaryCapture = enqueueBoundaryCapture(
-                        broadcastKey = broadcastKey,
-                        deliveredRuleToken = deliveredRuleToken,
-                        ownedCorrelation = null
-                    )
-                    if (boundaryCapture == null) {
+                    if (broadcastKey.isEmpty() || deliveredRuleToken.isEmpty()) {
                         productionReceiver.onReceive(context, intent)
                     } else {
-                        invokeProductionReceiverWithExactCapture(
+                        boundaryCapture = invokeProductionReceiverWithExactCapture(
                             blocker,
                             productionReceiver,
                             context,
                             intent,
-                            boundaryCapture
+                            broadcastKey = broadcastKey,
+                            ruleToken = deliveredRuleToken,
+                            ownedCorrelation = null
                         )
                     }
                     if (boundaryCapture != null) {
@@ -916,17 +1021,14 @@ internal object Ticket19ObserverRegistry {
                             )
                         }
                     }
-                    boundaryCapture = enqueueBoundaryCapture(
-                        broadcastKey = readExtra(intent, MUTATION_BROADCAST_KEY_EXTRA),
-                        deliveredRuleToken = deliveredRuleToken,
-                        ownedCorrelation = correlation
-                    )
-                    invokeProductionReceiverWithExactCapture(
+                    boundaryCapture = invokeProductionReceiverWithExactCapture(
                         blocker,
                         productionReceiver,
                         context,
                         intent,
-                        boundaryCapture!!
+                        broadcastKey = readExtra(intent, MUTATION_BROADCAST_KEY_EXTRA),
+                        ruleToken = deliveredRuleToken,
+                        ownedCorrelation = correlation
                     )
                     awaitProductionBoundaryCapture(boundaryCapture!!)
                     val reservation = boundaryCapture?.reservation
@@ -1528,6 +1630,10 @@ internal object Ticket19ObserverRegistry {
                     "mutationRefreshRuntimeRevision",
                     mutationRefreshRuntimeRevision ?: JSONObject.NULL
                 )
+                put(
+                    "mutationRefreshBoundaryRevisionBefore",
+                    mutationRefreshBoundaryRevisionBefore ?: JSONObject.NULL
+                )
                 put("mutationRefreshReceiverRegistered", mutationRefreshReceiver != null)
                 put(
                     "mutationRefreshPassThroughReceiverRegistered",
@@ -1542,6 +1648,10 @@ internal object Ticket19ObserverRegistry {
                     mutationRefreshProductionReceiverDetached
                 )
                 put("mutationRefreshCleanupRetryCount", mutationRefreshCleanupRetryCount)
+                put(
+                    "mutationRefreshImmediatePublicationBeforeReadyArmed",
+                    forceImmediatePublicationBeforeReady
+                )
                 put("mutationRefreshUnregisterFailureInjectionAvailable", true)
                 put(
                     "mutationRefreshUnregisterFailureInjectionArmed",
@@ -1558,6 +1668,10 @@ internal object Ticket19ObserverRegistry {
                             put("ruleToken", observation.ruleToken)
                             put("reservationCount", observation.reservationCount)
                             put("publicationCount", observation.publicationCount)
+                            put(
+                                "revisionBefore",
+                                observation.revisionBefore ?: JSONObject.NULL
+                            )
                             val reservation = observation.reservation
                             put(
                                 "sourceIdentity",
@@ -1754,14 +1868,11 @@ internal object Ticket19ObserverRegistry {
         externalOutcomeWarningCalled = false
         failNextRuntimePublication = false
         failNextMutationReceiverUnregister = false
+        forceImmediatePublicationBeforeReady = false
+        mutationRefreshBoundaryRevisionBefore = null
         mutationRefreshUncorrelatedDeliveryCount = 0L
         mutationRefreshCleanupRetryCount = 0L
-        pendingProductionBoundaryCaptures.forEach { capture ->
-            capture.failure = capture.failure ?: IllegalStateException("observation reset")
-            capture.reservationReady.countDown()
-        }
-        pendingProductionBoundaryCaptures.clear()
-        productionBoundaryCapturesByRevision.clear()
+        clearProductionBoundaryCapturesLocked(IllegalStateException("observation reset"))
         mutationPassThroughObservations.clear()
         mutationPassThroughByRevision.clear()
         mutationPassThroughObservedRevisions.clear()
