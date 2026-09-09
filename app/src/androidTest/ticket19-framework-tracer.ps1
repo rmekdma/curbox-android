@@ -1366,4 +1366,4 @@ if ($failures.Count -gt 1) {
 }
 if ($failures.Count -eq 1) { throw $failures[0] }
 if (-not $traceCompleted) { throw 'ticket19 trace did not reach its scoped completion point' }
-Write-Trace "TRACE_COMPLETE scoped assertions passed; decision remains INCONCLUSIVE, ticket open, gate closed; restored services=$((Get-EnabledServices) -join ':') accessibility_enabled=$(Get-AccessibilityEnabled)"
+Write-Trace "TRACE_COMPLETE scoped assertions passed; decision DONE/NO-GO; ticket closed; architecture gate closed; restored services=$((Get-EnabledServices) -join ':') accessibility_enabled=$(Get-AccessibilityEnabled)"
