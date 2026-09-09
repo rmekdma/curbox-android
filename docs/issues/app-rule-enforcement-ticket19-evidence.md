@@ -222,16 +222,15 @@ editing absence. The run changed process PID/token from 26600/`0bac4c6f-422f-4e7
 to 27823/`f0e3cf88-c9e4-41fc-bcb3-e46e52d9f1b1`, restored SafeInCloud-only with
 accessibility_enabled=1, never added Lock Me Out, and restored exact Dozing before TRACE_COMPLETE.
 
-## Remaining required evidence
+## Historical Trigger 1 evidence boundary
 
-Trigger 1 also remains unresolved at the required ordering. In production
-AppBlockerService.onDestroy calls super.onDestroy and then AppRuleBlocker cleanup as its first
-feature cleanup. The final service cannot be subclassed, and the debug component factory has only
-an instantiation callback, not a hook inside onDestroy before that first cleanup. A debug-only
-fault can be injected into AppRule itself or after AppRule cleanup, but neither proves that an
-earlier feature cleanup fault permits AppRule scheduler/receiver/worker cleanup. Adding the
-required pre-cleanup hook to production, opening the final service, or directly invoking destroy
-would violate the accepted safety/evidence constraints. No fault-ordering claim is made.
+No synthetic fault-ordering experiment was run. The former blocked/inconclusive conclusion was
+historical: the accepted evidence constraints provided no pre-AppRule fault hook, so a synthetic
+earlier-feature fault was not evidence for production ordering. The superseding current conclusion
+is that `AppRuleBlocker` cleanup runs first in production and `cleanupFeature` independently
+isolates every actual feature cleanup. Therefore the canonical prior-feature-skips-AppRule Trigger
+1 is absent, and Phase 4 closes `DONE/NO-GO; ticket closed; architecture gate closed`. No
+lifecycle host ticket or implementation is warranted.
 
 Trigger 2's independent scheduler caller remains absent. Trigger 3 now has scoped actual-framework
 barrier, post-resume completion, teardown/quiescence, and real external denial evidence. Trigger 4
