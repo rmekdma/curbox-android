@@ -502,7 +502,7 @@ internal object Ticket19ObserverRegistry {
                 }
                 "inject_mutation_unregister_failure" -> synchronized(lock) {
                     failNextMutationReceiverUnregister = true
-                    recordEventLocked("mutation_unregister_failure_armed", "passThrough")
+                    recordEventLocked("mutation_unregister_failure_armed", "debugReceiver")
                 }
                 "force_mutation_publication_before_ready" -> synchronized(lock) {
                     forceImmediatePublicationBeforeReady = true
@@ -740,7 +740,7 @@ internal object Ticket19ObserverRegistry {
         receiver: BroadcastReceiver,
         passThrough: Boolean,
         stage: String
-    ) {
+    ): Boolean {
         val registeredReceiver = synchronized(lock) {
             val current = if (passThrough) {
                 mutationRefreshPassThroughReceiver
@@ -748,10 +748,10 @@ internal object Ticket19ObserverRegistry {
                 mutationRefreshReceiver
             }
             current?.takeIf { it === receiver }
-        } ?: return
+        } ?: return false
         try {
             val injectFailure = synchronized(lock) {
-                if (passThrough && failNextMutationReceiverUnregister) {
+                if (failNextMutationReceiverUnregister) {
                     failNextMutationReceiverUnregister = false
                     true
                 } else {
@@ -776,9 +776,11 @@ internal object Ticket19ObserverRegistry {
                     }
                 }
             }
+            return true
         } catch (error: Throwable) {
             synchronized(lock) { mutationRefreshState = "FAILED" }
             recordFailure(stage, error)
+            return false
         }
     }
 
@@ -819,7 +821,9 @@ internal object Ticket19ObserverRegistry {
         synchronized(lock) { mutationRefreshPassThroughReceiver }?.let {
             unregisterMutationReceiver(service, it, passThrough = true, stage)
         }
-        restoreProductionRefreshReceiver(service, productionReceiver, stage)
+        if (debugMutationReceiversAreClean()) {
+            restoreProductionRefreshReceiver(service, productionReceiver, stage)
+        }
         synchronized(lock) {
             clearProductionBoundaryCapturesLocked(
                 IllegalStateException("$stage cleared pending production boundary captures")
@@ -831,6 +835,10 @@ internal object Ticket19ObserverRegistry {
         mutationRefreshReceiver == null &&
             mutationRefreshPassThroughReceiver == null &&
             !mutationRefreshProductionReceiverDetached
+    }
+
+    private fun debugMutationReceiversAreClean(): Boolean = synchronized(lock) {
+        mutationRefreshReceiver == null && mutationRefreshPassThroughReceiver == null
     }
 
     private fun retryMutationReceiverCleanup() {
@@ -967,17 +975,19 @@ internal object Ticket19ObserverRegistry {
                         mutationRefreshState == "FAILED"
                     }
                     if (cleanupAfterDelivery) {
-                        unregisterMutationReceiver(
+                        val passThroughUnregistered = unregisterMutationReceiver(
                             service,
                             passThroughReceiver,
                             passThrough = true,
                             "mutation_refresh_pass_through_cleanup"
                         )
-                        restoreProductionRefreshReceiver(
-                            service,
-                            productionReceiver,
-                            "mutation_refresh_production_receiver_restore"
-                        )
+                        if (passThroughUnregistered && debugMutationReceiversAreClean()) {
+                            restoreProductionRefreshReceiver(
+                                service,
+                                productionReceiver,
+                                "mutation_refresh_production_receiver_restore"
+                            )
+                        }
                     }
                 }
             }
@@ -1071,17 +1081,19 @@ internal object Ticket19ObserverRegistry {
                             mutationRefreshState == "FAILED"
                         }
                         if (!keepPassThroughReceiver) {
-                            unregisterMutationReceiver(
+                            val passThroughUnregistered = unregisterMutationReceiver(
                                 service,
                                 passThroughReceiver,
                                 passThrough = true,
                                 "mutation_refresh_pass_through_cleanup"
                             )
-                            restoreProductionRefreshReceiver(
-                                service,
-                                productionReceiver,
-                                "mutation_refresh_production_receiver_restore"
-                            )
+                            if (passThroughUnregistered && debugMutationReceiversAreClean()) {
+                                restoreProductionRefreshReceiver(
+                                    service,
+                                    productionReceiver,
+                                    "mutation_refresh_production_receiver_restore"
+                                )
+                            }
                         }
                     }
                 }
@@ -1104,17 +1116,19 @@ internal object Ticket19ObserverRegistry {
                 ContextCompat.RECEIVER_EXPORTED
             )
         } catch (error: Throwable) {
-            unregisterMutationReceiver(
+            val passThroughUnregistered = unregisterMutationReceiver(
                 service,
                 passThroughReceiver,
                 passThrough = true,
                 "mutation_refresh_pass_through_cleanup"
             )
-            restoreProductionRefreshReceiver(
-                service,
-                productionReceiver,
-                "mutation_refresh_production_receiver_restore"
-            )
+            if (passThroughUnregistered && debugMutationReceiversAreClean()) {
+                restoreProductionRefreshReceiver(
+                    service,
+                    productionReceiver,
+                    "mutation_refresh_production_receiver_restore"
+                )
+            }
             throw error
         }
         synchronized(lock) {
