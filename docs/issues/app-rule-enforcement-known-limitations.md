@@ -227,9 +227,9 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Acceptance criteria:** 충족. 독립 deadline 유실 또는 잘못된 coalescing을 외부 allow/denial로 재현하지 못했고, Phase 3 coordinator 진입 조건이 성립하지 않는다. Phase 4 판정은 ticket16에 blocked로 새로 기록하며 구현은 보류한다.
 - **Target refactor phase:** `Phase 3 coordinator decision` 완료. `Phase 4 lifecycle host`는 별도 evidence와 승인 없이는 시작하지 않는다.
 
-### AR 012 Phase 4 lifecycle host trigger 결정 — evidence insufficient, open
+### AR 012 Phase 4 lifecycle host trigger 결정 — DONE/NO-GO; ticket closed; architecture gate closed
 
-- **Status / Severity:** `review-open, provisional and inconclusive` / `P2`
+- **Status / Severity:** `DONE/NO-GO; ticket closed; architecture gate closed` / `P2`
 - **Exact triggers:** 다음 네 trigger는 서로 대체하거나 하나로 축약하지 않는다.
   1. feature 하나의 cleanup exception이 다른 feature cleanup 또는 AppRuleBlocker의 예약 취소를 다시 건너뛴다.
   2. 두 번째 독립 scheduler feature가 setup, destroy, generation과 receiver 규칙을 복사하고 그 복사가 회귀를 만든다.
@@ -240,15 +240,15 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Evidence:**
   - `AppRuleBlockerDestroyFaultRedTest`의 21개 test는 component boundary에서 cleanup, generation fence와 post-guard external effect containment을 검증하며 green이다. 실제 framework service reconnect 증거는 아니다.
   - [AppRuleReceiverLifecycleTest.kt:8](../../app/src/test/java/neth/iecal/curbox/domain/apprules/AppRuleReceiverLifecycleTest.kt#L8)는 AppRule receiver helper의 registration failure rollback과 idempotent cleanup을 검증하지만 service-wide active ownership을 측정하지 않는다.
-  - Trigger 1은 실제 framework destroy에서 여전히 미검증이다. `AppBlockerService.onDestroy()`의 첫 feature cleanup이 AppRule이라 debug-only 코드가 그 앞에 cleanup fault를 삽입할 production hook이 없다. production seam, subclass 또는 direct destroy 없이 요구한 ordering을 만들 수 없다.
+  - Canonical Trigger 1의 `prior feature cleanup skips AppRule cleanup/cancellation` 경로는 현재 production ordering에서 발생할 수 없다. production `AppBlockerService.onDestroy()`는 `AppRuleBlocker`를 첫 feature cleanup으로 실행하고, 모든 실제 feature cleanup은 `cleanupFeature`로 독립적으로 containment된다. 이는 production-order 분석이며 synthetic fault evidence가 아니다. Synthetic fault는 실행하지 않았다.
   - Trigger 3은 실제 disable 중 entered refresh barrier를 release한 뒤 resumed production callback completion ACK와 전 work-count zero, 두 번째 quiescence에서 안정된 publication/effect/failure count까지 확인했다. 2026-09-09 최종 실제 기기 run은 quiescent/reset baseline과 Guardian 부재 뒤 UUID one-shot window를 arm했다. 첫 REAL_EVENT/Calculator DecisionRequest의 source identity 22를 소비하고 같은 identity의 denied evaluation, denied DecisionOutcome, warning-before-framework-call과 이후 새 top-resumed `GuardianApprovalActivity`를 순서대로 확인했다. 총 evaluator denial은 3회, allow는 0회, warning framework boundary는 1회였다. Install과 removal은 각각 별도 UUID framework delivery 1회, 그 callback이 예약한 source/revision의 production publication 1회, callback completion ACK와 scoped quiescence를 확인했다. 따라서 untagged publication 증가는 mutation 성공 조건을 충족하지 못한다. Cleanup은 단일 DataStore transaction에서 UUID 항목만 effective 및 matching pending APP_RULES snapshot에서 제거하고 unrelated 항목/metadata를 보존한 뒤 effective/pending/editing 세 view 부재를 확인했다. 장기 예약 callback 3개는 실제 framework disable에서 0으로 drain된 뒤 같은 PID 새 service로 rebound했다.
   - 두 번째 trigger의 독립 scheduler caller는 현재 production tree에 없다. 가상의 caller나 abstraction은 추가하지 않았다.
   - Trigger 4는 같은 PID rebind와 distinct-PID rebind에서 service/receiver identity 교체, 16→0→16 process filter 수, old-PID filter zero와 UUID별 한 delivery를 확인했다. narrow AppRule receiver reapply도 filter 수와 단일 delivery를 유지했다. Shizuku `IntentReceiverLeaked`는 두 destroy에서 재현됐지만 stale filter/delivery가 없어 teardown anomaly로만 분류한다.
   - final disable evidence는 AppRule registration zero, scope inactive, process filter zero와 active service record 부재에 한정한다. library-owned resource까지 complete teardown이라고 주장하지 않는다.
-- **Decision:** **INCONCLUSIVE.** 실제 framework lifecycle과 real external denial evidence는 추가됐지만 Trigger 1 fault ordering이 미충족이다. ticket19은 open이고 architecture approval gate는 닫혀 있다. ticket-level NO-GO 또는 no-canonical-trigger 결론을 내리지 않는다.
-- **Mitigation or decision needed:** lifecycle host를 구현하거나 implementation ticket을 만들지 않는다. [ticket19 evidence](app-rule-enforcement-ticket19-evidence.md)의 남은 Trigger 1 prerequisite를 production/release surface 없이 충족할 수 있을 때 재평가한다. canonical failure가 재현되면 먼저 per-feature 또는 Shizuku/integration의 더 좁은 remedy와 비교한다.
-- **Acceptance criteria:** 실제 framework external denial을 포함한 scoped lifecycle 항목은 충족했지만 Trigger 1 ordering이 남았으므로 tracker와 gate를 완료 처리하지 않는다.
-- **Target refactor phase:** `Phase 4 lifecycle host decision`은 evidence prerequisite가 충족될 때까지 open으로 유지한다.
+- **Decision:** **DONE/NO-GO; ticket closed; architecture gate closed**. Earlier `INCONCLUSIVE`/open conclusion is superseded by the production-order analysis above: because `AppRuleBlocker` is the first feature cleanup and every actual feature cleanup is independently contained by `cleanupFeature`, canonical Trigger 1 cannot occur in the current production ordering. No synthetic fault was executed. No lifecycle host ticket or implementation is warranted.
+- **Mitigation or decision needed:** None under the current production ordering. Preserve the existing scoped lifecycle evidence and reassess only if production cleanup ordering or containment changes.
+- **Acceptance criteria:** The current production path and the conditional GO-only Trigger 1 condition were evaluated. The GO-only synthetic-fault condition is not applicable and was not tested; no lifecycle host implementation is approved or needed.
+- **Target refactor phase:** `Phase 4 lifecycle host decision` completed as `DONE/NO-GO; ticket closed; architecture gate closed`.
 
 ## `c17677ae`에서 이미 닫힌 항목
 
