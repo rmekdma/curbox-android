@@ -9,6 +9,8 @@ $serviceClass = 'neth.iecal.curbox.services.AppBlockerService'
 $serviceComponent = "$packageName/$serviceClass"
 $observerUri = 'content://neth.iecal.curbox.debug.ticket19.observer'
 $refreshAction = 'neth.iecal.curbox.refresh.app_rules'
+$mutationRuleTokenExtra = 'ticket19_mutation_rule_token'
+$mutationBroadcastKeyExtra = 'ticket19_mutation_broadcast_key'
 
 function Write-Trace([string]$Message) {
     Write-Host "$(Get-Date -Format o) $Message"
@@ -256,6 +258,67 @@ function Get-CorrelatedRefreshDelivery([string]$Token, [int]$ExpectedPid) {
     return $deliveries[0].Value.Trim()
 }
 
+function Send-PassThroughRefresh {
+    param(
+        [string]$BroadcastKey,
+        [string]$RuleToken,
+        [string]$RunToken = ''
+    )
+    $arguments = @(
+        'shell', 'am', 'broadcast', '-a', $refreshAction, '-p', $packageName,
+        '--es', $mutationBroadcastKeyExtra, $BroadcastKey,
+        '--es', $mutationRuleTokenExtra, $RuleToken
+    )
+    if (-not [string]::IsNullOrWhiteSpace($RunToken)) {
+        $arguments += @('--es', 'ticket19_run_token', $RunToken)
+    }
+    $output = Invoke-AdbCommand $arguments
+    if ($output -notmatch 'result=0') {
+        throw "pass-through broadcast failed: $output"
+    }
+    return $output
+}
+
+function Get-PassThroughObservation($Snapshot, [string]$BroadcastKey, [string]$RuleToken) {
+    return @($Snapshot.mutationPassThroughObservations | Where-Object {
+        $_.key -eq $BroadcastKey -and $_.ruleToken -eq $RuleToken
+    })
+}
+
+function Assert-PassThroughRefresh {
+    param(
+        [string]$BroadcastKey,
+        [string]$RuleToken,
+        [string]$RunToken,
+        [string]$ExpectedState,
+        [int]$ExpectedFailureCount,
+        [string]$Stage
+    )
+    Send-PassThroughRefresh $BroadcastKey $RuleToken $RunToken | Out-Null
+    Wait-Until "$Stage matching source reservation/publication" {
+        $snapshot = Invoke-ObserverCommand 'snapshot'
+        $matches = @(Get-PassThroughObservation $snapshot $BroadcastKey $RuleToken)
+        return $matches.Count -eq 1 -and
+            $snapshot.mutationRefreshState -eq $ExpectedState -and
+            [long]$matches[0].reservationCount -eq 1 -and
+            [long]$matches[0].publicationCount -eq 1 -and
+            @($snapshot.failures).Count -eq $ExpectedFailureCount
+    }
+    $completed = Invoke-ObserverCommand 'snapshot'
+    $matches = @(Get-PassThroughObservation $completed $BroadcastKey $RuleToken)
+    if ($matches.Count -ne 1 -or
+        [long]$matches[0].reservationCount -ne 1 -or
+        [long]$matches[0].publicationCount -ne 1) {
+        throw "$Stage did not correlate exactly one production reservation/publication: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    if ([long]$matches[0].sourceIdentity -le 0 -or
+        [long]$matches[0].runtimeRevision -le 0) {
+        throw "$Stage did not expose a valid source/revision pair: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    Write-Trace "$Stage correlated key=$BroadcastKey ruleToken=$RuleToken source=$($matches[0].sourceIdentity) revision=$($matches[0].runtimeRevision)"
+    return $completed
+}
+
 function Assert-WorkCountsZero($Snapshot, [string]$Stage) {
     foreach ($property in $Snapshot.workCounts.PSObject.Properties) {
         if ([int]$property.Value -ne 0) { throw "$Stage work count $($property.Name)=$($property.Value)" }
@@ -289,43 +352,26 @@ function Assert-MutationRefresh {
     if ([string]::IsNullOrWhiteSpace($refreshToken)) {
         throw "$Stage did not return a UUID-tagged mutation refresh"
     }
-    $unownedBaseline = [long]$MutationSnapshot.runtimePublicationCount
-    $untagged = Invoke-AdbCommand @(
-        'shell', 'am', 'broadcast', '-a', $refreshAction, '-p', $packageName
-    )
-    if ($untagged -notmatch 'result=0') {
-        throw "$Stage untagged framework broadcast failed: $untagged"
-    }
-    Wait-Until "$Stage untagged production refresh" {
-        $snapshot = Invoke-ObserverCommand 'snapshot'
-        [long]$snapshot.runtimePublicationCount -gt $unownedBaseline -and
-            $snapshot.mutationRefreshState -eq 'ARMED' -and
-            [long]$snapshot.mutationRefreshDeliveryCount -eq 0 -and
-            @($snapshot.failures).Count -eq 0
+    $untaggedKey = [guid]::NewGuid().ToString()
+    $untaggedRuleToken = [guid]::NewGuid().ToString()
+    $afterUntagged = Assert-PassThroughRefresh `
+        $untaggedKey $untaggedRuleToken '' 'ARMED' 0 "$Stage untagged"
+    if ($afterUntagged.mutationRefreshDeliveryCount -ne 0) {
+        throw "$Stage untagged broadcast was claimed by the owned receiver: $($afterUntagged | ConvertTo-Json -Depth 12 -Compress)"
     }
     $afterUntagged = Wait-MutationWorkQuiescent "$Stage untagged"
     Assert-NoFailures $afterUntagged
     $differentToken = [guid]::NewGuid().ToString()
-    $different = Invoke-AdbCommand @(
-        'shell', 'am', 'broadcast', '-a', $refreshAction, '-p', $packageName,
-        '--es', 'ticket19_run_token', $differentToken,
-        '--es', 'ticket19_mutation_operation', $Operation,
-        '--es', 'ticket19_mutation_rule_token', $RuleToken
-    )
-    if ($different -notmatch 'result=0') {
-        throw "$Stage differently tagged framework broadcast failed: $different"
-    }
-    Wait-Until "$Stage differently tagged production refresh" {
-        $snapshot = Invoke-ObserverCommand 'snapshot'
-        [long]$snapshot.runtimePublicationCount -gt
-            [long]$afterUntagged.runtimePublicationCount -and
-            $snapshot.mutationRefreshState -eq 'ARMED' -and
-            [long]$snapshot.mutationRefreshDeliveryCount -eq 0 -and
-            @($snapshot.failures).Count -eq 0
+    $differentKey = [guid]::NewGuid().ToString()
+    $differentRuleToken = [guid]::NewGuid().ToString()
+    $afterDifferent = Assert-PassThroughRefresh `
+        $differentKey $differentRuleToken $differentToken 'ARMED' 0 "$Stage differently tagged"
+    if ($afterDifferent.mutationRefreshDeliveryCount -ne 0) {
+        throw "$Stage differently tagged broadcast was claimed by the owned receiver: $($afterDifferent | ConvertTo-Json -Depth 12 -Compress)"
     }
     $afterDifferent = Wait-MutationWorkQuiescent "$Stage differently tagged"
     Assert-NoFailures $afterDifferent
-    Write-Trace "$Stage unowned broadcasts passed to production; differentToken=$differentToken"
+    Write-Trace "$Stage unowned broadcasts passed to production; untaggedKey=$untaggedKey differentKey=$differentKey differentToken=$differentToken"
     $sentAt = Get-Date -Format o
     $send = Invoke-AdbCommand @(
         'shell', 'am', 'broadcast', '-a', $refreshAction, '-p', $packageName,
@@ -372,6 +418,57 @@ function Assert-MutationRefresh {
     }
     Write-Trace "$Stage exact delivery token=$refreshToken line=$delivery"
     return $completed
+}
+
+function Assert-OwnedMalformedMutationThenPassThrough {
+    param(
+        $MutationSnapshot,
+        [string]$Operation,
+        [string]$Stage
+    )
+    $refreshToken = [string]$MutationSnapshot.mutationRefreshToken
+    if ([string]::IsNullOrWhiteSpace($refreshToken)) {
+        throw "$Stage did not return a UUID-tagged mutation refresh"
+    }
+    $beforeFailures = @($MutationSnapshot.failures).Count
+    $malformedKey = [guid]::NewGuid().ToString()
+    $malformedRuleToken = [guid]::NewGuid().ToString()
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    Send-PassThroughRefresh $malformedKey $malformedRuleToken $refreshToken | Out-Null
+    $failed = Invoke-ObserverCommand 'await_mutation_refresh' "$Operation`:$refreshToken"
+    $timer.Stop()
+    if ($timer.Elapsed.TotalSeconds -ge 5) {
+        throw "$Stage await_mutation_refresh did not surface FAILED promptly: elapsed=$($timer.Elapsed.TotalSeconds)s"
+    }
+    if ($failed.mutationRefreshState -ne 'FAILED' -or
+        @($failed.failures).Count -ne ($beforeFailures + 1) -or
+        $failed.mutationRefreshReceiverRegistered -ne $false -or
+        [long]$failed.mutationRefreshDeliveryCount -ne 0) {
+        throw "$Stage malformed owned delivery did not fail deterministically and unregister its receiver: $($failed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    if (@(Get-PassThroughObservation $failed $malformedKey $malformedRuleToken).Count -ne 0) {
+        throw "$Stage malformed owned delivery reached a matching production reservation/publication: $($failed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    Write-Trace "$Stage malformed owned delivery failed promptly and high-priority receiver was absent"
+
+    $passThroughKey = [guid]::NewGuid().ToString()
+    $passThroughRuleToken = [guid]::NewGuid().ToString()
+    $afterPassThrough = Assert-PassThroughRefresh `
+        $passThroughKey $passThroughRuleToken '' 'FAILED' ($beforeFailures + 1) `
+        "$Stage subsequent unowned"
+    if ($afterPassThrough.mutationRefreshReceiverRegistered -ne $false -or
+        $afterPassThrough.mutationRefreshPassThroughReceiverRegistered -ne $false) {
+        throw "$Stage subsequent unowned refresh did not leave mutation receivers absent: $($afterPassThrough | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    if ([long]$afterPassThrough.mutationRefreshDeliveryCount -ne 0) {
+        throw "$Stage subsequent unowned refresh was claimed by the owned receiver: $($afterPassThrough | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    $quiescent = Wait-MutationWorkQuiescent "$Stage subsequent unowned"
+    if (@($quiescent.failures).Count -ne ($beforeFailures + 1)) {
+        throw "$Stage subsequent unowned refresh introduced an observer failure: $($quiescent | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    Write-Trace "$Stage subsequent unowned refresh correlated exactly one production reservation/publication key=$passThroughKey ruleToken=$passThroughRuleToken"
+    return $quiescent
 }
 
 function Get-EffectFingerprint($Snapshot) {
@@ -508,20 +605,21 @@ function Assert-RealCalculatorDenial {
     if (-not $preflight.ruleMutationPreflightReady) {
         throw "temporary Calculator rule preflight rejected: $($preflight.ruleMutationPreflightReason)"
     }
-    $beforeInstall = Invoke-ObserverCommand 'snapshot'
     $script:temporaryRuleToken = $token
     $install = Invoke-ObserverCommand 'install_calculator_denial_rule' $token
     Assert-NoFailures $install
     if (-not $install.temporaryRulePresent) {
         throw "temporary Calculator denial rule is not effective: $($install | ConvertTo-Json -Depth 12 -Compress)"
     }
-    $installQuiescent = Assert-MutationRefresh $install 'install' $token $ExpectedServicePid `
-        ([long]$beforeInstall.mutationRefreshCompletionCount) 'temporary Calculator install'
+    $installQuiescent = Assert-OwnedMalformedMutationThenPassThrough $install 'install' `
+        'temporary Calculator install malformed ownership'
     Invoke-AdbCommand @('shell', 'am', 'force-stop', 'com.android.calculator2') | Out-Null
     Invoke-AdbCommand @('shell', 'input', 'keyevent', 'HOME') | Out-Null
     Start-Sleep -Milliseconds 500
     $baselineQuiescent = Invoke-ObserverCommand 'await_quiescence' '15000'
-    Assert-NoFailures $baselineQuiescent
+    if (@($baselineQuiescent.failures).Count -ne @($installQuiescent.failures).Count) {
+        throw "external outcome baseline introduced an unexpected observer failure: $($baselineQuiescent | ConvertTo-Json -Depth 12 -Compress)"
+    }
     Assert-WorkCountsZero $baselineQuiescent 'external outcome baseline quiescence'
     $baselineActivities = Get-ActivityState
     if (Test-GuardianActivityPresent $baselineActivities) {
