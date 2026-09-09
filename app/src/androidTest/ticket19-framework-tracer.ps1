@@ -262,6 +262,66 @@ function Assert-WorkCountsZero($Snapshot, [string]$Stage) {
     }
 }
 
+function Assert-MutationRefresh {
+    param(
+        $MutationSnapshot,
+        [string]$Operation,
+        [string]$RuleToken,
+        [int]$ExpectedPid,
+        [long]$BeforeCompletionCount,
+        [string]$Stage
+    )
+    $refreshToken = [string]$MutationSnapshot.mutationRefreshToken
+    if ([string]::IsNullOrWhiteSpace($refreshToken)) {
+        throw "$Stage did not return a UUID-tagged mutation refresh"
+    }
+    $sentAt = Get-Date -Format o
+    $send = Invoke-AdbCommand @(
+        'shell', 'am', 'broadcast', '-a', $refreshAction, '-p', $packageName,
+        '--es', 'ticket19_run_token', $refreshToken,
+        '--es', 'ticket19_mutation_operation', $Operation
+    )
+    if ($send -notmatch 'result=0') {
+        throw "$Stage tagged framework broadcast failed: $send"
+    }
+    Write-Trace "$Stage sent ruleToken=$RuleToken refreshToken=$refreshToken sentAt=$sentAt"
+    $completed = Invoke-ObserverCommand 'await_mutation_refresh' "$Operation`:$refreshToken"
+    Assert-NoFailures $completed
+    if ($completed.mutationRefreshRuleToken -ne $RuleToken -or
+        $completed.mutationRefreshToken -ne $refreshToken -or
+        $completed.mutationRefreshOperation -ne $Operation -or
+        $completed.mutationRefreshState -ne 'COMPLETED' -or
+        $completed.mutationRefreshPid -ne $ExpectedPid -or
+        $completed.mutationRefreshDeliveryCount -ne 1 -or
+        $completed.mutationRefreshReservationCount -ne 1 -or
+        $completed.mutationRefreshPublicationCount -ne 1 -or
+        $completed.mutationRefreshCompletionCount -le $BeforeCompletionCount -or
+        [long]$completed.mutationRefreshSourceIdentity -le 0 -or
+        [long]$completed.mutationRefreshRuntimeRevision -le 0) {
+        throw "$Stage exact mutation refresh correlation failed: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+    }
+    foreach ($name in @(
+        'refreshes', 'notifications', 'usageResetCompletions',
+        'recheckPlans', 'workerQueued', 'workerInFlight'
+    )) {
+        if ([int]$completed.workCounts.$name -ne 0) {
+            throw "$Stage work $name was not quiescent: $($completed | ConvertTo-Json -Depth 12 -Compress)"
+        }
+    }
+    $delivery = Get-CorrelatedRefreshDelivery $refreshToken $ExpectedPid
+    $ack = @($completed.events | Where-Object {
+        $_.name -eq 'mutation_refresh_callback_completed' -and
+        $_.detail -match [regex]::Escape("operation=$Operation") -and
+        $_.detail -match [regex]::Escape("ruleToken=$RuleToken") -and
+        $_.detail -match [regex]::Escape("refreshToken=$refreshToken")
+    })
+    if ($ack.Count -ne 1) {
+        throw "$Stage callback completion ACK was not uniquely correlated"
+    }
+    Write-Trace "$Stage exact delivery token=$refreshToken line=$delivery"
+    return $completed
+}
+
 function Get-EffectFingerprint($Snapshot) {
     return @($Snapshot.runtimePublicationCount, $Snapshot.notificationPublicationCount,
         $Snapshot.evaluationCount, $Snapshot.allowedEvaluationCount, $Snapshot.deniedEvaluationCount,
@@ -346,10 +406,8 @@ function Remove-TemporaryCalculatorRule {
             if (@($removal.failures).Count -ne $beforeFailures) {
                 throw "temporary rule removal command failed: $($removal | ConvertTo-Json -Depth 12 -Compress)"
             }
-            Wait-Until "$Stage removal refresh publication" {
-                (Invoke-ObserverCommand 'snapshot').runtimePublicationCount -gt
-                    $before.runtimePublicationCount
-            }
+            Assert-MutationRefresh $removal 'remove' $Token ([int]$before.processPid) `
+                ([long]$before.mutationRefreshCompletionCount) "$Stage removal" | Out-Null
             $completed = Invoke-ObserverCommand 'await_calculator_rule_cleanup' $Token
             if (@($completed.failures).Count -ne $beforeFailures -or
                 $completed.ruleCleanupCompletionCount -le $beforeCleanupAcks) {
@@ -405,13 +463,8 @@ function Assert-RealCalculatorDenial {
     if (-not $install.temporaryRulePresent) {
         throw "temporary Calculator denial rule is not effective: $($install | ConvertTo-Json -Depth 12 -Compress)"
     }
-    Wait-Until 'temporary Calculator rule refresh publication' {
-        (Invoke-ObserverCommand 'snapshot').runtimePublicationCount -gt
-            $beforeInstall.runtimePublicationCount
-    }
-    $installQuiescent = Invoke-ObserverCommand 'await_quiescence' '15000'
-    Assert-NoFailures $installQuiescent
-    Assert-WorkCountsZero $installQuiescent 'temporary Calculator install quiescence'
+    $installQuiescent = Assert-MutationRefresh $install 'install' $token $ExpectedServicePid `
+        ([long]$beforeInstall.mutationRefreshCompletionCount) 'temporary Calculator install'
     Invoke-AdbCommand @('shell', 'am', 'force-stop', 'com.android.calculator2') | Out-Null
     Invoke-AdbCommand @('shell', 'input', 'keyevent', 'HOME') | Out-Null
     Start-Sleep -Milliseconds 500

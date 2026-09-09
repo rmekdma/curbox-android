@@ -1,20 +1,26 @@
 package neth.iecal.curbox.debug
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
+import androidx.core.content.ContextCompat
+import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.blockers.AppRuleBlocker
-import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
+import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.AcceptedRuleRuntimeSnapshot
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
@@ -22,7 +28,10 @@ import neth.iecal.curbox.domain.apprules.DecisionOutcome
 import neth.iecal.curbox.domain.apprules.DecisionOutcomeSink
 import neth.iecal.curbox.domain.apprules.DecisionRequest
 import neth.iecal.curbox.domain.apprules.ObservationKind
+import neth.iecal.curbox.domain.apprules.RuntimeRevision
 import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
+import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
+import neth.iecal.curbox.domain.apprules.SourceOrderReservation
 import neth.iecal.curbox.services.AppBlockerService
 import org.json.JSONArray
 import org.json.JSONObject
@@ -46,8 +55,12 @@ internal object Ticket19ObserverRegistry {
     private const val TEMP_GROUP_PREFIX = "ticket19-calculator-group-"
     private const val TEMP_RULE_PREFIX = "ticket19-calculator-rule-"
     private const val EXTERNAL_OUTCOME_WINDOW_MS = 10_000L
+    private const val MUTATION_TOKEN_EXTRA = "ticket19_run_token"
+    private const val MUTATION_OPERATION_EXTRA = "ticket19_mutation_operation"
 
     private val lock = Any()
+    private val gson = Gson()
+    private val mutationRefreshThreadContext = ThreadLocal<MutationRefreshContext?>()
     private val processToken = UUID.randomUUID().toString()
     private val processStartedAtElapsedMs = SystemClock.elapsedRealtime()
     private var serviceGeneration = 0L
@@ -79,6 +92,19 @@ internal object Ticket19ObserverRegistry {
     private var ruleMutationPreflightReady = false
     private var ruleMutationPreflightReason = "not checked"
     private var ruleCleanupCompletionCount = 0L
+    private var mutationRefreshRuleToken = ""
+    private var mutationRefreshToken = ""
+    private var mutationRefreshOperation = ""
+    private var mutationRefreshState = "DISARMED"
+    private var mutationRefreshPid = 0
+    private var mutationRefreshDeliveryCount = 0L
+    private var mutationRefreshReservationCount = 0L
+    private var mutationRefreshPublicationCount = 0L
+    private var mutationRefreshCompletionCount = 0L
+    private var mutationRefreshSourceIdentity: Long? = null
+    private var mutationRefreshRuntimeRevision: Long? = null
+    private val mutationRefreshObservedRevisions = mutableSetOf<Long>()
+    private var mutationRefreshReceiver: BroadcastReceiver? = null
     private var failNextRuntimePublication = false
     private var runtimeBarrier: RuntimeBarrier? = null
     private val failures = mutableListOf<FailureRecord>()
@@ -97,11 +123,55 @@ internal object Ticket19ObserverRegistry {
         val detail: String
     )
 
+    private data class MutationRefreshContext(
+        val ruleToken: String,
+        val refreshToken: String,
+        val operation: String
+    )
+
     private class RuntimeBarrier(val timeoutMs: Long) {
         val release = CountDownLatch(1)
         var state: String = "ARMED"
         var enteredAtElapsedMs: Long? = null
         var releasedAtElapsedMs: Long? = null
+    }
+
+    private fun captureMutationRefreshReservation(reservation: SourceOrderReservation) {
+        val correlation = mutationRefreshThreadContext.get() ?: return
+        synchronized(lock) {
+            if (mutationRefreshState != "DELIVERED" ||
+                mutationRefreshToken != correlation.refreshToken ||
+                mutationRefreshOperation != correlation.operation ||
+                mutationRefreshRuleToken != correlation.ruleToken
+            ) return
+            mutationRefreshReservationCount += 1L
+            mutationRefreshSourceIdentity = reservation.sourceOrderIdentity.value
+            mutationRefreshRuntimeRevision = reservation.runtimeRevision.value
+            mutationRefreshState = "RESERVED"
+            recordEventLocked(
+                "mutation_refresh_reservation",
+                "operation=${correlation.operation} ruleToken=${correlation.ruleToken} " +
+                    "refreshToken=${correlation.refreshToken} " +
+                    "sourceIdentity=${reservation.sourceOrderIdentity.value} " +
+                    "runtimeRevision=${reservation.runtimeRevision.value}"
+            )
+            acknowledgeMutationPublicationLocked(reservation.runtimeRevision.value)
+        }
+    }
+
+    private fun acknowledgeMutationPublicationLocked(revision: Long) {
+        if (mutationRefreshState != "RESERVED" ||
+            mutationRefreshRuntimeRevision != revision ||
+            revision !in mutationRefreshObservedRevisions
+        ) return
+        mutationRefreshPublicationCount += 1L
+        mutationRefreshState = "PUBLISHED"
+        recordEventLocked(
+            "mutation_refresh_exact_publication",
+            "operation=$mutationRefreshOperation ruleToken=$mutationRefreshRuleToken " +
+                "refreshToken=$mutationRefreshToken " +
+                "sourceIdentity=$mutationRefreshSourceIdentity runtimeRevision=$revision"
+        )
     }
 
     fun attach(service: AppBlockerService) {
@@ -149,6 +219,7 @@ internal object Ticket19ObserverRegistry {
                 "install_calculator_denial_rule" -> installCalculatorDenialRule(argument)
                 "remove_calculator_denial_rule" -> removeCalculatorDenialRule(argument)
                 "await_calculator_rule_cleanup" -> awaitCalculatorRuleCleanup(argument)
+                "await_mutation_refresh" -> awaitMutationRefresh(argument)
                 "verify_calculator_rule_absent" -> verifyCalculatorRuleAbsent(argument)
                 "arm_external_outcome" -> armExternalOutcome(argument)
                 "terminate_process" -> terminateProcess(longArgument(name, argument))
@@ -164,7 +235,7 @@ internal object Ticket19ObserverRegistry {
         val previousRuntimeObserver = blocker.runtimePublicationBeforeWorkerHandoff
         blocker.runtimePublicationBeforeWorkerHandoff = { revision ->
             previousRuntimeObserver?.invoke(revision)
-            observeRuntimePublication()
+            observeRuntimePublication(revision)
         }
         val previousNotificationObserver = blocker.notificationPublicationObserver
         blocker.notificationPublicationObserver = { model ->
@@ -293,6 +364,8 @@ internal object Ticket19ObserverRegistry {
             updateTemporaryRuleStateLocked(state)
             recordEventLocked("temporary_rule_installed", "token=$token ruleId=$ruleId")
         }
+        dispatchMutationRefresh(service, blocker = synchronized(lock) { blockerRef?.get() }
+            ?: error("no current AppRuleBlocker"), token, "install")
     }
 
     private fun removeCalculatorDenialRule(argument: String?) {
@@ -306,26 +379,16 @@ internal object Ticket19ObserverRegistry {
                 "settingsDataStore"
             ) as androidx.datastore.core.DataStore<Settings>
             dataStore.updateData { current ->
-                val pendingContainsToken = current.settingsChangeDelayConfig2.pendingChanges.any {
-                    it.field == GatedSettingsField.APP_RULES.name &&
-                        (it.newValueJson.contains(TEMP_GROUP_PREFIX + token) ||
-                            it.newValueJson.contains(TEMP_RULE_PREFIX + token))
-                }
-                check(!pendingContainsToken) {
-                    "owned temporary rule reached pending APP_RULES state"
+                val pendingChanges = current.settingsChangeDelayConfig2.pendingChanges.map { change ->
+                    stripOwnedPendingChange(change, token)
                 }
                 current.copy(
-                    appRuleSnapshot = current.appRuleSnapshot.copy(
-                        appGroups = current.appRuleSnapshot.appGroups.filterNot {
-                            it.id == TEMP_GROUP_PREFIX + token
-                        },
-                        appRules = current.appRuleSnapshot.appRules.filterNot {
-                            it.id == TEMP_RULE_PREFIX + token
-                        }
+                    appRuleSnapshot = stripOwnedRule(current.appRuleSnapshot, token),
+                    settingsChangeDelayConfig2 = current.settingsChangeDelayConfig2.copy(
+                        pendingChanges = pendingChanges
                     )
                 )
             }
-            service.sendBroadcast(Intent(REFRESH_ACTION).setPackage(service.packageName))
             inspectRuleState(service, token)
         }
         check(!state.effectivePresent && !state.pendingPresent && !state.editingPresent) {
@@ -336,6 +399,183 @@ internal object Ticket19ObserverRegistry {
             recordEventLocked(
                 "temporary_rule_removal_requested",
                 "token=$token effective=false pending=false editing=false"
+            )
+        }
+        dispatchMutationRefresh(service, blocker = synchronized(lock) { blockerRef?.get() }
+            ?: error("no current AppRuleBlocker"), token, "remove")
+    }
+
+    private fun stripOwnedRule(snapshot: AppRuleSnapshot, token: String): AppRuleSnapshot =
+        snapshot.copy(
+            appGroups = snapshot.appGroups.filterNot { it.id == TEMP_GROUP_PREFIX + token },
+            appRules = snapshot.appRules.filterNot { it.id == TEMP_RULE_PREFIX + token }
+        )
+
+    private fun stripOwnedPendingChange(
+        change: neth.iecal.curbox.data.models.PendingSettingsChange,
+        token: String
+    ): neth.iecal.curbox.data.models.PendingSettingsChange {
+        if (change.field != GatedSettingsField.APP_RULES.name) return change
+        val snapshot = gson.fromJson(change.newValueJson, AppRuleSnapshot::class.java)
+            ?: error("pending APP_RULES payload was null")
+        val stripped = stripOwnedRule(snapshot, token)
+        if (stripped == snapshot) return change
+        return change.copy(
+            newValueJson = gson.toJson(stripped),
+            appGroupEditModes = change.appGroupEditModes - (TEMP_GROUP_PREFIX + token)
+        )
+    }
+
+    private fun dispatchMutationRefresh(
+        service: AppBlockerService,
+        blocker: AppRuleBlocker,
+        ruleToken: String,
+        operation: String
+    ) {
+        require(operation == "install" || operation == "remove")
+        val refreshToken = UUID.randomUUID().toString()
+        val previousReceiver = synchronized(lock) {
+            val previous = mutationRefreshReceiver
+            mutationRefreshReceiver = null
+            previous
+        }
+        previousReceiver?.let(service::unregisterReceiver)
+        synchronized(lock) {
+            mutationRefreshRuleToken = ruleToken
+            mutationRefreshToken = refreshToken
+            mutationRefreshOperation = operation
+            mutationRefreshState = "ARMED"
+            mutationRefreshPid = 0
+            mutationRefreshDeliveryCount = 0L
+            mutationRefreshReservationCount = 0L
+            mutationRefreshPublicationCount = 0L
+            mutationRefreshSourceIdentity = null
+            mutationRefreshRuntimeRevision = null
+            mutationRefreshObservedRevisions.clear()
+            recordEventLocked(
+                "mutation_refresh_sent",
+                "operation=$operation ruleToken=$ruleToken refreshToken=$refreshToken"
+            )
+        }
+        val productionReceiver = readField(blocker, "refreshReceiver") as BroadcastReceiver
+        lateinit var taggedReceiver: BroadcastReceiver
+        taggedReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val deliveredToken = intent?.getStringExtra(MUTATION_TOKEN_EXTRA).orEmpty()
+                val deliveredOperation =
+                    intent?.getStringExtra(MUTATION_OPERATION_EXTRA).orEmpty()
+                val correlation = synchronized(lock) {
+                    check(intent?.action == REFRESH_ACTION &&
+                        mutationRefreshState == "ARMED" &&
+                        mutationRefreshToken == deliveredToken &&
+                        mutationRefreshOperation == deliveredOperation
+                    ) { "unexpected tagged mutation refresh delivery" }
+                    mutationRefreshDeliveryCount += 1L
+                    mutationRefreshPid = Process.myPid()
+                    mutationRefreshState = "DELIVERED"
+                    MutationRefreshContext(ruleToken, refreshToken, operation).also {
+                        recordEventLocked(
+                            "mutation_refresh_framework_delivery",
+                            "operation=$operation ruleToken=$ruleToken " +
+                                "refreshToken=$refreshToken pid=$mutationRefreshPid"
+                        )
+                    }
+                }
+                mutationRefreshThreadContext.set(correlation)
+                try {
+                    val sequencer = readField(blocker, "sourceOrderSequencer")
+                    val sourceOrder = readField(sequencer, "sourceOrder") as java.util.concurrent.atomic.AtomicLong
+                    val runtimeRevision =
+                        readField(sequencer, "runtimeRevision") as java.util.concurrent.atomic.AtomicLong
+                    val sourceBefore = sourceOrder.get()
+                    val revisionBefore = runtimeRevision.get()
+                    productionReceiver.onReceive(context, intent)
+                    val sourceAfter = sourceOrder.get()
+                    val revisionAfter = runtimeRevision.get()
+                    check(sourceAfter == sourceBefore + 1L &&
+                        revisionAfter == revisionBefore + 1L
+                    ) {
+                        "tagged refresh did not reserve exactly one source/revision pair: " +
+                            "source=$sourceBefore->$sourceAfter revision=$revisionBefore->$revisionAfter"
+                    }
+                    captureMutationRefreshReservation(
+                        SourceOrderReservation(
+                            SourceOrderIdentity(sourceAfter),
+                            RuntimeRevision(revisionAfter)
+                        )
+                    )
+                    abortBroadcast()
+                } finally {
+                    mutationRefreshThreadContext.remove()
+                    service.unregisterReceiver(taggedReceiver)
+                    synchronized(lock) {
+                        if (mutationRefreshReceiver === taggedReceiver) {
+                            mutationRefreshReceiver = null
+                        }
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter(REFRESH_ACTION).apply { priority = 1_000 }
+        ContextCompat.registerReceiver(
+            service,
+            taggedReceiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
+        synchronized(lock) {
+            mutationRefreshReceiver = taggedReceiver
+        }
+    }
+
+    private fun awaitMutationRefresh(argument: String?) {
+        val pieces = argument.orEmpty().split(':', limit = 2)
+        require(pieces.size == 2) { "await_mutation_refresh requires operation:refreshToken" }
+        val operation = pieces[0]
+        val refreshToken = requireUuid(pieces[1])
+        synchronized(lock) {
+            require(mutationRefreshOperation == operation && mutationRefreshToken == refreshToken) {
+                "mutation refresh does not match current operation/token"
+            }
+        }
+        val blocker = synchronized(lock) { blockerRef?.get() }
+            ?: error("no current AppRuleBlocker")
+        val deadline = SystemClock.elapsedRealtime() + 15_000L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val published = synchronized(lock) {
+                mutationRefreshState == "PUBLISHED" &&
+                    mutationRefreshDeliveryCount == 1L &&
+                    mutationRefreshReservationCount == 1L &&
+                    mutationRefreshPublicationCount == 1L
+            }
+            if (published) break
+            Thread.sleep(10L)
+        }
+        synchronized(lock) {
+            check(mutationRefreshState == "PUBLISHED") {
+                "tagged mutation refresh did not reach its exact production publication"
+            }
+        }
+        val completedWork = awaitRuleCleanupWork(blocker, 15_000L)
+        runOnMainThread("mutation_refresh_main_queue_ack") { Unit }
+        val quiescentWork = awaitRuleCleanupWork(blocker, 15_000L)
+        check(completedWork.getValue("callbacks") == quiescentWork.getValue("callbacks")) {
+            "mutation refresh lifecycle callback ownership changed after completion: " +
+                "$completedWork -> $quiescentWork"
+        }
+        synchronized(lock) {
+            check(mutationRefreshDeliveryCount == 1L &&
+                mutationRefreshReservationCount == 1L &&
+                mutationRefreshPublicationCount == 1L
+            ) { "tagged mutation refresh correlation was not one-to-one" }
+            mutationRefreshCompletionCount += 1L
+            mutationRefreshState = "COMPLETED"
+            recordEventLocked(
+                "mutation_refresh_callback_completed",
+                "operation=$operation ruleToken=$mutationRefreshRuleToken " +
+                    "refreshToken=$refreshToken sourceIdentity=$mutationRefreshSourceIdentity " +
+                    "runtimeRevision=$mutationRefreshRuntimeRevision " +
+                    "pendingLifecycleCallbacks=${quiescentWork.getValue("callbacks")}"
             )
         }
     }
@@ -539,15 +779,10 @@ internal object Ticket19ObserverRegistry {
         val pendingAppRules = effective.settingsChangeDelayConfig2.pendingChanges.filter {
             it.field == GatedSettingsField.APP_RULES.name
         }
-        val pendingPresent = if (token == null) {
-            pendingAppRules.any {
-                it.newValueJson.contains(TEMP_GROUP_PREFIX) ||
-                    it.newValueJson.contains(TEMP_RULE_PREFIX)
-            }
-        } else {
-            pendingAppRules.any {
-                it.newValueJson.contains(groupId!!) || it.newValueJson.contains(ruleId!!)
-            }
+        val pendingPresent = pendingAppRules.any { change ->
+            val snapshot = gson.fromJson(change.newValueJson, AppRuleSnapshot::class.java)
+                ?: error("pending APP_RULES payload was null")
+            hasOwned(snapshot)
         }
         val delay = effective.settingsChangeDelayConfig2
         return TemporaryRuleState(
@@ -579,12 +814,16 @@ internal object Ticket19ObserverRegistry {
     private fun longArgument(name: String, argument: String?): Long =
         argument?.toLongOrNull() ?: error("$name requires a long argument")
 
-    private fun observeRuntimePublication() {
+    private fun observeRuntimePublication(revision: RuntimeRevision) {
         var barrier: RuntimeBarrier? = null
         var injectedFailure: Throwable? = null
         synchronized(lock) {
             runtimePublicationCount += 1L
             recordEventLocked("runtime_publication", "count=$runtimePublicationCount")
+            if (mutationRefreshState == "DELIVERED" || mutationRefreshState == "RESERVED") {
+                mutationRefreshObservedRevisions += revision.value
+                acknowledgeMutationPublicationLocked(revision.value)
+            }
             if (failNextRuntimePublication) {
                 failNextRuntimePublication = false
                 injectedFailure = IllegalStateException(
@@ -768,6 +1007,23 @@ internal object Ticket19ObserverRegistry {
                 put("ruleMutationPreflightReady", ruleMutationPreflightReady)
                 put("ruleMutationPreflightReason", ruleMutationPreflightReason)
                 put("ruleCleanupCompletionCount", ruleCleanupCompletionCount)
+                put("mutationRefreshRuleToken", mutationRefreshRuleToken)
+                put("mutationRefreshToken", mutationRefreshToken)
+                put("mutationRefreshOperation", mutationRefreshOperation)
+                put("mutationRefreshState", mutationRefreshState)
+                put("mutationRefreshPid", mutationRefreshPid)
+                put("mutationRefreshDeliveryCount", mutationRefreshDeliveryCount)
+                put("mutationRefreshReservationCount", mutationRefreshReservationCount)
+                put("mutationRefreshPublicationCount", mutationRefreshPublicationCount)
+                put("mutationRefreshCompletionCount", mutationRefreshCompletionCount)
+                put(
+                    "mutationRefreshSourceIdentity",
+                    mutationRefreshSourceIdentity ?: JSONObject.NULL
+                )
+                put(
+                    "mutationRefreshRuntimeRevision",
+                    mutationRefreshRuntimeRevision ?: JSONObject.NULL
+                )
                 put("refreshContinuationCompletionCount", refreshContinuationCompletionCount)
                 put("workCounts", JSONObject(workCounts))
                 put("barrierState", runtimeBarrier?.state ?: "DISARMED")

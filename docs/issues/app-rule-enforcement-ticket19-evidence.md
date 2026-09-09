@@ -137,7 +137,10 @@ event method. The controller waits for the resulting production refresh publicat
 launching Calculator. Before mutation it rejects an existing pending APP_RULES change, an active
 settings-delay gate, a tamper gate that could defer cleanup, or an existing ticket19 rule. Cleanup
 uses a debug-only transaction on DataStoreManager's existing singleton to remove only the matching
-UUID rule/group from the latest value, preserving unrelated concurrent values.
+UUID rule/group from the latest effective snapshot and from every matching pending APP_RULES
+snapshot. It rewrites those pending payloads in the same transaction, retains their unrelated
+groups/rules and metadata, and then verifies the UUID absent from effective, pending, and editing
+views.
 
 Exact successful controller command:
 
@@ -197,6 +200,28 @@ accessibility_enabled=1, and exact Dozing. The qualifying rerun replaces that ov
 with removal refresh/worker completion plus scoped stability, while retaining the subsequent real
 framework disable requirement that drains all three callbacks to zero.
 
+The final Standards hardening run used the same command, started at
+2026-09-09T11:50:08.6534788+09:00, and printed TRACE_COMPLETE at
+11:51:31.1613827 with exit code 0. Install and removal no longer accept an untagged
+`runtimePublicationCount` increment. For each mutation the debug registry armed a one-shot,
+high-priority receiver, and the controller sent a distinct UUID-tagged framework broadcast. The
+one-shot delegated to the existing production refresh receiver, captured the exact source/revision
+pair reserved synchronously by that callback, and acknowledged completion only after that revision
+reached the production publication seam, refresh/worker work completed, a main-queue boundary was
+crossed, and scoped quiescence held.
+
+The install broadcast UUID was `78ded3e6-90aa-4450-bf5e-6e083f56c102`: ActivityManager recorded
+exactly one delivery to current service PID 26600, and the registry recorded exactly one reservation
+(source identity 15, runtime revision 5), one matching publication, and one completion ACK. The
+removal broadcast UUID was `c4cd8375-319c-4fee-89cd-68fbbb5da791`, with the same one-to-one chain
+at PID 26600, source identity 35, and runtime revision 7. The Calculator rule UUID was
+`1cf7bd6e-353a-412b-b261-97478b97a694`; the real accessibility event again produced three denied
+evaluations, zero allows, one warning boundary, and a causal one-shot chain at source identity 22
+through the newly top-resumed Guardian activity. Removal attempt 1 verified effective, pending, and
+editing absence. The run changed process PID/token from 26600/`0bac4c6f-422f-4e7f-8560-7d9b0ad30066`
+to 27823/`f0e3cf88-c9e4-41fc-bcb3-e46e52d9f1b1`, restored SafeInCloud-only with
+accessibility_enabled=1, never added Lock Me Out, and restored exact Dozing before TRACE_COMPLETE.
+
 ## Remaining required evidence
 
 Trigger 1 also remains unresolved at the required ordering. In production
@@ -222,16 +247,15 @@ coordinator, integration, OEM work, or implementation ticket is authorized.
 
 ## Verification
 
-- compileFullDebugKotlin plus compileFullDebugAndroidTestKotlin: BUILD SUCCESSFUL in 18s.
-- compileFullDebugKotlin plus installFullDebug after the scoped-cleanup correction:
-  BUILD SUCCESSFUL in 26s before the qualifying rerun.
+- Final compileFullDebugKotlin plus installFullDebug after the mutation-correlation correction:
+  BUILD SUCCESSFUL in 21s before the qualifying rerun.
 - Final connectedFullDebugAndroidTest filtered to Ticket19ObserverBinderTest: 2/2 passed,
-  BUILD SUCCESSFUL in 22s. This includes AIDL access and non-shell rejection for all provider
+  BUILD SUCCESSFUL in 38s. This includes AIDL access and non-shell rejection for all provider
   entrypoints. On this API 33 device ContentResolver normalizes getType's remote SecurityException
   to null, so the test also invokes getType directly and verifies its SHELL_UID guard.
 - testFullDebugUnitTest, assembleFullDebug, assemblePlaystoreDebug, assembleFdroidDebug,
   assembleFullRelease, assemblePlaystoreRelease, and assembleFdroidRelease ran together:
-  BUILD SUCCESSFUL in 1m 10s.
+  BUILD SUCCESSFUL in 3m 29s.
 - The Full, Playstore, and F-Droid release merged manifests each had zero matches for the observer
   class, authority, permission, component factory, or AIDL name. aapt2 reported zero such manifest
   matches in all three release APKs. dexdump inspected 2 Full, 3 Playstore, and 2 F-Droid dex files;
