@@ -1,6 +1,6 @@
 # 앱 규칙 재검사의 알려진 한계와 미해결 항목
 
-기준 커밋은 `c17677ae` (`fix: enforce app rules across time boundaries`)이다. 이 문서는 해당 커밋 이후에도 남아 있는 결함, 결정 대기 사항, 테스트 공백, 수용된 플랫폼 한계와 구조 및 성능 부채의 단일 정본이다. 실행 순서와 변경 계획은 [앱 규칙 재검사 리팩토링 계획](../plans/app-rule-enforcement-refactor.md)을 따른다.
+기준 커밋은 `c17677ae` (`fix: enforce app rules across time boundaries`)이다. 이 문서는 해당 커밋 이후에도 남아 있는 결함, 결정 대기 사항, 테스트 공백, 수용된 플랫폼 한계와 구조 및 성능 부채의 단일 정본이다. 실행 순서와 변경 계획은 [앱 규칙 재검사 리팩토링 계획](../plans/app-rule-enforcement-refactor.md)을 따른다. connected-suite total과 failed-case owner의 정본은 [canonical baseline and inventory](app-rule-enforcement-baseline.md)다.
 
 요구사항의 원문은 [앱 규칙 개편 요구사항](../requirements/app-rules.md), 동작 스펙은 [앱 규칙 스펙](../specs/app-rules-github-issue.md), 현재 사용일 세션 저장 결정은 [ADR 0002](../adr/0002-store-current-use-day-foreground-sessions.md), 기기 보호 수준 결정은 [ADR 0003](../adr/0003-use-best-effort-device-protection.md), 용어는 [CONTEXT.md](../../CONTEXT.md)를 참조한다. 이 문서는 그 내용을 복사하지 않고, 현재 구현에서 확인된 후속 작업만 기록한다.
 
@@ -22,13 +22,13 @@
 
 구현 완료, 실제 기기 검증 완료, 보고된 incident 종료는 서로 다른 상태다. `c17677ae`의
 구현과 자동화 검증 결과를 `refactor implementation complete`로 기록하더라도, 그것은 OEM
-동작을 해결했다는 뜻이 아니다. 대상 샤오신 패드 프로 12.7 Android 16의 실제 증거가 없는
+동작을 해결했다는 뜻이 아니다. 대상 `Xiaomi Pad Pro 2025 12.7` Android 15 또는 Android 16의 실제 증거가 없는
 현재 상태에서는 다음 두 상태를 닫지 않는다.
 
 | 상태 | 현재 상태 | 완료 조건 |
 | --- | --- | --- |
 | `refactor implementation complete` | `별도 판정` | 코드와 자동화 검증의 completion criteria로만 판정한다. 기기 검증이나 incident 종료를 포함하지 않는다. |
-| `AR004 Android16 device verification complete` | `열림` | 대상 기기에서 정책표의 시나리오와 계측 증거를 남긴다. |
+| `AR004 Xiaomi Pad Pro 2025 12.7 device verification complete` | `열림` | Android 15 또는 Android 16 대상 기기에서 정책표의 시나리오와 계측 증거를 남긴다. |
 | `reported incident closed` | `열림` | AR004 증거와 보고된 재현 조건의 해결 확인을 모두 남긴다. |
 
 AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness를 주장하지 않는다. 구현
@@ -39,16 +39,17 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 ### AR 001 장시간 보호자 추가시간 뒤 가시성 증거 만료
 
 - **Status / Severity:** `확정 미해결` / `P1`
-- **Exact trigger:** 앱 규칙의 직접 사용 가능 시간이 소진된 상태에서 보호자 추가시간이 5초보다 길게 남아 있고, 앱이 계속 보이는 동안 새로운 `TYPE_WINDOW_STATE_CHANGED` 이벤트가 오지 않는다. 동시에 `service.windows`가 앱을 누락한 오래된 목록을 반환하거나 빈 목록 또는 `null` root를 반환하고, 다른 신뢰할 수 있는 비필수 앱 root도 없다.
+- **Exact trigger:** 앱 규칙의 직접 사용 가능 시간이 소진된 상태에서 보호자 추가시간이 5초보다 길게 남아 있고, 앱이 계속 보이는 동안 새로운 `TYPE_WINDOW_STATE_CHANGED` 이벤트가 오지 않는다. 동시에 `service.windows`가 앱을 누락한 오래된 목록을 반환하거나 빈 목록 또는 `null` root를 반환하고, 다른 신뢰할 수 있는 비필수 앱 root도 없다. Canonical connected evidence는 이 trigger family의 six failed cases를 T21 owner로 기록한다.
 - **Current behavior:** 재검사 시점에는 `currentForegroundEvidenceAtElapsedMs`가 `FOREGROUND_EVIDENCE_MAX_AGE_MS = 5_000`을 지나 있다. `packageVisibility()`는 대상 앱이 창 목록이나 신뢰할 수 있는 active root에서 확인되지 않으면 `UNKNOWN`을 반환한다. 세 번의 짧은 재시도 뒤 `canUseForegroundFallback()`도 만료된 이벤트 증거를 거부하므로, 규칙 평가 없이 20초 회복 재검사만 반복한다. synthetic event는 foreground 증거의 시각을 갱신하지 않는다.
-- **Impact:** 시간 구간의 전면 앱 사용 금지 규칙이나 추가시간 만료 뒤의 다른 규칙이 앱이 계속 보이는 동안 잠기지 않을 수 있다. 새 접근성 이벤트나 신뢰할 수 있는 창 정보가 나올 때까지 제한이 늦어지는 것이 아니라 사실상 무기한 늦어질 수 있다. 이는 샤오신 패드 프로 12.7 Android 16에서 보고된 증상과 같은 종류의 실패 경로다.
+- **Impact:** 시간 구간의 전면 앱 사용 금지 규칙이나 추가시간 만료 뒤의 다른 규칙이 앱이 계속 보이는 동안 잠기지 않을 수 있다. 새 접근성 이벤트나 신뢰할 수 있는 창 정보가 나올 때까지 제한이 늦어지는 것이 아니라 사실상 무기한 늦어질 수 있다. 이는 `Xiaomi Pad Pro 2025 12.7` Android 15/16에서 확인해야 할 보고 증상과 같은 종류의 실패 경로다.
 - **Evidence:**
   - [AppRuleBlocker.kt:61](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L61)부터 [AppRuleBlocker.kt:64](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L64)의 재시도, 20초 회복, 5초 증거 만료 상수
   - [AppRuleBlocker.kt:983](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L983)부터 [AppRuleBlocker.kt:1008](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1008)의 `UNKNOWN` 처리
   - [AppRuleBlocker.kt:1281](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1281)부터 [AppRuleBlocker.kt:1339](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1339)의 증거 만료와 fallback 판정
-  - [AppRuleRecheckPlanner.kt:20](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleRecheckPlanner.kt#L20)부터 [AppRuleRecheckPlanner.kt:64](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleRecheckPlanner.kt#L64)의 다음 경계 예약
+- [AppRuleRecheckPlanner.kt:20](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleRecheckPlanner.kt#L20)부터 [AppRuleRecheckPlanner.kt:64](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleRecheckPlanner.kt#L64)의 다음 경계 예약
+  - [canonical baseline inventory](app-rule-enforcement-baseline.md#t21-long-boundary-semantics--6-cases)의 T21 six-case observed failure set
 - **Mitigation or decision needed:** 승인된 [foreground evidence policy matrix](../plans/app-rule-enforcement-refactor.md#foreground-evidence-policy-matrix--approved-2026-08-31)를 따른다. R5는 A안으로 확정되어, 1.5초 bounded retry 뒤 마지막 비필수 package의 restriction을 fail closed한다. 5초 TTL을 늘리는 것만으로 해결하지 않으며, 다른 앱 root가 확실히 활성인 경우에는 이전 앱을 잠그지 않는다. 실제 adapter와 evaluator 변경은 Phase 1에서 수행한다.
-- **Acceptance criteria:** 가상 시각과 창 제공자를 주입한 테스트에서 30초 이상의 추가시간, 이벤트 없음, 오래된 목록, 빈 목록, `null` root를 재현한다. 정책이 평가를 요구하는 각 상태에서는 제한 시간 안에 실제 evaluator 결과와 대상 규칙의 거부 또는 허용을 관찰하고, 정책이 보류를 요구하는 상태에서는 그 보류 결과와 최대 지연을 관찰한다. 동시에 다른 비필수 앱 root가 확실한 경우에는 이전 앱을 재평가하지 않는다. 샤오신 패드 프로 12.7 Android 16에서 같은 시나리오를 실제 `windows`와 `rootInActiveWindow`로 확인한다.
+- **Acceptance criteria:** 가상 시각과 창 제공자를 주입한 테스트에서 30초 이상의 추가시간, 이벤트 없음, 오래된 목록, 빈 목록, `null` root를 재현한다. 정책이 평가를 요구하는 각 상태에서는 제한 시간 안에 실제 evaluator 결과와 대상 규칙의 거부 또는 허용을 관찰하고, 정책이 보류를 요구하는 상태에서는 그 보류 결과와 최대 지연을 관찰한다. 동시에 다른 비필수 앱 root가 확실한 경우에는 이전 앱을 재평가하지 않는다. `Xiaomi Pad Pro 2025 12.7` Android 15 또는 Android 16에서 같은 시나리오를 실제 `windows`와 `rootInActiveWindow`로 확인한다. 현재 canonical run은 이 조건의 six RED cases를 고정했지만 acceptance를 충족시키거나 failure를 fixed로 표시하지 않는다.
 - **Target refactor phase:** 리팩토링 계획의 `Phase 0 정책 결정`에서 결정하고 `Phase 1 foreground evidence 모듈`에서 수정한다.
 
 ## 결정 기록과 구현 대기 사항
@@ -93,22 +94,23 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
   - [AppRuleBlockerRecheckTest.kt:80](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L80)부터 [AppRuleBlockerRecheckTest.kt:114](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L114)의 3초 grant와 `windowsReads` 단독 확인
   - [AppRuleBlockerRecheckTest.kt:146](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L146)부터 [AppRuleBlockerRecheckTest.kt:223](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L223)의 2초 grant와 5초 sleep
   - [AppRuleBlocker.kt:1281](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1281)부터 [AppRuleBlocker.kt:1285](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1285)의 elapsed time TTL
+  - [canonical baseline inventory](app-rule-enforcement-baseline.md#failure-inventory)의 T21 six-case owner set
 - **Mitigation or decision needed:** 시계 세 종류인 wall clock, elapsed clock, Handler scheduler를 주입할 수 있는 deterministic seam을 만든다. 제품 동작 테스트는 evaluator 호출, 최종 denial과 허용 결과를 외부에서 확인하고, concurrency/performance contract 테스트는 worker thread, queue idle, post-destroy side effect와 latency budget을 확인한다. visibility 상태를 순서대로 공급하는 테스트를 JVM 또는 빠른 instrumentation으로 작성한다.
 - **Acceptance criteria:** sleep 없이 30초 이상의 grant를 가상 시간으로 진행하는 테스트가 있다. `no event + stale window`, `no event + empty window`, `no event + null root`를 각각 실행하고, callback 실행 여부가 아니라 evaluator 결과와 `startedActivities`의 denial payload를 확인한다. 다른 active root가 있는 경우의 비잠금 결과도 같은 제품 동작 테스트 묶음에 포함한다. 별도의 contract 테스트는 thread/queue idle, post-destroy side effect와 latency budget을 관찰할 수 있지만 private call order를 검증하지 않는다.
 - **Target refactor phase:** `Phase 0 deterministic harness`, `Phase 1 foreground evidence 모듈`, 이후 scheduler 관련 검증은 `Phase 2`에서 수행한다.
 
-### AR 004 Android 16 실제 창 동작 테스트 부재
+### AR 004 Xiaomi Pad Pro 2025 12.7 실제 창 동작 테스트 부재
 
 - **Status / Severity:** `테스트 공백` / `P1`
-- **Exact trigger:** 샤오신 패드 프로 12.7 Android 16에서 앱을 계속 전면에 둔 채 보호자 추가시간 경계와 전체 앱 사용 금지 시간 경계를 통과한다. 새 window event가 없거나 OEM이 오래된 창 목록, 빈 목록, `null` root를 반환하는 상태를 포함한다.
+- **Exact trigger:** `Xiaomi Pad Pro 2025 12.7` Android 15 또는 Android 16에서 앱을 계속 전면에 둔 채 보호자 추가시간 경계와 전체 앱 사용 금지 시간 경계를 통과한다. 새 window event가 없거나 OEM이 오래된 창 목록, 빈 목록, `null` root를 반환하는 상태를 포함한다.
 - **Current behavior:** 현재 테스트는 `RecordingService`와 `applicationWindowSnapshotProvider`, `activeWindowSnapshotProvider` fake를 사용한다. split screen과 재연결 시나리오도 실제 `AccessibilityService.windows` 또는 `rootInActiveWindow`를 읽지 않는다.
-- **Impact:** Android 16 또는 특정 OEM의 window provider 동작과 현재 fallback 정책이 맞는지 증명하지 못한다. SM F721N 등 다른 기기에서 통과한 결과를 샤오신 패드의 보고된 실패가 해결됐다는 증거로 사용할 수 없다.
+- **Impact:** Android 15/16 또는 특정 OEM의 window provider 동작과 현재 fallback 정책이 맞는지 증명하지 못한다. iPlay50_mini_Pro 등 다른 기기에서 통과한 결과를 Xiaomi Pad Pro의 보고된 실패가 해결됐다는 증거로 사용할 수 없다.
 - **Evidence:**
   - [AppRuleBlockerRecheckTest.kt:435](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L435)부터 [AppRuleBlockerRecheckTest.kt:467](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L467)의 fake reconnect test
   - [AppRuleBlockerRecheckTest.kt:470](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L470)부터 [AppRuleBlockerRecheckTest.kt:512](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L512)의 fake split screen test
   - [AppRuleBlocker.kt:1118](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1118)부터 [AppRuleBlocker.kt:1151](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1151)의 실제 `service.windows` 변환 경로
-- **Mitigation or decision needed:** 테스트 기기에서 실제 접근성 서비스를 활성화하고, 이벤트 timestamp, `windows`의 package 집합과 application window count, active root package, evaluator 결과, 시작된 guardian activity를 기록한다. 대상 기기를 사용할 수 없으면 이 항목을 미검증으로 유지한다.
-- **Acceptance criteria:** 샤오신 패드 프로 12.7 Android 16에서 다음 세 시나리오를 반복 통과한다. 1) 전체 앱 사용 금지 시간 시작, 2) 다른 규칙 사용량 소진 뒤 30초 이상 보호자 추가시간 만료, 3) split screen에서 두 앱의 독립 경계. 각 시나리오에서 정책표가 정한 시간 안에 denial을 확인하고, 다른 앱 전환 뒤 stale package에 대한 중복 guardian이 없음을 확인한다. 이 증거 전에는 AR004와 `reported incident closed`를 완료로 기록하지 않으며, 구현 완료를 OEM 해결이나 release readiness로 해석하지 않는다.
+- **Mitigation or decision needed:** ticket 29에서 정확히 `Xiaomi Pad Pro 2025 12.7`을 대상으로 Android 15 또는 Android 16의 installed build/channel, 실제 접근성 service, event timestamp, `windows` package 집합과 application window count, active root package, evaluator 결과, 시작된 Guardian activity를 기록한다. 대상 build가 일치하지 않으면 대체 기기로 진행하지 않는다.
+- **Acceptance criteria:** `Xiaomi Pad Pro 2025 12.7` Android 15 또는 Android 16에서 다음 세 시나리오를 반복 통과한다. 1) 전체 앱 사용 금지 시간 시작, 2) 다른 규칙 사용량 소진 뒤 30초 이상 보호자 추가시간 만료, 3) split screen에서 두 앱의 독립 경계. 각 시나리오에서 정책표가 정한 시간 안에 denial을 확인하고, 다른 앱 전환 뒤 stale package에 대한 중복 Guardian이 없음을 확인한다. 이 증거 전에는 AR004와 `reported incident closed`를 완료로 기록하지 않으며, 구현 완료를 OEM 해결이나 release readiness로 해석하지 않는다.
 - **Target refactor phase:** `Phase 0`에서 시나리오와 계측을 준비하고 `Phase 1`의 production adapter 검증에서 실행한다.
 
 ## 플랫폼 및 시간 기반의 잔여 한계
@@ -155,6 +157,7 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
   - [AppUsageTracker.kt:247](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt#L247)부터 [AppUsageTracker.kt:258](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt#L258)의 `onEvent()` visible package reconciliation 진입점
   - [AppUsageTracker.kt:436](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt#L436)부터 [AppUsageTracker.kt:496](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt#L496)의 visible-session reconciliation과 Room boundary writer
   - [AppRuleEnforcement.kt:24](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleEnforcement.kt#L24)부터 [AppRuleEnforcement.kt:46](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleEnforcement.kt#L46)의 Room 세션 조회
+  - [canonical baseline inventory](app-rule-enforcement-baseline.md#t24t26--4-cases)의 T24 two-case callback-flush failure set
 - **Mitigation or decision needed:** 현재 `AppUsageTracker.onEvent()`가 visible-session reconciliation과
   그 Room writer의 관찰 진입점을 소유한다. Phase 2에서 `onEvent()`는 immutable visible-set
   observation만 하나의 serialized handoff로 넘기고, handoff 이후의 reconciliation writer와
@@ -163,12 +166,12 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
   별도로 두어 순서를 나누지 않는다. callback은 입력을 복사해 worker에 전달하고, 결과의
   generation과 lifecycle을 확인한 뒤 warning을 main thread에서 표시한다. timeout, cancellation,
   storage failure의 fail policy도 함께 정의한다.
-- **Acceptance criteria:** main callback이 Room 결과를 기다리지 않고 반환한다. 지연된 fake repository와 빠른 연속 window event에서 `AppUsageTracker.onEvent()`의 visible-session flush와 Room commit이 새 rule decision보다 먼저 완료되며, 각 event의 최신 generation만 warning을 표시한다. tracker와 decision을 별도 queue로 분리하지 않고 하나의 serialized path에서 순서를 보장한다. 대표적인 세션 크기에서 p95 callback blocking time과 decision latency를 측정하고 기준을 계획 문서에 기록한다.
+- **Acceptance criteria:** main callback이 Room 결과를 기다리지 않고 반환한다. 지연된 fake repository와 빠른 연속 window event에서 `AppUsageTracker.onEvent()`의 visible-session flush와 Room commit이 새 rule decision보다 먼저 완료되며, 각 event의 최신 generation만 warning을 표시한다. tracker와 decision을 별도 queue로 분리하지 않고 하나의 serialized path에서 순서를 보장한다. 대표적인 세션 크기에서 p95 callback blocking time과 decision latency를 측정하고 기준을 계획 문서에 기록한다. 현재 canonical run은 T24의 두 RED case를 보존하며 p95 수치는 기록하지 않았고, 측정 protocol은 ticket 27에서 별도 승인한다.
 - **Target refactor phase:** `Phase 2 asynchronous decision worker`.
 
 ### AR 008 shutdown drain 시간과 완료 보장 미측정
 
-- **Status / Severity:** `ticket15 결정적 기준 green, 인접 fault/cancellation RED 잔존, 운영 숫자 선택 보류` / `P2`
+- **Status / Severity:** `ticket15와 ticket18 결정적 계약 green, p95 및 운영 숫자 선택 보류` / `P2`
 - **Exact trigger:** service가 in flight인 rule evaluation, refresh, notification job 또는 scheduled callback을 가진 채 `onDestroy()`를 호출한다.
 - **Current behavior:** `AppRuleBlocker.onDestroy()`는 lifecycle flag, generation과 adapter-private worker-instance token을 먼저 무효화하고, 예약 callback과 scope를 취소하며, worker를 `RecoveryOnlyStop`으로 중단한 뒤 receiver를 해제한다. `onDestroyForMeasurement()`는 production timeout으로 사용하지 않는 candidate-only `DeadlineDrainStop`을 통해 scheduler, handler, worker, scope, receiver와 effect drain을 하나의 absolute deadline에서 측정한다. evaluator, warning, notification의 실제 외부 publication 경계도 같은 destroy fence로 보호한다.
 - **Impact:** production은 D6 승인에 따라 아직 numeric drain budget이나 completion guarantee를 선택하지 않았다. 따라서 deadline 측정은 운영 threshold가 아니며, timeout 뒤 unfinished durable session state는 새 연결의 `AppUsageTracker.setup()`이 호출하는 `recoverOpenSessions()`와 generation/use-day filter를 통해서만 복구된다. 측정된 in-memory outcome이나 callback은 새 연결로 재사용하지 않는다.
@@ -178,9 +181,10 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
   - [AppRuleBlockerDestroyFaultRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerDestroyFaultRedTest.kt)의 barrier 기반 ticket15 measurement: final decision, refresh, final notification publication, warning, visible/rearmed handler and alarm publication, usage-reset completion broadcast, worker recheck-plan registration/delivery, event and scheduled-provider provenance-cache invalidation, zero post-destroy effects와 reconnect recovery
   - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 absolute deadline timeout/completion, timeout 전 durable-work snapshot과 same-lifecycle worker-instance replacement tests
   - [AppUsageTracker.kt](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt)의 `recoverOpenSessions()` reconnect recovery path
+  - [ticket 18 implementation evidence](../../.scratch/app-rule-enforcement/issues/18-phase2-fault-cancellation-closure.md#implementation-evidence--replacement-agent-2026-09-07): `AppRuleBlockerDestroyFaultRedTest` `21/21`, Full unit `350/350`, and three debug flavor builds green
 - **Mitigation or decision needed:** production에서는 승인된 numeric selection 전까지 `RecoveryOnlyStop`을 유지한다. candidate measurement의 timeout은 worker의 unfinished work를 durable recovery 대상으로 남기고, old generation의 evaluator, warning, notification과 handler publication은 suppress한다. 운영 timeout 숫자와 `DeadlineDrainStop` production 전환은 대표 device latency 측정과 별도 explicit approval 뒤에 결정한다.
-- **Acceptance criteria:** the ticket15 deterministic measurement/lifecycle contract is green: injected elapsed deadline measurement includes the final decision, refresh, final notification publication, handler, scheduler, scope and receiver cleanup; post-destroy evaluator, warning, notification, handler, usage-reset broadcast and worker recheck-plan effects are zero; timeout durable work is marked before cancellation and is recovered only through an open durable session's documented `recoverOpenSessions()` path; and repeated same-host/same-lifecycle replacement publishes only the latest generation and worker instance. This does not complete Phase 2. `AppRuleBlockerDestroyFaultRedTest` remains 16/20: its four failing JUnit cases cover eight fault modes. The aggregate ordinary-fault case covers persistence, evaluator, scheduler, callback-post and notification-worker continuation; the other three cases cover evaluator `CancellationException` propagation, worker cancellation continuation and handler cancellation continuation. These are the still-open ticket05/06 fault and cancellation contracts, and no exception to the Phase 2 completion criteria has been approved. The broader connected suite also retains unresolved callback-flush, long-boundary, recheck, Guardian-lifecycle and debug-fixture REDs. No production 2-second or 5-second timeout was selected.
-- **Target refactor phase:** `Phase 2` remains open until all eight ticket05/06 fault and cancellation modes are green; ticket15's narrower deterministic lifecycle measurement contract is green. Numeric D6 selection and a fresh conditional `Phase 4` decision remain separate work.
+- **Acceptance criteria:** the ticket15 deterministic measurement/lifecycle contract is green: injected elapsed deadline measurement includes the final decision, refresh, final notification publication, handler, scheduler, scope and receiver cleanup; post-destroy evaluator, warning, notification, handler, usage-reset broadcast and worker recheck-plan effects are zero; timeout durable work is marked before cancellation and is recovered only through an open durable session's documented `recoverOpenSessions()` path; and repeated same-host/same-lifecycle replacement publishes only the latest generation and worker instance. Ticket18 then closed the eight ticket05/06 fault and cancellation modes with `AppRuleBlockerDestroyFaultRedTest` at `21/21`; this does not choose an operational numeric drain budget. The current connected baseline retains T24 callback-flush, T21 long-boundary, T22/T23 recheck/visibility, T25 Guardian-lifecycle and T26 debug-fixture REDs. No production 2-second or 5-second timeout was selected.
+- **Target refactor phase:** the ticket15/ticket18 implementation contracts are recorded complete. Ticket 27 owns callback/decision p95 measurement, and ticket 28 owns the explicit numeric D6 drain-budget decision. Production remains on `RecoveryOnlyStop` until that decision is explicitly made.
 
 ### AR 009 AppRuleBlocker의 책임 집중
 

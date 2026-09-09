@@ -19,6 +19,11 @@
 version, 실행 명령, test count, pass/fail, deterministic clock/barrier와 unrelated failure
 분류를 포함한다.
 
+현재 connected-suite 기준선과 ticket 01–19의 상태를 중복해서 관리하지 않기 위해 [canonical
+baseline and inventory](../issues/app-rule-enforcement-baseline.md)를 정본으로 둔다. 이 계획은
+그 문서의 status와 remaining-work 경계를 따르며, filtered/focused 결과를 unfiltered total에
+합치지 않는다.
+
 이 문서에서 `module`, `interface`, `implementation`, `depth`, `deep`, `shallow`, `seam`,
 `adapter`, `leverage`, `locality`는 codebase-design vocabulary의 정의로 사용한다. 설계가 줄 수
 있는 것은 policy가 아니라 module의 depth, caller의 leverage, maintainer의 locality다.
@@ -27,20 +32,22 @@ version, 실행 명령, test count, pass/fail, deterministic clock/barrier와 un
 
 구현 완료, 실제 기기 검증 완료, 보고된 incident 종료는 서로 다른 상태로 기록한다. 현재
 `c17677ae`의 구현 및 자동화 검증 결과는 `refactor implementation complete`로 별도 판정할 수
-있지만, 이것만으로 OEM 해결이나 release readiness를 주장하지 않는다. 대상 샤오신 패드 프로
-12.7 Android 16의 증거가 기록되기 전까지 다음 두 상태는 열린 상태로 유지한다.
+있지만, 이것만으로 OEM 해결이나 release readiness를 주장하지 않는다. 대상 `Xiaomi Pad Pro
+2025 12.7` Android 15 또는 Android 16의 증거가 기록되기 전까지 다음 두 상태는 열린 상태로
+유지한다.
 
-- `AR004 Android16 device verification complete`: `열림`. 실제 기기에서 정책표의 시나리오와
+- `AR004 Xiaomi Pad Pro 2025 12.7 device verification complete`: `열림`. Android 15 또는
+  Android 16 실제 기기에서 정책표의 시나리오와
   계측 결과를 남긴 뒤에만 완료로 바꾼다.
 - `reported incident closed`: `열림`. AR004 완료 증거와 incident 재현 조건의 해결 확인이
   모두 있어야 종료한다.
 
 이 문서의 Phase 0부터 Phase 4까지의 구조 개선 완료도 위 세 상태와 별도로 기록한다. 구현
-완료 판정, 샤오신 기기 검증, incident 종료를 하나의 체크박스로 합치지 않는다.
+완료 판정, `Xiaomi Pad Pro 2025 12.7` 기기 검증, incident 종료를 하나의 체크박스로 합치지 않는다.
 
 ## 목표
 
-1. Android 16 및 OEM에서 `windows`, active root, foreground event가 비어 있거나 일시적으로
+1. Android 15/16 및 OEM에서 `windows`, active root, foreground event가 비어 있거나 일시적으로
    실패해도 시간 경계의 enforcement가 조용히 사라지지 않게 한다.
 2. foreground evidence 정책을 하나의 deep module에 모아 stale, null, partial, split-screen,
    keyguard, service reconnect의 의미를 한 곳에서 검증한다.
@@ -120,6 +127,11 @@ known-limitations 문서의 닫힌 항목을 regression contract로 삼는다. �
 red test를 임의로 완화해 green으로 만들지 말고, 정책/증거를 known-limitations 문서에 연결한다.
 
 ### Phase 0 — policy를 고정하고 deterministic red test를 만든다
+
+**현재 상태:** `complete — policy와 deterministic RED-contract stage 완료`. Ticket 01–07의
+정책, red contract와 architecture approval은 완료됐고, 실패 결과는 이후 구현 ticket의
+입력으로 보존한다. 현재 total과 실패 inventory는 [canonical baseline](../issues/app-rule-enforcement-baseline.md)을
+참조한다.
 
 **목적:** Android framework의 관찰값과 제품의 enforcement 결정을 분리해, 현재 실패를
    재현 가능한 외부 동작으로 표현한다.
@@ -217,23 +229,23 @@ parent는 2026-08-31에 `A`로 전체 13개 행과 R5 A안을 승인했다. 따�
 
 **완료 조건:**
 
-- [ ] AR 001 관련 policy matrix의 모든 행에 승인된 `VISIBLE`, `NOT_VISIBLE`, `UNKNOWN` 의미,
+- [x] AR 001 관련 policy matrix의 모든 행에 승인된 `VISIBLE`, `NOT_VISIBLE`, `UNKNOWN` 의미,
       최대 허용 지연, fail policy와 자동 테스트 mapping이 있다. owner 지정만 있는 행은
       blocker로 남는다.
-- [ ] AR 001, AR 003, AR 005, AR 007, AR 008에는 적어도 하나의 deterministic red test가
+- [x] AR 001, AR 003, AR 005, AR 007, AR 008에는 적어도 하나의 deterministic red test가
       있고, AR 010에는 stress 결과와 무관하게 deterministic interleaving test가 있다. 둘 다
       sleep이나 실제 elapsed time에 의존하지 않는다. AR 002는 모든 정책 행과 test mapping으로,
       AR 004는 실제 기기 검증 절차와 계측으로 증명 범위를 명시한다.
-- [ ] AR 010은 100회 stress 결과만으로 닫지 않는다. latch, controllable Flow 또는 virtual
+- [x] AR 010은 100회 stress 결과만으로 닫지 않는다. latch, controllable Flow 또는 virtual
       scheduler로 receiver가 최신 값을 읽은 뒤 지연된 이전 emission이 publish되는
       deterministic interleaving을 강제하고, final snapshot, generation과 visible check를
       검증한다. 100회 stress는 보조 증거일 뿐이며, deterministic test가 위험을 반증하거나
       ordering contract/fix를 입증한 뒤에만 닫는다.
-- [ ] red test는 activity launch, allow/block 결정, scheduler state, persisted outcome 등
+- [x] red test는 activity launch, allow/block 결정, scheduler state, persisted outcome 등
       사용자가 관찰할 수 있는 결과를 검증하며 private call order만 검증하지 않는다.
-- [ ] baseline command 결과와 known-limitations 링크가 기록됐고, 이 phase는 implementation
+- [x] baseline command 결과와 known-limitations 링크가 기록됐고, 이 phase는 implementation
       code를 green으로 만들지 않았다.
-- [ ] `gradle.properties`, `gradle/libs.versions.toml`, Room/schema 파일이 변경되지 않았다.
+- [x] `gradle.properties`, `gradle/libs.versions.toml`, Room/schema 파일이 변경되지 않았다.
 
 ### 테스트 범주와 관찰 허용 범위
 
@@ -796,26 +808,23 @@ with a `RecordingService` and verifies latest-generation effects only; it does n
 2-second or 5-second timeout was selected. The focused JVM regression and Full, Playstore and
 F-Droid debug compile/build scope is recorded below.
 
-Verification record for this implementation (JBR 21 at
-`C:\Users\DELL\.jdks\jbr-21.0.11`): the focused
-`SerializedDecisionWorkerTest` passed all 20 tests and `testFullDebugUnitTest` passed all 347
-tests. `compileFullDebugKotlin compileFullDebugAndroidTestKotlin` passed, and
-`assembleFullDebug assemblePlaystoreDebug assembleFdroidDebug` passed. On the attached iPlay50
-mini Pro Android 13 device, the ticket11–15 focused instrumentation set had 61 tests with 43
-passes: `AppRuleBlockerRecheckTest` 22/36, `AppRuleBlockerVirtualDozeWakeRedTest` 1/1,
-`AppRuleBlockerDestroyFaultRedTest` 16/20, and `AppRuleBlockerRefreshOrderingRedTest` 4/4.
-The two reproduced lifecycle-boundary tests passed; the Recheck fixture now explicitly supplies
-unlocked display providers so its evidence classification is deterministic. The destroy/fault
-class retains 4 adjacent fault/cancellation RED tests. The complete
-`connectedFullDebugAndroidTest` run reached 87 tests with 28 failures: 1 debug package-id
-fixture, 2 callback-flush, 4 destroy fault/cancellation, 6 long-boundary, 14 recheck/visibility,
-and 1 Guardian lifecycle failure; the virtual-doze wake test is green. These remain residual
-regression evidence rather than ticket15 closure failures; the ticket15-specific deterministic
-tests are green. The four `AppRuleBlockerDestroyFaultRedTest` failures contain eight distinct
-ticket05/06 modes: ordinary persistence, evaluator, scheduler, callback-post and
-notification-worker continuation, plus evaluator cancellation propagation, worker cancellation
-continuation and handler cancellation continuation. Consequently Phase 2 is not complete, and no
-exception to its fault/cancellation completion criteria has been approved.
+Verification record for this implementation is maintained in the [canonical baseline and
+inventory](../issues/app-rule-enforcement-baseline.md). The historical pre-ticket18 run at
+`db1066a0` recorded 89 tests with 65 passes and 24 unrelated failures; the exact wall-clock
+timestamp was not retained. The superseding unfiltered run at `1af45acd` used JBR 21 at
+`C:\Users\DELL\.jdks\jbr-21.0.11` and `connectedFullDebugAndroidTest` on the attached iPlay50
+mini Pro Android 13 device from `2026-09-09T23:56:46.7064251+09:00` through
+`2026-09-10T00:00:47.1651995+09:00`: 91 tests, 67 passed, 24 failed, 0 errors and 0 skipped.
+The 24 failure identifiers are unchanged from the historical inventory; the two additional
+ticket19 connected tests passed.
+
+Ticket 18 separately records `AppRuleBlockerDestroyFaultRedTest` at 21/21, the focused JVM
+regression and the Full, Playstore and F-Droid debug builds as green. The 24 canonical connected
+failures are therefore not ticket18 fault/cancellation failures: T21 owns 6 long-boundary cases,
+T22 owns 3 recheck cases, T23 owns 11 visibility/ownership cases, T24 owns 2 callback-flush cases,
+T25 owns 1 Guardian lifecycle case, and T26 owns 1 debug-fixture case. No observed failure is
+called fixed by this baseline reconciliation, and the p95 measurement, numeric drain decision and
+Xiaomi device validation remain open.
 
 ### 6. Phase 0 RED contract → future invariant mapping
 
@@ -856,7 +865,7 @@ shallow wrapper로 판단해 도입하지 않는다.
 - Phase 3 per-package coordinator와 Phase 4 lifecycle host의 선제 도입. 각 조건이 재현되기
   전에는 unused interface와 pass-through host를 만들지 않는다.
 - 이 ticket에서의 production code, Room, Gradle, exported API 또는 ticket status 변경.
-- 샤오신 패드 프로 12.7 Android 16의 AR004 실제 검증과 reported incident 종료 판정. 이
+- `Xiaomi Pad Pro 2025 12.7` Android 15 또는 Android 16의 AR004 실제 검증과 reported incident 종료 판정. 이
   contract는 device evidence를 대신하지 않는다.
 
 ### 9. Decision table — approved architecture record
@@ -898,6 +907,10 @@ selection 뒤의 `DeadlineDrainStop`만 하나의 total deadline을 가진다.
 
 ### Phase 1 — foreground evidence deep module
 
+**현재 상태:** `implementation slice recorded done; verification open`. Ticket 08–10의
+evidence module과 복합 foreground path는 기록됐지만, canonical baseline의 T21 long-boundary와
+T22/T23 recheck/visibility failures 및 Xiaomi device verification은 아직 닫히지 않았다.
+
 **목적:** 이 section 앞의 architecture contract, 특히 §§1.0–1.1과 §§4–6을 실행해 raw
 framework facts와 evidence policy 해석을 하나의 deep module 뒤에 둔다. 아래는 실행 순서이며,
 그 contract를 다시 정의하지 않는다.
@@ -928,10 +941,15 @@ framework facts와 evidence policy 해석을 하나의 deep module 뒤에 둔다
       policy branch와 private call-order 의존이 중복되지 않는다.
 - [ ] node traversal와 value seam 이전 event recycle 조건은 §5와 기존 Accessibility safety
       contract에 맞게 검증된다.
-- [ ] AR 004의 실제 Android 16/OEM 검증 결과가 기록됐다. 대상 기기를 사용할 수 없으면 해당
+- [ ] AR 004의 실제 Xiaomi Pad Pro 2025 12.7 Android 15/16 OEM 검증 결과가 기록됐다. 대상 기기를 사용할 수 없으면 해당
       검증을 미실행으로 표시하고 green 결과로 보고하지 않는다.
 
 ### Phase 2 — async decision worker
+
+**현재 상태:** `implementation and fault/cancellation contracts recorded done; measurement
+decisions open`. Ticket 11–15와 ticket 18의 worker, scheduler, fault/cancellation 및 lifecycle
+measurement evidence는 완료됐다. canonical baseline의 T24 callback-flush failures, callback/
+decision p95 measurement와 numeric drain-budget decision은 각각 ticket 24, 27, 28에 남아 있다.
 
 **목적:** 이 section 앞의 architecture contract, 특히 §§1.2–5를 실행해 callback의 handoff와
 session/evaluator/scheduler/outcome publication 순서를 하나의 deep worker가 소유하게 한다.
@@ -976,6 +994,11 @@ session/evaluator/scheduler/outcome publication 순서를 하나의 deep worker�
       영향을 주면 세 flavor compile 결과가 기록됐다.
 
 ### Phase 3 — 조건부 per-package recheck coordinator
+
+**현재 상태:** `done — NO-GO` (ticket 16). Canonical independent-deadline evidence did not
+establish a need for a coordinator; the existing keyed plans and serialized worker remain the
+implementation. The T22/T23 baseline failures are separate policy and visibility closure work and
+do not reopen this NO-GO decision.
 
 **목적:** 독립적인 package deadline이 실제로 남을 때만 scheduling 복잡성을 깊은 module로
    집중한다. Phase 2만으로 충분하면 이 phase를 실행하지 않는다.
@@ -1026,6 +1049,11 @@ session/evaluator/scheduler/outcome publication 순서를 하나의 deep worker�
 
 ### Phase 4 — lifecycle host는 보류하고 재방문 조건만 관리한다
 
+**현재 상태:** `done — NO-GO; architecture gate closed` (ticket 19). Ticket 17's component-only
+conditional decision was superseded by the full-service lifecycle evidence in ticket 19. The four
+triggers remain independently recorded, and no lifecycle host is authorized under the current
+production ordering.
+
 **목적:** 이미 독립 cleanup과 generation guard가 있는 상태에서 pass-through lifecycle host를
    조기에 만들지 않는다. 실제 반복이 확인될 때만 깊이를 입증한 뒤 추출한다.
 
@@ -1068,25 +1096,18 @@ known-limitations 문서에 기록한다.
 - [ ] host를 도입한 경우 deletion/design gate와 위 보조 기준을 PR 또는 design record에
       기록했다. 이 기록은 qualitative 근거이며 private call order 자동 검증 결과가 아니다.
 
-**Ticket 17 review-open decision (2026-09-07):** Phase 4 is conditionally `NO-GO` only for the
-tested `AppRuleBlocker` component boundaries. The deterministic tests construct the blocker with a
-`RecordingService`, use reflection seams, and in one case call candidate-only
-`onDestroyForMeasurement()`. They do not execute full `AppBlockerService.onServiceConnected()`,
-actual service receiver registration, `AppBlockerService.onDestroy()`, or service reconnect.
-`AppRuleReceiverLifecycleTest` verifies only the receiver helper contract. The component evidence
-reproduced no post-guard callback, worker or notification effect and preserved external allow and
-denial, but service-level cleanup exception bypass and stale service/receiver ownership remain
-unverified. The four canonical triggers above all remain active and independent; none is collapsed
-into a generic stale-artifact trigger.
+**Ticket 17 historical decision (2026-09-07):** Phase 4 was conditionally `NO-GO` only for the
+tested `AppRuleBlocker` component boundaries. Its `RecordingService`, reflection and candidate-only
+`onDestroyForMeasurement()` scope did not cover the full service lifecycle, so that record correctly
+left the four triggers open at that time.
 
-Phase 2 also remains open: `AppRuleBlockerDestroyFaultRedTest` is `16/20`, with four failing JUnit
-cases covering the eight persistence, evaluator, scheduler, callback-post, notification-worker,
-evaluator-cancellation, worker-cancellation and handler-cancellation modes. There is no approved
-completion exception. The next local working-tree draft is therefore a vertical Phase 2
-fault/cancellation closure ticket. Only after those contracts are green may a fresh Phase 4
-decision re-evaluate the same four triggers. No lifecycle host, coordinator, integration or OEM
-implementation ticket is authorized or has been created, and ticket17 remains review-open until parent
-review convergence.
+Ticket 18 then closed the eight fault/cancellation modes with
+`AppRuleBlockerDestroyFaultRedTest` at `21/21`. Ticket 19 performed the fresh full-service lifecycle
+revisit and is the current decision: `done — NO-GO; architecture gate closed`. It measured framework
+bind/disable/rebind, receiver ownership, generation fences and external denial boundaries; it did
+not execute a synthetic Trigger 1 fault-ordering experiment, and no lifecycle host, coordinator,
+integration or OEM implementation ticket was authorized. Ticket 17 is therefore a completed
+historical conditional decision, not review-open current status.
 
 ## 검증 명령과 flavor 매트릭스
 
@@ -1150,8 +1171,9 @@ clock/window/scheduler adapter의 결정론을, instrumentation은 Android Acces
   기록했다.
 - Phase 4는 trigger가 없으면 defer를 기록하고, trigger가 있으면 host의 fault/lifecycle test가
   green이다.
-- `refactor implementation complete`, `AR004 Android16 device verification complete`,
-  `reported incident closed` 상태가 서로 분리되어 기록된다. 샤오신 패드 프로 12.7 Android 16
+- `refactor implementation complete`, `AR004 Xiaomi Pad Pro 2025 12.7 device verification complete`,
+  `reported incident closed` 상태가 서로 분리되어 기록된다. `Xiaomi Pad Pro 2025 12.7` Android
+  15 또는 Android 16의
   증거 전에는 AR004와 incident를 닫지 않으며, 구현 완료를 OEM 해결 또는 release readiness로
   보고하지 않는다.
 - known-limitations 문서에 남은 문제, 제품 선택, 기기별 미검증 범위가 최신 상태로 링크되어
