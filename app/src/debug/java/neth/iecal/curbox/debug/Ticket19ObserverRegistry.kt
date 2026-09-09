@@ -57,6 +57,7 @@ internal object Ticket19ObserverRegistry {
     private const val EXTERNAL_OUTCOME_WINDOW_MS = 10_000L
     private const val MUTATION_TOKEN_EXTRA = "ticket19_run_token"
     private const val MUTATION_OPERATION_EXTRA = "ticket19_mutation_operation"
+    private const val MUTATION_RULE_TOKEN_EXTRA = "ticket19_mutation_rule_token"
 
     private val lock = Any()
     private val gson = Gson()
@@ -182,6 +183,7 @@ internal object Ticket19ObserverRegistry {
                 serviceRef = WeakReference(service)
                 blockerRef = WeakReference(blocker)
                 serviceIdentity = System.identityHashCode(service)
+                mutationRefreshReceiver = null
                 resetObservationLocked(clearEvents = false)
                 recordEventLocked(
                     name = "service_instantiated",
@@ -462,33 +464,52 @@ internal object Ticket19ObserverRegistry {
         taggedReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val deliveredToken = intent?.getStringExtra(MUTATION_TOKEN_EXTRA).orEmpty()
-                val deliveredOperation =
-                    intent?.getStringExtra(MUTATION_OPERATION_EXTRA).orEmpty()
-                val correlation = synchronized(lock) {
-                    check(intent?.action == REFRESH_ACTION &&
-                        mutationRefreshState == "ARMED" &&
-                        mutationRefreshToken == deliveredToken &&
-                        mutationRefreshOperation == deliveredOperation
-                    ) { "unexpected tagged mutation refresh delivery" }
-                    mutationRefreshDeliveryCount += 1L
-                    mutationRefreshPid = Process.myPid()
-                    mutationRefreshState = "DELIVERED"
-                    MutationRefreshContext(ruleToken, refreshToken, operation).also {
-                        recordEventLocked(
-                            "mutation_refresh_framework_delivery",
-                            "operation=$operation ruleToken=$ruleToken " +
-                                "refreshToken=$refreshToken pid=$mutationRefreshPid"
-                        )
-                    }
+                val ownsDelivery = synchronized(lock) {
+                    mutationRefreshState == "ARMED" && mutationRefreshToken == deliveredToken
                 }
-                mutationRefreshThreadContext.set(correlation)
+                if (!ownsDelivery) return
+
+                var delegatedToProduction = false
                 try {
+                    val deliveredOperation =
+                        intent?.getStringExtra(MUTATION_OPERATION_EXTRA).orEmpty()
+                    val deliveredRuleToken =
+                        intent?.getStringExtra(MUTATION_RULE_TOKEN_EXTRA).orEmpty()
+                    val correlation = synchronized(lock) {
+                        check(intent?.action == REFRESH_ACTION) {
+                            "owned mutation refresh action mismatch: ${intent?.action}"
+                        }
+                        check(mutationRefreshState == "ARMED" &&
+                            mutationRefreshToken == deliveredToken
+                        ) { "owned mutation refresh was no longer armed" }
+                        check(mutationRefreshOperation == deliveredOperation &&
+                            operation == deliveredOperation
+                        ) { "owned mutation refresh operation mismatch: $deliveredOperation" }
+                        check(mutationRefreshRuleToken == deliveredRuleToken &&
+                            ruleToken == deliveredRuleToken
+                        ) { "owned mutation refresh rule token mismatch: $deliveredRuleToken" }
+                        check(context?.packageName == service.packageName &&
+                            context?.applicationContext === service.applicationContext
+                        ) { "owned mutation refresh context/process mismatch" }
+                        mutationRefreshDeliveryCount += 1L
+                        mutationRefreshPid = Process.myPid()
+                        mutationRefreshState = "DELIVERED"
+                        MutationRefreshContext(ruleToken, refreshToken, operation).also {
+                            recordEventLocked(
+                                "mutation_refresh_framework_delivery",
+                                "operation=$operation ruleToken=$ruleToken " +
+                                    "refreshToken=$refreshToken pid=$mutationRefreshPid"
+                            )
+                        }
+                    }
+                    mutationRefreshThreadContext.set(correlation)
                     val sequencer = readField(blocker, "sourceOrderSequencer")
                     val sourceOrder = readField(sequencer, "sourceOrder") as java.util.concurrent.atomic.AtomicLong
                     val runtimeRevision =
                         readField(sequencer, "runtimeRevision") as java.util.concurrent.atomic.AtomicLong
                     val sourceBefore = sourceOrder.get()
                     val revisionBefore = runtimeRevision.get()
+                    delegatedToProduction = true
                     productionReceiver.onReceive(context, intent)
                     val sourceAfter = sourceOrder.get()
                     val revisionAfter = runtimeRevision.get()
@@ -504,13 +525,46 @@ internal object Ticket19ObserverRegistry {
                             RuntimeRevision(revisionAfter)
                         )
                     )
-                    abortBroadcast()
+                    synchronized(lock) {
+                        check((mutationRefreshState == "RESERVED" &&
+                            mutationRefreshPublicationCount == 0L) ||
+                            (mutationRefreshState == "PUBLISHED" &&
+                                mutationRefreshPublicationCount == 1L)
+                        ) { "owned mutation refresh publication state mismatch" }
+                        check(
+                            mutationRefreshToken == deliveredToken &&
+                            mutationRefreshOperation == deliveredOperation &&
+                            mutationRefreshRuleToken == deliveredRuleToken &&
+                            mutationRefreshDeliveryCount == 1L &&
+                            mutationRefreshReservationCount == 1L &&
+                            mutationRefreshSourceIdentity == sourceAfter &&
+                            mutationRefreshRuntimeRevision == revisionAfter
+                        ) { "owned mutation refresh source/revision chain mismatch" }
+                    }
+                } catch (error: Throwable) {
+                    synchronized(lock) {
+                        mutationRefreshState = "FAILED"
+                    }
+                    recordFailure("mutation_refresh_owned_delivery", error)
                 } finally {
                     mutationRefreshThreadContext.remove()
-                    service.unregisterReceiver(taggedReceiver)
-                    synchronized(lock) {
-                        if (mutationRefreshReceiver === taggedReceiver) {
-                            mutationRefreshReceiver = null
+                    try {
+                        if (delegatedToProduction) abortBroadcast()
+                    } catch (error: Throwable) {
+                        synchronized(lock) { mutationRefreshState = "FAILED" }
+                        recordFailure("mutation_refresh_abort", error)
+                    } finally {
+                        try {
+                            service.unregisterReceiver(taggedReceiver)
+                        } catch (error: Throwable) {
+                            synchronized(lock) { mutationRefreshState = "FAILED" }
+                            recordFailure("mutation_refresh_receiver_cleanup", error)
+                        } finally {
+                            synchronized(lock) {
+                                if (mutationRefreshReceiver === taggedReceiver) {
+                                    mutationRefreshReceiver = null
+                                }
+                            }
                         }
                     }
                 }
@@ -542,6 +596,12 @@ internal object Ticket19ObserverRegistry {
             ?: error("no current AppRuleBlocker")
         val deadline = SystemClock.elapsedRealtime() + 15_000L
         while (SystemClock.elapsedRealtime() < deadline) {
+            val state = synchronized(lock) {
+                mutationRefreshState
+            }
+            if (state == "FAILED") {
+                return
+            }
             val published = synchronized(lock) {
                 mutationRefreshState == "PUBLISHED" &&
                     mutationRefreshDeliveryCount == 1L &&

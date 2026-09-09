@@ -262,6 +262,20 @@ function Assert-WorkCountsZero($Snapshot, [string]$Stage) {
     }
 }
 
+function Wait-MutationWorkQuiescent([string]$Stage) {
+    Wait-Until "$Stage mutation work quiescence" {
+        $snapshot = Invoke-ObserverCommand 'snapshot'
+        foreach ($name in @(
+            'refreshes', 'notifications', 'usageResetCompletions',
+            'recheckPlans', 'workerQueued', 'workerInFlight'
+        )) {
+            if ([int]$snapshot.workCounts.$name -ne 0) { return $false }
+        }
+        return $true
+    }
+    return Invoke-ObserverCommand 'snapshot'
+}
+
 function Assert-MutationRefresh {
     param(
         $MutationSnapshot,
@@ -275,11 +289,49 @@ function Assert-MutationRefresh {
     if ([string]::IsNullOrWhiteSpace($refreshToken)) {
         throw "$Stage did not return a UUID-tagged mutation refresh"
     }
+    $unownedBaseline = [long]$MutationSnapshot.runtimePublicationCount
+    $untagged = Invoke-AdbCommand @(
+        'shell', 'am', 'broadcast', '-a', $refreshAction, '-p', $packageName
+    )
+    if ($untagged -notmatch 'result=0') {
+        throw "$Stage untagged framework broadcast failed: $untagged"
+    }
+    Wait-Until "$Stage untagged production refresh" {
+        $snapshot = Invoke-ObserverCommand 'snapshot'
+        [long]$snapshot.runtimePublicationCount -gt $unownedBaseline -and
+            $snapshot.mutationRefreshState -eq 'ARMED' -and
+            [long]$snapshot.mutationRefreshDeliveryCount -eq 0 -and
+            @($snapshot.failures).Count -eq 0
+    }
+    $afterUntagged = Wait-MutationWorkQuiescent "$Stage untagged"
+    Assert-NoFailures $afterUntagged
+    $differentToken = [guid]::NewGuid().ToString()
+    $different = Invoke-AdbCommand @(
+        'shell', 'am', 'broadcast', '-a', $refreshAction, '-p', $packageName,
+        '--es', 'ticket19_run_token', $differentToken,
+        '--es', 'ticket19_mutation_operation', $Operation,
+        '--es', 'ticket19_mutation_rule_token', $RuleToken
+    )
+    if ($different -notmatch 'result=0') {
+        throw "$Stage differently tagged framework broadcast failed: $different"
+    }
+    Wait-Until "$Stage differently tagged production refresh" {
+        $snapshot = Invoke-ObserverCommand 'snapshot'
+        [long]$snapshot.runtimePublicationCount -gt
+            [long]$afterUntagged.runtimePublicationCount -and
+            $snapshot.mutationRefreshState -eq 'ARMED' -and
+            [long]$snapshot.mutationRefreshDeliveryCount -eq 0 -and
+            @($snapshot.failures).Count -eq 0
+    }
+    $afterDifferent = Wait-MutationWorkQuiescent "$Stage differently tagged"
+    Assert-NoFailures $afterDifferent
+    Write-Trace "$Stage unowned broadcasts passed to production; differentToken=$differentToken"
     $sentAt = Get-Date -Format o
     $send = Invoke-AdbCommand @(
         'shell', 'am', 'broadcast', '-a', $refreshAction, '-p', $packageName,
         '--es', 'ticket19_run_token', $refreshToken,
-        '--es', 'ticket19_mutation_operation', $Operation
+        '--es', 'ticket19_mutation_operation', $Operation,
+        '--es', 'ticket19_mutation_rule_token', $RuleToken
     )
     if ($send -notmatch 'result=0') {
         throw "$Stage tagged framework broadcast failed: $send"
