@@ -224,7 +224,7 @@ accessibility_enabled=1, never added Lock Me Out, and restored exact Dozing befo
 
 ## Historical Trigger 1 evidence boundary
 
-No synthetic fault-ordering experiment was run. The former blocked/inconclusive conclusion was
+No synthetic Trigger 1 fault-ordering experiment was executed. The former blocked/inconclusive conclusion was
 historical: the accepted evidence constraints provided no pre-AppRule fault hook, so a synthetic
 earlier-feature fault was not evidence for production ordering. The superseding current conclusion
 is that `AppRuleBlocker` cleanup runs first in production and `cleanupFeature` independently
@@ -244,8 +244,9 @@ The earlier `INCONCLUSIVE`/open conclusion is superseded by the production-order
 production `AppBlockerService.onDestroy()` runs `AppRuleBlocker` as the first feature cleanup,
 and every actual feature cleanup is independently contained by `cleanupFeature`. Therefore
 canonical Trigger 1's `prior feature cleanup skips AppRule cleanup/cancellation` path cannot occur
-in the current production ordering. This is not synthetic fault evidence; no synthetic fault was
-executed. No lifecycle host ticket or implementation is warranted.
+in the current production ordering. This is not synthetic Trigger 1 fault-ordering evidence; no
+synthetic Trigger 1 fault-ordering experiment was executed. No lifecycle host ticket or
+implementation is warranted.
 
 ## Verification
 
