@@ -58,6 +58,7 @@ internal object Ticket19ObserverRegistry {
     private const val MUTATION_TOKEN_EXTRA = "ticket19_run_token"
     private const val MUTATION_OPERATION_EXTRA = "ticket19_mutation_operation"
     private const val MUTATION_RULE_TOKEN_EXTRA = "ticket19_mutation_rule_token"
+    private const val MUTATION_BROADCAST_KEY_EXTRA = "ticket19_mutation_broadcast_key"
 
     private val lock = Any()
     private val gson = Gson()
@@ -106,6 +107,10 @@ internal object Ticket19ObserverRegistry {
     private var mutationRefreshRuntimeRevision: Long? = null
     private val mutationRefreshObservedRevisions = mutableSetOf<Long>()
     private var mutationRefreshReceiver: BroadcastReceiver? = null
+    private var mutationRefreshPassThroughReceiver: BroadcastReceiver? = null
+    private val mutationPassThroughObservations = linkedMapOf<String, PassThroughMutationObservation>()
+    private val mutationPassThroughByRevision = mutableMapOf<Long, PassThroughMutationObservation>()
+    private val mutationPassThroughObservedRevisions = mutableSetOf<Long>()
     private var failNextRuntimePublication = false
     private var runtimeBarrier: RuntimeBarrier? = null
     private val failures = mutableListOf<FailureRecord>()
@@ -128,6 +133,15 @@ internal object Ticket19ObserverRegistry {
         val ruleToken: String,
         val refreshToken: String,
         val operation: String
+    )
+
+    private data class PassThroughMutationObservation(
+        val key: String,
+        val ruleToken: String,
+        var reservationCount: Long = 0L,
+        var publicationCount: Long = 0L,
+        var sourceIdentity: Long? = null,
+        var runtimeRevision: Long? = null
     )
 
     private class RuntimeBarrier(val timeoutMs: Long) {
@@ -175,6 +189,17 @@ internal object Ticket19ObserverRegistry {
         )
     }
 
+    private fun acknowledgePassThroughPublicationLocked(revision: Long) {
+        val observation = mutationPassThroughByRevision[revision] ?: return
+        observation.publicationCount += 1L
+        recordEventLocked(
+            "mutation_pass_through_publication",
+            "key=${observation.key} ruleToken=${observation.ruleToken} " +
+                "sourceIdentity=${observation.sourceIdentity} runtimeRevision=$revision " +
+                "count=${observation.publicationCount}"
+        )
+    }
+
     fun attach(service: AppBlockerService) {
         try {
             val blocker = readField(service, "appRuleBlocker") as AppRuleBlocker
@@ -184,6 +209,7 @@ internal object Ticket19ObserverRegistry {
                 blockerRef = WeakReference(blocker)
                 serviceIdentity = System.identityHashCode(service)
                 mutationRefreshReceiver = null
+                mutationRefreshPassThroughReceiver = null
                 resetObservationLocked(clearEvents = false)
                 recordEventLocked(
                     name = "service_instantiated",
@@ -436,12 +462,15 @@ internal object Ticket19ObserverRegistry {
     ) {
         require(operation == "install" || operation == "remove")
         val refreshToken = UUID.randomUUID().toString()
-        val previousReceiver = synchronized(lock) {
+        val previousReceivers = synchronized(lock) {
             val previous = mutationRefreshReceiver
+            val previousPassThrough = mutationRefreshPassThroughReceiver
             mutationRefreshReceiver = null
-            previous
+            mutationRefreshPassThroughReceiver = null
+            previous to previousPassThrough
         }
-        previousReceiver?.let(service::unregisterReceiver)
+        previousReceivers.first?.let(service::unregisterReceiver)
+        previousReceivers.second?.let(service::unregisterReceiver)
         synchronized(lock) {
             mutationRefreshRuleToken = ruleToken
             mutationRefreshToken = refreshToken
@@ -454,6 +483,9 @@ internal object Ticket19ObserverRegistry {
             mutationRefreshSourceIdentity = null
             mutationRefreshRuntimeRevision = null
             mutationRefreshObservedRevisions.clear()
+            mutationPassThroughObservations.clear()
+            mutationPassThroughByRevision.clear()
+            mutationPassThroughObservedRevisions.clear()
             recordEventLocked(
                 "mutation_refresh_sent",
                 "operation=$operation ruleToken=$ruleToken refreshToken=$refreshToken"
@@ -461,6 +493,85 @@ internal object Ticket19ObserverRegistry {
         }
         val productionReceiver = readField(blocker, "refreshReceiver") as BroadcastReceiver
         lateinit var taggedReceiver: BroadcastReceiver
+        lateinit var passThroughReceiver: BroadcastReceiver
+        passThroughReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val broadcastKey = runCatching {
+                    intent?.getStringExtra(MUTATION_BROADCAST_KEY_EXTRA).orEmpty()
+                }.getOrDefault("")
+                val deliveredRuleToken = runCatching {
+                    intent?.getStringExtra(MUTATION_RULE_TOKEN_EXTRA).orEmpty()
+                }.getOrDefault("")
+                if (broadcastKey.isEmpty() || deliveredRuleToken.isEmpty()) return
+                val deliveredToken = runCatching {
+                    intent?.getStringExtra(MUTATION_TOKEN_EXTRA).orEmpty()
+                }.getOrDefault("")
+                val shouldObserve = synchronized(lock) {
+                    (mutationRefreshState == "ARMED" && deliveredToken != mutationRefreshToken) ||
+                        mutationRefreshState == "FAILED"
+                }
+                if (!shouldObserve) return
+
+                var unregisterAfterObservation = false
+                try {
+                    val sequencer = readField(blocker, "sourceOrderSequencer")
+                    val sourceOrder = readField(
+                        sequencer,
+                        "sourceOrder"
+                    ) as java.util.concurrent.atomic.AtomicLong
+                    val runtimeRevision = readField(
+                        sequencer,
+                        "runtimeRevision"
+                    ) as java.util.concurrent.atomic.AtomicLong
+                    val sourceIdentity = sourceOrder.get()
+                    val revision = runtimeRevision.get()
+                    synchronized(lock) {
+                        if (mutationRefreshState != "ARMED" && mutationRefreshState != "FAILED") {
+                            return@synchronized
+                        }
+                        if (mutationRefreshState == "ARMED" &&
+                            deliveredToken == mutationRefreshToken
+                        ) return@synchronized
+                        val observation = mutationPassThroughObservations.getOrPut(broadcastKey) {
+                            PassThroughMutationObservation(
+                                key = broadcastKey,
+                                ruleToken = deliveredRuleToken
+                            )
+                        }
+                        observation.reservationCount += 1L
+                        observation.sourceIdentity = sourceIdentity
+                        observation.runtimeRevision = revision
+                        mutationPassThroughByRevision[revision] = observation
+                        recordEventLocked(
+                            "mutation_pass_through_reservation",
+                            "key=$broadcastKey ruleToken=$deliveredRuleToken " +
+                                "sourceIdentity=$sourceIdentity runtimeRevision=$revision " +
+                                "count=${observation.reservationCount}"
+                        )
+                        if (revision in mutationPassThroughObservedRevisions) {
+                            acknowledgePassThroughPublicationLocked(revision)
+                        }
+                        unregisterAfterObservation = mutationRefreshState == "FAILED"
+                    }
+                } catch (error: Throwable) {
+                    recordFailure("mutation_refresh_pass_through_observer", error)
+                } finally {
+                    if (unregisterAfterObservation) {
+                        try {
+                            service.unregisterReceiver(passThroughReceiver)
+                        } catch (error: Throwable) {
+                            recordFailure("mutation_refresh_pass_through_cleanup", error)
+                        } finally {
+                            synchronized(lock) {
+                                if (mutationRefreshPassThroughReceiver === passThroughReceiver) {
+                                    mutationRefreshPassThroughReceiver = null
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         taggedReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val deliveredToken = intent?.getStringExtra(MUTATION_TOKEN_EXTRA).orEmpty()
@@ -469,7 +580,6 @@ internal object Ticket19ObserverRegistry {
                 }
                 if (!ownsDelivery) return
 
-                var delegatedToProduction = false
                 try {
                     val deliveredOperation =
                         intent?.getStringExtra(MUTATION_OPERATION_EXTRA).orEmpty()
@@ -509,7 +619,6 @@ internal object Ticket19ObserverRegistry {
                         readField(sequencer, "runtimeRevision") as java.util.concurrent.atomic.AtomicLong
                     val sourceBefore = sourceOrder.get()
                     val revisionBefore = runtimeRevision.get()
-                    delegatedToProduction = true
                     productionReceiver.onReceive(context, intent)
                     val sourceAfter = sourceOrder.get()
                     val revisionAfter = runtimeRevision.get()
@@ -549,7 +658,7 @@ internal object Ticket19ObserverRegistry {
                 } finally {
                     mutationRefreshThreadContext.remove()
                     try {
-                        if (delegatedToProduction) abortBroadcast()
+                        abortBroadcast()
                     } catch (error: Throwable) {
                         synchronized(lock) { mutationRefreshState = "FAILED" }
                         recordFailure("mutation_refresh_abort", error)
@@ -565,20 +674,52 @@ internal object Ticket19ObserverRegistry {
                                     mutationRefreshReceiver = null
                                 }
                             }
+                            val keepPassThroughReceiver = synchronized(lock) {
+                                mutationRefreshState == "FAILED"
+                            }
+                            if (!keepPassThroughReceiver) {
+                                try {
+                                    service.unregisterReceiver(passThroughReceiver)
+                                } catch (error: Throwable) {
+                                    synchronized(lock) { mutationRefreshState = "FAILED" }
+                                    recordFailure("mutation_refresh_pass_through_cleanup", error)
+                                } finally {
+                                    synchronized(lock) {
+                                        if (mutationRefreshPassThroughReceiver ===
+                                            passThroughReceiver
+                                        ) {
+                                            mutationRefreshPassThroughReceiver = null
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        val filter = IntentFilter(REFRESH_ACTION).apply { priority = 1_000 }
+        val passThroughFilter = IntentFilter(REFRESH_ACTION).apply { priority = -1 }
         ContextCompat.registerReceiver(
             service,
-            taggedReceiver,
-            filter,
+            passThroughReceiver,
+            passThroughFilter,
             ContextCompat.RECEIVER_EXPORTED
         )
+        try {
+            val filter = IntentFilter(REFRESH_ACTION).apply { priority = 1_000 }
+            ContextCompat.registerReceiver(
+                service,
+                taggedReceiver,
+                filter,
+                ContextCompat.RECEIVER_EXPORTED
+            )
+        } catch (error: Throwable) {
+            runCatching { service.unregisterReceiver(passThroughReceiver) }
+            throw error
+        }
         synchronized(lock) {
             mutationRefreshReceiver = taggedReceiver
+            mutationRefreshPassThroughReceiver = passThroughReceiver
         }
     }
 
@@ -884,6 +1025,12 @@ internal object Ticket19ObserverRegistry {
                 mutationRefreshObservedRevisions += revision.value
                 acknowledgeMutationPublicationLocked(revision.value)
             }
+            if (mutationRefreshPassThroughReceiver != null ||
+                mutationPassThroughObservations.isNotEmpty()
+            ) {
+                mutationPassThroughObservedRevisions += revision.value
+                acknowledgePassThroughPublicationLocked(revision.value)
+            }
             if (failNextRuntimePublication) {
                 failNextRuntimePublication = false
                 injectedFailure = IllegalStateException(
@@ -1084,6 +1231,29 @@ internal object Ticket19ObserverRegistry {
                     "mutationRefreshRuntimeRevision",
                     mutationRefreshRuntimeRevision ?: JSONObject.NULL
                 )
+                put("mutationRefreshReceiverRegistered", mutationRefreshReceiver != null)
+                put(
+                    "mutationRefreshPassThroughReceiverRegistered",
+                    mutationRefreshPassThroughReceiver != null
+                )
+                put("mutationPassThroughObservations", JSONArray().apply {
+                    mutationPassThroughObservations.values.forEach { observation ->
+                        put(JSONObject().apply {
+                            put("key", observation.key)
+                            put("ruleToken", observation.ruleToken)
+                            put("reservationCount", observation.reservationCount)
+                            put("publicationCount", observation.publicationCount)
+                            put(
+                                "sourceIdentity",
+                                observation.sourceIdentity ?: JSONObject.NULL
+                            )
+                            put(
+                                "runtimeRevision",
+                                observation.runtimeRevision ?: JSONObject.NULL
+                            )
+                        })
+                    }
+                })
                 put("refreshContinuationCompletionCount", refreshContinuationCompletionCount)
                 put("workCounts", JSONObject(workCounts))
                 put("barrierState", runtimeBarrier?.state ?: "DISARMED")
@@ -1267,6 +1437,9 @@ internal object Ticket19ObserverRegistry {
         externalOutcomeDeniedPublished = false
         externalOutcomeWarningCalled = false
         failNextRuntimePublication = false
+        mutationPassThroughObservations.clear()
+        mutationPassThroughByRevision.clear()
+        mutationPassThroughObservedRevisions.clear()
         failures.clear()
         if (clearEvents) events.clear()
     }
