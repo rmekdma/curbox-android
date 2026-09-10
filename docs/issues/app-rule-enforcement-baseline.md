@@ -93,18 +93,20 @@ Source: [AppRuleBlockerLongBoundaryRedTest.kt](../../app/src/androidTest/java/ne
 
 Ticket 21 closes the six stable identifiers above without changing the approved foreground policy.
 The production change keeps the host classifier's raw real-event history aligned with the same
-facts handed to the serialized worker, and restores the existing R5 fail-closed evaluator path for
-ordinary evaluator failure. Synthetic rechecks do not renew evidence age. The partial-window
-fixture in the T21 provenance method represents an unresolved slot with no currently known package;
-the separate known-other-package ownership case remains the T23 contract.
+facts handed to the serialized worker, restores the existing R5 fail-closed evaluator path for
+ordinary evaluator failure, and prevents `observeWorkerEvaluation()` from renewing evidence for a
+synthetic request. Synthetic rechecks do not renew evidence age while evaluation observation and
+publication remain intact. The partial-window fixture in the T21 provenance method represents an
+unresolved slot with no currently known package; the separate known-other-package ownership case
+remains the T23 contract.
 
 | Verification | Environment and result |
 | --- | --- |
 | Focused JVM | `testFullDebugUnitTest` with `ForegroundEvidenceContractTest` and `SerializedDecisionWorkerTest`: 52 tests, 52 passed, 0 failures, 0 errors, 0 skipped. |
-| Focused connected | `connectedFullDebugAndroidTest` filtered to `AppRuleBlockerLongBoundaryRedTest` on `iPlay50_mini_Pro - 13` / Android 13: 9 tests, 9 passed, 0 failures, 0 errors, 0 skipped. The six T21 identifiers all passed. |
+| Focused connected | `connectedFullDebugAndroidTest` filtered to `AppRuleBlockerLongBoundaryRedTest` on `iPlay50_mini_Pro - 13` / Android 13: 10 tests, 10 passed, 0 failures, 0 errors, 0 skipped. The six T21 identifiers and the synthetic timestamp regression all passed. |
 | Full JVM | `testFullDebugUnitTest`: 350 tests, 350 passed, 0 failures, 0 errors, 0 skipped. |
 | Flavor compile | `assembleFullDebug`, `assemblePlaystoreDebug`, and `assembleFdroidDebug`: all succeeded. |
-| Final unfiltered connected | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13: 91 tests, 88 passed, 3 failures, 0 errors, 0 skipped. |
+| Final unfiltered connected | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13: 92 tests, 89 passed, 3 failures, 0 errors, 0 skipped. |
 
 The final connected failures are unchanged outside T21: `ExampleInstrumentedTest::useAppContext`
 is the T26 debug-fixture failure, and

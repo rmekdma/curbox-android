@@ -59,6 +59,23 @@ class AppRuleBlockerLongBoundaryRedTest {
     }
 
     @Test
+    fun syntheticR5EvaluationDoesNotRenewForegroundEvidenceTimestamp() {
+        val result = runBoundaryScenario(WindowState.STALE_WINDOW)
+
+        check(result.boundaryForegroundEvidenceAtElapsedMs != null) {
+            "the synthetic R5 boundary evaluation was not observed"
+        }
+        check(
+            result.boundaryForegroundEvidenceAtElapsedMs ==
+                result.initialForegroundEvidenceAtElapsedMs
+        ) {
+            "synthetic R5 evaluation renewed foreground evidence: " +
+                "initial=${result.initialForegroundEvidenceAtElapsedMs}, " +
+                "boundary=${result.boundaryForegroundEvidenceAtElapsedMs}"
+        }
+    }
+
+    @Test
     fun cachedTargetThenCurrentPartialOtherDoesNotReevaluateStaleTarget() {
         val result = runBoundaryScenario(WindowState.CACHED_TARGET_THEN_PARTIAL_OTHER)
 
@@ -342,6 +359,8 @@ class AppRuleBlockerLongBoundaryRedTest {
             ) {
                 "initial foreground boundary was not scheduled before advancing the virtual clock"
             }
+            val initialForegroundEvidenceAtElapsedMs =
+                getField(blocker, "currentForegroundEvidenceAtElapsedMs") as Long
 
             // The row is the persisted usage outcome at the allowance boundary. No real clock or
             // looper is advanced; the scheduler only runs queued callbacks after virtual time is
@@ -468,10 +487,20 @@ class AppRuleBlockerLongBoundaryRedTest {
                 useDayCalculator = repository.calculator,
                 overrides = snapshot.overrideState
             )
+            val boundaryForegroundEvidenceAtElapsedMs = if (
+                windowState.expectsBoundaryDecision &&
+                boundaryFailure != BoundaryFailure.CANCELLATION
+            ) {
+                getField(blocker, "currentForegroundEvidenceAtElapsedMs") as Long
+            } else {
+                null
+            }
             return BoundaryResult(
                 decisions = decisions.toList(),
                 startedActivities = service.startedActivities.toList(),
                 persistedBoundaryDecision = persistedBoundaryDecision,
+                initialForegroundEvidenceAtElapsedMs = initialForegroundEvidenceAtElapsedMs,
+                boundaryForegroundEvidenceAtElapsedMs = boundaryForegroundEvidenceAtElapsedMs,
                 virtualElapsedMs = clock.elapsedRealtimeMs,
                 scheduler = scheduler.snapshot(),
                 boundaryPostedDelays = boundaryPostedDelays,
@@ -645,6 +674,8 @@ class AppRuleBlockerLongBoundaryRedTest {
         val decisions: List<EvaluationObservation>,
         val startedActivities: List<StartedActivityObservation>,
         val persistedBoundaryDecision: AppRulesEvaluation,
+        val initialForegroundEvidenceAtElapsedMs: Long,
+        val boundaryForegroundEvidenceAtElapsedMs: Long?,
         val virtualElapsedMs: Long,
         val scheduler: SchedulerState,
         val boundaryPostedDelays: List<Long>,
