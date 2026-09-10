@@ -1,6 +1,6 @@
 # App-rule enforcement canonical baseline and inventory
 
-이 문서는 app-rule enforcement 프로젝트의 connected-suite 기준선, 실패 inventory와 ticket 01–22
+이 문서는 app-rule enforcement 프로젝트의 connected-suite 기준선, 실패 inventory와 ticket 01–23
 상태를 하나로 묶는 정본이다. 여기의 실패는 관찰된 RED evidence이며, 이 문서 자체는 제품
 동작이 고쳐졌다고 주장하지 않는다. 다음 ticket은 이 inventory의 stable identifier와 primary
 owner를 그대로 사용한다.
@@ -147,22 +147,22 @@ T23의 window selection/root availability/target ownership 사례는 이 closure
 This focused result does not change the historical 91-test canonical inventory. It closes only the
 three T22 ownership cases; the remaining inventory ownership and the Xiaomi gate stay separate.
 
-### Latest full-suite verification after Ticket 22 — 2026-09-10
+### Latest full-suite verification after Ticket 23 — 2026-09-10
 
-The required final suites were run after the focused T22 verification. These results are a new
-execution record and do not rewrite the historical 91-test inventory or the earlier T21 closure
-run.
+The required final suites were run after the focused T23 verification. These results are a new
+execution record and do not rewrite the historical 91-test inventory or the earlier T21/T22
+closure runs.
 
 | Verification | Environment and result |
 | --- | --- |
 | Full JVM | `testFullDebugUnitTest`: 351 tests, 351 passed, 0 failures, 0 errors, 0 skipped. |
-| Full connected | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: 92 tests, 88 passed, 4 failures, 0 errors, 0 skipped. XML timestamp: `2026-09-10T01:24:14` (timezone not encoded). |
+| Full connected | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: 92 tests, 89 passed, 3 failures, 0 errors, 0 skipped. XML timestamp: `2026-09-10T01:56:03` (timezone not encoded). |
 
-The four full-connected failures classify against Ticket 20 as T24 callback flush (2), T25
-Guardian lifecycle (1), and T26 debug fixture (1). T21, T22 and T23 had no failure node in this
-run. The T25 result is an execution-specific current observation that remains open; it is neither a
-claim that the case is fixed nor a definitive product diagnosis. This run is on iPlay50 and is not
-the Ticket 29 Xiaomi Pad Pro 2025 12.7 Android 15/16 gate.
+The three full-connected failures classify against Ticket 20 as T24 callback flush (2) and T26
+debug fixture (1): `foregroundCallbackReturnsBeforeDelayedPersistenceCompletes`,
+`evaluatorRunsOnlyAfterVisibleSessionFlushIsCommitted`, and `ExampleInstrumentedTest::useAppContext`.
+T21, T22, T23 and T25 had no failure node in this run. This run is on iPlay50 and is not the
+Ticket 29 Xiaomi Pad Pro 2025 12.7 Android 15/16 gate.
 
 ### T23-VISIBILITY-OWNERSHIP — 11 cases
 
@@ -181,6 +181,37 @@ the Ticket 29 Xiaomi Pad Pro 2025 12.7 Android 15/16 gate.
 | `AppRuleBlockerRecheckTest::allAppsRuleEvaluatesCurrentPackageWhenLauncherListingOmitsIt` | current package ownership for all-apps scope |
 
 Source: [AppRuleBlockerRecheckTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt).
+
+### Ticket 23 closure evidence — 2026-09-10
+
+Ticket 23의 11개 stable identifier는 Ticket 20의 frozen owner inventory와 일치하며, window
+selection, root availability와 target ownership을 기존 approved evidence contract로 검증했다.
+현재 production behavior와 기존 deterministic test seams가 계약을 이미 충족하므로 T23 production
+또는 test source 변경은 없었다. T21 evidence-age/long-boundary semantics와 T22
+recheck scheduling/retry/cancellation은 이 closure에 포함하지 않았다.
+
+| Verification | Environment and result |
+| --- | --- |
+| Focused connected | `connectedFullDebugAndroidTest` filtered to `neth.iecal.curbox.blockers.AppRuleBlockerRecheckTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: 37 tests, 37 passed, 0 failures, 0 errors, 0 skipped. XML timestamp: `2026-09-10T01:45:55` (timezone not encoded). All 11 T23 identifiers were present and `PASSED`. |
+| Focused JVM | `testFullDebugUnitTest --tests neth.iecal.curbox.domain.apprules.ForegroundEvidenceContractTest`: 29 tests, 29 passed, 0 failures, 0 errors, 0 skipped. |
+| Device identity | serial `T811MA256GB23418064398`, model `iPlay50_mini_Pro`, Android 13 / API 33, fingerprint `Alldocube/iPlay50_mini_Pro/iPlay50_mini_Pro:13/TP1A.220624.014/1699256002:user/release-keys`. |
+| Production change | None. No new visibility rule, threshold, device substitution, policy, or architecture decision was introduced. |
+
+The owned outcomes were observed as follows: essential-overlay evaluation produced one target
+Guardian and no duplicate; essential events evaluated the target window and the deduped two-package
+snapshot (2 evaluations); reconnect evaluated the known application window without an event or
+active root; the original overlay snapshot evaluated `[target, other]` exactly once each without
+recapture; all-apps used the current event package when the launcher list omitted it; suspended
+evidence resumed only from the matching module-visible package; provider failure preserved the recent
+target boundary; and split-screen retained two independent package-keyed boundaries when one root was
+unknown. The essential-root plus reconnect sequence produced 3 evaluations and 1 reused Guardian.
+These are the exact target, evaluation and warning/ownership outcomes asserted by the focused tests;
+the tests use `com.example.reader`, `com.example.other`, and the service package as the essential
+overlay.
+
+The focused result closes only T23's deterministic visibility ownership contract. It does not close
+AR004 or the final Xiaomi gate: `Xiaomi Pad Pro 2025 12.7` on Android 15 or Android 16 remains the
+last device validation target.
 
 ### T24–T26 — 4 cases
 
@@ -221,7 +252,7 @@ one of the 24 canonical failure nodes appears once.
 | 07 | `done` | Phase 1/2 architecture contract approved on 2026-09-01. |
 | 08 | `done` | Evidence contract and production/deterministic adapters implemented. |
 | 09 | `done` | AR001 long-boundary implementation slice recorded; ticket 21 later records deterministic closure of the six owned cases. |
-| 10 | `done` | Complex foreground policy and caller reduction recorded; current T23 cases remain open. |
+| 10 | `done` | Complex foreground policy and caller reduction recorded; T23 later records deterministic visibility ownership closure. |
 | 11 | `done` | Serialized decision worker happy path recorded. |
 | 12 | `done` | Wall-clock scheduler and wake recovery recorded. |
 | 13 | `done` | Worker fault containment recorded. |
@@ -236,20 +267,21 @@ The detailed ticket records remain in [.scratch/app-rule-enforcement/issues](../
 Ticket 17's component-only limitation and ticket 19's later full-service decision are both retained;
 the latter is authoritative for the current Phase 4 status.
 
-### Tickets 20–22
+### Tickets 20–23
 
 | Ticket | Canonical status | Evidence or interpretation |
 | --- | --- | --- |
 | 20 | `done` | Historical connected-suite inventory and documentation baseline are frozen; the historical 24 failures remain historical evidence. |
 | 21 | `done` | The six T21 stable identifiers have deterministic closure evidence above. T22/T23 ownership and the Xiaomi device gate remain separate. |
 | 22 | `done` | The three T22 stable identifiers passed the focused connected and JVM verification above. No production change was needed; T23 visibility/ownership remains separate. |
+| 23 | `done` | The 11 T23 stable identifiers passed the focused connected and JVM verification above. Existing window/root/target ownership behavior satisfied the contract; Xiaomi OEM validation remains T29. |
 
 ### Phases 0–4
 
 | Phase | Reconciled status | Open boundary |
 | --- | --- | --- |
 | Phase 0 | `complete — policy and deterministic RED-contract stage` | Its failures are inputs to later implementation tickets, not fixed results. |
-| Phase 1 | `T21/T22 deterministic closure recorded; verification open` | T23 retains the 11 visibility/ownership cases; T24/T25/T26 and Xiaomi device verification remain open. |
+| Phase 1 | `T21/T22/T23 deterministic closure recorded; verification open` | T24/T25/T26 and Xiaomi device verification remain open. |
 | Phase 2 | `implementation and fault/cancellation contracts recorded done; measurement decisions open` | T24 owns callback flush; T27 owns callback/decision p95; T28 owns numeric drain-budget decision. |
 | Phase 3 | `done — NO-GO` | Do not add a per-package coordinator unless its entry condition is newly reproduced. |
 | Phase 4 | `done — NO-GO; architecture gate closed` | Revisit only if production cleanup ordering or containment changes. |
@@ -260,8 +292,8 @@ historical 24 failures, or the later connected results, into a green release gat
 ## Remaining verification work
 
 - Ticket 21's six T21 cases are resolved in the deterministic closure evidence above without changing the approved evidence policy.
-- Ticket 22's three recheck cases are resolved in the closure evidence above; ticket 23 owns the
-  eleven visibility/ownership cases. Neither ticket may absorb the other owner's identifiers.
+- Ticket 22's three recheck cases and Ticket 23's eleven visibility/ownership cases are resolved in
+  the closure evidence above. Neither ticket absorbed the other owner's identifiers.
 - Ticket 24 owns the two callback-flush cases. Ticket 25 owns the one Guardian lifecycle case.
 - Ticket 26 owns the one debug-fixture case and must not relabel product failures as fixture failures.
 - Ticket 27 must first propose and obtain approval for a p95 measurement protocol; no p95 value is
@@ -283,9 +315,13 @@ historical 24 failures, or the later connected results, into a green release gat
 - The T22 focused XML reported `37` cases, `0` failures, `0` errors and `0` skipped; all three
   T22 identifiers were present and passed. The focused JVM XML reported `33` cases with no
   failures, errors or skips.
-- The final post-T22 full JVM XML reported `351` cases, all passed. The final post-T22 connected
-  XML reported `92` cases with `88` passes and four failures classified as T24 `2`, T25 `1`, and
-  T26 `1`; T22 had no failure node.
+- The T23 focused XML reported `37` cases, `0` failures, `0` errors and `0` skipped; all 11
+  T23 identifiers were present and passed at XML timestamp `2026-09-10T01:45:55`. The focused
+  JVM XML for `ForegroundEvidenceContractTest` reported `29` cases with no failures, errors or
+  skips.
+- The final post-T23 full JVM XML reported `351` cases, all passed. The final post-T23 connected
+  XML reported `92` cases with `89` passes and three failures classified as T24 `2` and T26 `1`;
+  T21, T22, T23 and T25 had no failure node.
 - The device properties were read through ADB and match the recorded serial, model, API level and
   build fingerprint.
 - Focused or filtered results, including ticket 19's binder test, were not added to the 91-test
