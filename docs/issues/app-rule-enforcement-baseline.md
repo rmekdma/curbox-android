@@ -273,6 +273,28 @@ the existing denial flow, visible activity identity, close broadcast, and backgr
 The connected result is deterministic T25 closure evidence on iPlay50, not Xiaomi OEM evidence.
 `Xiaomi Pad Pro 2025 12.7` Android 15/16 remains the final Ticket 29 gate.
 
+### Ticket 25 payload validation hardening — 2026-09-10
+
+The accepted Copernicus Standards finding identified a payload boundary in the same Guardian
+lifecycle seam. `GuardianApprovalActivity` now validates the package identity and denial list as
+one payload before initial rendering or repeated-intent state replacement. The payload requires a
+nonblank package, a nonempty list, nonnull entries, and a nonblank `ruleId`; `ruleName` and
+`reason` remain unchanged and are not given new policy requirements. A malformed repeated intent
+returns before `super.onNewIntent()` or `setIntent()`, so the current valid screen, intent, and
+close-broadcast package remain intact. A malformed initial payload finishes safely.
+
+| Verification | Environment and result |
+| --- | --- |
+| Focused connected after hardening | `GuardianApprovalActivityLifecycleTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: `6` tests, `6` passed, `0` failures, `0` errors, `0` skipped; XML timestamp `2026-09-10T03:42:54` (timezone not encoded). This includes valid SINGLE_TOP refresh, null/malformed denial replacement, missing-package replacement, initial malformed finish, close broadcast, and background-finish cleanup. |
+| Screen identity, decision count, and cleanup | Malformed replacements kept one existing `GuardianApprovalActivity`, retained the current denial row, and did not replace the valid package. Closing the activity emitted the close broadcast with the valid current package. The valid repeated request still rendered one choice row with updated denial content. |
+| Full JVM after hardening | `testFullDebugUnitTest`: `64` XML suites, `351` tests, `351` passed, `0` failures, `0` errors, `0` skipped. |
+| Full connected after hardening | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: `95` tests, `94` passed, `1` failure, `0` errors, `0` skipped; XML timestamp `2026-09-10T03:46:02` (timezone not encoded). |
+| Remaining failure classification | The only failure was `ExampleInstrumentedTest::useAppContext`, owned by T26's debug application-id fixture. No T25 failure node was reported. |
+| Production scope | One narrow validation boundary and regression coverage only. No approval policy, timing threshold, architecture, or device substitution was added. |
+
+This is deterministic Guardian payload evidence on iPlay50, not Xiaomi OEM evidence. The final
+`Xiaomi Pad Pro 2025 12.7` Android 15/16 validation remains the Ticket 29 gate.
+
 ### T24–T26 — 4 cases
 
 | Owner | Stable identifier | Primary classification |

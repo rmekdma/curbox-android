@@ -34,6 +34,11 @@ import kotlinx.coroutines.withContext
 
 /** Internal approval surface. It has no exported intent or broadcast write path. */
 class GuardianApprovalActivity : AppCompatActivity() {
+    private data class GuardianApprovalPayload(
+        val packageName: String,
+        val denials: List<AppRuleGuardianDenial>
+    )
+
     private lateinit var binding: ActivityGuardianApprovalBinding
     private val dataStore by lazy { DataStoreManager(applicationContext) }
     private var denials: List<AppRuleGuardianDenial> = emptyList()
@@ -79,11 +84,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 navigateHomeAndFinish()
             }
         })
-        denials = readDenials(intent)
-        if (denials.isEmpty()) {
+        val payload = readValidatedPayload(intent)
+        if (payload == null) {
             finish()
             return
         }
+        denials = payload.denials
         ContextCompat.registerReceiver(
             this,
             guardianStateRequestReceiver,
@@ -99,21 +105,41 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     override fun onNewIntent(intent: Intent) {
+        val payload = readValidatedPayload(intent) ?: return
+        if (isFinishing) return
         super.onNewIntent(intent)
-        val updatedDenials = readDenials(intent)
-        if (updatedDenials.isEmpty() || isFinishing) return
         setIntent(intent)
-        denials = updatedDenials
+        denials = payload.denials
         selectedRuleId = denials.first().ruleId
         render()
     }
 
-    private fun readDenials(sourceIntent: Intent): List<AppRuleGuardianDenial> = runCatching {
-        Gson().fromJson<List<AppRuleGuardianDenial>>(
-            sourceIntent.getStringExtra(EXTRA_DENIALS).orEmpty(),
-            object : TypeToken<List<AppRuleGuardianDenial>>() {}.type
+    private fun readValidatedPayload(sourceIntent: Intent): GuardianApprovalPayload? {
+        val packageName = runCatching {
+            sourceIntent.getStringExtra(EXTRA_PACKAGE)
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+        }.getOrNull() ?: return null
+        val parsedDenials = runCatching {
+            Gson().fromJson<List<AppRuleGuardianDenial?>>(
+                sourceIntent.getStringExtra(EXTRA_DENIALS).orEmpty(),
+                object : TypeToken<List<AppRuleGuardianDenial?>>() {}.type
+            )
+        }.getOrNull() ?: return null
+        if (parsedDenials.isEmpty()) return null
+
+        val validatedDenials = parsedDenials.map { denial ->
+            runCatching {
+                denial?.takeIf { it.ruleId.isNotBlank() }
+            }.getOrNull()
+        }
+        if (validatedDenials.any { it == null }) return null
+
+        return GuardianApprovalPayload(
+            packageName = packageName,
+            denials = validatedDenials.filterNotNull()
         )
-    }.getOrNull().orEmpty()
+    }
 
     private fun render() {
         val choices = binding.approvalChoices

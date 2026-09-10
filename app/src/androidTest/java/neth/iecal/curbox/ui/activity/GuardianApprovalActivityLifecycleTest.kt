@@ -56,6 +56,124 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
+    fun malformedDenialReplacementRetainsTheCurrentApprovalPayload() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val receivedPackage = AtomicReference<String?>()
+        val closed = CountDownLatch(1)
+        val receiver = guardianClosedReceiver(receivedPackage, closed)
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_CLOSED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(reason = "Current denial")
+            ).use { scenario ->
+                lateinit var original: GuardianApprovalActivity
+                scenario.onActivity { approval ->
+                    original = approval
+                    assertDenialReason(approval, "Current denial")
+                }
+
+                instrumentation.targetContext.startActivity(
+                    malformedApprovalIntent("[null]")
+                )
+                instrumentation.waitForIdleSync()
+
+                scenario.onActivity { approval ->
+                    assertSame(original, approval)
+                    assertDenialReason(approval, "Current denial")
+                }
+
+                instrumentation.targetContext.startActivity(
+                    malformedApprovalIntent(
+                        "[{\"ruleName\":\"Malformed\",\"reason\":\"Bad payload\"}]"
+                    )
+                )
+                instrumentation.waitForIdleSync()
+
+                scenario.onActivity { approval ->
+                    assertSame(original, approval)
+                    assertDenialReason(approval, "Current denial")
+                }
+            }
+
+            assertTrue(
+                "closing the approval activity must notify the blocker",
+                closed.await(2, TimeUnit.SECONDS)
+            )
+            assertEquals(context.packageName, receivedPackage.get())
+        } finally {
+            context.unregisterReceiver(receiver)
+        }
+    }
+
+    @Test
+    fun missingPackageReplacementRetainsTheCurrentPackageForCleanup() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val receivedPackage = AtomicReference<String?>()
+        val closed = CountDownLatch(1)
+        val receiver = guardianClosedReceiver(receivedPackage, closed)
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_CLOSED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(reason = "Current package")
+            ).use { scenario ->
+                lateinit var original: GuardianApprovalActivity
+                scenario.onActivity { approval ->
+                    original = approval
+                    assertDenialReason(approval, "Current package")
+                }
+
+                instrumentation.targetContext.startActivity(
+                    approvalIntentWithoutPackage(reason = "Replacement denial")
+                )
+                instrumentation.waitForIdleSync()
+
+                scenario.onActivity { approval ->
+                    assertSame(original, approval)
+                    assertDenialReason(approval, "Current package")
+                }
+            }
+
+            assertTrue(
+                "closing the approval activity must notify the blocker",
+                closed.await(2, TimeUnit.SECONDS)
+            )
+            assertEquals(context.packageName, receivedPackage.get())
+        } finally {
+            context.unregisterReceiver(receiver)
+        }
+    }
+
+    @Test
+    fun malformedInitialPayloadFinishesWithoutCrash() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        ActivityScenario.launch<GuardianApprovalActivity>(
+            malformedApprovalIntent("[null]")
+        ).use { scenario ->
+            instrumentation.waitForIdleSync()
+            if (scenario.state != Lifecycle.State.DESTROYED) {
+                scenario.onActivity { approval ->
+                    assertTrue(
+                        "a malformed initial payload must finish the activity",
+                        approval.isFinishing
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
     fun approvalIsFinishedAfterItLeavesTheForeground() {
         ActivityScenario.launch<GuardianApprovalActivity>(approvalIntent()).use { scenario ->
             if (scenario.state != Lifecycle.State.DESTROYED) {
@@ -107,6 +225,39 @@ class GuardianApprovalActivityLifecycleTest {
             context.unregisterReceiver(receiver)
         }
     }
+
+    private fun assertDenialReason(activity: GuardianApprovalActivity, reason: String) {
+        assertTrue(
+            (activity.findViewById<RadioGroup>(R.id.approval_choices)
+                .getChildAt(0) as RadioButton).text.contains(reason)
+        )
+    }
+
+    private fun guardianClosedReceiver(
+        receivedPackage: AtomicReference<String?>,
+        closed: CountDownLatch
+    ): BroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            receivedPackage.set(
+                intent?.getStringExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE)
+            )
+            closed.countDown()
+        }
+    }
+
+    private fun malformedApprovalIntent(denialsJson: String): Intent {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        return Intent(context, GuardianApprovalActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(GuardianApprovalActivity.EXTRA_PACKAGE, context.packageName)
+            putExtra(GuardianApprovalActivity.EXTRA_DENIALS, denialsJson)
+        }
+    }
+
+    private fun approvalIntentWithoutPackage(reason: String): Intent =
+        approvalIntent(reason).apply {
+            removeExtra(GuardianApprovalActivity.EXTRA_PACKAGE)
+        }
 
     private fun approvalIntent(reason: String = "Daily limit reached"): Intent {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
