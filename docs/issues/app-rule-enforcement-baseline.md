@@ -107,15 +107,16 @@ the separate known-other-package ownership case remains the T23 contract.
 | Focused connected | `connectedFullDebugAndroidTest` filtered to `AppRuleBlockerLongBoundaryRedTest` on `iPlay50_mini_Pro - 13` / Android 13: 10 tests, 10 passed, 0 failures, 0 errors, 0 skipped. The six T21 identifiers and the synthetic timestamp regression all passed. |
 | Full JVM | `testFullDebugUnitTest`: 351 tests, 351 passed, 0 failures, 0 errors, 0 skipped. |
 | Flavor compile | `assembleFullDebug`, `assemblePlaystoreDebug`, and `assembleFdroidDebug`: all succeeded. |
-| Final unfiltered connected | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13: 92 tests, 89 passed, 3 failures, 0 errors, 0 skipped. |
+| T21 closure connected execution (recorded 2026-09-10; exact XML timestamp not retained in this record) | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13: 92 tests, 89 passed, 3 failures, 0 errors, 0 skipped. |
 
-The final connected failures are unchanged outside T21: `ExampleInstrumentedTest::useAppContext`
-is the T26 debug-fixture failure, and
+In that T21 closure execution, the observed failures were `ExampleInstrumentedTest::useAppContext`
+as the T26 debug-fixture failure, and
 `AppRuleBlockerCallbackFlushOrderingRedTest::foregroundCallbackReturnsBeforeDelayedPersistenceCompletes`
 plus `AppRuleBlockerCallbackFlushOrderingRedTest::evaluatorRunsOnlyAfterVisibleSessionFlushIsCommitted`
 are the two T24 callback-flush failures. No T21, T22, T23, or T25 failure node was reported in
-this final run; that observation does not reassign or close those tickets. The connected result is
-not Xiaomi evidence: `Xiaomi Pad Pro 2025 12.7` Android 15/16 remains the ticket 29 device gate.
+that execution; this execution-specific observation does not reassign, close, or establish a fix for
+any ticket. The connected result is not Xiaomi evidence: `Xiaomi Pad Pro 2025 12.7` Android 15/16
+remains the ticket 29 device gate.
 
 ### T22-RECHECK — 3 cases
 
@@ -159,9 +160,9 @@ run.
 
 The four full-connected failures classify against Ticket 20 as T24 callback flush (2), T25
 Guardian lifecycle (1), and T26 debug fixture (1). T21, T22 and T23 had no failure node in this
-run. The newly observed T25 failure is recorded as current verification evidence; it does not
-change T22 ownership or claim that the T25 case is fixed. This run is on iPlay50 and is not the
-Ticket 29 Xiaomi Pad Pro 2025 12.7 Android 15/16 gate.
+run. The T25 result is an execution-specific current observation that remains open; it is neither a
+claim that the case is fixed nor a definitive product diagnosis. This run is on iPlay50 and is not
+the Ticket 29 Xiaomi Pad Pro 2025 12.7 Android 15/16 gate.
 
 ### T23-VISIBILITY-OWNERSHIP — 11 cases
 
