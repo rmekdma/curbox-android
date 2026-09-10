@@ -1003,10 +1003,12 @@ class AppRuleBlocker {
             if (!isCurrentWorkerRequestLocked(workerInstanceToken, request, accepted) ||
                 foregroundEvidenceSuspended
             ) return
-            recordForegroundEvidence(
-                packageName = packageName,
-                evidenceAtElapsedMs = evidenceAtElapsedMs
-            )
+            if (request.reason != ObservationKind.SYNTHETIC_RECHECK) {
+                recordForegroundEvidence(
+                    packageName = packageName,
+                    evidenceAtElapsedMs = evidenceAtElapsedMs
+                )
+            }
             pendingWorkerEvaluations
                 .getOrPut(request.sourceOrderIdentity) { mutableMapOf() }[packageName] = evaluation
         }
