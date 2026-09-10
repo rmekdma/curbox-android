@@ -38,38 +38,37 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 
 ### AR 001 장시간 보호자 추가시간 뒤 가시성 증거 만료
 
-- **Status / Severity:** `확정 미해결` / `P1`
+- **Status / Severity:** `닫힘 (T21 deterministic contract; OEM gate remains separate)` / `P1`
 - **Exact trigger:** 앱 규칙의 직접 사용 가능 시간이 소진된 상태에서 보호자 추가시간이 5초보다 길게 남아 있고, 앱이 계속 보이는 동안 새로운 `TYPE_WINDOW_STATE_CHANGED` 이벤트가 오지 않는다. 동시에 `service.windows`가 앱을 누락한 오래된 목록을 반환하거나 빈 목록 또는 `null` root를 반환하고, 다른 신뢰할 수 있는 비필수 앱 root도 없다. Canonical connected evidence는 이 trigger family의 six failed cases를 T21 owner로 기록한다.
-- **Current behavior:** 재검사 시점에는 `currentForegroundEvidenceAtElapsedMs`가 `FOREGROUND_EVIDENCE_MAX_AGE_MS = 5_000`을 지나 있다. `packageVisibility()`는 대상 앱이 창 목록이나 신뢰할 수 있는 active root에서 확인되지 않으면 `UNKNOWN`을 반환한다. 세 번의 짧은 재시도 뒤 `canUseForegroundFallback()`도 만료된 이벤트 증거를 거부하므로, 규칙 평가 없이 20초 회복 재검사만 반복한다. synthetic event는 foreground 증거의 시각을 갱신하지 않는다.
-- **Impact:** 시간 구간의 전면 앱 사용 금지 규칙이나 추가시간 만료 뒤의 다른 규칙이 앱이 계속 보이는 동안 잠기지 않을 수 있다. 새 접근성 이벤트나 신뢰할 수 있는 창 정보가 나올 때까지 제한이 늦어지는 것이 아니라 사실상 무기한 늦어질 수 있다. 이는 `Xiaomi Pad Pro 2025 12.7` Android 15/16에서 확인해야 할 보고 증상과 같은 종류의 실패 경로다.
+- **Current behavior:** 승인된 R5 A 경로는 실제 event의 raw signal history를 host scheduler classifier에 보존하고, evidence age가 만료된 뒤에도 세 번의 bounded retry가 끝나면 마지막 비필수 package에 대해 `EVALUATE_FAIL_CLOSED`를 worker로 전달한다. worker는 synthetic event로 evidence TTL을 갱신하지 않은 채 boundary 시점의 persisted session을 읽고 evaluator 결과를 적용한다. evaluator의 ordinary failure는 기존 fail closed eligibility로 denial을 만들고, request child cancellation은 outcome, warning, recovery 없이 contained된다. 다른 비필수 active root 또는 알려진 partial window가 현재 package를 식별하는 경우에는 이 fallback을 사용하지 않는다.
+- **Impact:** T21의 deterministic contract에서는 시간 경계의 evaluator decision과 Guardian denial이 더 이상 사라지지 않는다. 이 결과는 `Xiaomi Pad Pro 2025 12.7` Android 15/16에서 같은 동작이 확인됐다는 뜻이 아니며, 실제 OEM window/root 동작과 reported incident 판정은 AR004에 남는다.
 - **Evidence:**
-  - [AppRuleBlocker.kt:61](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L61)부터 [AppRuleBlocker.kt:64](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L64)의 재시도, 20초 회복, 5초 증거 만료 상수
-  - [AppRuleBlocker.kt:983](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L983)부터 [AppRuleBlocker.kt:1008](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1008)의 `UNKNOWN` 처리
-  - [AppRuleBlocker.kt:1281](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1281)부터 [AppRuleBlocker.kt:1339](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1339)의 증거 만료와 fallback 판정
-- [AppRuleRecheckPlanner.kt:20](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleRecheckPlanner.kt#L20)부터 [AppRuleRecheckPlanner.kt:64](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleRecheckPlanner.kt#L64)의 다음 경계 예약
-  - [canonical baseline inventory](app-rule-enforcement-baseline.md#t21-long-boundary-semantics--6-cases)의 T21 six-case observed failure set
-- **Mitigation or decision needed:** 승인된 [foreground evidence policy matrix](../plans/app-rule-enforcement-refactor.md#foreground-evidence-policy-matrix--approved-2026-08-31)를 따른다. R5는 A안으로 확정되어, 1.5초 bounded retry 뒤 마지막 비필수 package의 restriction을 fail closed한다. 5초 TTL을 늘리는 것만으로 해결하지 않으며, 다른 앱 root가 확실히 활성인 경우에는 이전 앱을 잠그지 않는다. 실제 adapter와 evaluator 변경은 Phase 1에서 수행한다.
-- **Acceptance criteria:** 가상 시각과 창 제공자를 주입한 테스트에서 30초 이상의 추가시간, 이벤트 없음, 오래된 목록, 빈 목록, `null` root를 재현한다. 정책이 평가를 요구하는 각 상태에서는 제한 시간 안에 실제 evaluator 결과와 대상 규칙의 거부 또는 허용을 관찰하고, 정책이 보류를 요구하는 상태에서는 그 보류 결과와 최대 지연을 관찰한다. 동시에 다른 비필수 앱 root가 확실한 경우에는 이전 앱을 재평가하지 않는다. `Xiaomi Pad Pro 2025 12.7` Android 15 또는 Android 16에서 같은 시나리오를 실제 `windows`와 `rootInActiveWindow`로 확인한다. 현재 canonical run은 이 조건의 six RED cases를 고정했지만 acceptance를 충족시키거나 failure를 fixed로 표시하지 않는다.
-- **Target refactor phase:** 리팩토링 계획의 `Phase 0 정책 결정`에서 결정하고 `Phase 1 foreground evidence 모듈`에서 수정한다.
+  - [AppRuleBlocker.kt](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt)의 `submitForegroundDecision`, `runScheduledRecheck`, worker handoff와 warning publication 경계
+  - [SerializedDecisionWorker.kt](../../app/src/main/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorker.kt)의 `EVALUATE_FAIL_CLOSED` recovery와 evaluator cancellation containment
+  - [AppRuleBlockerLongBoundaryRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerLongBoundaryRedTest.kt)의 T21 six-case deterministic scenarios
+  - [canonical baseline inventory](app-rule-enforcement-baseline.md#t21-long-boundary-semantics--6-cases)의 T21 six-case observed failure set and closure evidence
+- **Mitigation or decision needed:** 승인된 [foreground evidence policy matrix](../plans/app-rule-enforcement-refactor.md#foreground-evidence-policy-matrix--approved-2026-08-31)를 따른다. R5 A의 1.5초 bounded retry와 5초 evidence age는 그대로 유지한다. 다른 앱 root가 확실히 활성인 경우에는 이전 앱을 잠그지 않으며, current known partial window ownership은 T23 contract로 남긴다. Xiaomi 실제 adapter 검증은 ticket 29에서 수행한다.
+- **Acceptance criteria:** T21의 가상 시각과 창 제공자 테스트는 30초 추가시간, stale/empty/null 또는 failed window, evaluator decision, persisted session read, denial payload, ordinary failure, cancellation과 healthy later event를 모두 확인했고 six inventory identifiers가 통과했다. `iPlay50_mini_Pro - 13` Android 13에서의 connected evidence는 deterministic closure 증거일 뿐 Xiaomi device acceptance를 대신하지 않는다.
+- **Target refactor phase:** 리팩토링 계획의 `Phase 0 정책 결정`에서 결정했고 `Phase 1 foreground evidence 모듈`에서 수정했다. 실제 OEM 검증은 `AR 004`와 ticket 29에 남아 있다.
 
 ## 결정 기록과 구현 대기 사항
 
-### AR 002 foreground evidence 정책표 승인 완료, 구현 대기
+### AR 002 foreground evidence 정책표 승인 완료, T21 구현 완료
 
-- **Status / Severity:** `결정됨, 구현 대기` / `P1`
+- **Status / Severity:** `T21 구현됨, T22/T23 및 실제 기기 검증 잔여` / `P1`
 - **Exact trigger:** 정상 접근성 이벤트, synthetic 재검사, 서비스 재연결, 화면 켜짐과 분할 화면에서 이벤트의 최신성, `service.windows`의 상태, `rootInActiveWindow`의 상태가 서로 다르게 관찰된다. 특히 이벤트가 만료된 뒤 창 목록이 대상 앱을 누락하거나 창 package가 비어 있는 조합에서 정책이 필요하다.
-- **Current behavior:** `checkCurrentlyVisibleApplications()`, `packageVisibility()`, `canUseForegroundFallback()`, `readApplicationWindowSnapshot()`과 `readActiveWindowSnapshot()`이 각각 일부 조합을 판단한다. 실행 계약은 [리팩토링 계획의 승인된 13행 정책표](../plans/app-rule-enforcement-refactor.md#foreground-evidence-policy-matrix--approved-2026-08-31)에 고정됐지만, production adapter와 module 구현은 아직 그 계약으로 이행되지 않았다.
-- **Impact:** 같은 플랫폼 상태가 호출 경로에 따라 다르게 처리될 수 있고, AR 001을 고칠 때 미차단을 줄이려다 오차단을 만들 수 있다. 테스트가 어떤 결과를 보장해야 하는지도 명확하지 않다.
+- **Current behavior:** `ForegroundEvidenceModule`이 raw facts와 approved policy를 분류하고, `SerializedDecisionWorker`가 accepted runtime, persisted reconciliation, evaluator와 outcome을 직렬화한다. T21의 expired event fallback은 host가 실제 event signal history를 유지하고 worker가 final fail closed decision을 수행한다. T22 recheck scheduling과 T23 visibility/ownership contract는 이 ticket에서 재정의하거나 흡수하지 않는다.
+- **Impact:** T21이 소유한 evidence age와 long-boundary decision 경로는 deterministic contract로 닫혔다. 남은 제품 위험은 다른 package ownership, recheck timing, 실제 Xiaomi window/root adapter 동작과 같이 별도로 분류된 영역에 있다.
 - **Evidence:**
-  - [AppRuleBlocker.kt:591](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L591)부터 [AppRuleBlocker.kt:732](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L732)의 visible package reconciliation
-  - [AppRuleBlocker.kt:1081](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1081)부터 [AppRuleBlocker.kt:1115](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1115)의 `packageVisibility()`
-  - [AppRuleBlocker.kt:1287](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1287)부터 [AppRuleBlocker.kt:1339](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1339)의 foreground fallback
+  - [AppRuleBlocker.kt](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt)의 foreground observation, host classifier history, worker handoff와 scheduler path
+  - [ForegroundEvidenceModule.kt](../../app/src/main/java/neth/iecal/curbox/domain/apprules/ForegroundEvidenceModule.kt)의 approved R1–R13 classification
+  - [SerializedDecisionWorker.kt](../../app/src/main/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorker.kt)의 serialized persistence/evaluation/publication path
+  - [AppRuleBlockerLongBoundaryRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerLongBoundaryRedTest.kt)와 [ForegroundEvidenceContractTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/ForegroundEvidenceContractTest.kt)의 focused evidence
   - [앱 규칙 요구사항: 전면 사용량 추적](../requirements/app-rules.md#L91)와 [앱 규칙 스펙: window reconciliation 결정](../specs/app-rules-github-issue.md#L93)
 - **Mitigation or decision needed:** 승인된 표의 13개 행과 `AR002-R01`부터 `AR002-R13`까지의
-  mapping을 Phase 0 deterministic test와 Phase 1 foreground evidence module의 동일 계약으로
-  구현한다. R5에는 승인된 A안을 사용하고 B는 오차단과 제한 누락의 tradeoff를 기록한 비활성
-  대안으로만 남긴다. R6는 이전 후보가 없는 최초 관찰에서도 확실한 비필수 active root를
-  첫 후보로 평가하며, 이전 후보가 있을 때만 stale 이전 package와의 전환을 판정한다.
+  mapping을 유지한다. R5에는 승인된 A안을 사용하고 B는 오차단과 제한 누락의 tradeoff를
+  기록한 비활성 대안으로만 남긴다. T22와 T23의 남은 inventory 또는 실제 OEM 증거가
+  발견되면 해당 ticket의 scope에서 다룬다.
 - **Approval evidence:** parent replied `A` on 2026-08-31, approving the full 13-row matrix and
   selecting R5 option A.
 
@@ -86,18 +85,18 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 
 ### AR 003 결정적 장시간 경계 테스트 부재
 
-- **Status / Severity:** `테스트 공백` / `P1`
+- **Status / Severity:** `닫힘 (T21 deterministic harness; OEM gate remains separate)` / `P1`
 - **Exact trigger:** 보호자 추가시간이 foreground evidence TTL보다 길고, allowance 경계에서 이벤트가 오지 않으며, 창 제공자가 오래된 목록, 빈 목록 또는 `null` root를 반환하는 경우다.
-- **Current behavior:** 현재 Android instrumentation 테스트는 `System.currentTimeMillis()`와 `SystemClock.sleep()`에 의존하고 Handler의 실제 uptime을 기다린다. 3초 추가시간을 확인하는 테스트는 callback이 예약되고 창 읽기가 일어났는지만 확인한다. 2초 추가시간 테스트는 실제 denial을 확인하지만 TTL보다 긴 추가시간과 모든 불완전한 창 상태를 조합하지 않는다.
-- **Impact:** 테스트가 통과해도 AR 001처럼 callback은 실행됐지만 evaluator가 실행되지 않는 경로를 놓칠 수 있다. 실제 시간과 기기 부하에 따라 테스트가 불안정해지고, 실패 원인도 분리하기 어렵다.
+- **Current behavior:** `AppRuleBlockerLongBoundaryRedTest`는 `VirtualClock`, `VirtualRecheckScheduler`, ordered provider states와 worker/handler latches를 사용해 sleep 없이 T21의 30초 boundary를 재현한다. evaluator result, persisted read, denial payload, ordinary failure, cancellation과 later event를 관찰한다.
+- **Impact:** T21 소유 영역에서는 callback이 실행됐다는 사실만으로 green을 주장하는 공백이 닫혔다. 실제 `windows`와 `rootInActiveWindow` 동작 및 Xiaomi 검증은 AR004에 남아 있다.
 - **Evidence:**
-  - [AppRuleBlockerRecheckTest.kt:80](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L80)부터 [AppRuleBlockerRecheckTest.kt:114](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L114)의 3초 grant와 `windowsReads` 단독 확인
-  - [AppRuleBlockerRecheckTest.kt:146](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L146)부터 [AppRuleBlockerRecheckTest.kt:223](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L223)의 2초 grant와 5초 sleep
-  - [AppRuleBlocker.kt:1281](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1281)부터 [AppRuleBlocker.kt:1285](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1285)의 elapsed time TTL
-  - [canonical baseline inventory](app-rule-enforcement-baseline.md#failure-inventory)의 T21 six-case owner set
-- **Mitigation or decision needed:** 시계 세 종류인 wall clock, elapsed clock, Handler scheduler를 주입할 수 있는 deterministic seam을 만든다. 제품 동작 테스트는 evaluator 호출, 최종 denial과 허용 결과를 외부에서 확인하고, concurrency/performance contract 테스트는 worker thread, queue idle, post-destroy side effect와 latency budget을 확인한다. visibility 상태를 순서대로 공급하는 테스트를 JVM 또는 빠른 instrumentation으로 작성한다.
-- **Acceptance criteria:** sleep 없이 30초 이상의 grant를 가상 시간으로 진행하는 테스트가 있다. `no event + stale window`, `no event + empty window`, `no event + null root`를 각각 실행하고, callback 실행 여부가 아니라 evaluator 결과와 `startedActivities`의 denial payload를 확인한다. 다른 active root가 있는 경우의 비잠금 결과도 같은 제품 동작 테스트 묶음에 포함한다. 별도의 contract 테스트는 thread/queue idle, post-destroy side effect와 latency budget을 관찰할 수 있지만 private call order를 검증하지 않는다.
-- **Target refactor phase:** `Phase 0 deterministic harness`, `Phase 1 foreground evidence 모듈`, 이후 scheduler 관련 검증은 `Phase 2`에서 수행한다.
+  - [AppRuleBlockerLongBoundaryRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerLongBoundaryRedTest.kt)의 deterministic clock/scheduler and T21 six-case evidence
+  - [ForegroundEvidenceContractTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/ForegroundEvidenceContractTest.kt)의 29 focused evidence-age/provenance cases
+  - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 23 focused worker cases
+  - [canonical baseline inventory](app-rule-enforcement-baseline.md#ticket-21-closure-evidence-2026-09-10)의 exact run counts and remaining failure owners
+- **Mitigation or decision needed:** T21 harness와 production seam을 유지한다. recheck scheduling, visibility ownership, callback flush와 device validation은 각각 T22–T24 및 T29의 scope로 남긴다.
+- **Acceptance criteria:** T21의 six stable identifiers는 final focused connected run에서 통과했고, focused JVM에는 52 tests with 0 failures, full JVM에는 350 tests with 0 failures가 기록됐다. Final unfiltered connected run은 91 tests, 88 passed, 3 unrelated inventory failures를 기록했으며, 그 3건은 T24와 T26으로 분류된다.
+- **Target refactor phase:** `Phase 0 deterministic harness`와 `Phase 1 foreground evidence 모듈`의 T21 범위를 완료했다. 이후 scheduler 관련 검증은 `Phase 2`에서 수행한다.
 
 ### AR 004 Xiaomi Pad Pro 2025 12.7 실제 창 동작 테스트 부재
 
@@ -264,6 +263,8 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **서비스 재연결 후 기존 visible application을 검사하지 않는 경로:** setup 완료 후 visible reconciliation을 게시한다. [AppRuleBlocker.kt:219](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L219)부터 [AppRuleBlocker.kt:224](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L224)을 참조한다.
 - **AppBlockerService의 한 feature cleanup 실패가 AppRuleBlocker cleanup을 건너뛰는 경로:** feature별 containment로 분리됐다. [AppBlockerService.kt:259](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L259)부터 [AppBlockerService.kt:303](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L303)을 참조한다.
 
-이 목록은 AR 001의 정책과 테스트 공백을 해결했다는 뜻이 아니다. AR 002의 13행 정책표와
-R5 A 선택은 승인됐지만, 그 계약을 production adapter와 foreground evidence module에
-반영하고 AR 003 및 AR 004의 검증을 수행하는 일은 남아 있다.
+이 목록의 AR 001 deterministic contract와 AR 003 deterministic harness 범위는 T21에서
+해결됐다. 이는 실제 OEM 동작이나 보고된 incident가 종료됐다는 뜻은 아니다. AR 002의
+13행 정책표와 R5 A 선택은 승인됐고 T21에 필요한 production adapter 및 foreground evidence
+module 경로에 반영됐다. T22/T23의 잔여 ownership/recheck 범위와 AR 004의 실제 Xiaomi
+검증은 각 ticket과 limitation 항목에 남아 있다.
