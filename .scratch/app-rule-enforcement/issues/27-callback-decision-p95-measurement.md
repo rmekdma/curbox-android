@@ -40,12 +40,12 @@ post-preflight empty app-data state, but a future measurement invocation must st
 approved final-APK pinning and clean-state gate. No measurement harness was implemented or run,
 no samples were collected, and no p95 was calculated.
 
-This revision is approved protocol documentation. The remaining
-`WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground` failure remains
-an unassigned preflight observation. A clean preflight reproduction must record whether it is
-causally relevant to this fixed harness path and ask the user whether to create a separate
-triage ticket. Its existence alone does not block Ticket 27 and this protocol does not absorb
-or fix it.
+This revision is approved protocol documentation. The historical
+`WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground` failure remains an
+unassigned observation, but it did not reproduce in the approved focused preflight: 1 test ran
+and 1 passed. If it recurs in a future required clean preflight, record whether it is causally
+relevant to this fixed harness path and ask the user whether to create a separate triage ticket.
+Recurrence alone does not block Ticket 27, and this protocol does not absorb or fix it.
 
 ### Approved boundary
 
@@ -112,10 +112,12 @@ UI effect, or warning.
   `SystemClock.elapsedRealtimeNanos()`. Store every such value as a raw integer nanosecond
   field; never convert it to milliseconds before retention or subtract wall-clock time. Wall
   clock values may be retained separately for human-readable run metadata only.
-- The diagnostic adapter correlates callback-local timestamps with the request's existing
-  `SourceOrderIdentity`, then correlates that identity with the selected A or B seam. It does
-  not add timing fields to the decision contract and does not make a second evaluator or
-  persistence call.
+- For the approved B run, the diagnostic adapter correlates callback-local timestamps only with
+  the `DecisionOutcome` delivered at `DecisionOutcomeSink.publish` entry. That outcome supplies
+  the existing `SourceOrderIdentity`, lifecycle generation, accepted runtime revision, package
+  decision, allow/deny value, denying-rule count, commit status, and publication status. It does
+  not install or invoke an A-only `onEvaluation` observer, add timing fields to the decision
+  contract, or make a second evaluator or persistence call.
 - Observation must be passive: no blocking I/O, sleeps, latches, measurement locks, scheduler
   posts, queue changes, policy branches, or UI interception on the callback or worker path.
   Required attempt disposition is retained by the lossless ledger described below.
@@ -141,10 +143,11 @@ test-owned blocker lifecycle ready. It deliberately does not call production `se
 that would start DataStore collection, notification ticks, visible-app refresh, and reconnect
 effects; it also never calls `setupReceivers()`. As in the existing direct callback tests, the
 first accepted preflight request reaches `ensureDecisionWorker`, which constructs the production
-`SerializedDecisionWorker`; the harness does not construct a substitute worker. After approval,
-the only new observation hooks are identity-bearing passive callbacks at `onEvaluation` entry
-and as the first statement of `DecisionOutcomeSink.publish`, after its `DecisionOutcome`
-argument exists. They may write only raw primitive fields into the preallocated ledger.
+`SerializedDecisionWorker`; the harness does not construct a substitute worker. The approved B
+implementation adds exactly one new observation hook: an identity-bearing passive callback as
+the first statement of `DecisionOutcomeSink.publish`, after its `DecisionOutcome` argument
+exists. It writes only raw primitive outcome fields and `selectedEndNs` into the preallocated
+ledger. The B harness does not add, install, or use the A-only `onEvaluation` hook.
 
 The instrumentation runs in the target APK's main app process. Before allocating the harness,
 it asserts `Application.getProcessName()` equals the host-pinned target application id and does
