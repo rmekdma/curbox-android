@@ -116,6 +116,31 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Acceptance criteria:** the earlier payload-hardening execution recorded focused Guardian lifecycle connected tests at `6/6`, full JVM at `351/351`, and full connected at `95` tests with `94` passed and only T26's debug fixture remaining. The later accepted-review execution recorded focused Guardian lifecycle connected tests at `8/8` (XML timestamp `2026-09-10T04:19:57`), full JVM at `351/351`, and full connected at `97` tests with `96` passed, `1` T26 debug-fixture failure, `0` errors, and `0` skipped (XML timestamp `2026-09-10T04:21:50`); `assembleFullDebug`, `assemblePlaystoreDebug`, and `assembleFdroidDebug` were green. The grant and skip completion waits run while `ActivityScenario` remains open. These results are iPlay50 deterministic evidence, not Xiaomi acceptance.
 - **Target refactor phase:** `Phase 1/2 lifecycle integration`; no new lifecycle host or approval architecture was introduced.
 
+### Ticket 26 debug application-ID fixture closure
+
+- **Status:** `닫힘 (variant-aware debug fixture; OEM gate remains separate)`
+- **Exact trigger:** `ExampleInstrumentedTest::useAppContext` asserted the release application ID
+  `neth.iecal.curbox` while the debug target correctly used `neth.iecal.curbox.debug`.
+- **Current behavior:** The test compares `InstrumentationRegistry.getInstrumentation().targetContext`
+  with the variant-generated `BuildConfig.APPLICATION_ID`, so release and debug flavor semantics
+  remain explicit and the expected identity is not weakened.
+- **Fixture isolation and cleanup:** The test has no mutable state, persistent files, receivers,
+  services, or database writes. Three clean focused connected invocations each passed `1/1`; the
+  connected task left no Curbox target or instrumentation package installed, and the final pre-suite
+  ADB package check was empty.
+- **Evidence:** [ExampleInstrumentedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/ExampleInstrumentedTest.kt),
+  [Ticket 26 closure evidence](app-rule-enforcement-baseline.md#ticket-26-closure-evidence--2026-09-10),
+  and [Ticket 26 record](../../.scratch/app-rule-enforcement/issues/26-debug-fixture-reliability-closure.md).
+- **Final suite boundary:** Full JVM was `351/351` with `0` failures, errors, or skips; the three
+  debug flavor assemblies succeeded. The final full connected run was `97` total, `96` passed,
+  `1` failure, `0` errors and `0` skipped. Its only failure was
+  `WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground`, which is not one
+  of Ticket 20's frozen 24 identifiers and is intentionally not assigned to T26 or diagnosed here.
+- **Mitigation or decision needed:** Keep this fixture assertion variant-aware. Preserve the
+  outside-inventory WarningActivity observation for separate ownership; do not relabel it as a
+  debug-fixture failure. Xiaomi validation remains the Ticket 29 gate.
+- **Target refactor phase:** `Phase 1/2 verification boundary`; no production behavior changed.
+
 ### AR 004 Xiaomi Pad Pro 2025 12.7 실제 창 동작 테스트 부재
 
 - **Status / Severity:** `테스트 공백` / `P1`

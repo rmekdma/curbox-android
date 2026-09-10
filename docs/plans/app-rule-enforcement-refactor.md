@@ -827,8 +827,10 @@ called fixed by this baseline reconciliation. Ticket 25 later recorded determini
 evidence for its one Guardian lifecycle case. Ticket 22 recorded focused green evidence for
 its three owned cases without changing production code, and Ticket 23 recorded focused green
 visibility/window/root/target ownership evidence without changing production or test source. Ticket
-24 recorded focused connected/JVM ordering evidence without changing production source. The p95
-measurement, numeric drain decision, T26 closure and Xiaomi device validation remain open.
+24 recorded focused connected/JVM ordering evidence without changing production source. Ticket 26
+closed its one frozen debug application-ID fixture with a variant-aware `BuildConfig.APPLICATION_ID`
+assertion and no production change. The p95 measurement, numeric drain decision and Xiaomi device
+validation remain open.
 
 ### 6. Phase 0 RED contract → future invariant mapping
 
@@ -954,7 +956,7 @@ framework facts와 evidence policy 해석을 하나의 deep module 뒤에 둔다
 decisions open`. Ticket 11–15와 ticket 18의 worker, scheduler, fault/cancellation 및 lifecycle
 measurement evidence는 완료됐다. Ticket 24의 callback-flush ordering은 focused evidence로
 닫혔고, callback/decision p95 measurement와 numeric drain-budget decision은 각각 ticket 27,
-28에 남아 있다. T25 closure는 별도 deterministic evidence로 기록됐고, T26 closure와
+28에 남아 있다. T25 closure와 T26 fixture closure는 별도 deterministic evidence로 기록됐고,
 Xiaomi validation은 별도 scope다.
 
 `887aab62` 이후 T25 accepted-review verification은 [canonical baseline의 follow-up
@@ -963,6 +965,8 @@ section](../issues/app-rule-enforcement-baseline.md#ticket-25-accepted-review-fo
 `351/351`, full connected `97` total / `96` passed / `1` T26 debug-fixture failure (XML timestamp
 `2026-09-10T04:21:50`), and Full/Playstore/F-Droid debug builds all green. The grant/skip
 completion barrier is observed while `ActivityScenario` remains open; no sleep-based probe is used.
+
+Ticket 26's final closure evidence is recorded in the [canonical baseline follow-up](../issues/app-rule-enforcement-baseline.md#ticket-26-closure-evidence--2026-09-10): three clean focused runs passed `1/1`, the full JVM passed `351/351`, and all three debug flavor assemblies succeeded. The final full connected run reported `97` total, `96` passed and one remaining `WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground` failure. That execution-specific node is outside Ticket 20's frozen inventory and is not assigned to T26.
 
 **목적:** 이 section 앞의 architecture contract, 특히 §§1.2–5를 실행해 callback의 handoff와
 session/evaluator/scheduler/outcome publication 순서를 하나의 deep worker가 소유하게 한다.
