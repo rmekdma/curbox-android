@@ -957,6 +957,13 @@ measurement evidence는 완료됐다. Ticket 24의 callback-flush ordering은 fo
 28에 남아 있다. T25 closure는 별도 deterministic evidence로 기록됐고, T26 closure와
 Xiaomi validation은 별도 scope다.
 
+`887aab62` 이후 T25 accepted-review verification은 [canonical baseline의 follow-up
+section](../issues/app-rule-enforcement-baseline.md#ticket-25-accepted-review-follow-up--2026-09-10)에
+기록됐다: Guardian focused connected `8/8` (XML timestamp `2026-09-10T04:19:57`), full JVM
+`351/351`, full connected `97` total / `96` passed / `1` T26 debug-fixture failure (XML timestamp
+`2026-09-10T04:21:50`), and Full/Playstore/F-Droid debug builds all green. The grant/skip
+completion barrier is observed while `ActivityScenario` remains open; no sleep-based probe is used.
+
 **목적:** 이 section 앞의 architecture contract, 특히 §§1.2–5를 실행해 callback의 handoff와
 session/evaluator/scheduler/outcome publication 순서를 하나의 deep worker가 소유하게 한다.
 아래는 실행 순서이며, normative ordering과 error contract는 앞 section만 따른다.
