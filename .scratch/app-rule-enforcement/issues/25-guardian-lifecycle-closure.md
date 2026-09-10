@@ -56,8 +56,9 @@ The accepted Copernicus Standards finding was fixed directly in the existing Gua
 seam. `GuardianApprovalActivity.readValidatedPayload()` now treats package identity and the
 denial list as one validated payload. It requires a nonblank package, a nonempty list, nonnull
 entries, and a nonblank `ruleId` while preserving the existing `ruleName` and `reason` behavior.
-`onNewIntent()` validates before calling `super` or `setIntent`, so a malformed replacement does
-not replace the current valid intent, denial rows, activity identity, or cleanup package. An
+`onNewIntent()` calls `super` unconditionally first, then validates before `setIntent()` and
+Guardian state replacement, so a malformed replacement does not replace the current valid intent,
+denial rows, activity identity, or cleanup package. An
 initial malformed payload finishes safely without rendering or crashing.
 
 The new TDD regressions cover `[null]` replacement, a denial missing `ruleId`, a valid-looking
@@ -73,5 +74,33 @@ reported `64` XML suites and `351` tests with `351` passed, `0` failures, `0` er
 skipped. The full connected suite reported `95` tests with `94` passed, `1` failure, `0` errors,
 and `0` skipped (XML timestamp `2026-09-10T03:46:02`); the sole failure was
 `ExampleInstrumentedTest::useAppContext`, classified as T26's debug application-id fixture.
+
+No child/thread operations were performed, and no code-review or spawning skill was invoked.
+
+## Accepted review follow-up evidence — 2026-09-10
+
+The accepted Standards Low finding is closed by moving both grant and skip completion waits and
+assertions inside the `ActivityScenario.use` block, immediately after the positive action. The
+DataStore state is therefore observed while the activity and its `lifecycleScope` remain alive.
+No sleep or time-based negative probe was added.
+
+The accepted Spec P1 behavior remains covered by the immutable rule id captured when each grant or
+skip flow opens and carried through authentication and the write callback. `onNewIntent()` calls
+`super` first on every path; only validated `setIntent()` and Guardian state replacement are
+validation-gated.
+
+The final focused connected class on `iPlay50_mini_Pro - 13` / Android 13 passed `8/8` tests with
+`0` failures, `0` errors, and `0` skipped (XML timestamp `2026-09-10T04:19:57`, timezone not
+encoded). The two interleaving regressions kept the action bound to `rule_a` after a valid
+`rule_b` replacement for both grant and skip, and the lifecycle tests retained one visible screen
+and the valid cleanup package.
+
+The post-`887aab62` full JVM verification reported `64` XML suites and `351/351` tests passed with
+`0` failures, `0` errors, and `0` skipped. The full connected verification after the test fix
+started `97` tests and reported `96` passed, `1` failure, `0` errors, and `0` skipped (XML
+timestamp `2026-09-10T04:21:50`). The sole failure was
+`ExampleInstrumentedTest::useAppContext`, classified as T26's debug application-id fixture; no
+T25 failure node was reported. `assembleFullDebug`, `assemblePlaystoreDebug`, and
+`assembleFdroidDebug` all completed successfully.
 
 No child/thread operations were performed, and no code-review or spawning skill was invoked.

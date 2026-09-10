@@ -280,8 +280,9 @@ lifecycle seam. `GuardianApprovalActivity` now validates the package identity an
 one payload before initial rendering or repeated-intent state replacement. The payload requires a
 nonblank package, a nonempty list, nonnull entries, and a nonblank `ruleId`; `ruleName` and
 `reason` remain unchanged and are not given new policy requirements. A malformed repeated intent
-returns before `super.onNewIntent()` or `setIntent()`, so the current valid screen, intent, and
-close-broadcast package remain intact. A malformed initial payload finishes safely.
+calls `super.onNewIntent()` first, then returns before `setIntent()` or Guardian state replacement,
+so the current valid screen, intent, and close-broadcast package remain intact. A malformed initial
+payload finishes safely.
 
 | Verification | Environment and result |
 | --- | --- |
@@ -294,6 +295,28 @@ close-broadcast package remain intact. A malformed initial payload finishes safe
 
 This is deterministic Guardian payload evidence on iPlay50, not Xiaomi OEM evidence. The final
 `Xiaomi Pad Pro 2025 12.7` Android 15/16 validation remains the Ticket 29 gate.
+
+### Ticket 25 accepted review follow-up — 2026-09-10
+
+The accepted Standards Low finding is closed by moving the grant and skip completion wait and
+assertions inside `ActivityScenario.use`, after the positive action. The DataStore write is observed
+while the activity remains alive; no sleep or time-based negative probe was added. The accepted Spec
+P1 action identity remains immutable through both grant and skip authentication/write callbacks, and
+`super.onNewIntent()` is unconditional while `setIntent()` and Guardian state replacement remain
+validation-gated.
+
+| Verification | Environment and result |
+| --- | --- |
+| Focused connected after the review test fix | `GuardianApprovalActivityLifecycleTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: `8` tests, `8` passed, `0` failures, `0` errors, `0` skipped; XML timestamp `2026-09-10T04:19:57` (timezone not encoded). |
+| Screen identity, decision count, and cleanup | The grant and skip interleavings opened for `rule_a`, accepted a valid `rule_b` replacement, and wrote only to `rule_a`; the lifecycle regressions retained one visible approval screen and the valid current cleanup package. |
+| Full JVM after `887aab62` | `testFullDebugUnitTest`: `64` XML suites, `351` tests, `351` passed, `0` failures, `0` errors, `0` skipped. |
+| Full connected after the review test fix | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: `97` tests, `96` passed, `1` failure, `0` errors, `0` skipped; XML timestamp `2026-09-10T04:21:50` (timezone not encoded). |
+| Remaining failure classification | The only failure was `ExampleInstrumentedTest::useAppContext`, owned by T26's debug application-id fixture. No T25 failure node was reported. |
+| Flavor debug builds | `assembleFullDebug`, `assemblePlaystoreDebug`, and `assembleFdroidDebug`: all completed successfully. |
+
+These are execution-specific results after `887aab62` and the accepted review test fix; earlier
+Ticket 25 runs above remain historical. The connected result is iPlay50 evidence, not Xiaomi OEM
+evidence. The final `Xiaomi Pad Pro 2025 12.7` Android 15/16 validation remains the Ticket 29 gate.
 
 ### T24–T26 — 4 cases
 

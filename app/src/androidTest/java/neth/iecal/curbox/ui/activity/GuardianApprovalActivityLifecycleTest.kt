@@ -209,11 +209,11 @@ class GuardianApprovalActivityLifecycleTest {
                 onView(withText(R.string.common_continue))
                     .inRoot(isDialog())
                     .perform(click())
-            }
 
-            val state = awaitOverrideState(context) { it.grants.isNotEmpty() }
-            assertEquals(listOf("rule_a"), state.grants.map { it.ruleId })
-            assertTrue(state.skips.isEmpty())
+                val state = awaitOverrideState(context) { it.grants.isNotEmpty() }
+                assertEquals(listOf("rule_a"), state.grants.map { it.ruleId })
+                assertTrue(state.skips.isEmpty())
+            }
         } finally {
             resetGuardianOverrides(context)
         }
@@ -237,11 +237,11 @@ class GuardianApprovalActivityLifecycleTest {
                 onView(withText(R.string.guardian_skip_15_minutes))
                     .inRoot(isDialog())
                     .perform(click())
-            }
 
-            val state = awaitOverrideState(context) { it.skips.isNotEmpty() }
-            assertEquals(listOf("rule_a"), state.skips.map { it.ruleId })
-            assertTrue(state.grants.isEmpty())
+                val state = awaitOverrideState(context) { it.skips.isNotEmpty() }
+                assertEquals(listOf("rule_a"), state.skips.map { it.ruleId })
+                assertTrue(state.grants.isEmpty())
+            }
         } finally {
             resetGuardianOverrides(context)
         }
