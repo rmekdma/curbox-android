@@ -12,7 +12,7 @@ become a product requirement without a separate user decision.
 
 **Status:** awaiting-user-approval
 
-## Pre-approval protocol proposal — revision T27-P5 (2026-09-10)
+## Pre-approval protocol proposal — revision T27-P6 (2026-09-10)
 
 **Proposal status:** awaiting explicit user approval.
 
@@ -126,8 +126,11 @@ and as the first statement of `DecisionOutcomeSink.publish`, after its `Decision
 argument exists. They may write only raw primitive fields into the preallocated ledger.
 
 The instrumentation runs in the target APK's main app process. Before allocating the harness,
-it asserts `Application.getProcessName()` equals the target application id and does not end in
-`:app_blocker_service` or `:crash_handler`. It never instantiates, starts, binds, reconnects, or
+it asserts `Application.getProcessName()` equals the host-pinned target application id and does
+not end in `:app_blocker_service` or `:crash_handler`. Device serial/model/API/fingerprint
+selection is performed by the host controller, not inferred or verified inside the app. The
+instrumentation receives the host-selected raw serial and pseudonym as runner arguments solely
+for restricted metadata. It never instantiates, starts, binds, reconnects, or
 registers receivers for `AppBlockerService`; Debug Curbox's accessibility service is disabled
 for the entire run. Other device accessibility services may remain installed, but they have no
 reference to this private blocker. Therefore Android framework accessibility callbacks and
@@ -148,7 +151,7 @@ proof complementing the topology's absence of a framework ingress path.
 
 The approved run starts from a clean uninstall of both the FullDebug target package and its
 instrumentation package, followed by installation of the two pinned APKs and an empty app-data
-state. Preflight must assert the pinned device/build/process, target accessibility service
+state. Preflight must assert the host-pinned device/build identity and in-app process, target accessibility service
 disabled and not running, no `AppBlockerService` service-process instance, an empty app-rule
 session/reset store, no pending target recheck, exactly the fixed synthetic snapshot, one
 application window/root, zero unexpected ingress, and the expected allow/deny result from an
@@ -156,6 +159,32 @@ unmeasured fixture sanity phase. Preflight is not a measurement sample. It also 
 unassigned WarningActivity observation described above; a clean reproduction is assessed for
 causal relevance and raised to the user for a separate triage-ticket decision, but does not
 automatically block this isolated run.
+
+#### Focused WarningActivity preflight and mandatory reset
+
+Before launching `AppRuleBlockerFixedFixtureP95MeasurementTest`, the host runs exactly the
+single existing Warning test against the selected device from the pinned source checkout:
+
+```powershell
+$env:JAVA_HOME = 'C:\Users\DELL\.jdks\jbr-21.0.11'
+$env:ANDROID_SERIAL = 'T811MA256GB23418064398'
+.\gradlew.bat connectedFullDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=neth.iecal.curbox.ui.activity.WarningActivityLifecycleTest#warningIsFinishedAfterItLeavesTheForeground"
+```
+
+This invocation is a preflight diagnostic only: it does not start the Ticket 27 harness,
+allocate its ledger, or collect any latency/p95 sample. Record only pass/fail and the focused
+test output. Whether it passes or fails, remove `neth.iecal.curbox.debug` and
+`neth.iecal.curbox.debug.test` from the selected device, then reinstall the already pinned
+target and instrumentation APK bytes before any Ticket 27 preflight/harness work. Verify empty
+app data again after reinstall; output APKs incidentally produced by the focused invocation do
+not replace the pinned run inputs.
+
+If the focused failure reproduces, complete that fresh reinstall/reset and then pause before
+Ticket 27 instrumentation. Assess whether the failure can causally affect the isolated direct
+stimulus, ask the user to own or create a separate triage ticket, and continue only after that
+ownership assessment. Recurrence alone is not an automatic Ticket 27 block. If it passes,
+continue from the mandatory fresh reinstall/reset. In neither branch may the Warning preflight
+produce or be counted as a Ticket 27 sample.
 
 This topology is the provisional recommendation, not an adopted design. The user must
 explicitly approve or reject it before the harness or its observation seams are implemented.
@@ -205,11 +234,26 @@ revision. A registration without a provable originating identity is an instrumen
 not permission for broad cleanup.
 
 `FixedFixtureMeasurementService` records Guardian/Warning launch intents and prevents them from
-escaping the test-owned effect boundary. If an instrumentation-owned Guardian or Warning
-activity was nevertheless launched during preflight or an attempt, the harness closes its
-tracked `ActivityScenario`, waits until it is destroyed, and records the existing Guardian
-closed signal for the same synthetic package where applicable. It never uses Back/Home or a
-package-wide force-stop as per-attempt cleanup. The attempt's synthetic foreground session,
+escaping the test-owned effect boundary. After approval, add exactly one narrow seam next to
+`guardianReceiver` in
+`app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt`:
+`@VisibleForTesting internal fun closeGuardianForInstrumentation(packageName: String): Boolean`.
+The receiver's existing package-scoped OPENED/CLOSED state mutation is first extracted without
+semantic change into a private `applyGuardianLifecycleTransition(action, packageName)` helper;
+both `guardianReceiver.onReceive` and the new seam invoke that same helper. The seam invokes only
+the CLOSED transition for the supplied synthetic package and, under `runtimeLock`, returns true
+only when `activeGuardianPackage == null` and `lastShownAt == 0L`. It is called only after
+`quiescenceStartNs`, is never called by production code, sends no refresh/reconnect, and changes
+no rule, worker, lifecycle, or runtime revision. If another package is active or either invariant
+is false, cleanup fails rather than clearing broader state.
+
+If an instrumentation-owned Guardian or Warning activity was nevertheless launched during
+preflight or an attempt, the harness closes its tracked `ActivityScenario` and waits until it is
+destroyed before applying/verifying the package-scoped Guardian transition. It never uses
+Back/Home or a package-wide force-stop as per-attempt cleanup. The next-stimulus gate cannot
+reopen until the synthetic package's cleanup seam returned true, direct state observation again
+confirms `activeGuardianPackage == null` and `lastShownAt == 0L`, and no test-owned Warning UI is
+visible. The attempt's synthetic foreground session,
 usage/reset rows, captured launch intents, and one-window/root provider are then restored to the
 same approved fixture baseline in a transaction/drain step; the fixed rule snapshot and accepted
 runtime revision are not reloaded or changed. The harness verifies zero open session/reset rows,
@@ -236,13 +280,13 @@ and ends when both `callbackReturn` and the selected end have arrived. If `D` ex
 both signals are present, classify the row immediately at `D` with exactly which boundary is
 missing and abort the run as `ABORT_OBSERVATION_DEADLINE`; `quiescenceStartNs` does not exist
 and `R` must not be started or inferred. This prevents a missing boundary from creating a
-circular quiescence condition. For a request rejected before a
-`DecisionRequest` exists, `callbackReturn` plus `EXCLUDED_NO_REQUEST` is the terminal
-disposition; no end boundary is expected and no next stimulus is sent until that disposition
-is closed. Because no worker identity exists in this case, the terminal disposition closes at
-the observed callback return after the synthetic fixture is restored; `quiescenceStartNs` and
-`R` are not invented for it. For an accepted request that cannot produce the selected end, the
-row remains a timeout/exclusion and is never counted as a sample.
+circular quiescence condition. The permitted callback and A/B hooks cannot prove that a request
+was rejected before construction, so this protocol defines no separate no-request exclusion and
+adds no submission hook. In particular, a `NORMAL` callback return without the selected boundary at
+`D` is observably `TIMEOUT_MISSING_SELECTED_END` followed by
+`ABORT_OBSERVATION_DEADLINE`, regardless of its unobserved internal cause. It is never counted
+as an exclusion eligible for retry, and the run has no p95. Likewise, a missing callback return
+or both signals missing uses the corresponding observable timeout state and aborts.
 
 After a terminal exclusion that has both required boundary signals, the harness enters normal
 post-sample recovery and sends no new stimulus while the `R` interval is open. It must confirm
@@ -290,14 +334,44 @@ retained for diagnosis only.
 
 ### Concrete execution population proposal
 
-The proposed committed execution identity uses pseudonymous device id `T27_DEVICE_01`, mapped
-only in restricted raw run-control metadata to the exact user-approved serial. The device is
-model `iPlay50_mini_Pro`, Android 13/API 33, build fingerprint
+The host run controller selects the device with literal selector
+`adb -s T811MA256GB23418064398` and maps it to committed pseudonym `T27_DEVICE_01`. Before any
+install or preflight, the host runs `adb -s T811MA256GB23418064398 get-serialno` and exact
+`adb -s T811MA256GB23418064398 shell getprop` queries for `ro.product.model`,
+`ro.build.version.release`, `ro.build.version.sdk`, and `ro.build.fingerprint`. It requires the
+serial to equal the selector, model `iPlay50_mini_Pro`, Android 13/API 33, and fingerprint
 `Alldocube/iPlay50_mini_Pro/iPlay50_mini_Pro:13/TP1A.220624.014/1699256002:user/release-keys`,
-and the `FullDebug` flavor. At run start, assert all of these values. Any mismatch aborts
-before the first stimulus; the run must not silently substitute another device or build.
-The exact serial is compared on-device against the restricted mapping and retained only in raw
-`metadata.json`; it must not appear in this committed ticket or the committed evidence manifest.
+plus the `FullDebug` application id `neth.iecal.curbox.debug`. Any mismatch aborts before install;
+the run must not silently substitute another device or build.
+
+The controller uses the same literal selector for every later adb operation. After the focused
+Warning preflight it performs the mandatory clean install using the pinned input paths:
+
+```powershell
+adb -s T811MA256GB23418064398 uninstall neth.iecal.curbox.debug
+adb -s T811MA256GB23418064398 uninstall neth.iecal.curbox.debug.test
+adb -s T811MA256GB23418064398 install --no-streaming $pinnedTargetApkPath
+adb -s T811MA256GB23418064398 install --no-streaming $pinnedInstrumentationApkPath
+```
+
+An `Unknown package` result is acceptable only for the two uninstall commands and is recorded;
+any install failure aborts. The controller then verifies both installed package identities and
+empty app data before deciding whether the Warning result permits continuation.
+
+The host passes the already selected identity to the approved instrumentation invocation as
+runner arguments, using `-e t27RawDeviceSerial T811MA256GB23418064398` and
+`-e t27PseudonymousDeviceId T27_DEVICE_01`. Instrumentation records both in restricted raw
+`metadata.json` but performs no independent serial selection. The external/committed manifest
+contains only `T27_DEVICE_01`; the raw serial is never copied into it.
+
+```powershell
+adb -s T811MA256GB23418064398 shell am instrument -w -r `
+    -e class neth.iecal.curbox.blockers.AppRuleBlockerFixedFixtureP95MeasurementTest#measureFixedSyntheticFixtureP95 `
+    -e t27RawDeviceSerial T811MA256GB23418064398 `
+    -e t27PseudonymousDeviceId T27_DEVICE_01 `
+    neth.iecal.curbox.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
 Xiaomi Pad Pro 2025 12.7 on Android 15/16 is not substituted here and remains the final
 Ticket 29 validation gate.
 
@@ -356,13 +430,15 @@ package, the fixed one-window facts above, and the selected end boundary. Both a
 denied results are retained when selected by M1; outcome and denying-rule count are metadata,
 not filters.
 
-Exclude and count separately: invalid or ignored events; not-ready, stale, or overlapping
-submissions; synthetic rechecks; refresh/reconnect/screen lifecycle observations;
-cancellation or generation invalidation; recoverable outcomes without an evaluation;
-multi-package or unknown-root outcomes; no-request exits; clock-order failures; terminal
-timeouts; recovery failures; and instrumentation/ledger failures. No duration is removed just
-because it is large; there is no outlier cutoff. A row that cannot be assigned one of these
-terminal dispositions aborts the run instead of disappearing.
+Exclude and count separately only states exposed by the permitted callback/A/B hooks: a
+non-`REAL_EVENT` `observationKind`; a stale, overlap, cancellation, generation-invalidation, or
+recoverable outcome explicitly delivered at those hooks; a multi-package or unknown-root
+outcome; a clock-order failure; a post-boundary recovery failure; or an instrumentation/ledger
+failure. An ignored, invalid, not-ready, or pre-request internal cause is not guessed from the
+absence of an end signal; a `NORMAL` callback with no selected end follows the mandatory
+missing-end abort at `D`. No duration is removed just because it is large; there is no outlier
+cutoff. A row that cannot be assigned an observable terminal disposition aborts the run instead
+of disappearing.
 
 ### Lossless attempt disposition and passive observation
 
@@ -379,8 +455,10 @@ attempt ordinal, sample ordinal when applicable, source-order identity when avai
 package decision count, allow/deny result, denying-rule count, commit status, publication
 status, every boundary timestamp (`callbackStartNs`, `callbackReturnNs`, `selectedEndNs`,
 `quiescenceStartNs`, and `quiescenceEndNs`) as raw integer nanoseconds, the signed durations,
-boundary-presence bits, terminal state, exclusion reason, and synthetic fixture label. The host serializes the
-already-closed ledger records to JSONL only after the run. If a ledger slot cannot be allocated or updated, record
+boundary-presence bits, terminal state, exclusion reason, and synthetic fixture label. After the
+ledger and run metadata are closed, instrumentation serializes each payload exactly once into
+the canonical bytes defined below. The host never serializes or reserializes either payload. If
+a ledger slot cannot be allocated or updated, record
 `ABORT_LEDGER_CAPACITY` or `ABORT_LEDGER_WRITE_FAILURE` in the run manifest and stop before
 dispatching another stimulus. Thus every dispatched attempt has one disposition or the run is
 explicitly incomplete; there is no observer-drop count that can contradict the one-row rule.
@@ -398,6 +476,15 @@ callback-to-decision-publication-entry p95`. An aborted or incomplete run has no
 
 ### Evidence, privacy, integrity, and deletion
 
+- After the final ledger state is closed, instrumentation creates the canonical
+  `samples.jsonl` byte array and canonical `metadata.json` byte array exactly once. It computes
+  byte length and SHA-256 directly over each array, writes each array unchanged with an
+  app-private `FileOutputStream`, flushes/syncs/closes it, then rereads the staged file as bytes
+  to require the same length and SHA-256. It emits those device-side values in a separate
+  app-private canonical `device-digests.json` with exact key order `samplesJsonlBytes`,
+  `samplesJsonlSha256`, `metadataJsonBytes`, `metadataJsonSha256`, using lowercase hexadecimal
+  hashes; neither canonical payload is regenerated. Serialization or
+  staged-file mismatch aborts evidence finalization and reports no p95.
 - Keep one immutable `samples.jsonl` row for every warm-up and measured attempt, including
   excluded and timeout rows. Use only `T27_ALLOW`/`T27_DENY` and other synthetic identifiers;
   do not retain real package names, real rule names, or user data. Serialize each ledger row as
@@ -427,21 +514,111 @@ callback-to-decision-publication-entry p95`. An aborted or incomplete run has no
   exact `samples.jsonl` bytes and exact `metadata.json` payload bytes with SHA-256. The manifest
   records keys in this exact order: `manifestSchemaVersion`, `canonicalizationVersion`, `runId`,
   `pseudonymousDeviceId`, `sourceCommit`, `harnessCommit`, `protocolRevision`, `appVersion`,
-  `applicationId`, `variant`, `targetApkSha256`, `instrumentationApkSha256`,
+  `applicationId`, `variant`, `targetApkFile`, `targetApkBytes`, `targetApkSha256`,
+  `instrumentationApkFile`, `instrumentationApkBytes`, `instrumentationApkSha256`,
   `samplesJsonlBytes`, `samplesJsonlSha256`, `metadataJsonBytes`, `metadataJsonSha256`,
   `deviceStagingDeleted`, `evidenceCommitParent`, `notes`. Metadata never self-hashes. The
   committed form contains only the run-stable pseudonymous device id whose exact-serial mapping
   is stored under restricted custody. The exact serial remains only in restricted raw
   `metadata.json` and is never committed.
-- Stage both canonical payloads only in the target app's private measurement directory. Transfer
-  them to
-  `C:\Users\DELL\StudioProjects\curbox-android\.scratch\app-rule-enforcement\evidence\ticket27\<run-id>`
-  as opaque bytes, compute SHA-256 and byte length independently on device before transfer and on
-  the host after transfer, and require exact equality for each file. Do not parse, normalize, or
-  rewrite during transfer. After the external manifest has been created and the host byte/hash
-  verification succeeds, delete the device staging copies and record deletion status in the
-  manifest. A mismatch preserves both sides for diagnosis, aborts evidence finalization, and
-  forbids reporting p95.
+- Stage both canonical payloads and `device-digests.json` only in
+  `files/ticket27/<run-id>/` in the target app's private directory. The host performs the exact
+  binary-safe transfer below, independently computes each copied file's byte length and SHA-256,
+  and compares the two payloads with the values in `device-digests.json`. It never parses,
+  normalizes, redirects as text, or reserializes `samples.jsonl` or `metadata.json`.
+
+The approved PowerShell 7 host controller uses `ProcessStartInfo.ArgumentList` and copies the
+native stdout `BaseStream`; it must not use PowerShell `>`/`Out-File` or `adb shell cat`:
+
+```powershell
+$adbExe = (Get-Command adb.exe -ErrorAction Stop).Source
+$deviceSerial = 'T811MA256GB23418064398'
+$applicationId = 'neth.iecal.curbox.debug'
+$runId = '<approved-run-id>'
+$evidenceDir = "C:\Users\DELL\StudioProjects\curbox-android\.scratch\app-rule-enforcement\evidence\ticket27\$runId"
+[void](New-Item -ItemType Directory -Path $evidenceDir -ErrorAction Stop)
+
+function Copy-AppPrivateEvidence([string]$name) {
+    $destination = Join-Path $evidenceDir $name
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $adbExe
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-s', $deviceSerial, 'exec-out', 'run-as', $applicationId,
+        'cat', "files/ticket27/$runId/$name"
+    )) {
+        [void]$start.ArgumentList.Add($argument)
+    }
+    $process = [System.Diagnostics.Process]::Start($start)
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $output = [System.IO.File]::Create($destination)
+    try {
+        $process.StandardOutput.BaseStream.CopyTo($output)
+    } finally {
+        $output.Dispose()
+    }
+    $process.WaitForExit()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) {
+        throw "adb copy failed for $name (exit $($process.ExitCode)): $stderr"
+    }
+}
+
+Copy-AppPrivateEvidence 'samples.jsonl'
+Copy-AppPrivateEvidence 'metadata.json'
+Copy-AppPrivateEvidence 'device-digests.json'
+
+$deviceDigests = Get-Content -Raw -LiteralPath (Join-Path $evidenceDir 'device-digests.json') |
+    ConvertFrom-Json
+$checks = @(
+    @('samples.jsonl', 'samplesJsonlBytes', 'samplesJsonlSha256'),
+    @('metadata.json', 'metadataJsonBytes', 'metadataJsonSha256')
+)
+foreach ($check in $checks) {
+    $path = Join-Path $evidenceDir $check[0]
+    $hostLength = (Get-Item -LiteralPath $path).Length
+    $hostSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $deviceLength = [int64]$deviceDigests.($check[1])
+    $deviceSha256 = [string]$deviceDigests.($check[2])
+    if ($hostLength -ne $deviceLength -or $hostSha256 -cne $deviceSha256) {
+        throw "device/host evidence mismatch for $($check[0])"
+    }
+}
+```
+
+The controller also copies the already pinned target and instrumentation APK input files with
+`[System.IO.File]::Copy(source, destination, $false)`, names them
+`target-full-debug.apk` and `instrumentation-full-debug-androidTest.apk` in the same new evidence
+directory, and records `Get-Item.Length` plus lowercase `Get-FileHash -Algorithm SHA256` for each.
+Those hashes must equal the hashes pinned before installation. This is a byte-for-byte host file
+copy, not extraction from or reserialization by the app.
+
+```powershell
+$apkCopies = @(
+    @($pinnedTargetApkPath, 'target-full-debug.apk', $pinnedTargetApkSha256),
+    @($pinnedInstrumentationApkPath, 'instrumentation-full-debug-androidTest.apk', $pinnedInstrumentationApkSha256)
+)
+foreach ($copy in $apkCopies) {
+    $destination = Join-Path $evidenceDir $copy[1]
+    [System.IO.File]::Copy([string]$copy[0], $destination, $false)
+    $length = (Get-Item -LiteralPath $destination).Length
+    $sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($sha256 -cne ([string]$copy[2]).ToLowerInvariant()) {
+        throw "pinned APK hash mismatch for $($copy[1])"
+    }
+    # Record $length and $sha256 in the external evidence manifest.
+}
+```
+
+Only after the two canonical host payloads match their device lengths/hashes and both retained
+APK copies match their pinned hashes does the controller delete the three exact device staging files with
+`adb -s T811MA256GB23418064398 shell run-as neth.iecal.curbox.debug rm -f` followed by each exact
+`files/ticket27/<run-id>/<name>` path. It then verifies those three paths are absent and records
+`deviceStagingDeleted: true` when serializing the final external manifest. A mismatch or failed absence check preserves available evidence,
+aborts finalization, and forbids reporting p95.
+
 - Keep the host raw files in the restricted workspace through review and ticket closure.
   Delete them only after explicit user instruction or explicit ticket-archive approval, and
   record the deletion in the ticket. No encryption is required while the files remain in the
@@ -463,7 +640,8 @@ Before any measurement work, the user must explicitly choose:
 3. Exclusion/abort cap: E0, E5, or E20.
 4. Population mix: M1, M2, or M3.
 5. The proposed isolated `AppRuleBlockerFixedFixtureP95MeasurementTest` topology, main target
-   process, direct-only stimulus path, ingress proof, clean-install/reset/preflight sequence,
+   process, direct-only stimulus path, ingress proof, focused Warning preflight plus mandatory
+   clean reinstall/reset sequence,
    and identity-scoped recheck/UI/fixture cleanup. **This topology is recommended but not
    selected.**
 6. The pinned serial/device/build identity and immutable run-input policy: source, harness,
