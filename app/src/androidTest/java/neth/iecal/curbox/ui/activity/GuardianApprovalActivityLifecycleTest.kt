@@ -4,11 +4,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.core.content.ContextCompat
+import neth.iecal.curbox.R
 import neth.iecal.curbox.blockers.AppRuleBlocker
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import org.junit.Assert.assertEquals
@@ -25,17 +28,29 @@ class GuardianApprovalActivityLifecycleTest {
     @Test
     fun repeatedDenialReusesTheVisibleApprovalScreen() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val firstIntent = approvalIntent()
+        val firstIntent = approvalIntent(reason = "Initial denial")
         assertEquals(0, firstIntent.flags and Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        assertTrue(firstIntent.flags and Intent.FLAG_ACTIVITY_SINGLE_TOP != 0)
         ActivityScenario.launch<GuardianApprovalActivity>(firstIntent).use { scenario ->
             lateinit var original: GuardianApprovalActivity
-            scenario.onActivity { original = it }
+            scenario.onActivity { approval ->
+                original = approval
+                assertTrue(
+                    (approval.findViewById<RadioGroup>(R.id.approval_choices)
+                        .getChildAt(0) as RadioButton).text.contains("Initial denial")
+                )
+            }
 
-            instrumentation.targetContext.startActivity(approvalIntent())
+            instrumentation.targetContext.startActivity(approvalIntent(reason = "Updated denial"))
             instrumentation.waitForIdleSync()
 
             scenario.onActivity { approval ->
                 assertSame(original, approval)
+                assertEquals(1, approval.findViewById<RadioGroup>(R.id.approval_choices).childCount)
+                assertTrue(
+                    (approval.findViewById<RadioGroup>(R.id.approval_choices)
+                        .getChildAt(0) as RadioButton).text.contains("Updated denial")
+                )
             }
         }
     }
@@ -93,13 +108,13 @@ class GuardianApprovalActivityLifecycleTest {
         }
     }
 
-    private fun approvalIntent(): Intent {
+    private fun approvalIntent(reason: String = "Daily limit reached"): Intent {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val denials = listOf(
             AppRuleGuardianDenial(
                 ruleId = "test_rule",
                 ruleName = "Test Rule",
-                reason = "Daily limit reached"
+                reason = reason
             )
         )
         return AppRuleBlocker.createGuardianApprovalIntent(

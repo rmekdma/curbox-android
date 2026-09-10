@@ -79,12 +79,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 navigateHomeAndFinish()
             }
         })
-        denials = runCatching {
-            Gson().fromJson<List<AppRuleGuardianDenial>>(
-                intent.getStringExtra(EXTRA_DENIALS).orEmpty(),
-                object : TypeToken<List<AppRuleGuardianDenial>>() {}.type
-            )
-        }.getOrNull().orEmpty()
+        denials = readDenials(intent)
         if (denials.isEmpty()) {
             finish()
             return
@@ -103,8 +98,26 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val updatedDenials = readDenials(intent)
+        if (updatedDenials.isEmpty() || isFinishing) return
+        setIntent(intent)
+        denials = updatedDenials
+        selectedRuleId = denials.first().ruleId
+        render()
+    }
+
+    private fun readDenials(sourceIntent: Intent): List<AppRuleGuardianDenial> = runCatching {
+        Gson().fromJson<List<AppRuleGuardianDenial>>(
+            sourceIntent.getStringExtra(EXTRA_DENIALS).orEmpty(),
+            object : TypeToken<List<AppRuleGuardianDenial>>() {}.type
+        )
+    }.getOrNull().orEmpty()
+
     private fun render() {
         val choices = binding.approvalChoices
+        choices.removeAllViews()
         denials.forEachIndexed { index, denial ->
             choices.addView(RadioButton(this).apply {
                 id = index + 1

@@ -823,11 +823,12 @@ regression and the Full, Playstore and F-Droid debug builds as green. The 24 can
 failures are therefore not ticket18 fault/cancellation failures: T21 owns 6 long-boundary cases,
 T22 owns 3 recheck cases, T23 owns 11 visibility/ownership cases, T24 owns 2 callback-flush cases,
 T25 owns 1 Guardian lifecycle case, and T26 owns 1 debug-fixture case. No observed failure is
-called fixed by this baseline reconciliation. Ticket 22 later recorded focused green evidence for
+called fixed by this baseline reconciliation. Ticket 25 later recorded deterministic closure
+evidence for its one Guardian lifecycle case. Ticket 22 recorded focused green evidence for
 its three owned cases without changing production code, and Ticket 23 recorded focused green
 visibility/window/root/target ownership evidence without changing production or test source. Ticket
 24 recorded focused connected/JVM ordering evidence without changing production source. The p95
-measurement, numeric drain decision, T25/T26 closure and Xiaomi device validation remain open.
+measurement, numeric drain decision, T26 closure and Xiaomi device validation remain open.
 
 ### 6. Phase 0 RED contract → future invariant mapping
 
@@ -953,7 +954,8 @@ framework facts와 evidence policy 해석을 하나의 deep module 뒤에 둔다
 decisions open`. Ticket 11–15와 ticket 18의 worker, scheduler, fault/cancellation 및 lifecycle
 measurement evidence는 완료됐다. Ticket 24의 callback-flush ordering은 focused evidence로
 닫혔고, callback/decision p95 measurement와 numeric drain-budget decision은 각각 ticket 27,
-28에 남아 있다. T25/T26 closure와 Xiaomi validation도 별도 scope다.
+28에 남아 있다. T25 closure는 별도 deterministic evidence로 기록됐고, T26 closure와
+Xiaomi validation은 별도 scope다.
 
 **목적:** 이 section 앞의 architecture contract, 특히 §§1.2–5를 실행해 callback의 handoff와
 session/evaluator/scheduler/outcome publication 순서를 하나의 deep worker가 소유하게 한다.
