@@ -8,6 +8,8 @@ import android.view.accessibility.AccessibilityWindowInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import neth.iecal.curbox.CrashLogger
+import neth.iecal.curbox.data.db.AppDatabase
+import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
@@ -89,12 +91,18 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
 
     @Test
     fun foregroundCallbackReturnsBeforeDelayedPersistenceCompletes() {
-        val repository = DelayedReadRepository()
+        val timeline = CopyOnWriteArrayList<String>()
+        val repository = DelayedReadRepository(timeline)
         val service = recordingService()
+        val evaluationObserved = CountDownLatch(1)
         val blocker = configureBlocker(
             repository = repository,
             service = service,
-            snapshot = snapshotWithAllowance(allowedMinutes = 0L)
+            snapshot = snapshotWithAllowance(allowedMinutes = 0L),
+            observer = {
+                timeline += "evaluation"
+                evaluationObserved.countDown()
+            }
         )
         val callbackReturned = CountDownLatch(1)
         val callbackStartedAtMs = AtomicLong(0L)
@@ -108,6 +116,7 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
                 instrumentation.runOnMainSync {
                     blocker.doAppRuleCheck(event)
                 }
+                timeline += "callback-return"
             } catch (error: Throwable) {
                 callbackFailure.set(error)
             } finally {
@@ -146,6 +155,18 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
                         callbackObservation
                 )
             }
+            repository.release()
+            assertTrue(
+                "evaluation did not complete after delayed persistence was released",
+                evaluationObserved.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertTraceOrder(
+                timeline,
+                "callback-return",
+                "persistence-read-complete",
+                "evaluation"
+            )
+            assertTrue("persistence read never started: $timeline", "persistence-read-start" in timeline)
         } finally {
             repository.release()
             callbackThread.join(WAIT_TIMEOUT_MS)
@@ -157,7 +178,8 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
     @Test
     fun evaluatorRunsOnlyAfterVisibleSessionFlushIsCommitted() {
         val nowMs = System.currentTimeMillis()
-        val repository = DelayedFlushRepository()
+        val timeline = CopyOnWriteArrayList<String>()
+        val repository = DelayedFlushRepository(timeline)
         val service = recordingService()
         val observations = CopyOnWriteArrayList<DecisionObservation>()
         val firstEvaluationObserved = CountDownLatch(1)
@@ -173,6 +195,7 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
                     persistedSessions = repository.lastRead,
                     commitCompletedAtObservation = repository.commitCompleted.get()
                 )
+                timeline += "evaluation-${observations.size}"
                 if (observingPostCommitPath.get()) {
                     postCommitEvaluations.countDown()
                 } else {
@@ -191,10 +214,13 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             )
             repository.rewindTargetSession(nowMs - SESSION_DURATION_MS)
             observations.clear()
+            timeline.clear()
             val readsBeforeFlush = repository.readHistory.size
             observingPostCommitPath.set(true)
 
-            sendWindowEvent(blocker, OTHER_PACKAGE)
+            sendWindowEvent(blocker, OTHER_PACKAGE) {
+                timeline += "callback-return-other"
+            }
             assertTrue(
                 "the foreground transition must enter the delayed flush",
                 repository.commitStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -202,7 +228,9 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
 
             // A rapid switch back queues behind the same commit. Both callbacks return while the
             // single worker keeps persistence and evaluation ordered.
-            sendWindowEvent(blocker, TARGET_PACKAGE)
+            sendWindowEvent(blocker, TARGET_PACKAGE) {
+                timeline += "callback-return-target"
+            }
             val evaluatorRanBeforeCommit = postCommitEvaluations.await(100L, TimeUnit.MILLISECONDS)
             val readsWhileCommitBlocked = repository.readHistory.size
 
@@ -222,6 +250,29 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             if (observations.any { !it.commitCompletedAtObservation }) {
                 failures += "queued evaluator ran before flush commit: $observations"
             }
+            val commitCompletedIndex = timeline.indexOf("persistence-commit-complete-1")
+            val callbackReturnIndexes = listOf(
+                timeline.indexOf("callback-return-other"),
+                timeline.indexOf("callback-return-target")
+            )
+            if (commitCompletedIndex < 0 || callbackReturnIndexes.any { it < 0 }) {
+                failures += "ordering trace is incomplete: $timeline"
+            } else if (callbackReturnIndexes.any { it >= commitCompletedIndex }) {
+                failures += "callback waited for flush completion: $timeline"
+            }
+            if ("evaluation-1" !in timeline || "evaluation-2" !in timeline) {
+                failures += "ordering trace is missing one of the queued evaluations: $timeline"
+            } else {
+                val firstCommitComplete = timeline.indexOf("persistence-commit-complete-1")
+                val secondCommitComplete = timeline.indexOf("persistence-commit-complete-2")
+                val firstEvaluation = timeline.indexOf("evaluation-1")
+                val secondEvaluation = timeline.indexOf("evaluation-2")
+                if (firstCommitComplete < 0 || secondCommitComplete < 0 ||
+                    firstEvaluation <= firstCommitComplete || secondEvaluation <= secondCommitComplete
+                ) {
+                    failures += "evaluation was not after its flush completion: $timeline"
+                }
+            }
             if (committedObservation == null || committedObservation.evaluation.isAllowed) {
                 failures += "post-commit evaluator did not deny the consumed target session"
             }
@@ -233,7 +284,7 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
                 throw AssertionError(
                     "flush-before-decision RED contract failures:\n" +
                         failures.joinToString("\n") { "- $it" } +
-                        "\nobservations=$observations"
+                        "\nobservations=$observations\nordering=$timeline"
                 )
             }
         } finally {
@@ -253,6 +304,11 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         evaluationResultObserver = observer
         setField(this, "service", service)
         setField(this, "sessionRepository", repository)
+        setField(
+            this,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
         setField(this, "enforcement", AppRuleEnforcement(repository))
         setField(this, "setupReady", true)
         setField(this, "launchablePackages", setOf(TARGET_PACKAGE, OTHER_PACKAGE))
@@ -286,6 +342,14 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
     }
 
     private fun sendWindowEvent(blocker: AppRuleBlocker, packageName: String) {
+        sendWindowEvent(blocker, packageName) {}
+    }
+
+    private fun sendWindowEvent(
+        blocker: AppRuleBlocker,
+        packageName: String,
+        afterCallback: () -> Unit
+    ) {
         blocker.applicationWindowSnapshotProvider = {
             AppRuleBlocker.ApplicationWindowSnapshot(
                 packages = setOf(packageName),
@@ -296,7 +360,11 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         blocker.activeWindowSnapshotProvider = {
             AppRuleBlocker.ActiveWindowSnapshot(packageName = packageName)
         }
-        withWindowEvent(packageName) { event -> blocker.doAppRuleCheck(event) }
+        withWindowEvent(packageName) {
+            event ->
+            blocker.doAppRuleCheck(event)
+            afterCallback()
+        }
     }
 
     private fun sendWindowEvent(tracker: AppUsageTracker, packageName: String) {
@@ -371,7 +439,9 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             error("the tracker window provider is intentionally unavailable")
     }
 
-    private class DelayedReadRepository : CurrentUseDaySessionRepository {
+    private class DelayedReadRepository(
+        private val timeline: MutableList<String>
+    ) : CurrentUseDaySessionRepository {
         val readStarted = CountDownLatch(1)
         val released = AtomicBoolean(false)
         private val releaseRead = CountDownLatch(1)
@@ -383,8 +453,10 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         override suspend fun updateSessionEnd(id: Long, endedAtMs: Long) = Unit
 
         override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+            timeline += "persistence-read-start"
             readStarted.countDown()
             releaseRead.await()
+            timeline += "persistence-read-complete"
             return emptyList()
         }
 
@@ -396,7 +468,9 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         }
     }
 
-    private class DelayedFlushRepository : CurrentUseDaySessionRepository {
+    private class DelayedFlushRepository(
+        private val timeline: MutableList<String>
+    ) : CurrentUseDaySessionRepository {
         val commitStarted = CountDownLatch(1)
         val commitCompleted = AtomicBoolean(false)
         val readHistory = CopyOnWriteArrayList<List<ForegroundSession>>()
@@ -432,12 +506,15 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             endedAtMs: Long,
             usage: List<ForegroundUsageCheckpoint>
         ): Boolean {
+            val commitNumber = ++commitCount
+            timeline += "persistence-commit-start-$commitNumber"
             commitStarted.countDown()
             releaseCommit.await()
             persistedSessions = persistedSessions.map { session ->
                 if (session.id == id) session.copy(endedAtMs = endedAtMs) else session
             }
             commitCompleted.set(true)
+            timeline += "persistence-commit-complete-$commitNumber"
             return true
         }
 
@@ -462,6 +539,8 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         fun releaseCommit() {
             releaseCommit.countDown()
         }
+
+        private var commitCount = 0
     }
 
     private class BlockingTrackerRepository : CurrentUseDaySessionRepository {
@@ -499,6 +578,15 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
 
     private fun getField(target: Any, name: String): Any? =
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+
+    private fun assertTraceOrder(timeline: List<String>, vararg events: String) {
+        val indexes = events.map(timeline::indexOf)
+        assertTrue("ordering trace is incomplete: $timeline", indexes.all { it >= 0 })
+        assertTrue(
+            "ordering trace was ${timeline.joinToString()} instead of ${events.toList()}",
+            indexes.zipWithNext().all { (first, second) -> first < second }
+        )
+    }
 
     private companion object {
         const val TARGET_PACKAGE = "com.example.reader"

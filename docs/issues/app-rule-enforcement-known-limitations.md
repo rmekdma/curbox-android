@@ -148,28 +148,20 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 
 ## 구조 및 성능 부채
 
-### AR 007 접근성 callback의 main thread `runBlocking` DB 대기
+### AR 007 접근성 callback의 persistence flush와 decision ordering
 
-- **Status / Severity:** `계획된 부채` / `P2`
-- **Exact trigger:** `AppBlockerService.onAccessibilityEvent()`가 `AppRuleBlocker.doAppRuleCheck()`를 호출하고, 앱 규칙이 활성인 상태에서 Room 세션 조회가 필요하다. setup 시에도 초기 settings를 동기적으로 읽는다.
-- **Current behavior:** 접근성 서비스의 main callback에서 `runBlocking(Dispatchers.IO)`로 Room 조회가 끝날 때까지 호출자를 막는다. `Dispatchers.IO`는 DB 작업 위치만 바꾸며 callback을 비동기로 만들지 않는다. `AppRuleEnforcement.check`는 current use day 세션 전체를 읽는다.
-- **Impact:** 세션 원장이 커지거나 Room이 잠시 느려지면 접근성 이벤트 처리와 다음 window event가 지연될 수 있다. 직접적인 기능 실패로 확정하지는 않았지만, AR 001의 경계 처리와 서비스 반응성을 같은 main thread 지연에 의존하게 만든다.
+- **Status / Severity:** `닫힘 (T24 deterministic ordering; p95 remains T27)` / `P2`
+- **Exact trigger:** 접근성 callback이 foreground facts를 worker에 넘긴 직후 evaluator가 visible-session persistence가 끝나기 전에 실행되면, 이전 상태를 기준으로 app rule decision이 만들어질 수 있다.
+- **Current behavior:** 접근성 callback은 immutable foreground facts를 만들고 `SerializedDecisionWorker.submit()`의 nonblocking value handoff로 반환한다. worker 하나가 visible-session reconciliation, persistence flush/commit, `AppRuleEnforcement.check()`의 persisted-session read와 evaluator 호출을 같은 serialized path에서 처리한다. evaluator는 필요한 persistence completion 이후에만 실행된다.
+- **Impact:** T24의 두 frozen callback-flush cases는 결정적 ordering evidence로 닫혔다. p95 callback/decision 측정과 Xiaomi OEM 검증은 각각 T27과 T29의 별도 scope이며 이 기록으로 확정하지 않는다.
 - **Evidence:**
-  - [AppBlockerService.kt:104](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L104)부터 [AppBlockerService.kt:122](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L122)의 동기 app rule callback 호출
-  - [AppRuleBlocker.kt:328](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L328)부터 [AppRuleBlocker.kt:344](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L344)의 main callback 내부 `runBlocking`
-  - [AppUsageTracker.kt:247](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt#L247)부터 [AppUsageTracker.kt:258](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt#L258)의 `onEvent()` visible package reconciliation 진입점
-  - [AppUsageTracker.kt:436](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt#L436)부터 [AppUsageTracker.kt:496](../../app/src/main/java/neth/iecal/curbox/trackers/AppUsageTracker.kt#L496)의 visible-session reconciliation과 Room boundary writer
-  - [AppRuleEnforcement.kt:24](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleEnforcement.kt#L24)부터 [AppRuleEnforcement.kt:46](../../app/src/main/java/neth/iecal/curbox/domain/apprules/AppRuleEnforcement.kt#L46)의 Room 세션 조회
-  - [canonical baseline inventory](app-rule-enforcement-baseline.md#t24t26--4-cases)의 T24 two-case callback-flush failure set
-- **Mitigation or decision needed:** 현재 `AppUsageTracker.onEvent()`가 visible-session reconciliation과
-  그 Room writer의 관찰 진입점을 소유한다. Phase 2에서 `onEvent()`는 immutable visible-set
-  observation만 하나의 serialized handoff로 넘기고, handoff 이후의 reconciliation writer와
-  evaluator decision worker는 단일 직렬화된 실행 경로의 한 owner가 맡는다. 이전 session flush와
-  Room commit 완료를 확인한 뒤에만 rule decision을 실행한다. tracker queue와 decision queue를
-  별도로 두어 순서를 나누지 않는다. callback은 입력을 복사해 worker에 전달하고, 결과의
-  generation과 lifecycle을 확인한 뒤 warning을 main thread에서 표시한다. timeout, cancellation,
-  storage failure의 fail policy도 함께 정의한다.
-- **Acceptance criteria:** main callback이 Room 결과를 기다리지 않고 반환한다. 지연된 fake repository와 빠른 연속 window event에서 `AppUsageTracker.onEvent()`의 visible-session flush와 Room commit이 새 rule decision보다 먼저 완료되며, 각 event의 최신 generation만 warning을 표시한다. tracker와 decision을 별도 queue로 분리하지 않고 하나의 serialized path에서 순서를 보장한다. 대표적인 세션 크기에서 p95 callback blocking time과 decision latency를 측정하고 기준을 계획 문서에 기록한다. 현재 canonical run은 T24의 두 RED case를 보존하며 p95 수치는 기록하지 않았고, 측정 protocol은 ticket 27에서 별도 승인한다.
+  - [AppRuleBlocker.kt](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt)의 callback-to-worker handoff
+  - [SerializedDecisionWorker.kt](../../app/src/main/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorker.kt)의 serialized reconciliation, persistence, evaluation path
+  - [AppRuleBlockerCallbackFlushOrderingRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerCallbackFlushOrderingRedTest.kt)의 delayed-read와 rapid-switch ordering traces
+  - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 focused JVM seam coverage
+  - [canonical baseline inventory](app-rule-enforcement-baseline.md#ticket-24-closure-evidence--2026-09-10)의 T24 closure evidence
+- **Mitigation or decision needed:** existing serialized worker ownership is retained. The callback remains nonblocking, and the worker waits for the required visible-session persistence completion before evaluation. No latency threshold, blocking callback contract, queue split, or architecture change is selected. Ticket 27 must separately propose and obtain approval for a p95 measurement protocol.
+- **Acceptance criteria:** the two stable T24 identifiers pass focused connected verification; the focused JVM worker suite passes; the delayed-read trace orders `callback-return < persistence-read-complete < evaluation`; the rapid-switch trace orders both callback returns before the relevant persistence completions and `evaluation-1`/`evaluation-2` after commits 1/2; Xiaomi validation and p95 measurement remain outside this closure.
 - **Target refactor phase:** `Phase 2 asynchronous decision worker`.
 
 ### AR 008 shutdown drain 시간과 완료 보장 미측정

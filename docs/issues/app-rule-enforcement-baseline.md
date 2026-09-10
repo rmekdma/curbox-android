@@ -213,6 +213,39 @@ The focused result closes only T23's deterministic visibility ownership contract
 AR004 or the final Xiaomi gate: `Xiaomi Pad Pro 2025 12.7` on Android 15 or Android 16 remains the
 last device validation target.
 
+### Ticket 24 closure evidence — 2026-09-10
+
+Ticket 24 owns exactly the two frozen `T24-CALLBACK-FLUSH` identifiers. The existing production
+handoff already satisfies the required contract: `SerializedDecisionWorker.submit()` uses a
+nonblocking value-only channel handoff, and one serialized worker performs visible-session
+reconciliation and persistence before `AppRuleEnforcement` reads sessions for evaluation. The
+T24 implementation completed the missing test fixture initialization and made the ordering trace
+explicit; no production source, policy threshold, blocking callback contract, device substitution,
+or architecture decision was added.
+
+| Verification | Environment and result |
+| --- | --- |
+| Focused connected | `AppRuleBlockerCallbackFlushOrderingRedTest` on `iPlay50_mini_Pro - 13` / Android 13: `3/3` passed, `0` failures, `0` errors, `0` skipped; XML timestamp `2026-09-10T02:20:00` (timezone not encoded). Both T24 identifiers passed; the third tracker handoff test is outside T24. |
+| Focused JVM | `SerializedDecisionWorkerTest`: `24/24` passed, `0` failures, `0` errors, `0` skipped. |
+| Ordering evidence | Delayed read: `callback-return < persistence-read-complete < evaluation`. Rapid switch: both callback returns precede the first persistence commit completion; `evaluation-1` follows commit 1 and `evaluation-2` follows commit 2. |
+| Production change | None. The test fixture now initializes the existing usage-reset repository required by the production worker constructor. |
+
+The two T24 identifiers are closed by this deterministic evidence. The trace proves callback
+handoff remains nonblocking while evaluator observation waits for required persistence completion.
+No p95 value or latency threshold is inferred; Ticket 27 owns separately approved measurement
+protocol. T25/T26 and the final Xiaomi gate remain open.
+
+### Latest full-suite verification after Ticket 24 — 2026-09-10
+
+The final full JVM command `testFullDebugUnitTest` reported `351` tests, `351` passed,
+`0` failures, `0` errors, and `0` skipped. The final full connected command
+`connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13 reported `92` tests,
+`91` passed, `1` failure, `0` errors, and `0` skipped; the connected XML timestamp was
+`2026-09-10T02:30:58` (timezone not encoded). The only failure was
+`ExampleInstrumentedTest::useAppContext`, classified as T26's debug application-id fixture.
+The latest run therefore has no T21, T22, T23, T24, or T25 failure node. T29's Xiaomi Pad Pro
+2025 12.7 Android 15/16 gate was not substituted or run.
+
 ### T24–T26 — 4 cases
 
 | Owner | Stable identifier | Primary classification |
@@ -267,7 +300,7 @@ The detailed ticket records remain in [.scratch/app-rule-enforcement/issues](../
 Ticket 17's component-only limitation and ticket 19's later full-service decision are both retained;
 the latter is authoritative for the current Phase 4 status.
 
-### Tickets 20–23
+### Tickets 20–24
 
 | Ticket | Canonical status | Evidence or interpretation |
 | --- | --- | --- |
@@ -275,14 +308,15 @@ the latter is authoritative for the current Phase 4 status.
 | 21 | `done` | The six T21 stable identifiers have deterministic closure evidence above. T22/T23 ownership and the Xiaomi device gate remain separate. |
 | 22 | `done` | The three T22 stable identifiers passed the focused connected and JVM verification above. No production change was needed; T23 visibility/ownership remains separate. |
 | 23 | `done` | The 11 T23 stable identifiers passed the focused connected and JVM verification above. Existing window/root/target ownership behavior satisfied the contract; Xiaomi OEM validation remains T29. |
+| 24 | `done` | The two frozen callback-flush identifiers pass focused connected and JVM ordering evidence; no production source change was needed. |
 
 ### Phases 0–4
 
 | Phase | Reconciled status | Open boundary |
 | --- | --- | --- |
 | Phase 0 | `complete — policy and deterministic RED-contract stage` | Its failures are inputs to later implementation tickets, not fixed results. |
-| Phase 1 | `T21/T22/T23 deterministic closure recorded; verification open` | T24/T25/T26 and Xiaomi device verification remain open. |
-| Phase 2 | `implementation and fault/cancellation contracts recorded done; measurement decisions open` | T24 owns callback flush; T27 owns callback/decision p95; T28 owns numeric drain-budget decision. |
+| Phase 1 | `T21/T22/T23/T24 deterministic closure recorded; verification open` | T25/T26 and Xiaomi device verification remain open. |
+| Phase 2 | `implementation and fault/cancellation contracts recorded done; measurement decisions open` | T24 callback ordering is closed; T27 owns callback/decision p95; T28 owns numeric drain-budget decision. |
 | Phase 3 | `done — NO-GO` | Do not add a per-package coordinator unless its entry condition is newly reproduced. |
 | Phase 4 | `done — NO-GO; architecture gate closed` | Revisit only if production cleanup ordering or containment changes. |
 
@@ -294,7 +328,7 @@ historical 24 failures, or the later connected results, into a green release gat
 - Ticket 21's six T21 cases are resolved in the deterministic closure evidence above without changing the approved evidence policy.
 - Ticket 22's three recheck cases and Ticket 23's eleven visibility/ownership cases are resolved in
   the closure evidence above. Neither ticket absorbed the other owner's identifiers.
-- Ticket 24 owns the two callback-flush cases. Ticket 25 owns the one Guardian lifecycle case.
+- Ticket 24's two callback-flush cases are closed by the deterministic ordering evidence above. Ticket 25 owns the one Guardian lifecycle case.
 - Ticket 26 owns the one debug-fixture case and must not relabel product failures as fixture failures.
 - Ticket 27 must first propose and obtain approval for a p95 measurement protocol; no p95 value is
   currently recorded.
