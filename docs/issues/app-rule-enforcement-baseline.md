@@ -318,6 +318,28 @@ These are execution-specific results after `887aab62` and the accepted review te
 Ticket 25 runs above remain historical. The connected result is iPlay50 evidence, not Xiaomi OEM
 evidence. The final `Xiaomi Pad Pro 2025 12.7` Android 15/16 validation remains the Ticket 29 gate.
 
+### Ticket 26 closure evidence — 2026-09-10
+
+The frozen T26 identifier was `ExampleInstrumentedTest::useAppContext`. Its failure was a fixture
+expectation mismatch: the test asserted the release ID `neth.iecal.curbox` while the debug target
+correctly reported `neth.iecal.curbox.debug`. The fixture now compares the target context with the
+variant-generated `BuildConfig.APPLICATION_ID`. This changes no production source, manifest,
+flavor configuration, policy, threshold, architecture, or expected debug identity.
+
+| Verification | Environment and result |
+| --- | --- |
+| Focused connected repeatability | Three independent clean-state `connectedFullDebugAndroidTest` invocations filtered to `neth.iecal.curbox.ExampleInstrumentedTest` on `iPlay50_mini_Pro - 13` / Android 13; each reported `1` test, `1` passed, `0` failures, `0` errors, `0` skipped. |
+| Fixture isolation and cleanup | The test has no mutable state, persistent files, receivers, services, or database writes. The connected task left no Curbox target or instrumentation package installed after each run; an ADB package check before the final suite was empty. |
+| Full JVM | `testFullDebugUnitTest`: `64` XML suites, `351` tests, `351` passed, `0` failures, `0` errors, `0` skipped. |
+| Flavor debug builds | `assembleFullDebug`, `assemblePlaystoreDebug`, and `assembleFdroidDebug`: all succeeded. |
+| Final full connected | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: `97` tests, `96` passed, `1` failure, `0` errors, `0` skipped; XML timestamp `2026-09-10T04:38:22` (timezone not encoded). |
+| Remaining failure classification | `WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground` was the only remaining node. It is not one of Ticket 20's 24 frozen identifiers, so it remains an execution-specific outside-inventory observation and is not assigned to T26. |
+
+The T26 owned failure is closed by the variant-aware fixture assertion. The remaining
+`WarningActivityLifecycleTest` observation is preserved without relabeling it as a debug-fixture
+failure or claiming that it is a product or infrastructure diagnosis. This iPlay50 result is not
+Xiaomi OEM evidence; `Xiaomi Pad Pro 2025 12.7` Android 15/16 remains the Ticket 29 gate.
+
 ### T24–T26 — 4 cases
 
 | Owner | Stable identifier | Primary classification |
@@ -372,7 +394,7 @@ The detailed ticket records remain in [.scratch/app-rule-enforcement/issues](../
 Ticket 17's component-only limitation and ticket 19's later full-service decision are both retained;
 the latter is authoritative for the current Phase 4 status.
 
-### Tickets 20–25
+### Tickets 20–26
 
 | Ticket | Canonical status | Evidence or interpretation |
 | --- | --- | --- |
@@ -382,13 +404,14 @@ the latter is authoritative for the current Phase 4 status.
 | 23 | `done` | The 11 T23 stable identifiers passed the focused connected and JVM verification above. Existing window/root/target ownership behavior satisfied the contract; Xiaomi OEM validation remains T29. |
 | 24 | `done` | The two frozen callback-flush identifiers pass focused connected and JVM ordering evidence; no production source change was needed. |
 | 25 | `done` | The frozen repeated-denial Guardian identifier passes deterministic same-instance, refreshed-screen, visibility, and cleanup evidence; the historical connected observation remains in the inventory. |
+| 26 | `done` | The frozen debug application-id fixture now compares the target context with the variant-generated application ID. Focused repetition is green; the remaining full-suite observation is outside Ticket 20's frozen inventory and is not assigned to T26. |
 
 ### Phases 0–4
 
 | Phase | Reconciled status | Open boundary |
 | --- | --- | --- |
 | Phase 0 | `complete — policy and deterministic RED-contract stage` | Its failures are inputs to later implementation tickets, not fixed results. |
-| Phase 1 | `T21/T22/T23/T24/T25 deterministic closure recorded; verification open` | T26 and Xiaomi device verification remain open. |
+| Phase 1 | `T21/T22/T23/T24/T25/T26 deterministic closure recorded; verification open` | Xiaomi device verification remains open. |
 | Phase 2 | `implementation and fault/cancellation contracts recorded done; measurement decisions open` | T24 callback ordering is closed; T27 owns callback/decision p95; T28 owns numeric drain-budget decision. |
 | Phase 3 | `done — NO-GO` | Do not add a per-package coordinator unless its entry condition is newly reproduced. |
 | Phase 4 | `done — NO-GO; architecture gate closed` | Revisit only if production cleanup ordering or containment changes. |
@@ -402,7 +425,9 @@ historical 24 failures, or the later connected results, into a green release gat
 - Ticket 22's three recheck cases and Ticket 23's eleven visibility/ownership cases are resolved in
   the closure evidence above. Neither ticket absorbed the other owner's identifiers.
 - Ticket 24's two callback-flush cases and Ticket 25's one Guardian lifecycle case are closed by the deterministic evidence above. The historical owner inventory remains unchanged.
-- Ticket 26 owns the one debug-fixture case and must not relabel product failures as fixture failures.
+- Ticket 26's one debug-fixture case is closed by the variant-aware application-ID assertion. The
+  latest full suite still has one execution-specific `WarningActivityLifecycleTest` failure outside
+  Ticket 20's frozen inventory; it is not assigned to T26 or relabeled as a fixture failure.
 - Ticket 27 must first propose and obtain approval for a p95 measurement protocol; no p95 value is
   currently recorded.
 - Ticket 28 must first obtain the explicit numeric drain-budget/completion decision; production
