@@ -134,7 +134,7 @@ class AppRuleBlocker {
             packageName: String,
             denials: List<AppRuleGuardianDenial>
         ): Intent = Intent(context, GuardianApprovalActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(GuardianApprovalActivity.EXTRA_PACKAGE, packageName)
             putExtra(GuardianApprovalActivity.EXTRA_DENIALS, Gson().toJson(denials))
         }

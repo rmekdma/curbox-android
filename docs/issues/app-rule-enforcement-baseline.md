@@ -233,9 +233,10 @@ or architecture decision was added.
 The two T24 identifiers are closed by this deterministic evidence. The trace proves callback
 handoff remains nonblocking while evaluator observation waits for required persistence completion.
 No p95 value or latency threshold is inferred; Ticket 27 owns separately approved measurement
-protocol. T25/T26 and the final Xiaomi gate remain open.
+protocol. T26 and the final Xiaomi gate remain open; Ticket 25 is recorded in the closure evidence
+below.
 
-### Latest full-suite verification after Ticket 24 — 2026-09-10
+### Full-suite verification after Ticket 24, before Ticket 25 — 2026-09-10
 
 The final full JVM command `testFullDebugUnitTest` reported `351` tests, `351` passed,
 `0` failures, `0` errors, and `0` skipped. The final full connected command
@@ -245,6 +246,32 @@ The final full JVM command `testFullDebugUnitTest` reported `351` tests, `351` p
 `ExampleInstrumentedTest::useAppContext`, classified as T26's debug application-id fixture.
 The latest run therefore has no T21, T22, T23, T24, or T25 failure node. T29's Xiaomi Pad Pro
 2025 12.7 Android 15/16 gate was not substituted or run.
+
+### Ticket 25 closure evidence — 2026-09-10
+
+Ticket 25 owns exactly the frozen identifier
+`GuardianApprovalActivityLifecycleTest::repeatedDenialReusesTheVisibleApprovalScreen`.
+The historical T25 failure remains in Ticket 20's inventory as observed evidence. It is not
+rewritten as fixed because a later suite happened to pass; closure is based on the deterministic
+same-instance and refreshed-screen contract below.
+
+The shared Guardian intent now carries the existing `NEW_TASK` handoff together with explicit
+`SINGLE_TOP`. `GuardianApprovalActivity.onNewIntent()` accepts a valid repeated denial payload,
+updates the activity intent and selected rule, and replaces the existing choice rows exactly once.
+An empty or malformed repeated payload leaves the current approval screen intact. This preserves
+the existing denial flow, visible activity identity, close broadcast, and background cleanup.
+
+| Verification | Environment and result |
+| --- | --- |
+| Focused connected | `GuardianApprovalActivityLifecycleTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: `3` tests, `3` passed, `0` failures, `0` errors, `0` skipped; XML timestamp `2026-09-10T03:08:12` (timezone not encoded). The owned repeated-denial case and the existing close-broadcast/background-finish lifecycle checks passed. |
+| Screen identity and decision count | The repeated request reused one `GuardianApprovalActivity` instance, left exactly one approval choice row, and displayed the updated denial reason on that same visible screen. |
+| Full JVM | `testFullDebugUnitTest`: `351` tests, `351` passed, `0` failures, `0` errors, `0` skipped. |
+| Full connected after Ticket 25 | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13, full flavor: `92` tests, `91` passed, `1` failure, `0` errors, `0` skipped; XML timestamp `2026-09-10T03:07:19` (timezone not encoded). |
+| Remaining failure classification | The only failure was `ExampleInstrumentedTest::useAppContext`, owned by T26's debug application-id fixture. T21, T22, T23, T24, and T25 had no failure node in this execution. |
+| Production scope | Two lifecycle changes only: explicit `SINGLE_TOP` on the existing Guardian intent and valid repeated-intent rendering. No approval policy, timing threshold, architecture, or device substitution was added. |
+
+The connected result is deterministic T25 closure evidence on iPlay50, not Xiaomi OEM evidence.
+`Xiaomi Pad Pro 2025 12.7` Android 15/16 remains the final Ticket 29 gate.
 
 ### T24–T26 — 4 cases
 
@@ -300,7 +327,7 @@ The detailed ticket records remain in [.scratch/app-rule-enforcement/issues](../
 Ticket 17's component-only limitation and ticket 19's later full-service decision are both retained;
 the latter is authoritative for the current Phase 4 status.
 
-### Tickets 20–24
+### Tickets 20–25
 
 | Ticket | Canonical status | Evidence or interpretation |
 | --- | --- | --- |
@@ -309,13 +336,14 @@ the latter is authoritative for the current Phase 4 status.
 | 22 | `done` | The three T22 stable identifiers passed the focused connected and JVM verification above. No production change was needed; T23 visibility/ownership remains separate. |
 | 23 | `done` | The 11 T23 stable identifiers passed the focused connected and JVM verification above. Existing window/root/target ownership behavior satisfied the contract; Xiaomi OEM validation remains T29. |
 | 24 | `done` | The two frozen callback-flush identifiers pass focused connected and JVM ordering evidence; no production source change was needed. |
+| 25 | `done` | The frozen repeated-denial Guardian identifier passes deterministic same-instance, refreshed-screen, visibility, and cleanup evidence; the historical connected observation remains in the inventory. |
 
 ### Phases 0–4
 
 | Phase | Reconciled status | Open boundary |
 | --- | --- | --- |
 | Phase 0 | `complete — policy and deterministic RED-contract stage` | Its failures are inputs to later implementation tickets, not fixed results. |
-| Phase 1 | `T21/T22/T23/T24 deterministic closure recorded; verification open` | T25/T26 and Xiaomi device verification remain open. |
+| Phase 1 | `T21/T22/T23/T24/T25 deterministic closure recorded; verification open` | T26 and Xiaomi device verification remain open. |
 | Phase 2 | `implementation and fault/cancellation contracts recorded done; measurement decisions open` | T24 callback ordering is closed; T27 owns callback/decision p95; T28 owns numeric drain-budget decision. |
 | Phase 3 | `done — NO-GO` | Do not add a per-package coordinator unless its entry condition is newly reproduced. |
 | Phase 4 | `done — NO-GO; architecture gate closed` | Revisit only if production cleanup ordering or containment changes. |
@@ -328,7 +356,7 @@ historical 24 failures, or the later connected results, into a green release gat
 - Ticket 21's six T21 cases are resolved in the deterministic closure evidence above without changing the approved evidence policy.
 - Ticket 22's three recheck cases and Ticket 23's eleven visibility/ownership cases are resolved in
   the closure evidence above. Neither ticket absorbed the other owner's identifiers.
-- Ticket 24's two callback-flush cases are closed by the deterministic ordering evidence above. Ticket 25 owns the one Guardian lifecycle case.
+- Ticket 24's two callback-flush cases and Ticket 25's one Guardian lifecycle case are closed by the deterministic evidence above. The historical owner inventory remains unchanged.
 - Ticket 26 owns the one debug-fixture case and must not relabel product failures as fixture failures.
 - Ticket 27 must first propose and obtain approval for a p95 measurement protocol; no p95 value is
   currently recorded.
