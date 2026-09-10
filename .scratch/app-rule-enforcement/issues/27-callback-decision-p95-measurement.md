@@ -26,10 +26,10 @@ between them:
   after visible-session reconciliation, persistence completion/read ordering, and
   `AppRuleEnforcement.check()` have produced an `AppRulesEvaluation`, but before recheck-plan
   publication and Handler/WarningActivity/Guardian effects.
-- **B — callback-to-published-decision:** `callbackStart` to entry of the existing
-  `DecisionOutcomeSink.publish(DecisionOutcome)` seam for the matching request. This includes
-  construction/publication of the final worker outcome, but still ends before the later
-  Handler/WarningActivity/Guardian effects. The metric must be named
+- **B — callback-to-published-decision:** `callbackStart` to a timestamp taken at entry to the
+  existing `DecisionOutcomeSink.publish(DecisionOutcome)` seam for the matching request, after
+  the `DecisionOutcome` object has already been constructed. This timestamp does not include the
+  sink body or any later Handler/WarningActivity/Guardian effects. The metric must be named
   callback-to-published-decision if B is selected.
 
 There is a useful but different outer boundary: full `AppBlockerService.onAccessibilityEvent`
@@ -61,6 +61,44 @@ One sample is one accepted `DecisionRequest` with `reason == REAL_EVENT`, correl
 existing `SourceOrderIdentity`, that produces exactly one evaluable package decision and
 reaches the selected end boundary. It is not one row per log line, retry, recheck, package
 UI effect, or warning.
+
+### Clock and passive correlation
+
+- Every measured boundary and diagnostic timestamp uses Android's
+  `SystemClock.elapsedRealtimeNanos()`. Store every such value as a raw integer nanosecond
+  field; never convert it to milliseconds before retention or subtract wall-clock time. Wall
+  clock values may be retained separately for human-readable run metadata only.
+- The diagnostic adapter correlates callback-local timestamps with the request's existing
+  `SourceOrderIdentity`, then correlates that identity with the selected A or B seam. It does
+  not add timing fields to the decision contract and does not make a second evaluator or
+  persistence call.
+- Observation must be passive: no blocking I/O, sleeps, latches, measurement locks, scheduler
+  posts, queue changes, policy branches, or UI interception on the callback or worker path.
+  Required attempt disposition is retained by the lossless ledger described below.
+
+### Normal post-sample quiescence gate
+
+The selected boundary ends the measured duration. Normal post-sample quiescence is a separate
+gate outside that duration and must complete before the next stimulus. A valid attempt cannot
+open the next-stimulus gate until all of the following are true:
+
+1. The synchronous callback has returned, including its final exit classification.
+2. The selected A or B boundary has been reached.
+3. The worker request and its `SourceOrderIdentity` are fully published and completed; no
+   worker-owned work for that identity remains in flight.
+4. Required persistence commit and read work for that identity is complete.
+5. No recheck or Handler effect for that identity remains pending.
+6. Any Warning/Guardian test UI caused by the fixture is deterministically closed, and the
+   synthetic fixture state is restored to its pre-stimulus state.
+7. No refresh, reconnect, lifecycle-generation change, or worker replacement occurred during
+   the attempt.
+
+Record `quiescenceStartNs` after the selected boundary and `quiescenceEndNs` when this gate
+closes, using the same raw integer nanosecond clock. These timestamps and the quiescence
+duration are retained for diagnosis but are outside the measured callback-to-A/B duration. If
+the gate cannot reach quiescence within the approved recovery deadline `R`, classify the row as
+`EXCLUDED_POST_SAMPLE_NOT_QUIESCENT`; if the approved exclusion cap or abort rule is reached,
+abort the run. Do not dispatch another stimulus while the gate is unresolved.
 
 ### Terminal handling, recovery, and abort choices
 
@@ -121,11 +159,19 @@ retained for diagnosis only.
 
 ### Concrete execution population proposal
 
-The proposed execution environment is the currently connected `iPlay50_mini_Pro`, Android
-13/API 33, `FullDebug`. Xiaomi Pad Pro 2025 12.7 on Android 15/16 is not substituted here and
-remains the final Ticket 29 validation gate. At run start, capture the exact final commit, app
-version/code, flavor, device model, Android build fingerprint, and test harness revision; none
-of those values is predeclared as a pass/fail target.
+The proposed execution identity is pinned to serial
+`T811MA256GB23418064398`, model `iPlay50_mini_Pro`, Android 13/API 33, build fingerprint
+`Alldocube/iPlay50_mini_Pro/iPlay50_mini_Pro:13/TP1A.220624.014/1699256002:user/release-keys`,
+and the `FullDebug` flavor. At run start, assert all of these values. Any mismatch aborts
+before the first stimulus; the run must not silently substitute another device or build.
+Xiaomi Pad Pro 2025 12.7 on Android 15/16 is not substituted here and remains the final
+Ticket 29 validation gate.
+
+The user must approve the implementation identity policy: the exact app version, source
+commit, and measurement-harness commit captured immediately before samples are the final
+measurement implementation HEAD. If any of those code or harness inputs changes after capture,
+the run is invalid and must be restarted; no later code change may be treated as the same run.
+The exact values are metadata, not a pass/fail target.
 
 Use only synthetic fixture identifiers:
 
@@ -143,7 +189,9 @@ identifier. The existing one-window fixture seam supplies exactly one applicatio
 one active root with the same fixture package, `hasApplicationWindow == true`,
 `hasUnknownApplicationWindow == false`, no split-screen second package, no essential overlay,
 `screenInteractive == true`, and `keyguardLocked == false`. No real package or real rule name
-is opened, launched, or written to evidence.
+is opened, launched, or written to evidence. This synthetic single-window event and root/window
+setup is explicitly measurement scope; it is not evidence of production Android-window or OEM
+window-selection representativeness and requires explicit user approval.
 
 The exact population mix is another user choice:
 
@@ -182,29 +230,33 @@ hooks update only primitive fields and an atomic terminal state in that record; 
 file I/O, wait, sleep, enqueue work, acquire a measurement lock, call the evaluator, or change
 the decision request.
 
-The ledger retains every attempt's start, callback-return, selected-end, source identity when
-available, boundary-presence bits, signed durations, terminal state, exclusion reason, and
-synthetic fixture label. The host serializes the already-closed ledger records to JSONL only
-after the run. If a ledger slot cannot be allocated or updated, record
+The complete row ledger retains, for every warm-up, measured, and excluded attempt: `runId`,
+attempt ordinal, sample ordinal when applicable, source-order identity when available,
+`observationKind`, lifecycle generation, accepted runtime revision, package decision count,
+allow/deny result, denying-rule count, commit status, publication status, every boundary
+timestamp (`callbackStartNs`, `callbackReturnNs`, `selectedEndNs`, `quiescenceStartNs`, and
+`quiescenceEndNs`) as raw integer nanoseconds, the signed durations, boundary-presence bits,
+terminal state, exclusion reason, and synthetic fixture label. The host serializes the
+already-closed ledger records to JSONL only after the run. If a ledger slot cannot be allocated or updated, record
 `ABORT_LEDGER_CAPACITY` or `ABORT_LEDGER_WRITE_FAILURE` in the run manifest and stop before
 dispatching another stimulus. Thus every dispatched attempt has one disposition or the run is
 explicitly incomplete; there is no observer-drop count that can contradict the one-row rule.
 
 ### Aggregation
 
-For a completed run, sort the valid selected durations in ascending order as
-`x[1] <= ... <= x[n]`. Use the nearest-rank method: `rank = ceil(0.95 * n)` with one-based
-indexing, and `p95 = x[rank]`. With the proposed 200 valid measured rows, this is the 190th
-sorted row (zero-based index 189). Do not interpolate, trim, pool runs, or infer any threshold,
-target timing, completion guarantee, or implementation response. An aborted or incomplete run
-has no p95.
+For a completed run, sort the valid selected durations, retained as raw integer nanoseconds,
+in ascending order as `x[1] <= ... <= x[n]`. Use the nearest-rank method:
+`rank = ceil(0.95 * n)` with one-based indexing, and `p95 = x[rank]`. With the proposed 200
+valid measured rows, this is the 190th sorted row (zero-based index 189). Do not interpolate,
+trim, pool runs, or infer any threshold, target timing, completion guarantee, or implementation
+response. An aborted or incomplete run has no p95.
 
 ### Evidence, privacy, integrity, and deletion
 
 - Keep one immutable `samples.jsonl` row for every warm-up and measured attempt, including
   excluded and timeout rows. Use only `T27_ALLOW`/`T27_DENY` and other synthetic identifiers;
   do not retain real package names, real rule names, or user data.
-- Retain `metadata.json` with run id, exact start/end wall time, captured commit/app
+- Retain `metadata.json` with run id, exact start/end wall time, captured serial, commit/app
   version/build/fingerprint, device/API, flavor, harness revision, chosen A/B boundary,
   chosen D/R/E/M options, clock source, stimulus order, lifecycle generation, root/window
   conditions, terminal/exclusion totals, and the raw-file SHA-256 values.
@@ -230,9 +282,12 @@ Before any measurement work, the user must explicitly choose:
 2. Terminal/recovery deadlines: T1, T2, or user-supplied `D` and `R`.
 3. Exclusion/abort cap: E0, E5, or E20.
 4. Population mix: M1, M2, or M3.
-5. The proposed `iPlay50_mini_Pro` Android 13 FullDebug synthetic fixture environment and
-   exact fixed rule/window state above.
-6. Lossless preallocated ledger retention, restricted-workspace retention/deletion, and
+5. The pinned serial/device/build identity, and the policy that the exact app version, source
+   commit, and harness commit captured before samples are the final measurement
+   implementation HEAD; any later code change invalidates the run.
+6. The synthetic single-window fixture scope and its explicit limitation that it does not
+   establish production Android-window or OEM representativeness.
+7. Lossless preallocated ledger retention, restricted-workspace retention/deletion, and
    committed hash manifest.
 
 No measurement, instrumentation verification, sample collection, p95 calculation, or
