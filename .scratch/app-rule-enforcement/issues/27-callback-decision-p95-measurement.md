@@ -10,37 +10,58 @@ become a product requirement without a separate user decision.
 
 **Blocked by:** 21 — Long-boundary foreground decision closure; 22 — Recheck policy closure; 23 — Visibility-window closure; 24 — Callback flush closure; 25 — Guardian lifecycle closure; 26 — Debug fixture reliability closure
 
-**Status:** awaiting-user-approval
+**Status:** approved-awaiting-implementation
 
-## Pre-approval protocol proposal — revision T27-P6 (2026-09-10)
+## Approved protocol — revision T27-P6 (2026-09-10)
 
-**Proposal status:** awaiting explicit user approval.
+**Protocol status:** approved on 2026-09-10; implementation and execution deferred by the user.
 
-This revision is a protocol proposal only. No instrumentation path was run or verified, no
-measurement samples were generated or collected, and no p95 was calculated. The remaining
+### Recorded user approval — 2026-09-10
+
+The user explicitly approved the complete bundle without modification: **B + T2 + E5 + M1 +
+the isolated direct-dispatch topology + the pinned identity policy + the synthetic-only scope +
+the restricted evidence retention policy**. Therefore this run uses the fixed synthetic
+callback-to-decision-publication-entry boundary, `D = 5 seconds`, `R = 5 seconds`, an exclusion
+cap of 5, 20 valid alternating warm-up rows, and exactly 100 valid allow plus 100 valid deny
+measured rows. This approval does not establish a pass/fail threshold, product latency target,
+or production/OEM representativeness.
+
+### Recorded focused preflight — 2026-09-10
+
+The approved focused
+`WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground` preflight ran on
+the pinned iPlay50_mini_Pro and passed: **1 test, 1 passed; Gradle BUILD SUCCESSFUL**. It did not
+start a Ticket 27 ledger or collect a latency sample. The two subsequent `adb uninstall`
+commands returned `DELETE_FAILED_INTERNAL_ERROR`; replacement installs of the FullDebug target
+and instrumentation APKs both succeeded. `pm clear` then succeeded for
+`neth.iecal.curbox.debug` and `neth.iecal.curbox.debug.test`, both package paths were present,
+and `run-as neth.iecal.curbox.debug` found no child under `files/`. This establishes the recorded
+post-preflight empty app-data state, but a future measurement invocation must still repeat the
+approved final-APK pinning and clean-state gate. No measurement harness was implemented or run,
+no samples were collected, and no p95 was calculated.
+
+This revision is approved protocol documentation. The remaining
 `WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground` failure remains
 an unassigned preflight observation. A clean preflight reproduction must record whether it is
 causally relevant to this fixed harness path and ask the user whether to create a separate
 triage ticket. Its existence alone does not block Ticket 27 and this protocol does not absorb
 or fix it.
 
-### Boundary choice remains user-owned
+### Approved boundary
 
-The run must choose exactly one of these two end boundaries; this proposal does not choose
-between them:
+The user selected B. A is retained below only to make the rejected alternative explicit:
 
-- **A — callback-to-evaluation-ready:** `callbackStart` to the entry of the existing
+- **A — not selected, callback-to-evaluation-ready:** `callbackStart` to the entry of the existing
   `SerializedDecisionWorker` `onEvaluation` seam for the matching request. This is the point
   after visible-session reconciliation, persistence completion/read ordering, and
   `AppRuleEnforcement.check()` have produced an `AppRulesEvaluation`, but before recheck-plan
   publication and Handler/WarningActivity/Guardian effects.
-- **B — callback-to-decision-publication-entry:** `callbackStart` to a timestamp taken at entry to the
+- **B — approved, callback-to-decision-publication-entry:** `callbackStart` to a timestamp taken at entry to the
   existing `DecisionOutcomeSink.publish(DecisionOutcome)` seam for the matching request, after
   the `DecisionOutcome` object has already been constructed. This timestamp does not include the
   sink body or any later Handler/WarningActivity/Guardian effects. If selected, the metric name
-  is exactly **fixed synthetic callback-to-decision-publication-entry p95**. B is the provisional
-  recommendation because it includes construction of the final outcome while retaining a precise
-  pre-sink boundary, but it remains an explicit user choice and is not selected by this proposal.
+  is exactly **fixed synthetic callback-to-decision-publication-entry p95**. B includes
+  construction of the final outcome while retaining a precise pre-sink boundary.
 
 There is a useful but different outer boundary: full `AppBlockerService.onAccessibilityEvent`
 entry to return includes the preceding `AppUsageTracker` fan-out and other service callback
@@ -99,7 +120,7 @@ UI effect, or warning.
   posts, queue changes, policy branches, or UI interception on the callback or worker path.
   Required attempt disposition is retained by the lossless ledger described below.
 
-### Proposed isolated instrumentation topology — explicit approval required
+### Approved isolated instrumentation topology
 
 Use one instrumentation-only entry point to be added after approval:
 `app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerFixedFixtureP95MeasurementTest.kt`,
@@ -186,8 +207,8 @@ ownership assessment. Recurrence alone is not an automatic Ticket 27 block. If i
 continue from the mandatory fresh reinstall/reset. In neither branch may the Warning preflight
 produce or be counted as a Ticket 27 sample.
 
-This topology is the provisional recommendation, not an adopted design. The user must
-explicitly approve or reject it before the harness or its observation seams are implemented.
+The user approved this topology exactly as documented. It remains unimplemented because the
+user subsequently directed this task to finish the ticket edit without implementing it.
 
 ### Normal post-sample quiescence gate
 
@@ -301,15 +322,16 @@ all of the following before reopening the gate:
 4. The callback/selected-end gate is closed for the old attempt; a new stimulus cannot reuse
    its identity or ledger slot.
 
-The user must choose both a terminal observation deadline `D` and a recovery/quiescence
-deadline `R`. `D` bounds the pre-quiescence observation phase. `R` starts only at the
+The approved terminal observation deadline is `D = 5 seconds`, and the approved
+recovery/quiescence deadline is `R = 5 seconds` (T2). `D` bounds the pre-quiescence observation
+phase. `R` starts only at the
 unambiguous `quiescenceStartNs` defined above and bounds normal post-sample recovery. These
 are measurement-run bounds only, not product thresholds:
 
 | Option | `D` per attempt | `R` after `quiescenceStartNs` | Tradeoff |
 | --- | ---: | ---: | --- |
 | T1 | 2 seconds | 2 seconds | Tighter run bound; more likely to classify slow debug/DB scheduling as excluded. |
-| T2 (provisional recommendation) | 5 seconds | 5 seconds | Still bounded while allowing a full-debug worker/persistence tail to settle; does not reuse a product budget. |
+| T2 (**approved**) | 5 seconds | 5 seconds | Still bounded while allowing a full-debug worker/persistence tail to settle; does not reuse a product budget. |
 | T3 | User-supplied values | User-supplied values | No numeric value is chosen here; the run cannot start until both values are recorded. |
 
 If normal recovery is not quiescent by `quiescenceStartNs + R`, classify the attempt as
@@ -318,16 +340,15 @@ or abort rule is reached, abort the run with `ABORT_RECOVERY_NOT_QUIESCENT`. A n
 attempt never opens the next-stimulus gate before `quiescenceEndNs`. A pre-quiescence missing
 boundary is handled at `D` as `ABORT_OBSERVATION_DEADLINE` and never uses `R`.
 
-The user must also choose the maximum number of excluded attempts across warm-up and
-measurement:
+The approved maximum number of excluded attempts across warm-up and measurement is E5:
 
 | Option | Maximum excluded attempts | Abort rule |
 | --- | ---: | --- |
 | E0 | 0 | Abort at the first exclusion or timeout. |
-| E5 (provisional recommendation) | 5 | Abort before dispatching another stimulus when the fifth exclusion is terminal. |
+| E5 (**approved**) | 5 | Abort before dispatching another stimulus when the fifth exclusion is terminal. |
 | E20 | 20, which is 10% of the requested 200 measured samples | Abort before dispatching another stimulus at the cap. |
 
-The provisional recommendation is T2 + E5, but it is not adopted without explicit approval.
+T2 + E5 is approved.
 Any abort, ledger-capacity failure, instrumentation error, lifecycle invalidation without
 recovery, or build/device mismatch produces no p95. Partial raw rows and the abort reason are
 retained for diagnosis only.
@@ -375,7 +396,7 @@ adb -s T811MA256GB23418064398 shell am instrument -w -r `
 Xiaomi Pad Pro 2025 12.7 on Android 15/16 is not substituted here and remains the final
 Ticket 29 validation gate.
 
-The user must approve the immutable run-input identity policy. Immediately before installation,
+The immutable run-input identity policy is approved. Immediately before installation,
 pin: the source commit containing the measured implementation, the harness commit, the protocol
 revision, exact app version/application id/variant, target FullDebug APK SHA-256, and
 instrumentation APK SHA-256. The installed APK bytes must hash to those values before preflight
@@ -409,12 +430,12 @@ The exact population mix is another user choice:
 
 | Option | Warm-up order | Measured order | Population |
 | --- | --- | --- | --- |
-| M1 (provisional recommendation) | Collect 20 **valid** alternating rows: `T27_ALLOW, T27_DENY` repeated until each scheduled position is valid. | Collect exactly 100 **valid** allow rows and 100 **valid** deny rows in alternating order. | Fixed 50/50 valid population; primary p95 pools all 200 valid measured rows. |
+| M1 (**approved**) | Collect 20 **valid** alternating rows: `T27_ALLOW, T27_DENY` repeated until each scheduled position is valid. | Collect exactly 100 **valid** allow rows and 100 **valid** deny rows in alternating order. | Fixed 50/50 valid population; primary p95 pools all 200 valid measured rows. |
 | M2 | `T27_ALLOW` repeated 20 times | `T27_ALLOW` repeated 200 times | 200 allowed only. |
 | M3 | `T27_DENY` repeated 20 times | `T27_DENY` repeated 200 times | 200 denied only. |
 
-The provisional recommendation is M1 because it exercises both evaluator outcomes without
-random stimulus order, but no mix is selected until the user approves it. Under M1, an exclusion
+M1 is approved because it exercises both evaluator outcomes without random stimulus order.
+Under M1, an exclusion
 does not consume a warm-up or measured population slot. After successful recovery, retry the
 same fixture until that slot produces a valid row; advance the allow/deny alternation only after
 a valid sample. Stop only after 20 valid warm-up rows and then exactly 100 valid allow plus 100
@@ -629,39 +650,32 @@ aborts finalization, and forbids reporting p95.
   metadata are not committed while their restricted workspace copies are retained. Later
   evidence/docs commits do not alter the pinned run inputs.
 
-### Explicit approval points
+### Approved decisions
 
-Before any measurement work, the user must explicitly choose:
+All previously user-owned choices are resolved:
 
-1. Boundary **A** (`fixed synthetic callback-to-evaluation-ready`) or boundary **B**
-   (`fixed synthetic callback-to-decision-publication-entry`). **B is recommended but not
-   selected.** The outer full-service boundary is not selected.
-2. Terminal/recovery deadlines: T1, T2, or user-supplied `D` and `R`.
-3. Exclusion/abort cap: E0, E5, or E20.
-4. Population mix: M1, M2, or M3.
-5. The proposed isolated `AppRuleBlockerFixedFixtureP95MeasurementTest` topology, main target
-   process, direct-only stimulus path, ingress proof, focused Warning preflight plus mandatory
-   clean reinstall/reset sequence,
-   and identity-scoped recheck/UI/fixture cleanup. **This topology is recommended but not
-   selected.**
-6. The pinned serial/device/build identity and immutable run-input policy: source, harness,
-   protocol revision, app identity, and both APK hashes are fixed before installation; later
-   evidence/docs-only commits do not invalidate the run.
-7. The synthetic single-window fixture scope and its explicit limitation that it does not
-   establish production Android-window or OEM representativeness.
-8. Lossless preallocated ledger retention, canonical byte format, pseudonymous committed
-   manifest, restricted raw serial/metadata, verified transfer, device deletion, and host
-   retention/deletion policy.
+1. Boundary **B**, fixed synthetic callback-to-decision-publication-entry.
+2. T2: `D = 5 seconds`, `R = 5 seconds`.
+3. E5: abort before another stimulus once the fifth exclusion is terminal.
+4. M1: 20 valid alternating warm-ups, then exactly 100 valid allow plus 100 valid deny rows.
+5. The isolated direct-dispatch `AppRuleBlockerFixedFixtureP95MeasurementTest` topology,
+   identity-scoped cleanup, and focused Warning preflight/reset sequence.
+6. The pinned host-selected device/build and immutable source/harness/protocol/APK identity
+   policy.
+7. Synthetic-only single-window scope, with no production Android-window or OEM
+   representativeness claim.
+8. Canonical restricted evidence, pseudonymous committed manifest, verified byte transfer,
+   device deletion, and restricted host retention policy.
 
-The currently recommended approval bundle is **B + T2 + E5 + M1 + the proposed isolated
-topology + the pinned identity policy + the stated retention policy**. Every element remains
-user-owned and may not be inferred from this recommendation.
-
-No measurement, instrumentation verification, sample collection, p95 calculation, or
-threshold decision may begin before those choices are approved.
+The approved bundle is exactly **B + T2 + E5 + M1 + isolated direct-dispatch topology + pinned
+identity policy + synthetic-only scope + restricted evidence retention policy**. The approval
+gate is satisfied, but implementation and measurement remain deferred under the user's latest
+instruction. A new implementation instruction is required before code, harness, measurement,
+sample collection, or p95 calculation resumes.
 
 - [x] Before collecting any measurement samples, write the revised protocol proposal above. No instrumentation was run and no samples were collected while writing it.
 - [x] **MUST STOP** immediately after recording the protocol proposal and request explicit user approval. This revision did not verify the measurement path, run tests/Gradle, collect samples, or report a p95.
+- [x] Record the user's complete approval bundle and the focused Warning preflight result. No Ticket 27 samples were collected.
 - [ ] After approval, verify that the approved measurement path can observe the selected boundaries without changing decision behavior solely to obtain a number, then run only the approved protocol and record the observed p95, exact conditions, population, retained evidence, and known limitations in the canonical documentation.
 - [ ] Do not invent a pass or fail threshold, target timing, completion guarantee, or implementation response; if a threshold decision is needed, stop and ask the user for it.
 
