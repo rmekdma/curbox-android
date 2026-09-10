@@ -215,6 +215,7 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             repository.rewindTargetSession(nowMs - SESSION_DURATION_MS)
             observations.clear()
             timeline.clear()
+            repository.resetPostClearOrderingState()
             observingPostCommitPath.set(true)
 
             sendWindowEvent(blocker, OTHER_PACKAGE) {
@@ -254,17 +255,22 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             } else if (callbackReturnIndexes.any { it >= commitCompletedIndex }) {
                 failures += "callback waited for flush completion: $timeline"
             }
-            if ("evaluation-1" !in timeline || "evaluation-2" !in timeline) {
+            val evaluationEvents = timeline.filter { it.startsWith("evaluation-") }
+            if (evaluationEvents != listOf("evaluation-1", "evaluation-2")) {
                 failures += "ordering trace is missing one of the queued evaluations: $timeline"
             } else {
-                val firstCommitComplete = timeline.indexOf("persistence-commit-complete-1")
-                val secondCommitComplete = timeline.indexOf("persistence-commit-complete-2")
-                val firstEvaluation = timeline.indexOf("evaluation-1")
-                val secondEvaluation = timeline.indexOf("evaluation-2")
-                if (firstCommitComplete < 0 || secondCommitComplete < 0 ||
-                    firstEvaluation <= firstCommitComplete || secondEvaluation <= secondCommitComplete
-                ) {
-                    failures += "evaluation was not after its flush completion: $timeline"
+                for (requestNumber in 1..2) {
+                    val requestEvents = listOf(
+                        "persistence-commit-complete-$requestNumber",
+                        "persistence-read-$requestNumber",
+                        "evaluation-$requestNumber"
+                    )
+                    val requestIndexes = requestEvents.map(timeline::indexOf)
+                    if (requestIndexes.any { it < 0 } ||
+                        requestIndexes.zipWithNext().any { (first, second) -> first >= second }
+                    ) {
+                        failures += "request $requestNumber was not ordered as commit < read < evaluation: $timeline"
+                    }
                 }
             }
             if (committedObservation == null || committedObservation.evaluation.isAllowed) {
@@ -470,6 +476,8 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         val readHistory = CopyOnWriteArrayList<List<ForegroundSession>>()
         private val releaseCommit = CountDownLatch(1)
         @Volatile private var persistedSessions: List<ForegroundSession> = emptyList()
+        private var commitCount = 0
+        private var readCount = 0
 
         val lastRead: List<ForegroundSession>?
             get() = readHistory.lastOrNull()
@@ -515,6 +523,8 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
             val result = persistedSessions.filter { it.useDayId == useDayId }
             readHistory += result
+            val readNumber = ++readCount
+            timeline += "persistence-read-$readNumber"
             return result
         }
 
@@ -534,7 +544,11 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             releaseCommit.countDown()
         }
 
-        private var commitCount = 0
+        fun resetPostClearOrderingState() {
+            commitCount = 0
+            readCount = 0
+            commitCompleted.set(false)
+        }
     }
 
     private class BlockingTrackerRepository : CurrentUseDaySessionRepository {
