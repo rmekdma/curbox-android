@@ -823,8 +823,9 @@ regression and the Full, Playstore and F-Droid debug builds as green. The 24 can
 failures are therefore not ticket18 fault/cancellation failures: T21 owns 6 long-boundary cases,
 T22 owns 3 recheck cases, T23 owns 11 visibility/ownership cases, T24 owns 2 callback-flush cases,
 T25 owns 1 Guardian lifecycle case, and T26 owns 1 debug-fixture case. No observed failure is
-called fixed by this baseline reconciliation, and the p95 measurement, numeric drain decision and
-Xiaomi device validation remain open.
+called fixed by this baseline reconciliation. Ticket 22 later recorded focused green evidence for
+its three owned cases without changing production code; the p95 measurement, numeric drain
+decision, T23/T24/T25/T26 closure and Xiaomi device validation remain open.
 
 ### 6. Phase 0 RED contract → future invariant mapping
 
@@ -908,8 +909,9 @@ selection 뒤의 `DeadlineDrainStop`만 하나의 total deadline을 가진다.
 ### Phase 1 — foreground evidence deep module
 
 **현재 상태:** `implementation slice recorded done; verification open`. Ticket 08–10의
-evidence module과 복합 foreground path는 기록됐지만, canonical baseline의 T21 long-boundary와
-T22/T23 recheck/visibility failures 및 Xiaomi device verification은 아직 닫히지 않았다.
+evidence module과 복합 foreground path는 기록됐고 T21 long-boundary와 T22 recheck closure가
+검증됐다. canonical baseline의 T23 visibility/ownership cases 및 Xiaomi device verification은
+아직 닫히지 않았다.
 
 **목적:** 이 section 앞의 architecture contract, 특히 §§1.0–1.1과 §§4–6을 실행해 raw
 framework facts와 evidence policy 해석을 하나의 deep module 뒤에 둔다. 아래는 실행 순서이며,
@@ -997,8 +999,8 @@ session/evaluator/scheduler/outcome publication 순서를 하나의 deep worker�
 
 **현재 상태:** `done — NO-GO` (ticket 16). Canonical independent-deadline evidence did not
 establish a need for a coordinator; the existing keyed plans and serialized worker remain the
-implementation. The T22/T23 baseline failures are separate policy and visibility closure work and
-do not reopen this NO-GO decision.
+implementation. The T23 baseline failures remain separate visibility closure work and do not reopen
+this NO-GO decision; T22's recheck closure does not change the coordinator entry condition.
 
 **목적:** 독립적인 package deadline이 실제로 남을 때만 scheduling 복잡성을 깊은 module로
    집중한다. Phase 2만으로 충분하면 이 phase를 실행하지 않는다.
