@@ -115,9 +115,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
         val payload = readValidatedPayload(intent) ?: return
         if (isFinishing) return
-        super.onNewIntent(intent)
         setIntent(intent)
         denials = payload.denials
         selectedRuleId = denials.first().ruleId
@@ -302,8 +302,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
                         ).isEnabled = false
                         dialog.dismiss()
                         authenticateThen(
-                            onAuthenticated = { password ->
-                                writeGrant(password, ruleId, submission.additionalMinutes)
+                            ruleId = ruleId,
+                            onAuthenticated = { capturedRuleId, password ->
+                                writeGrant(capturedRuleId, password, submission.additionalMinutes)
                             },
                             onCancelled = { grantInProgress = false }
                         )
@@ -315,6 +316,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun requestSkip() {
+        val ruleId = selectedRuleId ?: return
         val labels = arrayOf(
             getString(R.string.guardian_skip_15_minutes),
             getString(R.string.guardian_skip_30_minutes),
@@ -324,7 +326,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
             .setTitle(R.string.guardian_skip_rule)
             .setSingleChoiceItems(labels, 0) { dialog, which ->
                 dialog.dismiss()
-                authenticateThen(onAuthenticated = { password -> writeSkip(password, which) })
+                authenticateThen(ruleId) { capturedRuleId, password ->
+                    writeSkip(capturedRuleId, password, which)
+                }
             }
             .setNegativeButton(R.string.cancel, null)
             .create()
@@ -332,11 +336,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun authenticateThen(
-        onAuthenticated: (String) -> Unit,
+        ruleId: String,
+        onAuthenticated: (ruleId: String, password: String) -> Unit,
         onCancelled: () -> Unit = {}
     ) {
         if (!hasPassword) {
-            onAuthenticated("")
+            onAuthenticated(ruleId, "")
             return
         }
         val input = EditText(this).apply {
@@ -350,7 +355,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     val password = input.text.toString()
                     if (dataStore.guardianPasswordIsValid(password)) {
-                        onAuthenticated(password)
+                        onAuthenticated(ruleId, password)
                     } else {
                         onCancelled()
                         toast(R.string.guardian_wrong_password)
@@ -362,7 +367,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         GuardianOwnedDialog.show(dialog, onCancel = onCancelled)
     }
 
-    private fun writeGrant(password: String, ruleId: String, minutes: Long) {
+    private fun writeGrant(ruleId: String, password: String, minutes: Long) {
         lifecycleScope.launch(Dispatchers.IO) {
             val success = try {
                 val settings = dataStore.settings.first()
@@ -386,8 +391,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
-    private fun writeSkip(password: String, option: Int) {
-        val ruleId = selectedRuleId ?: return
+    private fun writeSkip(ruleId: String, password: String, option: Int) {
         lifecycleScope.launch(Dispatchers.IO) {
             val success = try {
                 val settings = dataStore.settings.first()

@@ -4,8 +4,17 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.replaceText
+import androidx.test.espresso.matcher.RootMatchers.isDialog
+import androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom
+import androidx.test.espresso.matcher.ViewMatchers.withId
+import androidx.test.espresso.matcher.ViewMatchers.withText
+import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -14,6 +23,11 @@ import androidx.core.content.ContextCompat
 import neth.iecal.curbox.R
 import neth.iecal.curbox.blockers.AppRuleBlocker
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
+import neth.iecal.curbox.data.models.AppRuleOverrideState
+import neth.iecal.curbox.utils.DataStoreManager
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -174,6 +188,66 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
+    fun addTimeFlowKeepsTheOriginalRuleAfterValidReplacement() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        resetGuardianOverrides(context)
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(ruleId = "rule_a", ruleName = "Rule A")
+            ).use {
+                onView(withId(R.id.approval_add_time)).perform(click())
+                onView(isAssignableFrom(EditText::class.java))
+                    .inRoot(isDialog())
+                    .perform(replaceText("5"))
+                    .check(matches(withText("5")))
+
+                InstrumentationRegistry.getInstrumentation().targetContext.startActivity(
+                    approvalIntent(ruleId = "rule_b", ruleName = "Rule B")
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+                onView(withText(R.string.common_continue))
+                    .inRoot(isDialog())
+                    .perform(click())
+            }
+
+            val state = awaitOverrideState(context) { it.grants.isNotEmpty() }
+            assertEquals(listOf("rule_a"), state.grants.map { it.ruleId })
+            assertTrue(state.skips.isEmpty())
+        } finally {
+            resetGuardianOverrides(context)
+        }
+    }
+
+    @Test
+    fun skipFlowKeepsTheOriginalRuleAfterValidReplacement() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        resetGuardianOverrides(context)
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(ruleId = "rule_a", ruleName = "Rule A")
+            ).use {
+                onView(withId(R.id.approval_skip_rule)).perform(click())
+
+                InstrumentationRegistry.getInstrumentation().targetContext.startActivity(
+                    approvalIntent(ruleId = "rule_b", ruleName = "Rule B")
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+                onView(withText(R.string.guardian_skip_15_minutes))
+                    .inRoot(isDialog())
+                    .perform(click())
+            }
+
+            val state = awaitOverrideState(context) { it.skips.isNotEmpty() }
+            assertEquals(listOf("rule_a"), state.skips.map { it.ruleId })
+            assertTrue(state.grants.isEmpty())
+        } finally {
+            resetGuardianOverrides(context)
+        }
+    }
+
+    @Test
     fun approvalIsFinishedAfterItLeavesTheForeground() {
         ActivityScenario.launch<GuardianApprovalActivity>(approvalIntent()).use { scenario ->
             if (scenario.state != Lifecycle.State.DESTROYED) {
@@ -259,12 +333,42 @@ class GuardianApprovalActivityLifecycleTest {
             removeExtra(GuardianApprovalActivity.EXTRA_PACKAGE)
         }
 
-    private fun approvalIntent(reason: String = "Daily limit reached"): Intent {
+    private fun resetGuardianOverrides(context: Context) {
+        assertTrue(
+            "Guardian lifecycle tests require an unset guardian password",
+            runBlocking { DataStoreManager(context).clearGuardianPassword() }
+        )
+        assertTrue(
+            runBlocking {
+                DataStoreManager(context).writeAppRuleOverrideState(
+                    password = "",
+                    state = AppRuleOverrideState()
+                )
+            }
+        )
+    }
+
+    private fun awaitOverrideState(
+        context: Context,
+        predicate: (AppRuleOverrideState) -> Boolean
+    ): AppRuleOverrideState = runBlocking {
+        withTimeout(5_000L) {
+            DataStoreManager(context).settings
+                .first { predicate(it.appRuleOverrideState) }
+                .appRuleOverrideState
+        }
+    }
+
+    private fun approvalIntent(
+        ruleId: String = "test_rule",
+        ruleName: String = "Test Rule",
+        reason: String = "Daily limit reached"
+    ): Intent {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val denials = listOf(
             AppRuleGuardianDenial(
-                ruleId = "test_rule",
-                ruleName = "Test Rule",
+                ruleId = ruleId,
+                ruleName = ruleName,
                 reason = reason
             )
         )
