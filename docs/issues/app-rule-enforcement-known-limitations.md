@@ -53,24 +53,25 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 
 ## 결정 기록과 구현 대기 사항
 
-### AR 002 foreground evidence 정책표 승인 완료, T21/T22 구현 완료
+### AR 002 foreground evidence 정책표 승인 완료, T21/T22/T23 deterministic closure 완료
 
-- **Status / Severity:** `T21/T22 구현됨, T23 및 실제 기기 검증 잔여` / `P1`
+- **Status / Severity:** `T21/T22/T23 deterministic contract closure, 실제 기기 검증 잔여` / `P1`
 - **Exact trigger:** 정상 접근성 이벤트, synthetic 재검사, 서비스 재연결, 화면 켜짐과 분할 화면에서 이벤트의 최신성, `service.windows`의 상태, `rootInActiveWindow`의 상태가 서로 다르게 관찰된다. 특히 이벤트가 만료된 뒤 창 목록이 대상 앱을 누락하거나 창 package가 비어 있는 조합에서 정책이 필요하다.
-- **Current behavior:** `ForegroundEvidenceModule`이 raw facts와 approved policy를 분류하고, `SerializedDecisionWorker`가 accepted runtime, persisted reconciliation, evaluator와 outcome을 직렬화한다. T21의 expired event fallback은 host가 실제 event signal history를 유지하고 worker가 final fail closed decision을 수행한다. T22의 기존 keyed recheck scheduler는 delayed/changed evidence를 guarded re-evaluation으로 연결하고, stale replacement를 취소하며, package-less unknown slot의 기존 bounded retry sequence를 종료한다. T23 visibility/ownership contract는 이 ticket에서 재정의하거나 흡수하지 않는다.
-- **Impact:** T21이 소유한 evidence age와 long-boundary decision 경로 및 T22가 소유한 recheck scheduling/retry/cancellation 경로는 deterministic contract와 focused device evidence로 닫혔다. 남은 제품 위험은 다른 package ownership과 실제 Xiaomi window/root adapter 동작처럼 별도로 분류된 영역에 있다.
+- **Current behavior:** `ForegroundEvidenceModule`이 raw facts와 approved policy를 분류하고, `SerializedDecisionWorker`가 accepted runtime, persisted reconciliation, evaluator와 outcome을 직렬화한다. T21의 expired event fallback은 host가 실제 event signal history를 유지하고 worker가 final fail closed decision을 수행한다. T22의 기존 keyed recheck scheduler는 delayed/changed evidence를 guarded re-evaluation으로 연결하고, stale replacement를 취소하며, package-less unknown slot의 기존 bounded retry sequence를 종료한다. T23의 기존 application-window selection, active-root fallback, provenance snapshot과 package ownership 경로는 11개 frozen case에서 approved contract를 충족했다. 실제 Xiaomi window/root adapter 동작은 ticket 29에 남아 있다.
+- **Impact:** T21이 소유한 evidence age와 long-boundary decision 경로, T22가 소유한 recheck scheduling/retry/cancellation 경로, T23가 소유한 visibility/window/root/target ownership 경로는 deterministic contract와 focused evidence로 닫혔다. 남은 제품 위험은 실제 Xiaomi window/root adapter 동작과 later callback, lifecycle, fixture 및 measurement work처럼 별도로 분류된 영역에 있다.
 - **Evidence:**
   - [AppRuleBlocker.kt](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt)의 foreground observation, host classifier history, worker handoff와 scheduler path
   - [ForegroundEvidenceModule.kt](../../app/src/main/java/neth/iecal/curbox/domain/apprules/ForegroundEvidenceModule.kt)의 approved R1–R13 classification
   - [SerializedDecisionWorker.kt](../../app/src/main/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorker.kt)의 serialized persistence/evaluation/publication path
   - [AppRuleBlockerLongBoundaryRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerLongBoundaryRedTest.kt)와 [ForegroundEvidenceContractTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/ForegroundEvidenceContractTest.kt)의 focused evidence
   - [canonical T22 closure evidence](app-rule-enforcement-baseline.md#ticket-22-closure-evidence--2026-09-10)의 three recheck identifiers and exact counts
+  - [canonical T23 closure evidence](app-rule-enforcement-baseline.md#ticket-23-closure-evidence--2026-09-10)의 11 visibility/ownership identifiers, exact device identity and target/warning outcomes
   - [앱 규칙 요구사항: 전면 사용량 추적](../requirements/app-rules.md#L91)와 [앱 규칙 스펙: window reconciliation 결정](../specs/app-rules-github-issue.md#L93)
 - **Mitigation or decision needed:** 승인된 표의 13개 행과 `AR002-R01`부터 `AR002-R13`까지의
   mapping을 유지한다. R5에는 승인된 A안을 사용하고 B는 오차단과 제한 누락의 tradeoff를
-  기록한 비활성 대안으로만 남긴다. T22의 기존 scheduler/retry contract는 새 interval이나
-  policy를 추가하지 않고 보존한다. T23의 남은 inventory 또는 실제 OEM 증거가 발견되면
-  해당 ticket의 scope에서 다룬다.
+  기록한 비활성 대안으로만 남긴다. T22의 기존 scheduler/retry contract와 T23의 기존
+  window/root/target ownership contract는 새 interval, policy 또는 threshold를 추가하지 않고
+  보존한다. 실제 OEM evidence가 발견되면 ticket 29의 device gate에서 다룬다.
 - **Approval evidence:** parent replied `A` on 2026-08-31, approving the full 13-row matrix and
   selecting R5 option A.
 
@@ -97,7 +98,7 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
   - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 24 focused worker cases
   - [canonical baseline inventory](app-rule-enforcement-baseline.md#ticket-21-closure-evidence-2026-09-10)의 exact run counts and remaining failure owners
 - **Mitigation or decision needed:** T21 harness와 production seam을 유지한다. T22 recheck scheduling/retry/cancellation은 closure evidence로 닫혔고, visibility ownership, callback flush와 device validation은 각각 T23, T24 및 T29의 scope로 남긴다.
-- **Acceptance criteria:** T21의 six stable identifiers와 synthetic timestamp regression은 final focused connected run에서 통과했고, focused JVM에는 53 tests with 0 failures, full JVM에는 351 tests with 0 failures가 기록됐다. 실행별 connected 관찰은 다음과 같이 구분한다: `T21 closure execution (recorded 2026-09-10; exact XML timestamp not retained in this record)`은 92 tests, 89 passed, 3 failures였고 T24 2건과 T26 1건으로 분류됐으며 T25 failure node는 없었다. `Ticket 22 latest execution (XML timestamp 2026-09-10T01:24:14; timezone not encoded)`은 92 tests, 88 passed, 4 failures였고 T24 2건, T25 1건, T26 1건으로 분류됐다. 두 수치는 서로 다른 실행의 관찰이며, T25 결과는 열린 execution-specific observation일 뿐 fixed 상태나 definitive product diagnosis를 뜻하지 않는다.
+- **Acceptance criteria:** T21의 six stable identifiers와 synthetic timestamp regression은 final focused connected run에서 통과했고, focused JVM에는 53 tests with 0 failures, full JVM에는 351 tests with 0 failures가 기록됐다. 실행별 connected 관찰은 다음과 같이 구분한다: `T21 closure execution (recorded 2026-09-10; exact XML timestamp not retained in this record)`은 92 tests, 89 passed, 3 failures였고 T24 2건과 T26 1건으로 분류됐다. `Ticket 22 execution (XML timestamp 2026-09-10T01:24:14; timezone not encoded)`은 92 tests, 88 passed, 4 failures였고 T24 2건, T25 1건, T26 1건으로 분류됐다. `Ticket 23 latest execution (XML timestamp 2026-09-10T01:56:03; timezone not encoded)`은 92 tests, 89 passed, 3 failures였고 T24 2건과 T26 1건으로 분류됐으며 T21, T22, T23, T25 failure node는 없었다. 이 수치들은 서로 다른 실행의 관찰이며, T25 결과는 prior execution-specific open evidence일 뿐 fixed 상태나 definitive product diagnosis를 뜻하지 않는다.
 - **Target refactor phase:** `Phase 0 deterministic harness`와 `Phase 1 foreground evidence 모듈`의 T21 범위를 완료했다. 이후 scheduler 관련 검증은 `Phase 2`에서 수행한다.
 
 ### AR 004 Xiaomi Pad Pro 2025 12.7 실제 창 동작 테스트 부재
@@ -107,9 +108,10 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Current behavior:** 현재 테스트는 `RecordingService`와 `applicationWindowSnapshotProvider`, `activeWindowSnapshotProvider` fake를 사용한다. split screen과 재연결 시나리오도 실제 `AccessibilityService.windows` 또는 `rootInActiveWindow`를 읽지 않는다.
 - **Impact:** Android 15/16 또는 특정 OEM의 window provider 동작과 현재 fallback 정책이 맞는지 증명하지 못한다. iPlay50_mini_Pro 등 다른 기기에서 통과한 결과를 Xiaomi Pad Pro의 보고된 실패가 해결됐다는 증거로 사용할 수 없다.
 - **Evidence:**
-  - [AppRuleBlockerRecheckTest.kt:435](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L435)부터 [AppRuleBlockerRecheckTest.kt:467](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L467)의 fake reconnect test
-  - [AppRuleBlockerRecheckTest.kt:470](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L470)부터 [AppRuleBlockerRecheckTest.kt:512](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L512)의 fake split screen test
-  - [AppRuleBlocker.kt:1118](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1118)부터 [AppRuleBlocker.kt:1151](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L1151)의 실제 `service.windows` 변환 경로
+  - [AppRuleBlockerRecheckTest.kt:1067](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L1067)부터 [AppRuleBlockerRecheckTest.kt:1093](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L1093)의 fake reconnect test
+  - [AppRuleBlockerRecheckTest.kt:1103](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L1103)부터 [AppRuleBlockerRecheckTest.kt:1131](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerRecheckTest.kt#L1131)의 fake split screen test
+  - [AppRuleBlocker.kt:3488](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L3488)부터 [AppRuleBlocker.kt:3597](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt#L3597)의 실제 `service.windows`와 `rootInActiveWindow` 변환 경로
+  - [canonical T23 closure evidence](app-rule-enforcement-baseline.md#ticket-23-closure-evidence--2026-09-10)의 11 frozen visibility/ownership cases, focused `37/37` connected result and target/warning outcomes on iPlay50
 - **Mitigation or decision needed:** ticket 29에서 정확히 `Xiaomi Pad Pro 2025 12.7`을 대상으로 Android 15 또는 Android 16의 installed build/channel, 실제 접근성 service, event timestamp, `windows` package 집합과 application window count, active root package, evaluator 결과, 시작된 Guardian activity를 기록한다. 대상 build가 일치하지 않으면 대체 기기로 진행하지 않는다.
 - **Acceptance criteria:** `Xiaomi Pad Pro 2025 12.7` Android 15 또는 Android 16에서 다음 세 시나리오를 반복 통과한다. 1) 전체 앱 사용 금지 시간 시작, 2) 다른 규칙 사용량 소진 뒤 30초 이상 보호자 추가시간 만료, 3) split screen에서 두 앱의 독립 경계. 각 시나리오에서 정책표가 정한 시간 안에 denial을 확인하고, 다른 앱 전환 뒤 stale package에 대한 중복 Guardian이 없음을 확인한다. 이 증거 전에는 AR004와 `reported incident closed`를 완료로 기록하지 않으며, 구현 완료를 OEM 해결이나 release readiness로 해석하지 않는다.
 - **Target refactor phase:** `Phase 0`에서 시나리오와 계측을 준비하고 `Phase 1`의 production adapter 검증에서 실행한다.
@@ -266,7 +268,7 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **AppBlockerService의 한 feature cleanup 실패가 AppRuleBlocker cleanup을 건너뛰는 경로:** feature별 containment로 분리됐다. [AppBlockerService.kt:259](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L259)부터 [AppBlockerService.kt:303](../../app/src/main/java/neth/iecal/curbox/services/AppBlockerService.kt#L303)을 참조한다.
 
 이 목록의 AR 001 deterministic contract와 AR 003 deterministic harness 범위는 T21에서
-해결됐다. 이는 실제 OEM 동작이나 보고된 incident가 종료됐다는 뜻은 아니다. AR 002의
-13행 정책표와 R5 A 선택은 승인됐고 T21 및 T22에 필요한 production adapter와 scheduler
-경로가 검증됐다. T23의 잔여 ownership 범위와 AR 004의 실제 Xiaomi 검증은 각 ticket과
-limitation 항목에 남아 있다.
+해결됐고, T22의 recheck와 T23의 deterministic visibility ownership contract도 각각의
+closure evidence로 해결됐다. 이는 실제 OEM 동작이나 보고된 incident가 종료됐다는 뜻은
+아니다. AR 002의 13행 정책표와 R5 A 선택은 승인됐고, 실제 Xiaomi 검증은 ticket 29와 AR004에
+남아 있다.
