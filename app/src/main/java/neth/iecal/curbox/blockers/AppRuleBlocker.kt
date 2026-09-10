@@ -1292,6 +1292,21 @@ class AppRuleBlocker {
                 reason = kind,
                 observation = captured.facts
             )
+            if (kind == ObservationKind.REAL_EVENT) {
+                // The serialized worker remains the decision authority. Keep the host-side
+                // scheduler classifier's raw signal history aligned with the same captured
+                // facts so a later synthetic recheck can reach the approved R5 candidate after
+                // the existing evidence age expires.
+                foregroundEvidenceModule.classify(
+                    facts = captured.facts,
+                    policy = synchronized(runtimeLock) {
+                        ForegroundEvidencePolicySnapshot(
+                            essentialPackages = essentialPackages +
+                                setOf(servicePackageName, Constants.SYSTEM_UI_PACKAGE_NAME)
+                        )
+                    }
+                )
+            }
             submitDecisionRequest(
                 request = request,
                 connectionGeneration = connectionGeneration,

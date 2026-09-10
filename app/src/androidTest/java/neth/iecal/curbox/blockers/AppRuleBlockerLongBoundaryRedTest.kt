@@ -7,6 +7,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CancellationException
 import neth.iecal.curbox.CrashLogger
+import neth.iecal.curbox.data.db.AppDatabase
+import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleOverrideState
@@ -25,6 +27,9 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.io.RandomAccessFile
 import java.time.Instant
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
 class AppRuleBlockerLongBoundaryRedTest {
@@ -245,7 +250,9 @@ class AppRuleBlockerLongBoundaryRedTest {
         boundaryFailure: BoundaryFailure = BoundaryFailure.NONE
     ): BoundaryResult {
         val clock = VirtualClock(BASE_TIME_MS)
+        val initialRecheckPosted = CountDownLatch(1)
         val scheduler = VirtualRecheckScheduler(clock)
+        scheduler.firstPostObserver = { initialRecheckPosted.countDown() }
         val repository = MutableSessionRepository(clock)
         val service = RecordingService { clock.wallClockMs }.also {
             it.attach(InstrumentationRegistry.getInstrumentation().targetContext)
@@ -254,19 +261,47 @@ class AppRuleBlockerLongBoundaryRedTest {
 
         val snapshot = snapshotWithThirtySecondGuardianGrant(clock.wallClockMs, repository)
         val decisions = mutableListOf<EvaluationObservation>()
+        val initialEvaluationObserved = CountDownLatch(1)
+        val boundaryEvaluationObserved = CountDownLatch(1)
+        val laterEvaluationObserved = CountDownLatch(1)
+        val boundaryWarningObserved = CountDownLatch(1)
+        val boundaryHandlerPostObserved = CountDownLatch(1)
+        val handlerPostCount = AtomicInteger(0)
+        var windowReadCount = 0
         val blocker = AppRuleBlocker().apply {
             wallClockMsProvider = { clock.wallClockMs }
             elapsedRealtimeMsProvider = { clock.elapsedRealtimeMs }
             recheckPostDelayed = scheduler::postDelayed
             recheckRemoveCallback = scheduler::remove
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
             evaluationResultObserver = { decision ->
+                val observedAtMs = clock.wallClockMs
                 decisions += EvaluationObservation(
-                    observedAtMs = clock.wallClockMs,
+                    observedAtMs = observedAtMs,
                     evaluation = decision,
                     persistedRead = repository.lastRead
                 )
+                if (observedAtMs < boundaryTimeMs()) {
+                    initialEvaluationObserved.countDown()
+                } else if (observedAtMs > boundaryDeadlineMs()) {
+                    laterEvaluationObserved.countDown()
+                } else {
+                    boundaryEvaluationObserved.countDown()
+                }
             }
-            var windowReadCount = 0
+            warningBeforeFrameworkCallObserver = { packageName ->
+                if (packageName == TARGET_PACKAGE &&
+                    clock.wallClockMs in boundaryTimeMs()..boundaryDeadlineMs()
+                ) {
+                    boundaryWarningObserved.countDown()
+                }
+            }
+            handlerBeforeFrameworkPostObserver = {
+                if (handlerPostCount.incrementAndGet() >= 2) {
+                    boundaryHandlerPostObserved.countDown()
+                }
+            }
             applicationWindowSnapshotProvider = {
                 val readIndex = windowReadCount++
                 when {
@@ -283,6 +318,11 @@ class AppRuleBlockerLongBoundaryRedTest {
         setField(blocker, "service", service)
         setField(blocker, "crashLogger", CrashLogger(service))
         setField(blocker, "sessionRepository", repository)
+        setField(
+            blocker,
+            "usageResetRepository",
+            RoomUsageResetRepository(AppDatabase.getInstance(service))
+        )
         setField(blocker, "enforcement", AppRuleEnforcement(repository))
         setField(blocker, "setupReady", true)
         setField(blocker, "launchablePackages", setOf(TARGET_PACKAGE, OTHER_PACKAGE))
@@ -292,6 +332,16 @@ class AppRuleBlockerLongBoundaryRedTest {
 
         try {
             sendWindowEvent(blocker, TARGET_PACKAGE)
+            check(
+                initialEvaluationObserved.await(WORKER_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            ) {
+                "initial foreground decision was not processed before advancing the virtual clock"
+            }
+            check(
+                initialRecheckPosted.await(WORKER_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            ) {
+                "initial foreground boundary was not scheduled before advancing the virtual clock"
+            }
 
             // The row is the persisted usage outcome at the allowance boundary. No real clock or
             // looper is advanced; the scheduler only runs queued callbacks after virtual time is
@@ -321,9 +371,91 @@ class AppRuleBlockerLongBoundaryRedTest {
             val boundaryPostedDelays = scheduler.postedDelays.toList()
 
             if (boundaryFailure != BoundaryFailure.NONE) {
+                check(
+                    repository.boundaryFailureObserved.await(
+                        WORKER_WAIT_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    "the injected ${boundaryFailure.name} did not reach the boundary evaluator"
+                }
+                if (windowState.expectsBoundaryDecision &&
+                    boundaryFailure != BoundaryFailure.CANCELLATION
+                ) {
+                    check(
+                        boundaryEvaluationObserved.await(
+                            WORKER_WAIT_TIMEOUT_MS,
+                            TimeUnit.MILLISECONDS
+                        )
+                    ) {
+                        "the ${boundaryFailure.name} boundary denial was not evaluated before recovery"
+                    }
+                    check(
+                        boundaryHandlerPostObserved.await(
+                            WORKER_WAIT_TIMEOUT_MS,
+                            TimeUnit.MILLISECONDS
+                        )
+                    ) {
+                        "the ${boundaryFailure.name} boundary outcome was not posted before recovery"
+                    }
+                    InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                    check(
+                        boundaryWarningObserved.await(
+                            WORKER_WAIT_TIMEOUT_MS,
+                            TimeUnit.MILLISECONDS
+                        )
+                    ) {
+                        "the ${boundaryFailure.name} boundary denial was not published before recovery"
+                    }
+                }
                 repository.boundaryFailure = BoundaryFailure.NONE
-                clock.advanceBy(1_000L)
+                clock.advanceBy(LATER_EVENT_DELAY_MS)
                 sendWindowEvent(blocker, TARGET_PACKAGE)
+                check(
+                    laterEvaluationObserved.await(WORKER_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                ) {
+                    "a healthy later event was not evaluated after the boundary failure"
+                }
+            }
+            if (windowState.expectsBoundaryDecision &&
+                boundaryFailure != BoundaryFailure.CANCELLATION
+            ) {
+                check(
+                    boundaryEvaluationObserved.await(WORKER_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                ) {
+                    "${windowState.contractName} boundary worker decision was not processed " +
+                        "before the scenario ended; posted=${scheduler.postedDelays}, " +
+                        "windowReads=$windowReadCount, decisions=$decisions"
+                }
+                check(
+                    boundaryHandlerPostObserved.await(
+                        WORKER_WAIT_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    "boundary worker outcome was not posted before the scenario ended"
+                }
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                if (boundaryFailure == BoundaryFailure.NONE) {
+                    check(
+                        boundaryWarningObserved.await(
+                            WORKER_WAIT_TIMEOUT_MS,
+                            TimeUnit.MILLISECONDS
+                        )
+                    ) {
+                        "the boundary warning was not published before the scenario ended"
+                    }
+                }
+            } else if (windowState.expectsBoundaryDecision) {
+                check(
+                    boundaryHandlerPostObserved.await(
+                        WORKER_WAIT_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    "the healthy post-cancellation outcome was not posted before the scenario ended"
+                }
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
             }
 
             val persistedBoundaryDecision = AppRuleEvaluator.evaluate(
@@ -398,6 +530,7 @@ class AppRuleBlockerLongBoundaryRedTest {
         val contractName: String,
         val windowSnapshot: AppRuleBlocker.ApplicationWindowSnapshot,
         val activeWindowSnapshot: AppRuleBlocker.ActiveWindowSnapshot,
+        val expectsBoundaryDecision: Boolean = false,
         val seedResolvedWindow: Boolean = false,
         val failAfterSeed: Boolean = false,
         val seedTargetWindow: Boolean = false
@@ -410,6 +543,7 @@ class AppRuleBlockerLongBoundaryRedTest {
                 hasUnknownApplicationWindow = true
             ),
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            expectsBoundaryDecision = true,
             seedResolvedWindow = true
         ),
         EMPTY_WINDOW(
@@ -419,7 +553,8 @@ class AppRuleBlockerLongBoundaryRedTest {
                 hasApplicationWindow = false,
                 hasUnknownApplicationWindow = true
             ),
-            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
+            activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            expectsBoundaryDecision = true
         ),
         NULL_ROOT(
             contractName = "successful window then null root",
@@ -430,6 +565,7 @@ class AppRuleBlockerLongBoundaryRedTest {
                 applicationWindowCount = 1
             ),
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            expectsBoundaryDecision = true,
             seedResolvedWindow = true
         ),
         FRESH_DIFFERENT_WINDOW(
@@ -455,12 +591,13 @@ class AppRuleBlockerLongBoundaryRedTest {
         CACHED_PARTIAL_WINDOW(
             contractName = "successful window then partial unresolved read",
             windowSnapshot = AppRuleBlocker.ApplicationWindowSnapshot(
-                packages = setOf(OTHER_PACKAGE),
+                packages = emptySet(),
                 hasApplicationWindow = true,
                 hasUnknownApplicationWindow = true,
-                applicationWindowCount = 2
+                applicationWindowCount = 1
             ),
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            expectsBoundaryDecision = true,
             seedResolvedWindow = true
         ),
         CACHED_FAILED_WINDOW(
@@ -472,6 +609,7 @@ class AppRuleBlockerLongBoundaryRedTest {
                 providerFailed = true
             ),
             activeWindowSnapshot = AppRuleBlocker.ActiveWindowSnapshot(packageName = null),
+            expectsBoundaryDecision = true,
             seedResolvedWindow = true,
             failAfterSeed = true
         ),
@@ -558,6 +696,7 @@ class AppRuleBlockerLongBoundaryRedTest {
         private val tasks = mutableListOf<Task>()
         private var nextSequence = 0L
         val postedDelays = mutableListOf<Long>()
+        var firstPostObserver: (() -> Unit)? = null
 
         fun postDelayed(runnable: Runnable, delayMs: Long): Boolean {
             postedDelays += delayMs
@@ -566,6 +705,7 @@ class AppRuleBlockerLongBoundaryRedTest {
                 sequence = nextSequence++,
                 runnable = runnable
             )
+            if (postedDelays.size == 1) firstPostObserver?.invoke()
             return true
         }
 
@@ -600,6 +740,7 @@ class AppRuleBlockerLongBoundaryRedTest {
         val useDayId: String = calculator.idAt(BASE_TIME_MS)
         val readHistory = mutableListOf<PersistedSessionRead>()
         val mutationHistory = mutableListOf<Long>()
+        val boundaryFailureObserved = CountDownLatch(1)
         var boundaryFailure: BoundaryFailure = BoundaryFailure.NONE
         var lastRead: PersistedSessionRead? = null
         var persistedSessions: List<ForegroundSession> = listOf(
@@ -627,10 +768,18 @@ class AppRuleBlockerLongBoundaryRedTest {
         override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
             if (clock.wallClockMs >= BASE_TIME_MS + THIRTY_SECOND_GRANT_MS) {
                 when (boundaryFailure) {
-                    BoundaryFailure.SESSION_READ ->
+                    BoundaryFailure.SESSION_READ -> {
+                        boundaryFailureObserved.countDown()
                         throw IllegalStateException("injected ordinary R5 boundary read failure")
-                    BoundaryFailure.EVALUATOR_INPUT -> return ThrowingSessionList()
-                    BoundaryFailure.CANCELLATION -> throw CancellationException(CANCELLATION_MESSAGE)
+                    }
+                    BoundaryFailure.EVALUATOR_INPUT -> {
+                        boundaryFailureObserved.countDown()
+                        return ThrowingSessionList()
+                    }
+                    BoundaryFailure.CANCELLATION -> {
+                        boundaryFailureObserved.countDown()
+                        throw CancellationException(CANCELLATION_MESSAGE)
+                    }
                     BoundaryFailure.NONE -> Unit
                 }
             }
@@ -700,6 +849,8 @@ class AppRuleBlockerLongBoundaryRedTest {
         const val TARGET_GROUP_ID = "target-group"
         const val TARGET_RULE_ID = "target-rule"
         const val THIRTY_SECOND_GRANT_MS = 30_000L
+        const val LATER_EVENT_DELAY_MS = 2_500L
+        const val WORKER_WAIT_TIMEOUT_MS = 5_000L
         const val CANCELLATION_MESSAGE = "injected R5 boundary cancellation"
         val RESOLVED_OTHER_WINDOW = AppRuleBlocker.ApplicationWindowSnapshot(
             packages = setOf(OTHER_PACKAGE),

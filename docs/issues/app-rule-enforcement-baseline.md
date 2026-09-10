@@ -89,6 +89,31 @@ Stable identifier는 `test class::test method`이다. 각 행은 canonical XML�
 
 Source: [AppRuleBlockerLongBoundaryRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerLongBoundaryRedTest.kt).
 
+### Ticket 21 closure evidence — 2026-09-10
+
+Ticket 21 closes the six stable identifiers above without changing the approved foreground policy.
+The production change keeps the host classifier's raw real-event history aligned with the same
+facts handed to the serialized worker, and restores the existing R5 fail-closed evaluator path for
+ordinary evaluator failure. Synthetic rechecks do not renew evidence age. The partial-window
+fixture in the T21 provenance method represents an unresolved slot with no currently known package;
+the separate known-other-package ownership case remains the T23 contract.
+
+| Verification | Environment and result |
+| --- | --- |
+| Focused JVM | `testFullDebugUnitTest` with `ForegroundEvidenceContractTest` and `SerializedDecisionWorkerTest`: 52 tests, 52 passed, 0 failures, 0 errors, 0 skipped. |
+| Focused connected | `connectedFullDebugAndroidTest` filtered to `AppRuleBlockerLongBoundaryRedTest` on `iPlay50_mini_Pro - 13` / Android 13: 9 tests, 9 passed, 0 failures, 0 errors, 0 skipped. The six T21 identifiers all passed. |
+| Full JVM | `testFullDebugUnitTest`: 350 tests, 350 passed, 0 failures, 0 errors, 0 skipped. |
+| Flavor compile | `assembleFullDebug`, `assemblePlaystoreDebug`, and `assembleFdroidDebug`: all succeeded. |
+| Final unfiltered connected | `connectedFullDebugAndroidTest` on `iPlay50_mini_Pro - 13` / Android 13: 91 tests, 88 passed, 3 failures, 0 errors, 0 skipped. |
+
+The final connected failures are unchanged outside T21: `ExampleInstrumentedTest::useAppContext`
+is the T26 debug-fixture failure, and
+`AppRuleBlockerCallbackFlushOrderingRedTest::foregroundCallbackReturnsBeforeDelayedPersistenceCompletes`
+plus `AppRuleBlockerCallbackFlushOrderingRedTest::evaluatorRunsOnlyAfterVisibleSessionFlushIsCommitted`
+are the two T24 callback-flush failures. No T21, T22, T23, or T25 failure node was reported in
+this final run; that observation does not reassign or close those tickets. The connected result is
+not Xiaomi evidence: `Xiaomi Pad Pro 2025 12.7` Android 15/16 remains the ticket 29 device gate.
+
 ### T22-RECHECK — 3 cases
 
 | Stable identifier | Primary classification |
@@ -155,7 +180,7 @@ one of the 24 canonical failure nodes appears once.
 | 06 | `done` | Destroy/fault RED contract preserved; later closure is ticket 18. |
 | 07 | `done` | Phase 1/2 architecture contract approved on 2026-09-01. |
 | 08 | `done` | Evidence contract and production/deterministic adapters implemented. |
-| 09 | `done` | AR001 long-boundary implementation slice recorded; current six RED cases remain open. |
+| 09 | `done` | AR001 long-boundary implementation slice recorded; ticket 21 later records deterministic closure of the six owned cases. |
 | 10 | `done` | Complex foreground policy and caller reduction recorded; current T23 cases remain open. |
 | 11 | `done` | Serialized decision worker happy path recorded. |
 | 12 | `done` | Wall-clock scheduler and wake recovery recorded. |
@@ -171,22 +196,29 @@ The detailed ticket records remain in [.scratch/app-rule-enforcement/issues](../
 Ticket 17's component-only limitation and ticket 19's later full-service decision are both retained;
 the latter is authoritative for the current Phase 4 status.
 
+### Tickets 20–21
+
+| Ticket | Canonical status | Evidence or interpretation |
+| --- | --- | --- |
+| 20 | `done` | Historical connected-suite inventory and documentation baseline are frozen; the historical 24 failures remain historical evidence. |
+| 21 | `done` | The six T21 stable identifiers have deterministic closure evidence above. T22/T23 ownership and the Xiaomi device gate remain separate. |
+
 ### Phases 0–4
 
 | Phase | Reconciled status | Open boundary |
 | --- | --- | --- |
 | Phase 0 | `complete — policy and deterministic RED-contract stage` | Its failures are inputs to later implementation tickets, not fixed results. |
-| Phase 1 | `implementation slice recorded done; verification open` | T21–T23 own the 20 long-boundary/recheck/visibility failures; Xiaomi device verification remains open. |
+| Phase 1 | `T21 deterministic closure recorded; verification open` | T22/T23 retain the remaining 14 inventory cases by ownership; Xiaomi device verification remains open. |
 | Phase 2 | `implementation and fault/cancellation contracts recorded done; measurement decisions open` | T24 owns callback flush; T27 owns callback/decision p95; T28 owns numeric drain-budget decision. |
 | Phase 3 | `done — NO-GO` | Do not add a per-package coordinator unless its entry condition is newly reproduced. |
 | Phase 4 | `done — NO-GO; architecture gate closed` | Revisit only if production cleanup ordering or containment changes. |
 
 This table separates implementation slices from release/device verification. It does not turn the
-current 24 failures into a green release gate.
+historical 24 failures, or the later connected results, into a green release gate.
 
 ## Remaining verification work
 
-- Ticket 21 must resolve or record the six T21 cases without changing the approved evidence policy.
+- Ticket 21's six T21 cases are resolved in the deterministic closure evidence above without changing the approved evidence policy.
 - Ticket 22 owns the three T22 recheck cases; ticket 23 owns the eleven T23 visibility/ownership
   cases. Neither ticket may absorb the other owner's identifiers.
 - Ticket 24 owns the two callback-flush cases. Ticket 25 owns the one Guardian lifecycle case.

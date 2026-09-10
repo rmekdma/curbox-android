@@ -516,7 +516,22 @@ class SerializedDecisionWorker internal constructor(
                 )) {
                 null -> return
                 is SafeAppRuleEvaluationResult.Success -> result.evaluation
-                SafeAppRuleEvaluationResult.RecoverableFailure -> return
+                SafeAppRuleEvaluationResult.RecoverableFailure -> {
+                    if (outcome.decisionPermission != DecisionPermission.EVALUATE_FAIL_CLOSED) {
+                        return
+                    }
+                    failClosedEvaluation(
+                        snapshot = accepted.runtime.snapshot,
+                        packageName = packageName,
+                        useDayId = useDayId,
+                        nowMs = request.observation.capturedAtWallMs,
+                        calculator = calculator,
+                        useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
+                        availablePackages = accepted.runtime.launchablePackages,
+                        essentialPackages = accepted.runtime.evidencePolicy.essentialPackages,
+                        overrides = accepted.runtime.overrideState
+                    )
+                }
             }
             if (!isCurrent(request, accepted)) return
             try {
@@ -561,6 +576,51 @@ class SerializedDecisionWorker internal constructor(
             commitStatus = commitStatus,
             followUp = evaluable.firstOrNull()?.followUp ?: FollowUpKind.NONE,
             publicationStatus = PublicationStatus.PUBLISHED
+        )
+    }
+
+    /**
+     * Preserves the approved R5 fallback when the evaluator cannot produce a normal result.
+     * Eligibility is derived without session evidence, so this path cannot renew evidence or
+     * make an unavailable evaluator look like an allow.
+     */
+    private fun failClosedEvaluation(
+        snapshot: AppRuleSnapshot,
+        packageName: String,
+        useDayId: String,
+        nowMs: Long,
+        calculator: ConfigurableUseDayCalculator,
+        useDayGenerationStartedAtMs: Long,
+        availablePackages: Set<String>,
+        essentialPackages: Set<String>,
+        overrides: AppRuleOverrideState
+    ): AppRulesEvaluation {
+        val eligibility = AppRuleEvaluator.evaluate(
+            snapshot = snapshot,
+            packageName = packageName,
+            useDayId = useDayId,
+            sessions = emptyList(),
+            nowMs = nowMs,
+            zone = calculator.zone,
+            useDayCalculator = calculator,
+            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+            availablePackages = availablePackages,
+            essentialExcludedPackages = essentialPackages,
+            overrides = overrides
+        )
+        val applicable = eligibility.evaluations
+            .filter { it.isApplicable && it.isActive && !it.isSkipped }
+            .ifEmpty { eligibility.denyingRules }
+        val denials = applicable.map { evaluation ->
+            evaluation.copy(
+                remainingMillis = 0L,
+                isAllowed = false
+            )
+        }
+        return AppRulesEvaluation(
+            isAllowed = false,
+            denyingRules = denials,
+            evaluations = denials
         )
     }
 
