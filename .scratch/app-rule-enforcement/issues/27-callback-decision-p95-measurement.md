@@ -1,8 +1,8 @@
-# 27: Fixed synthetic fixture callback-to-evaluation-ready or callback-to-published-decision p95
+# 27: Fixed synthetic fixture callback-to-evaluation-ready or callback-to-decision-publication-entry p95
 
 **What to build:** First propose a reproducible protocol for measuring a fixed synthetic
 single-window fixture path. After the user selects boundary A or B, the objective/result is
-named either callback-to-evaluation-ready p95 or callback-to-published-decision p95. The word
+named either callback-to-evaluation-ready p95 or callback-to-decision-publication-entry p95. The word
 representative refers only to the approved fixed synthetic fixture path; it never means
 production Android-window or OEM representativeness. Only after explicit user approval may the
 approved protocol be run and its p95 recorded. The measurement is evidence only and must not
@@ -12,15 +12,17 @@ become a product requirement without a separate user decision.
 
 **Status:** awaiting-user-approval
 
-## Pre-approval protocol proposal — revision 2026-09-10
+## Pre-approval protocol proposal — revision T27-P5 (2026-09-10)
 
 **Proposal status:** awaiting explicit user approval.
 
 This revision is a protocol proposal only. No instrumentation path was run or verified, no
 measurement samples were generated or collected, and no p95 was calculated. The remaining
-`WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground` failure is
-outside Ticket 20's frozen inventory and remains unassigned pending a separate parent or
-user ownership decision.
+`WarningActivityLifecycleTest::warningIsFinishedAfterItLeavesTheForeground` failure remains
+an unassigned preflight observation. A clean preflight reproduction must record whether it is
+causally relevant to this fixed harness path and ask the user whether to create a separate
+triage ticket. Its existence alone does not block Ticket 27 and this protocol does not absorb
+or fix it.
 
 ### Boundary choice remains user-owned
 
@@ -32,19 +34,22 @@ between them:
   after visible-session reconciliation, persistence completion/read ordering, and
   `AppRuleEnforcement.check()` have produced an `AppRulesEvaluation`, but before recheck-plan
   publication and Handler/WarningActivity/Guardian effects.
-- **B — callback-to-published-decision:** `callbackStart` to a timestamp taken at entry to the
+- **B — callback-to-decision-publication-entry:** `callbackStart` to a timestamp taken at entry to the
   existing `DecisionOutcomeSink.publish(DecisionOutcome)` seam for the matching request, after
   the `DecisionOutcome` object has already been constructed. This timestamp does not include the
-  sink body or any later Handler/WarningActivity/Guardian effects. The metric must be named
-  callback-to-published-decision if B is selected.
+  sink body or any later Handler/WarningActivity/Guardian effects. If selected, the metric name
+  is exactly **fixed synthetic callback-to-decision-publication-entry p95**. B is the provisional
+  recommendation because it includes construction of the final outcome while retaining a precise
+  pre-sink boundary, but it remains an explicit user choice and is not selected by this proposal.
 
 There is a useful but different outer boundary: full `AppBlockerService.onAccessibilityEvent`
 entry to return includes the preceding `AppUsageTracker` fan-out and other service callback
 work. It is not selected for this app-rule metric; it may be a separate service-health metric
 only after a separate decision.
 
-The objective and result name must follow the selected boundary exactly: `T27-A
-callback-to-evaluation-ready p95` for A or `T27-B callback-to-published-decision p95` for B.
+The objective and result name must follow the selected boundary exactly: `T27-A fixed synthetic
+callback-to-evaluation-ready p95` for A or `T27-B fixed synthetic
+callback-to-decision-publication-entry p95` for B.
 Neither result may be described as production-representative, OEM-representative, or a product
 target. It is representative only of the approved synthetic fixture, fixed rule state, and
 single-window conditions below.
@@ -94,6 +99,67 @@ UI effect, or warning.
   posts, queue changes, policy branches, or UI interception on the callback or worker path.
   Required attempt disposition is retained by the lossless ledger described below.
 
+### Proposed isolated instrumentation topology — explicit approval required
+
+Use one instrumentation-only entry point to be added after approval:
+`app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerFixedFixtureP95MeasurementTest.kt`,
+test method `measureFixedSyntheticFixtureP95()`. Its private `FixedFixtureHarness` owns one
+manually constructed `AppRuleBlocker`, the production `SerializedDecisionWorker`, production
+`AppRuleEnforcement`, production Room-backed current-use-day/reset repositories, a
+`FixedFixtureMeasurementService`, the fixed snapshot providers, and the lossless ledger. It
+uses the deterministic construction/configuration seams already exercised by the neighboring
+`AppRuleBlocker` instrumentation tests. No exported component, benchmark process, live
+`AppBlockerService`, or second evaluator is introduced.
+
+`FixedFixtureHarness.create()` attaches `FixedFixtureMeasurementService` to the instrumentation
+target context, constructs `AppRuleBlocker` directly, injects
+`RoomCurrentUseDaySessionRepository`, `RoomUsageResetRepository`, and
+`AppRuleEnforcement` from `AppDatabase.getInstance(targetContext)`, fixes the launchable-package,
+window/root, screen, keyguard, clock, scheduler, and snapshot providers, and marks only the
+test-owned blocker lifecycle ready. It deliberately does not call production `setup()` because
+that would start DataStore collection, notification ticks, visible-app refresh, and reconnect
+effects; it also never calls `setupReceivers()`. As in the existing direct callback tests, the
+first accepted preflight request reaches `ensureDecisionWorker`, which constructs the production
+`SerializedDecisionWorker`; the harness does not construct a substitute worker. After approval,
+the only new observation hooks are identity-bearing passive callbacks at `onEvaluation` entry
+and as the first statement of `DecisionOutcomeSink.publish`, after its `DecisionOutcome`
+argument exists. They may write only raw primitive fields into the preallocated ledger.
+
+The instrumentation runs in the target APK's main app process. Before allocating the harness,
+it asserts `Application.getProcessName()` equals the target application id and does not end in
+`:app_blocker_service` or `:crash_handler`. It never instantiates, starts, binds, reconnects, or
+registers receivers for `AppBlockerService`; Debug Curbox's accessibility service is disabled
+for the entire run. Other device accessibility services may remain installed, but they have no
+reference to this private blocker. Therefore Android framework accessibility callbacks and
+unrelated accessibility traffic have no call path into the measured object.
+
+The sole stimulus entry is `FixedFixtureHarness.dispatch(fixture)`. It creates one synthetic
+`TYPE_WINDOW_STATE_CHANGED` event for the approved fixture and uses
+`Instrumentation.runOnMainSync` to preallocate its attempt slot, capture `callbackStartNs`, and
+directly invoke `appRuleBlocker.doAppRuleCheck(event)` inside `try/finally`; the `finally` captures
+`callbackReturnNs`, classifies `callbackExitKind`, and recycles the event. `callbackStart`
+therefore still means the synthetic `AppRuleBlocker.doAppRuleCheck` callback boundary, not
+instrumentation setup or an outer framework callback. No other method may dispatch an event.
+The harness assigns a fresh attempt token before the call and requires every accepted
+`SourceOrderIdentity`, selected boundary, recheck plan, and effect to map to that active token.
+An unsolicited identity, an event count different from the direct-dispatch count, or any seam
+observation without an active token records `ABORT_UNEXPECTED_INGRESS`; this is the runtime
+proof complementing the topology's absence of a framework ingress path.
+
+The approved run starts from a clean uninstall of both the FullDebug target package and its
+instrumentation package, followed by installation of the two pinned APKs and an empty app-data
+state. Preflight must assert the pinned device/build/process, target accessibility service
+disabled and not running, no `AppBlockerService` service-process instance, an empty app-rule
+session/reset store, no pending target recheck, exactly the fixed synthetic snapshot, one
+application window/root, zero unexpected ingress, and the expected allow/deny result from an
+unmeasured fixture sanity phase. Preflight is not a measurement sample. It also records the
+unassigned WarningActivity observation described above; a clean reproduction is assessed for
+causal relevance and raised to the user for a separate triage-ticket decision, but does not
+automatically block this isolated run.
+
+This topology is the provisional recommendation, not an adopted design. The user must
+explicitly approve or reject it before the harness or its observation seams are implemented.
+
 ### Normal post-sample quiescence gate
 
 The selected boundary ends the measured duration. Normal post-sample quiescence is a separate
@@ -105,9 +171,11 @@ open the next-stimulus gate until all of the following are true:
 3. The worker request and its `SourceOrderIdentity` are fully published and completed; no
    worker-owned work for that identity remains in flight.
 4. Required persistence commit and read work for that identity is complete.
-5. No recheck or Handler effect for that identity remains pending.
-6. Any Warning/Guardian test UI caused by the fixture is deterministically closed, and the
-   synthetic fixture state is restored to its pre-stimulus state.
+5. Every legitimate use-day-reset recheck or Handler effect carrying that attempt's
+   `SourceOrderIdentity` has completed or has been removed by the identity-scoped cleanup below;
+   no effect for that identity remains pending.
+6. Any Guardian/Warning test UI or recorded launch caused by the fixture is deterministically
+   closed/cleared, and the synthetic fixture state is restored to its pre-stimulus state.
 7. No refresh, reconnect, lifecycle-generation change, or worker replacement occurred during
    the attempt.
 
@@ -121,6 +189,39 @@ are outside the measured callback-to-A/B duration. The normal recovery deadline 
 expires, classify the row as `EXCLUDED_POST_SAMPLE_NOT_QUIESCENT`; if the approved exclusion
 cap or abort rule is reached, abort the run. Do not dispatch another stimulus while the gate
 is unresolved.
+
+#### Identity-scoped recheck, UI, and fixture cleanup
+
+Cleanup begins only after `quiescenceStartNs`, so none of it is part of the measured interval.
+The harness-owned scheduler records each legitimate use-day-reset recheck registration as
+`(SourceOrderIdentity, Runnable, registration kind)` through the existing recheck-plan and
+post/remove seams. After the worker has finished publishing the selected attempt, cleanup
+removes only registrations whose originating identity equals that attempt's identity, using
+the exact retained `Runnable`; it then waits for any already-running callback with that same
+identity to finish. It must not use a global `Handler.removeCallbacksAndMessages`, clear a
+different attempt's registration, destroy/recreate the blocker, refresh rules, reconnect the
+service, replace the worker, increment lifecycle/recheck generation, or publish a new runtime
+revision. A registration without a provable originating identity is an instrumentation failure,
+not permission for broad cleanup.
+
+`FixedFixtureMeasurementService` records Guardian/Warning launch intents and prevents them from
+escaping the test-owned effect boundary. If an instrumentation-owned Guardian or Warning
+activity was nevertheless launched during preflight or an attempt, the harness closes its
+tracked `ActivityScenario`, waits until it is destroyed, and records the existing Guardian
+closed signal for the same synthetic package where applicable. It never uses Back/Home or a
+package-wide force-stop as per-attempt cleanup. The attempt's synthetic foreground session,
+usage/reset rows, captured launch intents, and one-window/root provider are then restored to the
+same approved fixture baseline in a transaction/drain step; the fixed rule snapshot and accepted
+runtime revision are not reloaded or changed. The harness verifies zero open session/reset rows,
+zero same-identity pending effects, no visible test-owned Guardian/Warning activity, and the
+unchanged lifecycle generation/runtime revision before opening the next-stimulus gate. This
+preserves the next sample's initial state without a lifecycle or runtime refresh.
+
+Failure to remove or drain a same-identity recheck, close tracked test UI, restore fixture rows,
+or prove the unchanged generation/revision by `quiescenceStartNs + R` classifies the attempt as
+`EXCLUDED_POST_SAMPLE_NOT_QUIESCENT`. The harness retries that same fixture only if the exclusion
+is recoverable and the approved exclusion cap has not been reached; otherwise it aborts with the
+specific cleanup/restoration reason and reports no p95.
 
 ### Terminal handling, recovery, and abort choices
 
@@ -189,19 +290,26 @@ retained for diagnosis only.
 
 ### Concrete execution population proposal
 
-The proposed execution identity is pinned to serial
-`T811MA256GB23418064398`, model `iPlay50_mini_Pro`, Android 13/API 33, build fingerprint
+The proposed committed execution identity uses pseudonymous device id `T27_DEVICE_01`, mapped
+only in restricted raw run-control metadata to the exact user-approved serial. The device is
+model `iPlay50_mini_Pro`, Android 13/API 33, build fingerprint
 `Alldocube/iPlay50_mini_Pro/iPlay50_mini_Pro:13/TP1A.220624.014/1699256002:user/release-keys`,
 and the `FullDebug` flavor. At run start, assert all of these values. Any mismatch aborts
 before the first stimulus; the run must not silently substitute another device or build.
+The exact serial is compared on-device against the restricted mapping and retained only in raw
+`metadata.json`; it must not appear in this committed ticket or the committed evidence manifest.
 Xiaomi Pad Pro 2025 12.7 on Android 15/16 is not substituted here and remains the final
 Ticket 29 validation gate.
 
-The user must approve the implementation identity policy: the exact app version, source
-commit, and measurement-harness commit captured immediately before samples are the final
-measurement implementation HEAD. If any of those code or harness inputs changes after capture,
-the run is invalid and must be restarted; no later code change may be treated as the same run.
-The exact values are metadata, not a pass/fail target.
+The user must approve the immutable run-input identity policy. Immediately before installation,
+pin: the source commit containing the measured implementation, the harness commit, the protocol
+revision, exact app version/application id/variant, target FullDebug APK SHA-256, and
+instrumentation APK SHA-256. The installed APK bytes must hash to those values before preflight
+and again when copied into host evidence. A change to any pinned source, harness, protocol, app
+identity, or APK bytes invalidates the run and requires a clean restart. Evidence-only or
+documentation-only commits made after sampling do not invalidate the run because they are not
+run inputs; their parentage and purpose are recorded in the external evidence manifest. The
+exact values are metadata, not a pass/fail target.
 
 Use only synthetic fixture identifiers:
 
@@ -227,14 +335,19 @@ The exact population mix is another user choice:
 
 | Option | Warm-up order | Measured order | Population |
 | --- | --- | --- | --- |
-| M1 (provisional recommendation) | `T27_ALLOW, T27_DENY` repeated 10 times | `T27_ALLOW, T27_DENY` repeated 100 times | 100 allowed and 100 denied, fixed alternating order. |
+| M1 (provisional recommendation) | Collect 20 **valid** alternating rows: `T27_ALLOW, T27_DENY` repeated until each scheduled position is valid. | Collect exactly 100 **valid** allow rows and 100 **valid** deny rows in alternating order. | Fixed 50/50 valid population; primary p95 pools all 200 valid measured rows. |
 | M2 | `T27_ALLOW` repeated 20 times | `T27_ALLOW` repeated 200 times | 200 allowed only. |
 | M3 | `T27_DENY` repeated 20 times | `T27_DENY` repeated 200 times | 200 denied only. |
 
 The provisional recommendation is M1 because it exercises both evaluator outcomes without
-random stimulus order, but no mix is selected until the user approves it. The next stimulus is
-never dispatched until the current attempt has reached its valid terminal gate or its fully
-recovered exclusion terminal. No artificial sleep is inserted between stimuli.
+random stimulus order, but no mix is selected until the user approves it. Under M1, an exclusion
+does not consume a warm-up or measured population slot. After successful recovery, retry the
+same fixture until that slot produces a valid row; advance the allow/deny alternation only after
+a valid sample. Stop only after 20 valid warm-up rows and then exactly 100 valid allow plus 100
+valid deny measured rows, unless an approved abort rule fires. The primary nearest-rank p95 pools
+that fixed 50/50 population; per-outcome diagnostics may be retained but do not replace it. The
+next stimulus is never dispatched until the current attempt has reached its valid terminal gate
+or its fully recovered exclusion terminal. No artificial sleep is inserted between stimuli.
 
 ### Inclusion and exclusion rules
 
@@ -280,47 +393,91 @@ in ascending order as `x[1] <= ... <= x[n]`. Use the nearest-rank method:
 valid measured rows, this is the 190th sorted row (zero-based index 189). Do not interpolate,
 trim, pool runs, or infer any threshold, target timing, completion guarantee, or implementation
 response. The result label is exactly the selected fixed-fixture metric name from the boundary
-section: `T27-A callback-to-evaluation-ready p95` or `T27-B callback-to-published-decision
-p95`. An aborted or incomplete run has no p95.
+section: `T27-A fixed synthetic callback-to-evaluation-ready p95` or `T27-B fixed synthetic
+callback-to-decision-publication-entry p95`. An aborted or incomplete run has no p95.
 
 ### Evidence, privacy, integrity, and deletion
 
 - Keep one immutable `samples.jsonl` row for every warm-up and measured attempt, including
   excluded and timeout rows. Use only `T27_ALLOW`/`T27_DENY` and other synthetic identifiers;
-  do not retain real package names, real rule names, or user data.
-- Retain `metadata.json` with run id, exact start/end wall time, captured serial, commit/app
-  version/build/fingerprint, device/API, flavor, harness revision, chosen A/B boundary,
-  chosen D/R/E/M options, clock source, stimulus order, lifecycle generation, root/window
-  conditions, terminal/exclusion totals, and the raw-file SHA-256 values.
-- Keep device staging in the app-private measurement directory only until the host copy in
+  do not retain real package names, real rule names, or user data. Serialize each ledger row as
+  one canonical JSON object encoded as UTF-8 without BOM. The key order is exactly:
+  `runId`, `attemptOrdinal`, `sampleOrdinal`, `phase`, `fixtureLabel`,
+  `sourceOrderIdentity`, `observationKind`, `lifecycleGeneration`,
+  `acceptedRuntimeRevision`, `callbackExitKind`, `packageDecisionCount`, `decision`,
+  `denyingRuleCount`, `commitStatus`, `publicationStatus`, `callbackStartNs`,
+  `callbackReturnNs`, `selectedEndNs`, `quiescenceStartNs`, `quiescenceEndNs`,
+  `callbackDurationNs`, `selectedDurationNs`, `selectedEndMinusCallbackReturnNs`,
+  `quiescenceDurationNs`, `callbackReturnPresent`, `selectedEndPresent`, `terminalState`,
+  `exclusionReason`. Use no insignificant whitespace, JSON escaping
+  per RFC 8259, base-10 integers without leading zeroes, lowercase `true`/`false`/`null`, and one
+  LF byte (`0x0A`) after every object including the final row. Row order is ascending attempt
+  ordinal. No CRLF normalization or post-copy reserialization is allowed.
+- Retain a separate canonical `metadata.json` payload, also UTF-8 without BOM and serialized
+  once as one object with no insignificant whitespace and one final LF byte. Its key order is
+  exactly: `runId`, `startedAtUtc`, `endedAtUtc`, `rawDeviceSerial`, `pseudonymousDeviceId`,
+  `sourceCommit`, `harnessCommit`, `protocolRevision`, `appVersion`, `applicationId`, `variant`,
+  `targetApkSha256`, `instrumentationApkSha256`, `buildFingerprint`, `deviceModel`, `androidVersion`,
+  `apiLevel`, `boundary`, `observationDeadlineNs`, `recoveryDeadlineNs`, `exclusionCap`,
+  `populationOption`, `clockSource`, `stimulusOrder`, `lifecycleGeneration`, `rootWindowConditions`,
+  `attemptTotals`, `terminalTotals`, `exclusionTotals`. It contains no hash of itself and no
+  `samples.jsonl` hash.
+- After the run closes, create a separate canonical `evidence-manifest.json`, using the same
+  one-object UTF-8/no-BOM/no-whitespace/final-LF rules, that hashes the
+  exact `samples.jsonl` bytes and exact `metadata.json` payload bytes with SHA-256. The manifest
+  records keys in this exact order: `manifestSchemaVersion`, `canonicalizationVersion`, `runId`,
+  `pseudonymousDeviceId`, `sourceCommit`, `harnessCommit`, `protocolRevision`, `appVersion`,
+  `applicationId`, `variant`, `targetApkSha256`, `instrumentationApkSha256`,
+  `samplesJsonlBytes`, `samplesJsonlSha256`, `metadataJsonBytes`, `metadataJsonSha256`,
+  `deviceStagingDeleted`, `evidenceCommitParent`, `notes`. Metadata never self-hashes. The
+  committed form contains only the run-stable pseudonymous device id whose exact-serial mapping
+  is stored under restricted custody. The exact serial remains only in restricted raw
+  `metadata.json` and is never committed.
+- Stage both canonical payloads only in the target app's private measurement directory. Transfer
+  them to
   `C:\Users\DELL\StudioProjects\curbox-android\.scratch\app-rule-enforcement\evidence\ticket27\<run-id>`
-  has been verified byte-for-byte by hash. Delete the device staging copy at that point.
+  as opaque bytes, compute SHA-256 and byte length independently on device before transfer and on
+  the host after transfer, and require exact equality for each file. Do not parse, normalize, or
+  rewrite during transfer. After the external manifest has been created and the host byte/hash
+  verification succeeds, delete the device staging copies and record deletion status in the
+  manifest. A mismatch preserves both sides for diagnosis, aborts evidence finalization, and
+  forbids reporting p95.
 - Keep the host raw files in the restricted workspace through review and ticket closure.
   Delete them only after explicit user instruction or explicit ticket-archive approval, and
   record the deletion in the ticket. No encryption is required while the files remain in the
   restricted workspace; moving them outside it requires a separate approval and retention
   decision.
-- Anchor the evidence integrity by committing a small `evidence-manifest.json` or ticket
-  evidence update containing the exact SHA-256 values and run metadata. The manifest commit is
-  the trusted reference; raw files need not be committed when their restricted workspace copy
-  is retained.
+- Anchor evidence integrity by committing the pseudonymized external
+  `evidence-manifest.json`. The manifest commit is the trusted reference; raw files and raw
+  metadata are not committed while their restricted workspace copies are retained. Later
+  evidence/docs commits do not alter the pinned run inputs.
 
 ### Explicit approval points
 
 Before any measurement work, the user must explicitly choose:
 
-1. Boundary **A** (`callback-to-evaluation-ready`) or boundary **B**
-   (`callback-to-published-decision`). The outer full-service boundary is not selected.
+1. Boundary **A** (`fixed synthetic callback-to-evaluation-ready`) or boundary **B**
+   (`fixed synthetic callback-to-decision-publication-entry`). **B is recommended but not
+   selected.** The outer full-service boundary is not selected.
 2. Terminal/recovery deadlines: T1, T2, or user-supplied `D` and `R`.
 3. Exclusion/abort cap: E0, E5, or E20.
 4. Population mix: M1, M2, or M3.
-5. The pinned serial/device/build identity, and the policy that the exact app version, source
-   commit, and harness commit captured before samples are the final measurement
-   implementation HEAD; any later code change invalidates the run.
-6. The synthetic single-window fixture scope and its explicit limitation that it does not
+5. The proposed isolated `AppRuleBlockerFixedFixtureP95MeasurementTest` topology, main target
+   process, direct-only stimulus path, ingress proof, clean-install/reset/preflight sequence,
+   and identity-scoped recheck/UI/fixture cleanup. **This topology is recommended but not
+   selected.**
+6. The pinned serial/device/build identity and immutable run-input policy: source, harness,
+   protocol revision, app identity, and both APK hashes are fixed before installation; later
+   evidence/docs-only commits do not invalidate the run.
+7. The synthetic single-window fixture scope and its explicit limitation that it does not
    establish production Android-window or OEM representativeness.
-7. Lossless preallocated ledger retention, restricted-workspace retention/deletion, and
-   committed hash manifest.
+8. Lossless preallocated ledger retention, canonical byte format, pseudonymous committed
+   manifest, restricted raw serial/metadata, verified transfer, device deletion, and host
+   retention/deletion policy.
+
+The currently recommended approval bundle is **B + T2 + E5 + M1 + the proposed isolated
+topology + the pinned identity policy + the stated retention policy**. Every element remains
+user-owned and may not be inferred from this recommendation.
 
 No measurement, instrumentation verification, sample collection, p95 calculation, or
 threshold decision may begin before those choices are approved.
