@@ -610,7 +610,7 @@ class SerializedDecisionWorker internal constructor(
         )
         val applicable = eligibility.evaluations
             .filter { it.isApplicable && it.isActive && !it.isSkipped }
-            .ifEmpty { eligibility.denyingRules }
+        if (applicable.isEmpty()) return eligibility
         val denials = applicable.map { evaluation ->
             evaluation.copy(
                 remainingMillis = 0L,

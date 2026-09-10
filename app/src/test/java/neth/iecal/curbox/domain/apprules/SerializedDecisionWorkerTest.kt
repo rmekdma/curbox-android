@@ -342,6 +342,48 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun recoverableFailureWithoutApplicableRulePreservesEligibilityWithoutDenial() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val evaluations = Collections.synchronizedList(mutableListOf<AppRulesEvaluation>())
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            onEvaluation = { _, _, _, evaluation -> evaluations += evaluation }
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, OTHER_PACKAGE, capturedAtMs = 1_000L))
+            )
+            assertTrue(outcomes.awaitCount(1))
+
+            repository.evaluatorFailure = IllegalStateException("injected evaluator failure")
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(
+                    syntheticStaleRequest(
+                        sourceOrder = 2L,
+                        lifecycle = 1L,
+                        capturedAtMs = 7_000L
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitCount(2))
+
+            val evaluation = evaluations.last()
+            assertTrue("an inapplicable package must remain allowed", evaluation.isAllowed)
+            assertTrue(evaluation.denyingRules.isEmpty())
+            assertTrue(evaluation.evaluations.isEmpty())
+            val decision = outcomes.values.last().packageDecisions.single()
+            assertTrue("an inapplicable package must not be denied", decision.isAllowed)
+            assertTrue("an inapplicable package must not carry denial ids", decision.denyingRuleIds.isEmpty())
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun persistenceFailureIsLoggedContainedAndNextForegroundDecisionIsProcessed() {
         val repository = RecordingRepository()
         repository.startFailure = IllegalStateException("injected persistence failure")
@@ -1139,6 +1181,26 @@ class SerializedDecisionWorkerTest {
             displayState = DisplayState.UNLOCKED
         ),
         runtimePublication = runtimePublication
+    )
+
+    private fun syntheticStaleRequest(
+        sourceOrder: Long,
+        lifecycle: Long,
+        capturedAtMs: Long
+    ): DecisionRequest = DecisionRequest(
+        sourceOrderIdentity = SourceOrderIdentity(sourceOrder),
+        lifecycleGeneration = LifecycleGeneration(lifecycle),
+        reason = ObservationKind.SYNTHETIC_RECHECK,
+        observation = ForegroundFacts(
+            capturedAtWallMs = capturedAtMs,
+            capturedAtElapsedMs = capturedAtMs,
+            signal = SignalFact(kind = ObservationKind.SYNTHETIC_RECHECK),
+            activeRoot = ActiveRootFact(readState = ForegroundReadState.EMPTY),
+            applicationWindows = ApplicationWindowsFact(
+                readState = ForegroundReadState.EMPTY
+            ),
+            displayState = DisplayState.UNLOCKED
+        )
     )
 
     private fun refreshRequest(

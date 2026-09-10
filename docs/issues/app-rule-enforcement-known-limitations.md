@@ -40,7 +40,7 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 
 - **Status / Severity:** `닫힘 (T21 deterministic contract; OEM gate remains separate)` / `P1`
 - **Exact trigger:** 앱 규칙의 직접 사용 가능 시간이 소진된 상태에서 보호자 추가시간이 5초보다 길게 남아 있고, 앱이 계속 보이는 동안 새로운 `TYPE_WINDOW_STATE_CHANGED` 이벤트가 오지 않는다. 동시에 `service.windows`가 앱을 누락한 오래된 목록을 반환하거나 빈 목록 또는 `null` root를 반환하고, 다른 신뢰할 수 있는 비필수 앱 root도 없다. Canonical connected evidence는 이 trigger family의 six failed cases를 T21 owner로 기록한다.
-- **Current behavior:** 승인된 R5 A 경로는 실제 event의 raw signal history를 host scheduler classifier에 보존하고, evidence age가 만료된 뒤에도 세 번의 bounded retry가 끝나면 마지막 비필수 package에 대해 `EVALUATE_FAIL_CLOSED`를 worker로 전달한다. worker는 synthetic event로 evidence TTL을 갱신하지 않은 채 boundary 시점의 persisted session을 읽고 evaluator 결과를 적용한다. `observeWorkerEvaluation()`은 synthetic request에서 evidence timestamp를 갱신하지 않지만 evaluator observation과 publication은 유지한다. evaluator의 ordinary failure는 기존 fail closed eligibility로 denial을 만들고, request child cancellation은 outcome, warning, recovery 없이 contained된다. 다른 비필수 active root 또는 알려진 partial window가 현재 package를 식별하는 경우에는 이 fallback을 사용하지 않는다.
+- **Current behavior:** 승인된 R5 A 경로는 실제 event의 raw signal history를 host scheduler classifier에 보존하고, evidence age가 만료된 뒤에도 세 번의 bounded retry가 끝나면 마지막 비필수 package에 대해 `EVALUATE_FAIL_CLOSED`를 worker로 전달한다. worker는 synthetic event로 evidence TTL을 갱신하지 않은 채 boundary 시점의 persisted session을 읽고 evaluator 결과를 적용한다. `observeWorkerEvaluation()`은 synthetic request에서 evidence timestamp를 갱신하지 않지만 evaluator observation과 publication은 유지한다. evaluator의 ordinary failure는 applicable rule에 기존 fail-closed denial을 만들고, applicable rule이 없으면 evaluator-derived eligibility를 그대로 보존한다. request child cancellation은 outcome, warning, recovery 없이 contained된다. 다른 비필수 active root 또는 알려진 partial window가 현재 package를 식별하는 경우에는 이 fallback을 사용하지 않는다.
 - **Impact:** T21의 deterministic contract에서는 시간 경계의 evaluator decision과 Guardian denial이 더 이상 사라지지 않는다. 이 결과는 `Xiaomi Pad Pro 2025 12.7` Android 15/16에서 같은 동작이 확인됐다는 뜻이 아니며, 실제 OEM window/root 동작과 reported incident 판정은 AR004에 남는다.
 - **Evidence:**
   - [AppRuleBlocker.kt](../../app/src/main/java/neth/iecal/curbox/blockers/AppRuleBlocker.kt)의 `submitForegroundDecision`, `runScheduledRecheck`, worker handoff와 warning publication 경계
@@ -92,10 +92,10 @@ AR004 또는 incident가 열린 동안에는 OEM 해결이나 release readiness�
 - **Evidence:**
   - [AppRuleBlockerLongBoundaryRedTest.kt](../../app/src/androidTest/java/neth/iecal/curbox/blockers/AppRuleBlockerLongBoundaryRedTest.kt)의 deterministic clock/scheduler and T21 six-case evidence
   - [ForegroundEvidenceContractTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/ForegroundEvidenceContractTest.kt)의 29 focused evidence-age/provenance cases
-  - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 23 focused worker cases
+  - [SerializedDecisionWorkerTest.kt](../../app/src/test/java/neth/iecal/curbox/domain/apprules/SerializedDecisionWorkerTest.kt)의 24 focused worker cases
   - [canonical baseline inventory](app-rule-enforcement-baseline.md#ticket-21-closure-evidence-2026-09-10)의 exact run counts and remaining failure owners
 - **Mitigation or decision needed:** T21 harness와 production seam을 유지한다. recheck scheduling, visibility ownership, callback flush와 device validation은 각각 T22–T24 및 T29의 scope로 남긴다.
-- **Acceptance criteria:** T21의 six stable identifiers와 synthetic timestamp regression은 final focused connected run에서 통과했고, focused JVM에는 52 tests with 0 failures, full JVM에는 350 tests with 0 failures가 기록됐다. Final unfiltered connected run은 92 tests, 89 passed, 3 unrelated inventory failures를 기록했으며, 그 3건은 T24와 T26으로 분류된다.
+- **Acceptance criteria:** T21의 six stable identifiers와 synthetic timestamp regression은 final focused connected run에서 통과했고, focused JVM에는 53 tests with 0 failures, full JVM에는 351 tests with 0 failures가 기록됐다. Final unfiltered connected run은 92 tests, 89 passed, 3 unrelated inventory failures를 기록했으며, 그 3건은 T24와 T26으로 분류된다.
 - **Target refactor phase:** `Phase 0 deterministic harness`와 `Phase 1 foreground evidence 모듈`의 T21 범위를 완료했다. 이후 scheduler 관련 검증은 `Phase 2`에서 수행한다.
 
 ### AR 004 Xiaomi Pad Pro 2025 12.7 실제 창 동작 테스트 부재
