@@ -1,6 +1,12 @@
-# 27: Callback and decision p95 measurement
+# 27: Fixed synthetic fixture callback-to-evaluation-ready or callback-to-published-decision p95
 
-**What to build:** First propose a reproducible protocol for measuring the representative callback-to-decision p95 for the completed app rule path. Only after explicit user approval may the approved protocol be run and its p95 recorded. The measurement is evidence only and must not become a product requirement without a separate user decision.
+**What to build:** First propose a reproducible protocol for measuring a fixed synthetic
+single-window fixture path. After the user selects boundary A or B, the objective/result is
+named either callback-to-evaluation-ready p95 or callback-to-published-decision p95. The word
+representative refers only to the approved fixed synthetic fixture path; it never means
+production Android-window or OEM representativeness. Only after explicit user approval may the
+approved protocol be run and its p95 recorded. The measurement is evidence only and must not
+become a product requirement without a separate user decision.
 
 **Blocked by:** 21 — Long-boundary foreground decision closure; 22 — Recheck policy closure; 23 — Visibility-window closure; 24 — Callback flush closure; 25 — Guardian lifecycle closure; 26 — Debug fixture reliability closure
 
@@ -37,15 +43,27 @@ entry to return includes the preceding `AppUsageTracker` fan-out and other servi
 work. It is not selected for this app-rule metric; it may be a separate service-health metric
 only after a separate decision.
 
+The objective and result name must follow the selected boundary exactly: `T27-A
+callback-to-evaluation-ready p95` for A or `T27-B callback-to-published-decision p95` for B.
+Neither result may be described as production-representative, OEM-representative, or a product
+target. It is representative only of the approved synthetic fixture, fixed rule state, and
+single-window conditions below.
+
 For either A or B:
 
 - `callbackStart` is the monotonic timestamp immediately before the existing
   `AppRuleBlocker.doAppRuleCheck(event)` action is invoked at the synchronous app-rule service
   boundary. It excludes the preceding `AppUsageTracker` work.
 - `callbackReturn` is the timestamp in the action boundary's `finally` path immediately after
-  `doAppRuleCheck(event)` exits, whether it returns normally or throws. The row records the
-  exit kind (`NORMAL`, `CANCELLATION`, or `EXCEPTION`); an abnormal exit cannot be a valid
-  latency sample.
+  `doAppRuleCheck(event)` exits, whether it returns normally or throws. Every ledger row has a
+  `callbackExitKind` field whose enum values are exactly `NORMAL`, `CANCELLATION`, and
+  `EXCEPTION`. `NORMAL` is recorded when the action returns; `CANCELLATION` when it exits by
+  `CancellationException`; and `EXCEPTION` for any other thrown failure. If the callback has
+  not exited when `D` expires, `callbackExitKind` remains null in that row and the terminal
+  state must be `TIMEOUT_MISSING_CALLBACK_RETURN` or `TIMEOUT_MISSING_BOTH`; null is not a
+  fourth enum value. `CANCELLATION` and `EXCEPTION` are always exclusions, while `NORMAL`
+  may still become a valid sample or a later exclusion depending on the selected boundary and
+  quiescence gate.
 - `selectedEnd` is the A or B timestamp selected by the user. It is correlated through the
   request's existing `SourceOrderIdentity`; no new decision or persistence call is made.
 - Retain signed diagnostics: `callbackReturn - callbackStart`,
@@ -93,12 +111,16 @@ open the next-stimulus gate until all of the following are true:
 7. No refresh, reconnect, lifecycle-generation change, or worker replacement occurred during
    the attempt.
 
-Record `quiescenceStartNs` after the selected boundary and `quiescenceEndNs` when this gate
-closes, using the same raw integer nanosecond clock. These timestamps and the quiescence
-duration are retained for diagnosis but are outside the measured callback-to-A/B duration. If
-the gate cannot reach quiescence within the approved recovery deadline `R`, classify the row as
-`EXCLUDED_POST_SAMPLE_NOT_QUIESCENT`; if the approved exclusion cap or abort rule is reached,
-abort the run. Do not dispatch another stimulus while the gate is unresolved.
+Record `quiescenceStartNs` exactly once at the instant both `callbackReturn` and the selected
+A/B boundary are present. If the selected boundary arrived first, wait for `callbackReturn`
+and take `quiescenceStartNs` when the second signal arrives; do not start `R` at the earlier
+boundary. Record `quiescenceEndNs` when this gate closes, using the same raw integer
+nanosecond clock. These timestamps and the quiescence duration are retained for diagnosis but
+are outside the measured callback-to-A/B duration. The normal recovery deadline is the interval
+`[quiescenceStartNs, quiescenceStartNs + R]`. If the gate is not quiescent when that interval
+expires, classify the row as `EXCLUDED_POST_SAMPLE_NOT_QUIESCENT`; if the approved exclusion
+cap or abort rule is reached, abort the run. Do not dispatch another stimulus while the gate
+is unresolved.
 
 ### Terminal handling, recovery, and abort choices
 
@@ -108,17 +130,22 @@ state is one of `STARTED`, `CALLBACK_RETURNED`, `END_OBSERVED`, `VALID_SAMPLE`,
 `TIMEOUT_MISSING_BOTH`, `RECOVERY_NOT_QUIESCENT`, or an explicit `ABORT_<reason>` state.
 There is no silent pending state at run completion.
 
-For an eligible request, the per-attempt observation deadline starts at `callbackStart` and
-ends when both `callbackReturn` and the selected end have arrived. If the deadline expires,
-the row records exactly which boundary is missing. For a request rejected before a
+For an eligible request, the per-attempt observation deadline `D` starts at `callbackStart`
+and ends when both `callbackReturn` and the selected end have arrived. If `D` expires before
+both signals are present, classify the row immediately at `D` with exactly which boundary is
+missing and abort the run as `ABORT_OBSERVATION_DEADLINE`; `quiescenceStartNs` does not exist
+and `R` must not be started or inferred. This prevents a missing boundary from creating a
+circular quiescence condition. For a request rejected before a
 `DecisionRequest` exists, `callbackReturn` plus `EXCLUDED_NO_REQUEST` is the terminal
 disposition; no end boundary is expected and no next stimulus is sent until that disposition
-is closed. For an accepted request that cannot produce the selected end, the row remains a
-timeout/exclusion and is never counted as a sample.
+is closed. Because no worker identity exists in this case, the terminal disposition closes at
+the observed callback return after the synthetic fixture is restored; `quiescenceStartNs` and
+`R` are not invented for it. For an accepted request that cannot produce the selected end, the
+row remains a timeout/exclusion and is never counted as a sample.
 
-After any exclusion or timeout, the harness enters recovery and sends no new stimulus. It
-must observe the late callback return and selected end when they eventually arrive, or record
-their explicit absence, then confirm all of the following before reopening the gate:
+After a terminal exclusion that has both required boundary signals, the harness enters normal
+post-sample recovery and sends no new stimulus while the `R` interval is open. It must confirm
+all of the following before reopening the gate:
 
 1. The current attempt ledger slot is terminal and no measurement correlation entry for its
    `SourceOrderIdentity` remains open.
@@ -130,18 +157,21 @@ their explicit absence, then confirm all of the following before reopening the g
    its identity or ledger slot.
 
 The user must choose both a terminal observation deadline `D` and a recovery/quiescence
-deadline `R`. These are measurement-run bounds only, not product thresholds:
+deadline `R`. `D` bounds the pre-quiescence observation phase. `R` starts only at the
+unambiguous `quiescenceStartNs` defined above and bounds normal post-sample recovery. These
+are measurement-run bounds only, not product thresholds:
 
-| Option | `D` per attempt | `R` after timeout/exclusion | Tradeoff |
+| Option | `D` per attempt | `R` after `quiescenceStartNs` | Tradeoff |
 | --- | ---: | ---: | --- |
 | T1 | 2 seconds | 2 seconds | Tighter run bound; more likely to classify slow debug/DB scheduling as excluded. |
 | T2 (provisional recommendation) | 5 seconds | 5 seconds | Still bounded while allowing a full-debug worker/persistence tail to settle; does not reuse a product budget. |
 | T3 | User-supplied values | User-supplied values | No numeric value is chosen here; the run cannot start until both values are recorded. |
 
-`R` starts when the attempt first becomes a timeout/exclusion. If recovery is not quiescent by
-`R`, the run aborts with `ABORT_RECOVERY_NOT_QUIESCENT`; it does not continue to collect
-samples. A normal valid attempt never waits for `R`: its gate opens only after both required
-boundaries and the normal quiescence check are complete.
+If normal recovery is not quiescent by `quiescenceStartNs + R`, classify the attempt as
+`EXCLUDED_POST_SAMPLE_NOT_QUIESCENT`; it does not become a valid sample. If the exclusion cap
+or abort rule is reached, abort the run with `ABORT_RECOVERY_NOT_QUIESCENT`. A normal valid
+attempt never opens the next-stimulus gate before `quiescenceEndNs`. A pre-quiescence missing
+boundary is handled at `D` as `ABORT_OBSERVATION_DEADLINE` and never uses `R`.
 
 The user must also choose the maximum number of excluded attempts across warm-up and
 measurement:
@@ -232,11 +262,11 @@ the decision request.
 
 The complete row ledger retains, for every warm-up, measured, and excluded attempt: `runId`,
 attempt ordinal, sample ordinal when applicable, source-order identity when available,
-`observationKind`, lifecycle generation, accepted runtime revision, package decision count,
-allow/deny result, denying-rule count, commit status, publication status, every boundary
-timestamp (`callbackStartNs`, `callbackReturnNs`, `selectedEndNs`, `quiescenceStartNs`, and
-`quiescenceEndNs`) as raw integer nanoseconds, the signed durations, boundary-presence bits,
-terminal state, exclusion reason, and synthetic fixture label. The host serializes the
+`observationKind`, lifecycle generation, accepted runtime revision, `callbackExitKind`,
+package decision count, allow/deny result, denying-rule count, commit status, publication
+status, every boundary timestamp (`callbackStartNs`, `callbackReturnNs`, `selectedEndNs`,
+`quiescenceStartNs`, and `quiescenceEndNs`) as raw integer nanoseconds, the signed durations,
+boundary-presence bits, terminal state, exclusion reason, and synthetic fixture label. The host serializes the
 already-closed ledger records to JSONL only after the run. If a ledger slot cannot be allocated or updated, record
 `ABORT_LEDGER_CAPACITY` or `ABORT_LEDGER_WRITE_FAILURE` in the run manifest and stop before
 dispatching another stimulus. Thus every dispatched attempt has one disposition or the run is
@@ -249,7 +279,9 @@ in ascending order as `x[1] <= ... <= x[n]`. Use the nearest-rank method:
 `rank = ceil(0.95 * n)` with one-based indexing, and `p95 = x[rank]`. With the proposed 200
 valid measured rows, this is the 190th sorted row (zero-based index 189). Do not interpolate,
 trim, pool runs, or infer any threshold, target timing, completion guarantee, or implementation
-response. An aborted or incomplete run has no p95.
+response. The result label is exactly the selected fixed-fixture metric name from the boundary
+section: `T27-A callback-to-evaluation-ready p95` or `T27-B callback-to-published-decision
+p95`. An aborted or incomplete run has no p95.
 
 ### Evidence, privacy, integrity, and deletion
 
