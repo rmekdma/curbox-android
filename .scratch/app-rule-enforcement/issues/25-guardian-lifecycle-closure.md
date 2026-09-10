@@ -49,3 +49,29 @@ node in that execution. Xiaomi Pad Pro 2025 12.7 Android 15/16 validation remain
 gate.
 
 No child/thread operations were performed, and no code-review or spawning skill was invoked.
+
+## Follow-up hardening evidence — 2026-09-10
+
+The accepted Copernicus Standards finding was fixed directly in the existing Guardian activity
+seam. `GuardianApprovalActivity.readValidatedPayload()` now treats package identity and the
+denial list as one validated payload. It requires a nonblank package, a nonempty list, nonnull
+entries, and a nonblank `ruleId` while preserving the existing `ruleName` and `reason` behavior.
+`onNewIntent()` validates before calling `super` or `setIntent`, so a malformed replacement does
+not replace the current valid intent, denial rows, activity identity, or cleanup package. An
+initial malformed payload finishes safely without rendering or crashing.
+
+The new TDD regressions cover `[null]` replacement, a denial missing `ruleId`, a valid-looking
+denial with `EXTRA_PACKAGE` missing, close-broadcast retention of the valid current package, and
+an initial malformed payload. The existing valid SINGLE_TOP refresh test remains in the same
+focused class.
+
+The focused connected class on `iPlay50_mini_Pro - 13` / Android 13 passed `6` tests with `6`
+passed, `0` failures, `0` errors, and `0` skipped (XML timestamp `2026-09-10T03:42:54`, timezone
+not encoded). It observed one activity instance and one current choice row after each malformed
+replacement, and the close broadcast retained the valid current package. The full JVM suite
+reported `64` XML suites and `351` tests with `351` passed, `0` failures, `0` errors, and `0`
+skipped. The full connected suite reported `95` tests with `94` passed, `1` failure, `0` errors,
+and `0` skipped (XML timestamp `2026-09-10T03:46:02`); the sole failure was
+`ExampleInstrumentedTest::useAppContext`, classified as T26's debug application-id fixture.
+
+No child/thread operations were performed, and no code-review or spawning skill was invoked.
