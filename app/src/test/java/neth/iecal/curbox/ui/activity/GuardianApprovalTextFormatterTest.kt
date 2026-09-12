@@ -86,11 +86,12 @@ class GuardianApprovalTextFormatterTest {
     fun doesNotContainAnyHyphensOrDashesInFormattedStructure() {
         val ruleName = "Social Limits"
         val reasonTitle = "Usage condition not met"
-        val conditionName = "Total 20 min"
+        val conditionName = "Total"
+        val progressText = "19m/20m"
         val shortfallText = "1 min needed"
         val bullet = "•"
 
-        val formatted = "$ruleName\n$reasonTitle\n$bullet $conditionName: $shortfallText"
+        val formatted = "$ruleName\n$reasonTitle\n$bullet $conditionName: $progressText ($shortfallText)"
         assertFalse(formatted.contains("-"))
         assertFalse(formatted.contains("–"))
         assertFalse(formatted.contains("—"))
@@ -137,22 +138,22 @@ class GuardianApprovalTextFormatterTest {
         // Mocking strings:
         val unknownGroupString = "알 수 없는 앱 그룹 (규칙 설정 확인 필요)"
         fun resolveName(condition: AppRuleConditionProgress): String = when {
-            condition.isTotalCondition -> "전체 ${condition.requiredMillis / 60_000L}분 사용"
+            condition.isTotalCondition -> "전체"
             condition.conditionName.isBlank() -> unknownGroupString
             else -> condition.conditionName
         }
 
-        assertEquals("전체 20분 사용", resolveName(totalCond))
+        assertEquals("전체", resolveName(totalCond))
         assertEquals("학습", resolveName(studyCond))
         assertEquals(unknownGroupString, resolveName(deletedCond))
 
         // Check each bullet item
         val items = unmet.map { condition ->
-            "• ${resolveName(condition)}: ${condition.shortfallMinutes}분 부족"
+            "• ${resolveName(condition)}: ${condition.currentMinutes}분/${condition.requiredMinutes}분 (${condition.shortfallMinutes}분 부족)"
         }
-        assertEquals("• 전체 20분 사용: 1분 부족", items[0])
-        assertEquals("• 학습: 10분 부족", items[1])
-        assertEquals("• 알 수 없는 앱 그룹 (규칙 설정 확인 필요): 10분 부족", items[2])
+        assertEquals("• 전체: 19분/20분 (1분 부족)", items[0])
+        assertEquals("• 학습: 5분/15분 (10분 부족)", items[1])
+        assertEquals("• 알 수 없는 앱 그룹 (규칙 설정 확인 필요): 0분/10분 (10분 부족)", items[2])
 
         // Verify no hyphens/dashes in any of the items
         items.forEach { item ->
@@ -254,10 +255,10 @@ class GuardianApprovalTextFormatterTest {
 
         val reasonTitle = "사용 조건 미달"
         val bullet = "•"
-        val conditionItem = "$bullet ${unmetCond.conditionName}: ${unmetCond.shortfallMinutes}분 부족"
+        val conditionItem = "$bullet ${unmetCond.conditionName}: ${unmetCond.currentMinutes}분/${unmetCond.requiredMinutes}분 (${unmetCond.shortfallMinutes}분 부족)"
         val formatted = "${denial.ruleName}\n$reasonTitle\n$conditionItem"
 
-        assertEquals("소셜\n사용 조건 미달\n• 학습: 10분 부족", formatted)
+        assertEquals("소셜\n사용 조건 미달\n• 학습: 10분/20분 (10분 부족)", formatted)
     }
 
     @Test

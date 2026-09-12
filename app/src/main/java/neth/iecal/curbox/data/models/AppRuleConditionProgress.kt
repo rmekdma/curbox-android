@@ -11,6 +11,12 @@ data class AppRuleConditionProgress(
     val isMet: Boolean = false,
     val isTotalCondition: Boolean = false
 ) {
+    val currentMinutes: Long
+        get() = currentMillis / 60_000L
+
+    val requiredMinutes: Long
+        get() = requiredMillis / 60_000L
+
     val remainingShortfallMillis: Long
         get() = (requiredMillis - currentMillis).coerceAtLeast(0L)
 
@@ -22,5 +28,11 @@ data class AppRuleConditionProgress(
 
     companion object {
         const val CONDITION_ID_TOTAL = "total"
+
+        fun shouldShowConditionProgress(
+            unmetConditions: Collection<AppRuleConditionProgress>,
+            isAllowanceExhausted: Boolean,
+            earnedAllowanceEnabled: Boolean
+        ): Boolean = unmetConditions.isNotEmpty() && (!isAllowanceExhausted || earnedAllowanceEnabled)
     }
 }

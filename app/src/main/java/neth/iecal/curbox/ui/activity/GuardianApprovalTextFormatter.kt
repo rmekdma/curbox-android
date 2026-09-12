@@ -13,7 +13,11 @@ object GuardianApprovalTextFormatter {
 
     fun formatDenial(context: Context, denial: AppRuleGuardianDenial): CharSequence {
         val unmetConditions = denial.conditionProgresses.filter { it.isUnmetWithShortfall }
-        val showConditionProgress = unmetConditions.isNotEmpty() && (!denial.isAllowanceExhausted || denial.earnedAllowanceEnabled)
+        val showConditionProgress = AppRuleConditionProgress.shouldShowConditionProgress(
+            unmetConditions = unmetConditions,
+            isAllowanceExhausted = denial.isAllowanceExhausted,
+            earnedAllowanceEnabled = denial.earnedAllowanceEnabled
+        )
 
         if (showConditionProgress) {
             val reasonTitle = context.getString(R.string.app_rules_lock_reason_condition_not_met)
@@ -24,20 +28,25 @@ object GuardianApprovalTextFormatter {
             builder.appendBold(reasonTitle)
 
             unmetConditions.forEach { condition: AppRuleConditionProgress ->
-                val conditionName = if (condition.isTotalCondition) {
-                    val totalMinutesRequired = condition.requiredMillis / 60_000L
-                    context.getString(R.string.app_rules_condition_total_name, totalMinutesRequired)
-                } else if (condition.conditionName.isBlank()) {
-                    context.getString(R.string.app_rules_unknown_contributor_group)
-                } else {
-                    condition.conditionName
+                val conditionName = when {
+                    condition.isTotalCondition -> context.getString(R.string.app_rules_condition_total_short_name)
+                    condition.conditionName.isBlank() -> context.getString(R.string.app_rules_unknown_contributor_group)
+                    else -> condition.conditionName
                 }
+                val progressText = context.getString(
+                    R.string.app_rules_time_usage_allowance_format,
+                    condition.currentMinutes,
+                    condition.requiredMinutes
+                )
                 val shortfallText = context.getString(R.string.app_rules_shortfall_minutes, condition.shortfallMinutes)
 
                 builder.append("\n").append(bullet).append(" ")
                 builder.appendBold(conditionName)
                 builder.append(": ")
+                builder.append(progressText)
+                builder.append(" (")
                 builder.appendBold(shortfallText)
+                builder.append(")")
             }
 
             return builder

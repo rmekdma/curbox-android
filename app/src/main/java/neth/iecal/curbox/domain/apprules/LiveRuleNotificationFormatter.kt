@@ -2,6 +2,7 @@ package neth.iecal.curbox.domain.apprules
 
 import android.content.Context
 import neth.iecal.curbox.R
+import neth.iecal.curbox.data.models.AppRuleConditionProgress
 
 object LiveRuleNotificationFormatter {
 
@@ -142,7 +143,11 @@ object LiveRuleNotificationFormatter {
         item: LiveRuleNotificationItem
     ): String {
         val unmetConditions = item.conditionProgresses.filter { it.isUnmetWithShortfall }
-        val showConditionProgress = unmetConditions.isNotEmpty() && (!item.isAllowanceExhausted || item.earnedAllowanceEnabled)
+        val showConditionProgress = AppRuleConditionProgress.shouldShowConditionProgress(
+            unmetConditions = unmetConditions,
+            isAllowanceExhausted = item.isAllowanceExhausted,
+            earnedAllowanceEnabled = item.earnedAllowanceEnabled
+        )
 
         return if (showConditionProgress) {
             val progressText = formatConditionProgresses(context, unmetConditions)
@@ -182,7 +187,11 @@ object LiveRuleNotificationFormatter {
         extraTemplate: String = " (includes %1\$d min extra)"
     ): String {
         val unmetConditions = item.conditionProgresses.filter { it.isUnmetWithShortfall }
-        val showConditionProgress = unmetConditions.isNotEmpty() && (!item.isAllowanceExhausted || item.earnedAllowanceEnabled)
+        val showConditionProgress = AppRuleConditionProgress.shouldShowConditionProgress(
+            unmetConditions = unmetConditions,
+            isAllowanceExhausted = item.isAllowanceExhausted,
+            earnedAllowanceEnabled = item.earnedAllowanceEnabled
+        )
 
         return if (showConditionProgress) {
             val progressText = formatConditionProgresses(
