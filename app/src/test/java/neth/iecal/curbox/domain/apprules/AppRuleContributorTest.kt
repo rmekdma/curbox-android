@@ -2,6 +2,8 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleGuardianGrant
+import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.ForegroundSession
@@ -46,8 +48,21 @@ class AppRuleContributorTest {
         assertFalse(before.isAllowed)
         assertEquals(8 * MINUTE, before.evaluations.single().contributorUsageMillis)
         assertEquals(0L, before.evaluations.single().allowanceMillis)
+        val beforeProgress = before.evaluations.single().conditionProgresses.single()
+        assertEquals(8 * MINUTE, beforeProgress.currentMillis)
+        assertEquals(10 * MINUTE, beforeProgress.requiredMillis)
+        assertEquals(2 * MINUTE, beforeProgress.remainingShortfallMillis)
+        assertFalse(beforeProgress.isMet)
+        assertTrue(beforeProgress.isTotalCondition)
+
         assertTrue(after.isAllowed)
         assertEquals(10 * MINUTE, after.evaluations.single().allowanceMillis)
+        val afterProgress = after.evaluations.single().conditionProgresses.single()
+        assertEquals(10 * MINUTE, afterProgress.currentMillis)
+        assertEquals(10 * MINUTE, afterProgress.requiredMillis)
+        assertEquals(0L, afterProgress.remainingShortfallMillis)
+        assertTrue(afterProgress.isMet)
+        assertTrue(afterProgress.isTotalCondition)
     }
 
     @Test
@@ -283,6 +298,81 @@ class AppRuleContributorTest {
     }
 
     @Test
+    fun evaluatesMultipleContributorGroupConditionsAndMissingGroupInConditionProgresses() {
+        val mathGroup = AppRuleAppGroup("math", "Math", listOf("com.math"))
+        val readingGroup = AppRuleAppGroup("reading", "Reading", listOf("com.reading"))
+        val rule = rule(allowedMinutes = 20).copy(
+            contributorGroupIds = setOf(mathGroup.id, readingGroup.id, "deleted_group"),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 40L,
+            contributorGroupConditionMinutes = mapOf(
+                mathGroup.id to 15L,
+                readingGroup.id to 20L,
+                "deleted_group" to 10L
+            )
+        )
+        // Only mathGroup and readingGroup are in snapshot (deleted_group is missing)
+        val groups = listOf(target, mathGroup, readingGroup)
+
+        // Math: 10m / 15m (shortfall 5m, unmet)
+        // Reading: 25m / 20m (met)
+        // Deleted group: 0m / 10m (shortfall 10m, unmet)
+        // Total: 35m / 40m (shortfall 5m, unmet)
+        val sessions = listOf(
+            session("com.math", 10),
+            session("com.reading", 25)
+        )
+
+        val result = evaluate(rule, sessions, groups)
+        val eval = result.evaluations.single()
+        assertFalse(eval.isAllowed)
+        assertFalse(eval.isConditionMet)
+
+        val progresses = eval.conditionProgresses
+        // Expect 4 condition progresses: Total, Math, Reading, Deleted
+        assertEquals(4, progresses.size)
+
+        // 1. Total
+        val totalCond = progresses[0]
+        assertTrue(totalCond.isTotalCondition)
+        assertEquals("total", totalCond.conditionId)
+        assertEquals(35 * MINUTE, totalCond.currentMillis)
+        assertEquals(40 * MINUTE, totalCond.requiredMillis)
+        assertFalse(totalCond.isMet)
+        assertEquals(5 * MINUTE, totalCond.remainingShortfallMillis)
+
+        // 2. Math
+        val mathCond = progresses[1]
+        assertFalse(mathCond.isTotalCondition)
+        assertEquals(mathGroup.id, mathCond.conditionId)
+        assertEquals("Math", mathCond.conditionName)
+        assertEquals(10 * MINUTE, mathCond.currentMillis)
+        assertEquals(15 * MINUTE, mathCond.requiredMillis)
+        assertFalse(mathCond.isMet)
+        assertEquals(5 * MINUTE, mathCond.remainingShortfallMillis)
+
+        // 3. Reading
+        val readingCond = progresses[2]
+        assertFalse(readingCond.isTotalCondition)
+        assertEquals(readingGroup.id, readingCond.conditionId)
+        assertEquals("Reading", readingCond.conditionName)
+        assertEquals(25 * MINUTE, readingCond.currentMillis)
+        assertEquals(20 * MINUTE, readingCond.requiredMillis)
+        assertTrue(readingCond.isMet)
+        assertEquals(0L, readingCond.remainingShortfallMillis)
+
+        // 4. Deleted group
+        val deletedCond = progresses[3]
+        assertFalse(deletedCond.isTotalCondition)
+        assertEquals("deleted_group", deletedCond.conditionId)
+        assertEquals("", deletedCond.conditionName) // empty name for missing group, formatter falls back safely
+        assertEquals(0L, deletedCond.currentMillis)
+        assertEquals(10 * MINUTE, deletedCond.requiredMillis)
+        assertFalse(deletedCond.isMet)
+        assertEquals(10 * MINUTE, deletedCond.remainingShortfallMillis)
+    }
+
+    @Test
     fun unconstrainedConditionAllowsImmediateDirectAllowance() {
         val rule = rule(allowedMinutes = 10).copy(
             contributorGroupIds = setOf(contributor.id),
@@ -323,17 +413,124 @@ class AppRuleContributorTest {
         assertEquals(45 * MINUTE, after.evaluations.single().allowanceMillis)
     }
 
+    @Test
+    fun allowanceExhaustedPreservedIndependentlyEvenWhenConditionIsUnmet() {
+        val rule = rule(allowedMinutes = 30).copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 20,
+            earnedAllowanceEnabled = false
+        )
+
+        // Target used 30m (exhausted), but contributor used only 10m (unmet)
+        val sessionsExhaustedAndUnmet = listOf(
+            session("com.target", 30),
+            session("com.source", 10)
+        )
+        val result = evaluate(rule, sessionsExhaustedAndUnmet)
+        val evaluation = result.evaluations.single()
+
+        assertFalse(result.isAllowed)
+        assertFalse(evaluation.isConditionMet)
+        assertTrue(evaluation.isAllowanceExhausted)
+        assertEquals(30 * MINUTE, evaluation.usedMillis)
+        assertEquals(30 * MINUTE, evaluation.directAllowanceMillis)
+
+        // Target used 15m (not exhausted), contributor used 10m (unmet)
+        val sessionsNotExhaustedAndUnmet = listOf(
+            session("com.target", 15),
+            session("com.source", 10)
+        )
+        val result2 = evaluate(rule, sessionsNotExhaustedAndUnmet)
+        val evaluation2 = result2.evaluations.single()
+
+        assertFalse(result2.isAllowed)
+        assertFalse(evaluation2.isConditionMet)
+        assertFalse(evaluation2.isAllowanceExhausted)
+    }
+
+    @Test
+    fun guardianGrantRelievesAllowanceExhaustedAndExposesConditionUnmet() {
+        val rule = rule(allowedMinutes = 30).copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 20,
+            earnedAllowanceEnabled = false
+        )
+
+        // Target used 30m (exhausted), contributor used 10m (unmet)
+        val sessions = listOf(
+            session("com.target", 30),
+            session("com.source", 10)
+        )
+
+        // Before grant: exhausted and unmet
+        val before = evaluate(rule, sessions)
+        val beforeEval = before.evaluations.single()
+        assertFalse(before.isAllowed)
+        assertFalse(beforeEval.isConditionMet)
+        assertTrue(beforeEval.isAllowanceExhausted)
+        assertFalse(beforeEval.earnedAllowanceEnabled)
+        assertEquals(30 * MINUTE, beforeEval.usedMillis)
+        assertEquals(0L, beforeEval.guardianAllowanceMillis)
+
+        // Guardian grants 15 minutes extra time
+        val overrides = AppRuleOverrideState(
+            useDayId = USE_DAY,
+            grants = listOf(
+                AppRuleGuardianGrant(
+                    ruleId = rule.id,
+                    useDayId = USE_DAY,
+                    grantedAtMs = now - 5 * MINUTE,
+                    grantedMillis = 15 * MINUTE
+                )
+            )
+        )
+        val after = evaluate(rule, sessions, overrides = overrides)
+        val afterEval = after.evaluations.single()
+
+        // After grant: total allowance is 45m (30 base + 15 grant), used is 30m -> no longer exhausted!
+        // Grant provides usable remaining time (10m remaining out of 15m grant, since 5m was consumed after grant time)
+        assertTrue(after.isAllowed)
+        assertFalse(afterEval.isConditionMet)
+        assertFalse(afterEval.isAllowanceExhausted)
+        assertEquals(15 * MINUTE, afterEval.guardianAllowanceMillis)
+        assertEquals(30 * MINUTE, afterEval.directAllowanceMillis)
+        assertEquals(30 * MINUTE, afterEval.usedMillis)
+        assertEquals(15 * MINUTE, afterEval.allowanceMillis)
+
+        // Verifies the notification immediately exposes the unmet condition shortfall instead of time exhausted
+        val item = LiveRuleNotificationStateCalculator.computeNotificationItems(
+            snapshot = AppRuleSnapshot(listOf(target, contributor), listOf(rule)),
+            sessions = sessions,
+            useDayId = USE_DAY,
+            nowMs = now,
+            zone = zone,
+            overrides = overrides
+        ).single()
+        assertFalse(item.isAllowanceExhausted)
+        val formatted = LiveRuleNotificationFormatter.formatNotificationItem(
+            item = item,
+            unit = "분",
+            totalName = "전체",
+            unknownGroupName = "알 수 없는 앱 그룹"
+        )
+        assertTrue(formatted.contains("(10분/20분)"))
+    }
+
     private fun evaluate(
         rule: AppRule,
         sessions: List<ForegroundSession>,
-        groups: List<AppRuleAppGroup> = listOf(target, contributor)
+        groups: List<AppRuleAppGroup> = listOf(target, contributor),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRulesEvaluation = AppRuleEvaluator.evaluate(
         snapshot = AppRuleSnapshot(groups, listOf(rule)),
         packageName = "com.target",
         useDayId = USE_DAY,
         sessions = sessions,
         nowMs = now,
-        zone = zone
+        zone = zone,
+        overrides = overrides
     )
 
     private fun rule(

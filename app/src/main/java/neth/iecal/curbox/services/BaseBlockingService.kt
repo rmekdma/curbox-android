@@ -104,6 +104,7 @@ open class BaseBlockingService : AccessibilityService() {
             .setContentText(getString(R.string.blocking_service_notification_text))
             .setSmallIcon(R.drawable.icon)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(true)
             .build()
 
@@ -136,6 +137,7 @@ open class BaseBlockingService : AccessibilityService() {
                 .setContentText(model.collapsedText)
                 .setSmallIcon(R.drawable.icon)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
 

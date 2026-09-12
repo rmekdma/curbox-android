@@ -1,6 +1,7 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleConditionProgress
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.AppRuleOverrideState
@@ -29,8 +30,14 @@ data class AppRuleEvaluation(
     val guardianAllowanceMillis: Long = 0L,
     val guardianUsedMillis: Long = 0L,
     val guardianRemainingMillis: Long = 0L,
-    val isSkipped: Boolean = false
-)
+    val isSkipped: Boolean = false,
+    val conditionProgresses: List<AppRuleConditionProgress> = emptyList(),
+    val isAllowanceExhausted: Boolean = false,
+    val earnedAllowanceEnabled: Boolean = false
+) {
+    val effectiveAllowanceMillis: Long
+        get() = if (isConditionMet) allowanceMillis else AppRuleEvaluator.safeAdd(directAllowanceMillis, guardianAllowanceMillis)
+}
 
 data class AppRulesEvaluation(
     val isAllowed: Boolean,
@@ -52,6 +59,7 @@ object AppRuleEvaluator {
     private data class ContributorResolution(
         val packages: Set<String>,
         val packagesByGroupId: Map<String, Set<String>> = emptyMap(),
+        val groupNamesById: Map<String, String> = emptyMap(),
         val missingGroupIds: Set<String>
     )
 
@@ -105,21 +113,22 @@ object AppRuleEvaluator {
                 if (packageName !in packages) return@mapNotNull null
                 val contributorResolution = resolveContributors(snapshot, rule)
                 evaluateRule(
-                    rule,
-                    packages,
-                    useDayId,
-                    sessionList,
-                    nowMs,
-                    zone,
-                    useDayCalculator,
-                    useDayGenerationStartedAtMs,
-                    contributorResolution.packages,
-                    contributorResolution.packagesByGroupId,
-                    contributorResolution.missingGroupIds,
-                    overrides,
-                    membershipResolver,
-                    eventLaunchablePackages,
-                    essentialExcludedPackages
+                    rule = rule,
+                    targetPackages = packages,
+                    useDayId = useDayId,
+                    sessions = sessionList,
+                    nowMs = nowMs,
+                    zone = zone,
+                    useDayCalculator = useDayCalculator,
+                    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+                    contributorPackages = contributorResolution.packages,
+                    contributorPackagesByGroupId = contributorResolution.packagesByGroupId,
+                    contributorGroupNamesById = contributorResolution.groupNamesById,
+                    missingContributorGroupIds = contributorResolution.missingGroupIds,
+                    overrides = overrides,
+                    membershipResolver = membershipResolver,
+                    membershipLaunchablePackages = eventLaunchablePackages,
+                    membershipEssentialExcludedPackages = essentialExcludedPackages
                 )
             }
         return AppRulesEvaluation(
@@ -163,6 +172,7 @@ object AppRuleEvaluator {
             useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
             contributorPackages = contributorResolution.packages,
             contributorPackagesByGroupId = contributorResolution.packagesByGroupId,
+            contributorGroupNamesById = contributorResolution.groupNamesById,
             missingContributorGroupIds = contributorResolution.missingGroupIds,
             overrides = overrides,
             membershipResolver = membershipResolver,
@@ -182,6 +192,7 @@ object AppRuleEvaluator {
         useDayGenerationStartedAtMs: Long = 0L,
         contributorPackages: Set<String> = emptySet(),
         contributorPackagesByGroupId: Map<String, Set<String>> = emptyMap(),
+        contributorGroupNamesById: Map<String, String> = emptyMap(),
         missingContributorGroupIds: Set<String> = emptySet(),
         overrides: AppRuleOverrideState = AppRuleOverrideState(),
         membershipResolver: AppRuleMembershipResolver? = null,
@@ -213,14 +224,30 @@ object AppRuleEvaluator {
                 ?.targetAndContributorBoundaries(rule)
                 .orEmpty()
         )
-        val groupConditions = rule.effectiveContributorGroupConditionMinutes().filterKeys { it in rule.effectiveContributorGroupIds() }
-        val groupConditionsMet = if (!rule.usageConditionEnabled) {
-            true
-        } else {
-            groupConditions.all { (groupId, requiredMinutes) ->
-                if (requiredMinutes <= 0L) return@all true
-                val groupRequiredMillis = requiredMinutes.coerceAtMost(Long.MAX_VALUE / MILLIS_PER_MINUTE) * MILLIS_PER_MINUTE
-                val groupUsageMillis = usageMillisForPackages(
+        val conditionProgresses = mutableListOf<AppRuleConditionProgress>()
+        val totalConditionMet = !rule.usageConditionEnabled || conditionRequiredMillis <= 0L || contributorUsageMillis >= conditionRequiredMillis
+        if (rule.usageConditionEnabled && conditionRequiredMillis > 0L) {
+            conditionProgresses += AppRuleConditionProgress(
+                conditionId = AppRuleConditionProgress.CONDITION_ID_TOTAL,
+                conditionName = "",
+                currentMillis = contributorUsageMillis,
+                requiredMillis = conditionRequiredMillis,
+                isMet = totalConditionMet,
+                isTotalCondition = true
+            )
+        }
+
+        val effectiveGroupConditions = rule.effectiveContributorGroupConditionMinutes()
+        var groupConditionsMet = true
+        rule.effectiveContributorGroupIds().forEach { groupId ->
+            val requiredMinutes = effectiveGroupConditions[groupId] ?: 0L
+            if (requiredMinutes <= 0L) return@forEach
+            val isMissing = groupId in missingContributorGroupIds
+            val groupRequiredMillis = requiredMinutes.coerceAtMost(Long.MAX_VALUE / MILLIS_PER_MINUTE) * MILLIS_PER_MINUTE
+            val groupUsageMillis = if (isMissing) {
+                0L
+            } else {
+                usageMillisForPackages(
                     sessions = sessionList,
                     packageNames = contributorPackagesByGroupId[groupId].orEmpty(),
                     useDayId = useDayId,
@@ -235,10 +262,22 @@ object AppRuleEvaluator {
                     },
                     membershipBoundaries = membershipResolver?.targetAndContributorBoundaries(rule).orEmpty()
                 )
-                groupUsageMillis >= groupRequiredMillis
+            }
+            val isMet = !isMissing && groupUsageMillis >= groupRequiredMillis
+            if (!isMet) {
+                groupConditionsMet = false
+            }
+            if (rule.usageConditionEnabled) {
+                conditionProgresses += AppRuleConditionProgress(
+                    conditionId = groupId,
+                    conditionName = contributorGroupNamesById[groupId].orEmpty(),
+                    currentMillis = groupUsageMillis,
+                    requiredMillis = groupRequiredMillis,
+                    isMet = isMet,
+                    isTotalCondition = false
+                )
             }
         }
-        val totalConditionMet = !rule.usageConditionEnabled || conditionRequiredMillis <= 0L || contributorUsageMillis >= conditionRequiredMillis
         val isConditionMet = !rule.usageConditionEnabled || (totalConditionMet && groupConditionsMet)
         val hasMissingContributor = missingContributorGroupIds.isNotEmpty()
         val earnedAllowanceMillis = if (
@@ -304,7 +343,10 @@ object AppRuleEvaluator {
                 earnedAllowanceMillis = earnedAllowanceMillis,
                 guardianAllowanceMillis = guardianAllowanceMillis,
                 guardianRemainingMillis = guardianAllowanceMillis,
-                isSkipped = isSkipped
+                isSkipped = isSkipped,
+                conditionProgresses = conditionProgresses,
+                isAllowanceExhausted = false,
+                earnedAllowanceEnabled = rule.earnedAllowanceEnabled
             )
         }
 
@@ -358,6 +400,12 @@ object AppRuleEvaluator {
             grants = grants
         )
         val remainingMillis = safeAdd(allocation.baseRemainingMillis, allocation.guardianRemainingMillis)
+        val potentialAllowanceMillis = if (hasMissingContributor) {
+            0L
+        } else {
+            safeAdd(safeAdd(directAllowanceMillis, earnedAllowanceMillis), guardianAllowanceMillis)
+        }
+        val isAllowanceExhausted = !isSkipped && !hasMissingContributor && usedMillis >= potentialAllowanceMillis
         return AppRuleEvaluation(
             ruleId = rule.id,
             isApplicable = true,
@@ -376,7 +424,10 @@ object AppRuleEvaluator {
             guardianAllowanceMillis = guardianAllowanceMillis,
             guardianUsedMillis = allocation.guardianUsedMillis,
             guardianRemainingMillis = allocation.guardianRemainingMillis,
-            isSkipped = isSkipped
+            isSkipped = isSkipped,
+            conditionProgresses = conditionProgresses,
+            isAllowanceExhausted = isAllowanceExhausted,
+            earnedAllowanceEnabled = rule.earnedAllowanceEnabled
         )
     }
 
@@ -477,12 +528,14 @@ object AppRuleEvaluator {
         val groupsById = snapshot.appGroups.associateBy { it.id.trim() }
         val packages = linkedSetOf<String>()
         val packagesByGroupId = mutableMapOf<String, Set<String>>()
+        val groupNamesById = mutableMapOf<String, String>()
         val missing = linkedSetOf<String>()
         rule.effectiveContributorGroupIds().forEach { groupId ->
             val group = groupsById[groupId]
             if (group == null) {
                 missing += groupId
             } else {
+                groupNamesById[groupId] = group.name
                 val groupPackages = group.selectedPackages.map(String::trim)
                     .filter(String::isNotEmpty)
                     .toSet()
@@ -490,7 +543,7 @@ object AppRuleEvaluator {
                 packages.addAll(groupPackages)
             }
         }
-        return ContributorResolution(packages, packagesByGroupId, missing)
+        return ContributorResolution(packages, packagesByGroupId, groupNamesById, missing)
     }
 
     private fun usageMillisForPackages(
@@ -666,7 +719,7 @@ object AppRuleEvaluator {
         return AllowanceAllocation(baseRemaining, guardianUsed, guardianRemaining)
     }
 
-    private fun safeAdd(left: Long, right: Long): Long =
+    internal fun safeAdd(left: Long, right: Long): Long =
         if (Long.MAX_VALUE - left < right) Long.MAX_VALUE else left + right
 
     private const val MILLIS_PER_MINUTE = 60_000L
