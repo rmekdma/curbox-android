@@ -87,7 +87,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         denials.forEachIndexed { index, denial ->
             choices.addView(RadioButton(this).apply {
                 id = index + 1
-                text = getString(R.string.guardian_denial_row, denial.ruleName, denial.reason)
+                text = GuardianApprovalTextFormatter.formatDenial(this@GuardianApprovalActivity, denial)
                 isChecked = index == 0
                 setPadding(0, 8, 0, 8)
             })

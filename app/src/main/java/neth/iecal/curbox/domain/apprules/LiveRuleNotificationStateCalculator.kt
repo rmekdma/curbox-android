@@ -25,7 +25,8 @@ object LiveRuleNotificationStateCalculator {
         if (activeRules.isEmpty()) return emptyList()
 
         val sessionList = sessions.toList()
-        return activeRules.map { rule ->
+        val membershipResolver = AppRuleMembershipResolver(snapshot)
+        return activeRules.mapNotNull { rule ->
             val evaluation = AppRuleEvaluator.evaluateRuleForSnapshot(
                 snapshot = snapshot,
                 rule = rule,
@@ -39,17 +40,30 @@ object LiveRuleNotificationStateCalculator {
                 essentialExcludedPackages = essentialExcludedPackages,
                 overrides = overrides
             )
+            if (!evaluation.isActive) return@mapNotNull null
+
             val ruleName = rule.name.ifBlank { rule.id }
             val usedMinutes = (evaluation.usedMillis / 60_000L).coerceAtLeast(0L)
-            val totalAllowedMinutes = (evaluation.allowanceMillis / 60_000L).coerceAtLeast(0L)
+            val totalAllowedMinutes = (evaluation.effectiveAllowanceMillis / 60_000L).coerceAtLeast(0L)
             val guardianExtraMinutes = (evaluation.guardianAllowanceMillis / 60_000L).coerceAtLeast(0L)
+            val targetPackages = membershipResolver.targetPackagesAt(
+                rule = rule,
+                atMs = nowMs,
+                launchablePackages = availablePackages,
+                essentialExcludedPackages = essentialExcludedPackages
+            )
 
             LiveRuleNotificationItem(
                 ruleId = rule.id,
                 ruleName = ruleName,
                 usedMinutes = usedMinutes,
                 totalAllowedMinutes = totalAllowedMinutes,
-                guardianExtraMinutes = guardianExtraMinutes
+                guardianExtraMinutes = guardianExtraMinutes,
+                conditionProgresses = evaluation.conditionProgresses,
+                isAllowanceExhausted = evaluation.isAllowanceExhausted,
+                earnedAllowanceEnabled = evaluation.earnedAllowanceEnabled,
+                isAllowed = evaluation.isAllowed,
+                targetPackages = targetPackages
             )
         }
     }
@@ -60,7 +74,8 @@ object LiveRuleNotificationStateCalculator {
         defaultText: String,
         formatter: (LiveRuleNotificationItem) -> String,
         foregroundPackage: String? = null,
-        rulePackageResolver: ((String) -> Set<String>)? = null
+        rulePackageResolver: ((String) -> Set<String>)? = null,
+        titleFormatter: ((String) -> String)? = null
     ): LiveRuleNotificationModel {
         if (items.isEmpty()) {
             return LiveRuleNotificationModel(
@@ -70,21 +85,32 @@ object LiveRuleNotificationStateCalculator {
             )
         }
 
-        val formattedLines = items.map(formatter)
-
-        val selectedIndex = if (!foregroundPackage.isNullOrBlank() && rulePackageResolver != null) {
-            val matchingIndex = items.indexOfFirst { item ->
-                foregroundPackage in rulePackageResolver(item.ruleId)
+        // 4-tier stable priority sort:
+        // (1) Foreground app blocked
+        // (2) Foreground app allowed
+        // (3) Other app blocked
+        // (4) Other app allowed
+        // Stable sort preserves original snapshot order within the same tier.
+        val sortedItems = items.sortedBy { item ->
+            val targets = rulePackageResolver?.invoke(item.ruleId) ?: item.targetPackages
+            val isForeground = !foregroundPackage.isNullOrBlank() && targets.contains(foregroundPackage)
+            val isBlocked = !item.isAllowed
+            when {
+                isForeground && isBlocked -> 1
+                isForeground && !isBlocked -> 2
+                !isForeground && isBlocked -> 3
+                else -> 4
             }
-            if (matchingIndex >= 0) matchingIndex else 0
-        } else {
-            0
         }
 
-        val collapsedText = formattedLines.getOrElse(selectedIndex) { formattedLines.first() }
+        val topItem = sortedItems.first()
+        val title = titleFormatter?.invoke(topItem.ruleName)
+            ?: LiveRuleNotificationFormatter.formatNotificationTitle(topItem.ruleName)
+        val formattedLines = sortedItems.map(formatter)
+        val collapsedText = formattedLines.first()
 
         return LiveRuleNotificationModel(
-            title = defaultTitle,
+            title = title,
             collapsedText = collapsedText,
             expandedLines = formattedLines
         )

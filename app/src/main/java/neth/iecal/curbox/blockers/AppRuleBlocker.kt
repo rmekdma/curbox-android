@@ -70,6 +70,7 @@ class AppRuleBlocker {
     private val handler = Handler(Looper.getMainLooper())
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var notificationTickJob: kotlinx.coroutines.Job? = null
+    private var liveNotificationJob: kotlinx.coroutines.Job? = null
     private var lastShownAt = 0L
     @Volatile private var launchablePackages: Set<String> = emptySet()
     @Volatile private var essentialPackages: Set<String> = emptySet()
@@ -183,8 +184,11 @@ class AppRuleBlocker {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val packageName = event.packageName?.toString().orEmpty()
         if (packageName.isBlank()) return
+        val packageChanged = packageName != currentForegroundPackage
         currentForegroundPackage = packageName
-        updateLiveNotification(packageName)
+        if (packageChanged) {
+            updateLiveNotification(packageName)
+        }
 
         val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
         if (packageName in evaluationEssentialPackages) return
@@ -254,7 +258,8 @@ class AppRuleBlocker {
 
     fun updateLiveNotification(foregroundPackage: String? = null) {
         if (!setupReady || !::service.isInitialized) return
-        scope.launch(Dispatchers.IO) {
+        liveNotificationJob?.cancel()
+        liveNotificationJob = scope.launch(Dispatchers.IO) {
             try {
                 val currentSnapshot = snapshot.snapshot()
                 val now = System.currentTimeMillis()
@@ -281,33 +286,16 @@ class AppRuleBlocker {
                     essentialExcludedPackages = evaluationEssentialPackages,
                     overrides = overrideState
                 )
-                val membershipResolver = AppRuleMembershipResolver(currentSnapshot)
                 val model = LiveRuleNotificationStateCalculator.buildNotificationModel(
                     items = items,
                     defaultTitle = defaultTitle,
                     defaultText = defaultText,
                     formatter = { item ->
-                        LiveRuleNotificationFormatter.formatRuleStatus(
-                            context = service,
-                            ruleName = item.ruleName,
-                            usedMinutes = item.usedMinutes,
-                            totalAllowedMinutes = item.totalAllowedMinutes,
-                            guardianExtraMinutes = item.guardianExtraMinutes
-                        )
+                        LiveRuleNotificationFormatter.formatNotificationItem(service, item)
                     },
                     foregroundPackage = foregroundPackage ?: currentForegroundPackage,
-                    rulePackageResolver = { ruleId ->
-                        val rule = currentSnapshot.appRules.find { it.id == ruleId }
-                        if (rule != null) {
-                            membershipResolver.targetPackagesAt(
-                                rule = rule,
-                                atMs = now,
-                                launchablePackages = launchablePackages,
-                                essentialExcludedPackages = evaluationEssentialPackages
-                            )
-                        } else {
-                            emptySet()
-                        }
+                    titleFormatter = { ruleName ->
+                        LiveRuleNotificationFormatter.formatNotificationTitle(service, ruleName)
                     }
                 )
 
@@ -328,10 +316,16 @@ class AppRuleBlocker {
         try {
             val denialRows = evaluation.denyingRules.map { denial ->
                 val rule = snapshot.snapshot().appRules.find { it.id == denial.ruleId }
+                val effectiveAllowanceMillis = denial.effectiveAllowanceMillis
                 AppRuleGuardianDenial(
                     ruleId = denial.ruleId,
                     ruleName = rule?.name ?: denial.ruleId,
-                    reason = warningStatus(denial)
+                    reason = warningStatus(denial),
+                    conditionProgresses = denial.conditionProgresses,
+                    isAllowanceExhausted = denial.isAllowanceExhausted,
+                    usedMinutes = (denial.usedMillis / MILLIS_PER_MINUTE).coerceAtLeast(0L),
+                    totalAllowedMinutes = (effectiveAllowanceMillis / MILLIS_PER_MINUTE).coerceAtLeast(0L),
+                    earnedAllowanceEnabled = denial.earnedAllowanceEnabled
                 )
             }
             service.startActivity(
@@ -363,6 +357,7 @@ class AppRuleBlocker {
     fun onDestroy() {
         settingsJob?.cancel()
         notificationTickJob?.cancel()
+        liveNotificationJob?.cancel()
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)
@@ -405,12 +400,12 @@ class AppRuleBlocker {
                 .filter { it.isNotBlank() }
                 .distinct()
             for (pkg in visiblePackages) {
-                val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+                val event = obtainWindowStateEvent()
                 event.packageName = pkg
                 try {
                     doAppRuleCheck(event)
                 } finally {
-                    event.recycle()
+                    recycleAccessibilityEvent(event)
                 }
             }
         } catch (error: Exception) {
@@ -462,12 +457,12 @@ class AppRuleBlocker {
                 false
             }
             if (packageStillVisible) {
-                val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+                val event = obtainWindowStateEvent()
                 event.packageName = packageName
                 try {
                     doAppRuleCheck(event)
                 } finally {
-                    event.recycle()
+                    recycleAccessibilityEvent(event)
                 }
             }
         }, delay)
@@ -480,8 +475,18 @@ class AppRuleBlocker {
         return try {
             root.packageName?.toString().orEmpty()
         } finally {
+            @Suppress("DEPRECATION")
             root.recycle()
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun obtainWindowStateEvent(): AccessibilityEvent =
+        AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+
+    @Suppress("DEPRECATION")
+    private fun recycleAccessibilityEvent(event: AccessibilityEvent) {
+        event.recycle()
     }
 
     private fun logNonFatal(error: Exception) {

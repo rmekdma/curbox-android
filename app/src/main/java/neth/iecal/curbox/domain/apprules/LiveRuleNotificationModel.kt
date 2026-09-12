@@ -1,11 +1,18 @@
 package neth.iecal.curbox.domain.apprules
 
+import neth.iecal.curbox.data.models.AppRuleConditionProgress
+
 data class LiveRuleNotificationItem(
     val ruleId: String,
     val ruleName: String,
     val usedMinutes: Long,
     val totalAllowedMinutes: Long,
-    val guardianExtraMinutes: Long
+    val guardianExtraMinutes: Long,
+    val conditionProgresses: List<AppRuleConditionProgress> = emptyList(),
+    val isAllowanceExhausted: Boolean = false,
+    val earnedAllowanceEnabled: Boolean = false,
+    val isAllowed: Boolean = true,
+    val targetPackages: Set<String> = emptySet()
 )
 
 data class LiveRuleNotificationModel(

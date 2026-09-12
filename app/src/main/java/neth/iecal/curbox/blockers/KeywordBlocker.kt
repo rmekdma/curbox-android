@@ -384,11 +384,13 @@ class KeywordBlocker : BaseBlocker() {
                     Handler(Looper.getMainLooper()).post {
                         val currentPackage =
                             service.rootInActiveWindow?.packageName?.toString() ?: return@post
+                        @Suppress("DEPRECATION")
                         val event = AccessibilityEvent.obtain(
                             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
                         )
                         event.packageName = currentPackage
                         checkIfUnsupportedBrowser(event)
+                        @Suppress("DEPRECATION")
                         event.recycle()
                     }
                 } else {

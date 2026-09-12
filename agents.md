@@ -9,7 +9,7 @@ This file applies to the whole repository. Preserve more specific instructions i
 - Modules: `:app` and `:apitester`. The latter is a sample client for the Curbox API.
 - Language and UI: Kotlin, classic Views, Fragments, and ViewBinding.
 - Do not add Jetpack Compose or the Navigation component.
-- JVM target: 1.8.
+- JVM target: 17.
 - Package root: `app/src/main/java/neth/iecal/curbox`.
 - Prefer the smallest change that follows the nearest existing implementation.
 - Readability is more important than cleverness. Follow the style of each file you touch.
