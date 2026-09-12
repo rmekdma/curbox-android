@@ -181,4 +181,12 @@ class GuardianExtraTimeFormStateTest {
             result
         )
     }
+
+    @Test
+    fun negativeInitialTotalIsCoercedToZero() {
+        val state = GuardianExtraTimeFormState.initial(currentTotalMinutes = -10L)
+
+        assertEquals(0L, state.currentTotalMinutes)
+        assertEquals("0", state.currentTotalDisplay)
+    }
 }

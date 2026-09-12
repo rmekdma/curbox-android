@@ -142,19 +142,21 @@ class GuardianApprovalActivity : AppCompatActivity() {
             R.string.guardian_current_total,
             currentTotalMinutes
         )
-        dialogBinding.totalMinutesInput.hint = currentTotalMinutes.toString()
+        dialogBinding.totalMinutesLayout.placeholderText = currentTotalMinutes.toString()
+        dialogBinding.additionalMinutesInput.setSelectAllOnFocus(true)
         dialogBinding.totalMinutesInput.setSelectAllOnFocus(true)
         var formState = GuardianExtraTimeFormState.initial(currentTotalMinutes)
         var updatingDerivedValue = false
-        var totalPlaceholderWasFocused = false
+        dialogBinding.additionalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) return@setOnFocusChangeListener
+            if (!updatingDerivedValue) {
+                formState = formState.editAdditionalMinutes(
+                    dialogBinding.additionalMinutesInput.text?.toString().orEmpty()
+                )
+            }
+        }
         dialogBinding.totalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) return@setOnFocusChangeListener
-            if (!totalPlaceholderWasFocused) {
-                totalPlaceholderWasFocused = true
-                if (dialogBinding.totalMinutesInput.text.isNullOrEmpty()) {
-                    dialogBinding.totalMinutesInput.hint = null
-                }
-            }
             if (!updatingDerivedValue) {
                 formState = formState.editTotalMinutes(
                     dialogBinding.totalMinutesInput.text?.toString().orEmpty()
@@ -287,8 +289,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             }
             .setNegativeButton(R.string.cancel) { _, _ -> onCancelled() }
             .create()
-        dialog.setOnCancelListener { onCancelled() }
-        GuardianOwnedDialog.show(dialog)
+        GuardianOwnedDialog.show(dialog, onCancel = onCancelled)
     }
 
     private fun writeGrant(password: String, ruleId: String, minutes: Long) {
@@ -304,7 +305,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             } catch (_: Exception) {
                 false
             }
-            withContext(kotlinx.coroutines.Dispatchers.Main) {
+            withContext(Dispatchers.Main) {
                 if (success) {
                     finishAndLaunch()
                 } else {
@@ -318,20 +319,26 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private fun writeSkip(password: String, option: Int) {
         val ruleId = selectedRuleId ?: return
         lifecycleScope.launch(Dispatchers.IO) {
-            val settings = dataStore.settings.first()
-            val now = System.currentTimeMillis()
-            val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
-            val useDayId = calculator.idAt(now)
-            val nextReset = calculator.windowFor(useDayId).last + 1L
-            val selected = when (option) {
-                0 -> now + Duration.ofMinutes(15).toMillis()
-                1 -> now + Duration.ofMinutes(30).toMillis()
-                else -> nextReset
+            val success = try {
+                val settings = dataStore.settings.first()
+                val now = System.currentTimeMillis()
+                val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
+                val useDayId = calculator.idAt(now)
+                val nextReset = calculator.windowFor(useDayId).last + 1L
+                val selected = when (option) {
+                    0 -> now + Duration.ofMinutes(15).toMillis()
+                    1 -> now + Duration.ofMinutes(30).toMillis()
+                    else -> nextReset
+                }
+                dataStore.skipAppRuleUntil(
+                    password, ruleId, useDayId, selected, nextReset, now
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                false
             }
-            val success = dataStore.skipAppRuleUntil(
-                password, ruleId, useDayId, selected, nextReset, now
-            )
-            withContext(kotlinx.coroutines.Dispatchers.Main) {
+            withContext(Dispatchers.Main) {
                 if (success) finishAndLaunch() else toast(R.string.guardian_write_failed)
             }
         }

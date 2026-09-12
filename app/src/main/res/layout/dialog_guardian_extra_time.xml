@@ -26,7 +26,6 @@
             android:id="@+id/additional_minutes_input"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="@string/guardian_minutes_hint"
             android:imeOptions="actionDone"
             android:inputType="number" />
     </com.google.android.material.textfield.TextInputLayout>
@@ -44,8 +43,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:focusableInTouchMode="true"
-            android:inputType="number"
-            android:textIsSelectable="true" />
+            android:inputType="number" />
     </com.google.android.material.textfield.TextInputLayout>
 
 </LinearLayout>
