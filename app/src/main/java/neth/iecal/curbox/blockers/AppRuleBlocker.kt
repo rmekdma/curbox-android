@@ -287,12 +287,21 @@ class AppRuleBlocker {
                     defaultTitle = defaultTitle,
                     defaultText = defaultText,
                     formatter = { item ->
+                        val unmetCondition = item.conditionProgresses.firstOrNull { !it.isMet && it.requiredMillis > 0L }
+                        val conditionProgressText = if (unmetCondition != null) {
+                            val curM = unmetCondition.currentMillis / 60_000L
+                            val reqM = unmetCondition.requiredMillis / 60_000L
+                            service.getString(R.string.app_rules_condition_progress_format, curM, reqM)
+                        } else {
+                            ""
+                        }
                         LiveRuleNotificationFormatter.formatRuleStatus(
                             context = service,
                             ruleName = item.ruleName,
                             usedMinutes = item.usedMinutes,
                             totalAllowedMinutes = item.totalAllowedMinutes,
-                            guardianExtraMinutes = item.guardianExtraMinutes
+                            guardianExtraMinutes = item.guardianExtraMinutes,
+                            conditionProgressText = conditionProgressText
                         )
                     },
                     foregroundPackage = foregroundPackage ?: currentForegroundPackage,
@@ -331,7 +340,8 @@ class AppRuleBlocker {
                 AppRuleGuardianDenial(
                     ruleId = denial.ruleId,
                     ruleName = rule?.name ?: denial.ruleId,
-                    reason = warningStatus(denial)
+                    reason = warningStatus(denial),
+                    conditionProgresses = denial.conditionProgresses
                 )
             }
             service.startActivity(

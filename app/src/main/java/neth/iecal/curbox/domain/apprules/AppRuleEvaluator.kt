@@ -1,6 +1,7 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleConditionProgress
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.AppRuleOverrideState
@@ -29,7 +30,8 @@ data class AppRuleEvaluation(
     val guardianAllowanceMillis: Long = 0L,
     val guardianUsedMillis: Long = 0L,
     val guardianRemainingMillis: Long = 0L,
-    val isSkipped: Boolean = false
+    val isSkipped: Boolean = false,
+    val conditionProgresses: List<AppRuleConditionProgress> = emptyList()
 )
 
 data class AppRulesEvaluation(
@@ -240,6 +242,20 @@ object AppRuleEvaluator {
         }
         val totalConditionMet = !rule.usageConditionEnabled || conditionRequiredMillis <= 0L || contributorUsageMillis >= conditionRequiredMillis
         val isConditionMet = !rule.usageConditionEnabled || (totalConditionMet && groupConditionsMet)
+        val conditionProgresses = if (rule.usageConditionEnabled && conditionRequiredMillis > 0L) {
+            listOf(
+                AppRuleConditionProgress(
+                    conditionId = "total",
+                    conditionName = "",
+                    currentMillis = contributorUsageMillis,
+                    requiredMillis = conditionRequiredMillis,
+                    isMet = totalConditionMet,
+                    isTotalCondition = true
+                )
+            )
+        } else {
+            emptyList<AppRuleConditionProgress>()
+        }
         val hasMissingContributor = missingContributorGroupIds.isNotEmpty()
         val earnedAllowanceMillis = if (
             rule.earnedAllowanceEnabled && isConditionMet && !hasMissingContributor
@@ -304,7 +320,8 @@ object AppRuleEvaluator {
                 earnedAllowanceMillis = earnedAllowanceMillis,
                 guardianAllowanceMillis = guardianAllowanceMillis,
                 guardianRemainingMillis = guardianAllowanceMillis,
-                isSkipped = isSkipped
+                isSkipped = isSkipped,
+                conditionProgresses = conditionProgresses
             )
         }
 
@@ -376,7 +393,8 @@ object AppRuleEvaluator {
             guardianAllowanceMillis = guardianAllowanceMillis,
             guardianUsedMillis = allocation.guardianUsedMillis,
             guardianRemainingMillis = allocation.guardianRemainingMillis,
-            isSkipped = isSkipped
+            isSkipped = isSkipped,
+            conditionProgresses = conditionProgresses
         )
     }
 

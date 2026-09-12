@@ -66,7 +66,8 @@ data class AppRuleOverrideState(
 data class AppRuleGuardianDenial(
     val ruleId: String = "",
     val ruleName: String = "",
-    val reason: String = ""
+    val reason: String = "",
+    val conditionProgresses: List<AppRuleConditionProgress> = emptyList()
 )
 
 /** Names used by callers that describe the same persisted approval objects. */

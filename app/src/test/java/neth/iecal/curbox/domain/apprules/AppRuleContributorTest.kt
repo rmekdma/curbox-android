@@ -46,8 +46,21 @@ class AppRuleContributorTest {
         assertFalse(before.isAllowed)
         assertEquals(8 * MINUTE, before.evaluations.single().contributorUsageMillis)
         assertEquals(0L, before.evaluations.single().allowanceMillis)
+        val beforeProgress = before.evaluations.single().conditionProgresses.single()
+        assertEquals(8 * MINUTE, beforeProgress.currentMillis)
+        assertEquals(10 * MINUTE, beforeProgress.requiredMillis)
+        assertEquals(2 * MINUTE, beforeProgress.remainingShortfallMillis)
+        assertFalse(beforeProgress.isMet)
+        assertTrue(beforeProgress.isTotalCondition)
+
         assertTrue(after.isAllowed)
         assertEquals(10 * MINUTE, after.evaluations.single().allowanceMillis)
+        val afterProgress = after.evaluations.single().conditionProgresses.single()
+        assertEquals(10 * MINUTE, afterProgress.currentMillis)
+        assertEquals(10 * MINUTE, afterProgress.requiredMillis)
+        assertEquals(0L, afterProgress.remainingShortfallMillis)
+        assertTrue(afterProgress.isMet)
+        assertTrue(afterProgress.isTotalCondition)
     }
 
     @Test

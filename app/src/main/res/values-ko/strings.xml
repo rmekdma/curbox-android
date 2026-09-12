@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_rules_notification_rule_status">[%1$s] %2$d분 사용 / %3$d분 허용%4$s</string>
+    <string name="app_rules_notification_rule_status_with_condition">[%1$s] %2$s %3$d분 사용 / %4$d분 허용%5$s</string>
+    <string name="app_rules_condition_progress_format">(%1$d분/%2$d분)</string>
     <string name="app_rules_notification_guardian_extra"> (추가 %1$d분 포함)</string>
+    <string name="app_rules_bullet">•</string>
+    <string name="app_rules_condition_total_name">전체 %1$d분 사용</string>
+    <string name="app_rules_shortfall_minutes">%1$d분 부족</string>
+    <string name="app_rules_lock_reason_condition_not_met">사용 조건 미달</string>
 </resources>

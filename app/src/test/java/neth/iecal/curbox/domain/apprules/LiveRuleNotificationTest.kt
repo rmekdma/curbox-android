@@ -59,6 +59,26 @@ class LiveRuleNotificationTest {
     }
 
     @Test
+    fun formatsRuleStatusWithConditionProgress() {
+        val formatted = LiveRuleNotificationFormatter.formatRuleStatus(
+            ruleName = "Social",
+            usedMinutes = 0,
+            totalAllowedMinutes = 30,
+            guardianExtraMinutes = 0,
+            conditionProgressText = "(19m/20m)"
+        )
+        assertEquals("[Social] (19m/20m) 0 min used / 30 min allowed", formatted)
+
+        val formattedKorean = LiveRuleNotificationFormatter.formatRuleStatusKorean(
+            ruleName = "소셜",
+            usedMinutes = 0,
+            totalAllowedMinutes = 30,
+            guardianExtraMinutes = 0,
+            conditionProgressText = "(19분/20분)"
+        )
+        assertEquals("[소셜] (19분/20분) 0분 사용 / 30분 허용", formattedKorean)
+    }
+    @Test
     fun formatsScheduleOnlyZeroAllowanceRule() {
         val formatted = LiveRuleNotificationFormatter.formatRuleStatus(
             ruleName = "BlockAll",
@@ -231,5 +251,77 @@ class LiveRuleNotificationTest {
             "[소셜] 15분 사용 / 60분 허용\n[게임] 25분 사용 / 40분 허용 (추가 10분 포함)",
             modelForeground.expandedText
         )
+    }
+
+    @Test
+    fun computeNotificationItemsWithUnmetTotalConditionPopulatesConditionProgress() {
+        val group = AppRuleAppGroup.create("Social", listOf("com.social.app"))
+        val contributorGroup = AppRuleAppGroup.create("Study", listOf("com.other.app"))
+        val rule = AppRule(
+            id = "rule-condition",
+            name = "Social Limits",
+            weekdays = (0..6).toSet(),
+            startMinute = 0,
+            endMinute = 24 * 60,
+            scope = AppRuleScope.forGroup(group.id),
+            allowedMinutes = 30L,
+            usageConditionEnabled = true,
+            contributorGroupIds = setOf(contributorGroup.id),
+            usageConditionMinutes = 20L
+        )
+        val snapshot = AppRuleSnapshot(listOf(group, contributorGroup), listOf(rule))
+
+        // 19 minutes total phone usage across all apps
+        val sessions = listOf(
+            ForegroundSession(
+                useDayId = useDayId,
+                packageName = "com.other.app",
+                startedAtMs = now - 19 * 60_000L,
+                endedAtMs = now
+            )
+        )
+
+        val items = LiveRuleNotificationStateCalculator.computeNotificationItems(
+            snapshot = snapshot,
+            sessions = sessions,
+            useDayId = useDayId,
+            nowMs = now,
+            zone = zone
+        )
+
+        assertEquals(1, items.size)
+        val item = items.single()
+        assertEquals(1, item.conditionProgresses.size)
+        val cond = item.conditionProgresses.single()
+        assertTrue(cond.isTotalCondition)
+        assertFalse(cond.isMet)
+        assertEquals(19 * 60_000L, cond.currentMillis)
+        assertEquals(20 * 60_000L, cond.requiredMillis)
+
+        val curM = cond.currentMillis / 60_000L
+        val reqM = cond.requiredMillis / 60_000L
+        val progressTextEn = LiveRuleNotificationFormatter.formatConditionProgress(curM, reqM, unit = "m")
+        assertEquals("(19m/20m)", progressTextEn)
+
+        val formattedEn = LiveRuleNotificationFormatter.formatRuleStatus(
+            ruleName = item.ruleName,
+            usedMinutes = item.usedMinutes,
+            totalAllowedMinutes = item.totalAllowedMinutes,
+            guardianExtraMinutes = item.guardianExtraMinutes,
+            conditionProgressText = progressTextEn
+        )
+        assertEquals("[Social Limits] (19m/20m) 0 min used / 30 min allowed", formattedEn)
+
+        val progressTextKo = LiveRuleNotificationFormatter.formatConditionProgress(curM, reqM, unit = "분")
+        assertEquals("(19분/20분)", progressTextKo)
+
+        val formattedKo = LiveRuleNotificationFormatter.formatRuleStatusKorean(
+            ruleName = item.ruleName,
+            usedMinutes = item.usedMinutes,
+            totalAllowedMinutes = item.totalAllowedMinutes,
+            guardianExtraMinutes = item.guardianExtraMinutes,
+            conditionProgressText = progressTextKo
+        )
+        assertEquals("[Social Limits] (19분/20분) 0분 사용 / 30분 허용", formattedKo)
     }
 }

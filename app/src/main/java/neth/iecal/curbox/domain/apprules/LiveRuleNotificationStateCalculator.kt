@@ -41,7 +41,12 @@ object LiveRuleNotificationStateCalculator {
             )
             val ruleName = rule.name.ifBlank { rule.id }
             val usedMinutes = (evaluation.usedMillis / 60_000L).coerceAtLeast(0L)
-            val totalAllowedMinutes = (evaluation.allowanceMillis / 60_000L).coerceAtLeast(0L)
+            val effectiveAllowanceMillis = if (evaluation.isConditionMet) {
+                evaluation.allowanceMillis
+            } else {
+                safeAdd(evaluation.directAllowanceMillis, evaluation.guardianAllowanceMillis)
+            }
+            val totalAllowedMinutes = (effectiveAllowanceMillis / 60_000L).coerceAtLeast(0L)
             val guardianExtraMinutes = (evaluation.guardianAllowanceMillis / 60_000L).coerceAtLeast(0L)
 
             LiveRuleNotificationItem(
@@ -49,7 +54,8 @@ object LiveRuleNotificationStateCalculator {
                 ruleName = ruleName,
                 usedMinutes = usedMinutes,
                 totalAllowedMinutes = totalAllowedMinutes,
-                guardianExtraMinutes = guardianExtraMinutes
+                guardianExtraMinutes = guardianExtraMinutes,
+                conditionProgresses = evaluation.conditionProgresses
             )
         }
     }
@@ -89,4 +95,7 @@ object LiveRuleNotificationStateCalculator {
             expandedLines = formattedLines
         )
     }
+
+    private fun safeAdd(left: Long, right: Long): Long =
+        if (Long.MAX_VALUE - left < right) Long.MAX_VALUE else left + right
 }
