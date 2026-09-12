@@ -54,6 +54,7 @@ object AppRuleEvaluator {
     private data class ContributorResolution(
         val packages: Set<String>,
         val packagesByGroupId: Map<String, Set<String>> = emptyMap(),
+        val groupNamesById: Map<String, String> = emptyMap(),
         val missingGroupIds: Set<String>
     )
 
@@ -107,21 +108,22 @@ object AppRuleEvaluator {
                 if (packageName !in packages) return@mapNotNull null
                 val contributorResolution = resolveContributors(snapshot, rule)
                 evaluateRule(
-                    rule,
-                    packages,
-                    useDayId,
-                    sessionList,
-                    nowMs,
-                    zone,
-                    useDayCalculator,
-                    useDayGenerationStartedAtMs,
-                    contributorResolution.packages,
-                    contributorResolution.packagesByGroupId,
-                    contributorResolution.missingGroupIds,
-                    overrides,
-                    membershipResolver,
-                    eventLaunchablePackages,
-                    essentialExcludedPackages
+                    rule = rule,
+                    targetPackages = packages,
+                    useDayId = useDayId,
+                    sessions = sessionList,
+                    nowMs = nowMs,
+                    zone = zone,
+                    useDayCalculator = useDayCalculator,
+                    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+                    contributorPackages = contributorResolution.packages,
+                    contributorPackagesByGroupId = contributorResolution.packagesByGroupId,
+                    contributorGroupNamesById = contributorResolution.groupNamesById,
+                    missingContributorGroupIds = contributorResolution.missingGroupIds,
+                    overrides = overrides,
+                    membershipResolver = membershipResolver,
+                    membershipLaunchablePackages = eventLaunchablePackages,
+                    membershipEssentialExcludedPackages = essentialExcludedPackages
                 )
             }
         return AppRulesEvaluation(
@@ -165,6 +167,7 @@ object AppRuleEvaluator {
             useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
             contributorPackages = contributorResolution.packages,
             contributorPackagesByGroupId = contributorResolution.packagesByGroupId,
+            contributorGroupNamesById = contributorResolution.groupNamesById,
             missingContributorGroupIds = contributorResolution.missingGroupIds,
             overrides = overrides,
             membershipResolver = membershipResolver,
@@ -184,6 +187,7 @@ object AppRuleEvaluator {
         useDayGenerationStartedAtMs: Long = 0L,
         contributorPackages: Set<String> = emptySet(),
         contributorPackagesByGroupId: Map<String, Set<String>> = emptyMap(),
+        contributorGroupNamesById: Map<String, String> = emptyMap(),
         missingContributorGroupIds: Set<String> = emptySet(),
         overrides: AppRuleOverrideState = AppRuleOverrideState(),
         membershipResolver: AppRuleMembershipResolver? = null,
@@ -215,14 +219,30 @@ object AppRuleEvaluator {
                 ?.targetAndContributorBoundaries(rule)
                 .orEmpty()
         )
-        val groupConditions = rule.effectiveContributorGroupConditionMinutes().filterKeys { it in rule.effectiveContributorGroupIds() }
-        val groupConditionsMet = if (!rule.usageConditionEnabled) {
-            true
-        } else {
-            groupConditions.all { (groupId, requiredMinutes) ->
-                if (requiredMinutes <= 0L) return@all true
-                val groupRequiredMillis = requiredMinutes.coerceAtMost(Long.MAX_VALUE / MILLIS_PER_MINUTE) * MILLIS_PER_MINUTE
-                val groupUsageMillis = usageMillisForPackages(
+        val conditionProgresses = mutableListOf<AppRuleConditionProgress>()
+        val totalConditionMet = !rule.usageConditionEnabled || conditionRequiredMillis <= 0L || contributorUsageMillis >= conditionRequiredMillis
+        if (rule.usageConditionEnabled && conditionRequiredMillis > 0L) {
+            conditionProgresses += AppRuleConditionProgress(
+                conditionId = AppRuleConditionProgress.CONDITION_ID_TOTAL,
+                conditionName = "",
+                currentMillis = contributorUsageMillis,
+                requiredMillis = conditionRequiredMillis,
+                isMet = totalConditionMet,
+                isTotalCondition = true
+            )
+        }
+
+        val effectiveGroupConditions = rule.effectiveContributorGroupConditionMinutes()
+        var groupConditionsMet = true
+        rule.effectiveContributorGroupIds().forEach { groupId ->
+            val requiredMinutes = effectiveGroupConditions[groupId] ?: 0L
+            if (requiredMinutes <= 0L) return@forEach
+            val isMissing = groupId in missingContributorGroupIds
+            val groupRequiredMillis = requiredMinutes.coerceAtMost(Long.MAX_VALUE / MILLIS_PER_MINUTE) * MILLIS_PER_MINUTE
+            val groupUsageMillis = if (isMissing) {
+                0L
+            } else {
+                usageMillisForPackages(
                     sessions = sessionList,
                     packageNames = contributorPackagesByGroupId[groupId].orEmpty(),
                     useDayId = useDayId,
@@ -237,25 +257,23 @@ object AppRuleEvaluator {
                     },
                     membershipBoundaries = membershipResolver?.targetAndContributorBoundaries(rule).orEmpty()
                 )
-                groupUsageMillis >= groupRequiredMillis
+            }
+            val isMet = !isMissing && groupUsageMillis >= groupRequiredMillis
+            if (!isMet) {
+                groupConditionsMet = false
+            }
+            if (rule.usageConditionEnabled) {
+                conditionProgresses += AppRuleConditionProgress(
+                    conditionId = groupId,
+                    conditionName = contributorGroupNamesById[groupId].orEmpty(),
+                    currentMillis = groupUsageMillis,
+                    requiredMillis = groupRequiredMillis,
+                    isMet = isMet,
+                    isTotalCondition = false
+                )
             }
         }
-        val totalConditionMet = !rule.usageConditionEnabled || conditionRequiredMillis <= 0L || contributorUsageMillis >= conditionRequiredMillis
         val isConditionMet = !rule.usageConditionEnabled || (totalConditionMet && groupConditionsMet)
-        val conditionProgresses = if (rule.usageConditionEnabled && conditionRequiredMillis > 0L) {
-            listOf(
-                AppRuleConditionProgress(
-                    conditionId = "total",
-                    conditionName = "",
-                    currentMillis = contributorUsageMillis,
-                    requiredMillis = conditionRequiredMillis,
-                    isMet = totalConditionMet,
-                    isTotalCondition = true
-                )
-            )
-        } else {
-            emptyList<AppRuleConditionProgress>()
-        }
         val hasMissingContributor = missingContributorGroupIds.isNotEmpty()
         val earnedAllowanceMillis = if (
             rule.earnedAllowanceEnabled && isConditionMet && !hasMissingContributor
@@ -495,12 +513,14 @@ object AppRuleEvaluator {
         val groupsById = snapshot.appGroups.associateBy { it.id.trim() }
         val packages = linkedSetOf<String>()
         val packagesByGroupId = mutableMapOf<String, Set<String>>()
+        val groupNamesById = mutableMapOf<String, String>()
         val missing = linkedSetOf<String>()
         rule.effectiveContributorGroupIds().forEach { groupId ->
             val group = groupsById[groupId]
             if (group == null) {
                 missing += groupId
             } else {
+                groupNamesById[groupId] = group.name
                 val groupPackages = group.selectedPackages.map(String::trim)
                     .filter(String::isNotEmpty)
                     .toSet()
@@ -508,7 +528,7 @@ object AppRuleEvaluator {
                 packages.addAll(groupPackages)
             }
         }
-        return ContributorResolution(packages, packagesByGroupId, missing)
+        return ContributorResolution(packages, packagesByGroupId, groupNamesById, missing)
     }
 
     private fun usageMillisForPackages(

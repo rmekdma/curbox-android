@@ -287,14 +287,10 @@ class AppRuleBlocker {
                     defaultTitle = defaultTitle,
                     defaultText = defaultText,
                     formatter = { item ->
-                        val unmetCondition = item.conditionProgresses.firstOrNull { !it.isMet && it.requiredMillis > 0L }
-                        val conditionProgressText = if (unmetCondition != null) {
-                            val curM = unmetCondition.currentMillis / 60_000L
-                            val reqM = unmetCondition.requiredMillis / 60_000L
-                            service.getString(R.string.app_rules_condition_progress_format, curM, reqM)
-                        } else {
-                            ""
-                        }
+                        val conditionProgressText = LiveRuleNotificationFormatter.formatConditionProgresses(
+                            context = service,
+                            conditions = item.conditionProgresses
+                        )
                         LiveRuleNotificationFormatter.formatRuleStatus(
                             context = service,
                             ruleName = item.ruleName,

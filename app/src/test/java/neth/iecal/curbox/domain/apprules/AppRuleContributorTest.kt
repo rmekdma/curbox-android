@@ -296,6 +296,81 @@ class AppRuleContributorTest {
     }
 
     @Test
+    fun evaluatesMultipleContributorGroupConditionsAndMissingGroupInConditionProgresses() {
+        val mathGroup = AppRuleAppGroup("math", "Math", listOf("com.math"))
+        val readingGroup = AppRuleAppGroup("reading", "Reading", listOf("com.reading"))
+        val rule = rule(allowedMinutes = 20).copy(
+            contributorGroupIds = setOf(mathGroup.id, readingGroup.id, "deleted_group"),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 40L,
+            contributorGroupConditionMinutes = mapOf(
+                mathGroup.id to 15L,
+                readingGroup.id to 20L,
+                "deleted_group" to 10L
+            )
+        )
+        // Only mathGroup and readingGroup are in snapshot (deleted_group is missing)
+        val groups = listOf(target, mathGroup, readingGroup)
+
+        // Math: 10m / 15m (shortfall 5m, unmet)
+        // Reading: 25m / 20m (met)
+        // Deleted group: 0m / 10m (shortfall 10m, unmet)
+        // Total: 35m / 40m (shortfall 5m, unmet)
+        val sessions = listOf(
+            session("com.math", 10),
+            session("com.reading", 25)
+        )
+
+        val result = evaluate(rule, sessions, groups)
+        val eval = result.evaluations.single()
+        assertFalse(eval.isAllowed)
+        assertFalse(eval.isConditionMet)
+
+        val progresses = eval.conditionProgresses
+        // Expect 4 condition progresses: Total, Math, Reading, Deleted
+        assertEquals(4, progresses.size)
+
+        // 1. Total
+        val totalCond = progresses[0]
+        assertTrue(totalCond.isTotalCondition)
+        assertEquals("total", totalCond.conditionId)
+        assertEquals(35 * MINUTE, totalCond.currentMillis)
+        assertEquals(40 * MINUTE, totalCond.requiredMillis)
+        assertFalse(totalCond.isMet)
+        assertEquals(5 * MINUTE, totalCond.remainingShortfallMillis)
+
+        // 2. Math
+        val mathCond = progresses[1]
+        assertFalse(mathCond.isTotalCondition)
+        assertEquals(mathGroup.id, mathCond.conditionId)
+        assertEquals("Math", mathCond.conditionName)
+        assertEquals(10 * MINUTE, mathCond.currentMillis)
+        assertEquals(15 * MINUTE, mathCond.requiredMillis)
+        assertFalse(mathCond.isMet)
+        assertEquals(5 * MINUTE, mathCond.remainingShortfallMillis)
+
+        // 3. Reading
+        val readingCond = progresses[2]
+        assertFalse(readingCond.isTotalCondition)
+        assertEquals(readingGroup.id, readingCond.conditionId)
+        assertEquals("Reading", readingCond.conditionName)
+        assertEquals(25 * MINUTE, readingCond.currentMillis)
+        assertEquals(20 * MINUTE, readingCond.requiredMillis)
+        assertTrue(readingCond.isMet)
+        assertEquals(0L, readingCond.remainingShortfallMillis)
+
+        // 4. Deleted group
+        val deletedCond = progresses[3]
+        assertFalse(deletedCond.isTotalCondition)
+        assertEquals("deleted_group", deletedCond.conditionId)
+        assertEquals("", deletedCond.conditionName) // empty name for missing group, formatter falls back safely
+        assertEquals(0L, deletedCond.currentMillis)
+        assertEquals(10 * MINUTE, deletedCond.requiredMillis)
+        assertFalse(deletedCond.isMet)
+        assertEquals(10 * MINUTE, deletedCond.remainingShortfallMillis)
+    }
+
+    @Test
     fun unconstrainedConditionAllowsImmediateDirectAllowance() {
         val rule = rule(allowedMinutes = 10).copy(
             contributorGroupIds = setOf(contributor.id),

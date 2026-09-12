@@ -25,6 +25,8 @@ object GuardianApprovalTextFormatter {
                 val conditionName = if (condition.isTotalCondition) {
                     val totalMinutesRequired = condition.requiredMillis / 60_000L
                     context.getString(R.string.app_rules_condition_total_name, totalMinutesRequired)
+                } else if (condition.conditionName.isBlank()) {
+                    context.getString(R.string.app_rules_unknown_contributor_group)
                 } else {
                     condition.conditionName
                 }

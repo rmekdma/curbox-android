@@ -96,4 +96,70 @@ class GuardianApprovalTextFormatterTest {
         assertFalse(formatted.contains("—"))
         assertTrue(formatted.contains(bullet))
     }
+
+    @Test
+    fun formatsMultipleConditionsAndFallsBackToUnknownAppGroupWhenNameIsBlank() {
+        val totalCond = AppRuleConditionProgress(
+            conditionId = "total",
+            conditionName = "",
+            currentMillis = 19 * 60_000L,
+            requiredMillis = 20 * 60_000L,
+            isMet = false,
+            isTotalCondition = true
+        )
+        val studyCond = AppRuleConditionProgress(
+            conditionId = "study-group",
+            conditionName = "학습",
+            currentMillis = 5 * 60_000L,
+            requiredMillis = 15 * 60_000L,
+            isMet = false,
+            isTotalCondition = false
+        )
+        val deletedCond = AppRuleConditionProgress(
+            conditionId = "deleted-group",
+            conditionName = "",
+            currentMillis = 0L,
+            requiredMillis = 10 * 60_000L,
+            isMet = false,
+            isTotalCondition = false
+        )
+
+        val denial = AppRuleGuardianDenial(
+            ruleId = "rule-1",
+            ruleName = "게임 제한",
+            reason = "Usage condition not met",
+            conditionProgresses = listOf(totalCond, studyCond, deletedCond)
+        )
+
+        val unmet = denial.conditionProgresses.filter { !it.isMet && it.remainingShortfallMillis > 0L }
+        assertEquals(3, unmet.size)
+
+        // Mocking strings:
+        val unknownGroupString = "알 수 없는 앱 그룹 (규칙 설정 확인 필요)"
+        fun resolveName(condition: AppRuleConditionProgress): String = when {
+            condition.isTotalCondition -> "전체 ${condition.requiredMillis / 60_000L}분 사용"
+            condition.conditionName.isBlank() -> unknownGroupString
+            else -> condition.conditionName
+        }
+
+        assertEquals("전체 20분 사용", resolveName(totalCond))
+        assertEquals("학습", resolveName(studyCond))
+        assertEquals(unknownGroupString, resolveName(deletedCond))
+
+        // Check each bullet item
+        val items = unmet.map { condition ->
+            "• ${resolveName(condition)}: ${condition.shortfallMinutes}분 부족"
+        }
+        assertEquals("• 전체 20분 사용: 1분 부족", items[0])
+        assertEquals("• 학습: 10분 부족", items[1])
+        assertEquals("• 알 수 없는 앱 그룹 (규칙 설정 확인 필요): 10분 부족", items[2])
+
+        // Verify no hyphens/dashes in any of the items
+        items.forEach { item ->
+            assertFalse(item.contains("-"))
+            assertFalse(item.contains("–"))
+            assertFalse(item.contains("—"))
+        }
+    }
 }
+

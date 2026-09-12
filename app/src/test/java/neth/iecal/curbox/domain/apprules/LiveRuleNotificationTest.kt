@@ -2,6 +2,7 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleConditionProgress
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleScope
@@ -324,4 +325,77 @@ class LiveRuleNotificationTest {
         )
         assertEquals("[Social Limits] (19분/20분) 0분 사용 / 30분 허용", formattedKo)
     }
+
+    @Test
+    fun formatsMultipleUnmetConditionProgressesJoinedWithComma() {
+        val totalCond = AppRuleConditionProgress(
+            conditionId = "total",
+            conditionName = "",
+            currentMillis = 8 * 60_000L,
+            requiredMillis = 20 * 60_000L,
+            isMet = false,
+            isTotalCondition = true
+        )
+        val studyCond = AppRuleConditionProgress(
+            conditionId = "study",
+            conditionName = "Study",
+            currentMillis = 5 * 60_000L,
+            requiredMillis = 15 * 60_000L,
+            isMet = false,
+            isTotalCondition = false
+        )
+        val deletedCond = AppRuleConditionProgress(
+            conditionId = "deleted",
+            conditionName = "",
+            currentMillis = 0L,
+            requiredMillis = 10 * 60_000L,
+            isMet = false,
+            isTotalCondition = false
+        )
+        val metCond = AppRuleConditionProgress(
+            conditionId = "reading",
+            conditionName = "Reading",
+            currentMillis = 20 * 60_000L,
+            requiredMillis = 20 * 60_000L,
+            isMet = true,
+            isTotalCondition = false
+        )
+
+        val conditions = listOf(totalCond, studyCond, deletedCond, metCond)
+
+        // English format:
+        // total -> "Total (8m/20m)"
+        // study -> "Study (5m/15m)"
+        // deleted -> "Unknown app group (check rule settings) (0m/10m)"
+        val formattedEn = LiveRuleNotificationFormatter.formatConditionProgresses(
+            conditions = conditions,
+            unit = "m",
+            totalName = "Total",
+            unknownGroupName = "Unknown app group (check rule settings)"
+        )
+        assertEquals("Total (8m/20m), Study (5m/15m), Unknown app group (check rule settings) (0m/10m)", formattedEn)
+
+        // Korean format:
+        // total -> "전체 (8분/20분)"
+        // study -> "학습 (5분/15분)"
+        // deleted -> "알 수 없는 앱 그룹 (규칙 설정 확인 필요) (0분/10분)"
+        val studyCondKo = studyCond.copy(conditionName = "학습")
+        val conditionsKo = listOf(totalCond, studyCondKo, deletedCond, metCond)
+        val formattedKo = LiveRuleNotificationFormatter.formatConditionProgresses(
+            conditions = conditionsKo,
+            unit = "분",
+            totalName = "전체",
+            unknownGroupName = "알 수 없는 앱 그룹 (규칙 설정 확인 필요)"
+        )
+        assertEquals("전체 (8분/20분), 학습 (5분/15분), 알 수 없는 앱 그룹 (규칙 설정 확인 필요) (0분/10분)", formattedKo)
+
+        // Verify no dashes or hyphens
+        assertFalse(formattedEn.contains("-"))
+        assertFalse(formattedEn.contains("–"))
+        assertFalse(formattedEn.contains("—"))
+        assertFalse(formattedKo.contains("-"))
+        assertFalse(formattedKo.contains("–"))
+        assertFalse(formattedKo.contains("—"))
+    }
 }
+

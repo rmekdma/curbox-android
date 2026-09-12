@@ -1411,6 +1411,8 @@
     <string name="app_rules_notification_guardian_extra"> (includes %1$d min extra)</string>
     <string name="app_rules_bullet">•</string>
     <string name="app_rules_condition_total_name">Total %1$d min</string>
+    <string name="app_rules_condition_total_short_name">Total</string>
+    <string name="app_rules_unknown_contributor_group">Unknown app group (check rule settings)</string>
     <string name="app_rules_shortfall_minutes">%1$d min needed</string>
     <string name="app_rules_lock_reason_condition_not_met">Usage condition not met</string>
     <string name="guardian_approval_title">Guardian approval</string>

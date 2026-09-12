@@ -9,6 +9,48 @@ object LiveRuleNotificationFormatter {
         return "($currentMinutes$unit/$requiredMinutes$unit)"
     }
 
+    fun formatConditionProgresses(
+        conditions: List<neth.iecal.curbox.data.models.AppRuleConditionProgress>,
+        unit: String,
+        totalName: String,
+        unknownGroupName: String
+    ): String {
+        val unmetConditions = conditions.filter { !it.isMet && it.requiredMillis > 0L }
+        if (unmetConditions.isEmpty()) return ""
+        return unmetConditions.joinToString(", ") { condition ->
+            val name = when {
+                condition.isTotalCondition -> totalName
+                condition.conditionName.isBlank() -> unknownGroupName
+                else -> condition.conditionName
+            }
+            val curM = condition.currentMillis / 60_000L
+            val reqM = condition.requiredMillis / 60_000L
+            val progress = formatConditionProgress(curM, reqM, unit)
+            "$name $progress"
+        }
+    }
+
+    fun formatConditionProgresses(
+        context: Context,
+        conditions: List<neth.iecal.curbox.data.models.AppRuleConditionProgress>
+    ): String {
+        val totalName = context.getString(R.string.app_rules_condition_total_short_name)
+        val unknownGroupName = context.getString(R.string.app_rules_unknown_contributor_group)
+        val unmetConditions = conditions.filter { !it.isMet && it.requiredMillis > 0L }
+        if (unmetConditions.isEmpty()) return ""
+        return unmetConditions.joinToString(", ") { condition ->
+            val name = when {
+                condition.isTotalCondition -> totalName
+                condition.conditionName.isBlank() -> unknownGroupName
+                else -> condition.conditionName
+            }
+            val curM = condition.currentMillis / 60_000L
+            val reqM = condition.requiredMillis / 60_000L
+            val progress = context.getString(R.string.app_rules_condition_progress_format, curM, reqM)
+            "$name $progress"
+        }
+    }
+
     fun formatRuleStatus(
         ruleName: String,
         usedMinutes: Long,
