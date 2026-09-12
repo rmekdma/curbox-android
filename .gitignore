@@ -16,3 +16,4 @@ build/
 local.properties
 /test-code*
 .idea/
+.scratch/
