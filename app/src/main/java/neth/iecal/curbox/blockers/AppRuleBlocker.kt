@@ -287,18 +287,7 @@ class AppRuleBlocker {
                     defaultTitle = defaultTitle,
                     defaultText = defaultText,
                     formatter = { item ->
-                        val conditionProgressText = LiveRuleNotificationFormatter.formatConditionProgresses(
-                            context = service,
-                            conditions = item.conditionProgresses
-                        )
-                        LiveRuleNotificationFormatter.formatRuleStatus(
-                            context = service,
-                            ruleName = item.ruleName,
-                            usedMinutes = item.usedMinutes,
-                            totalAllowedMinutes = item.totalAllowedMinutes,
-                            guardianExtraMinutes = item.guardianExtraMinutes,
-                            conditionProgressText = conditionProgressText
-                        )
+                        LiveRuleNotificationFormatter.formatNotificationItem(service, item)
                     },
                     foregroundPackage = foregroundPackage ?: currentForegroundPackage,
                     rulePackageResolver = { ruleId ->
@@ -333,11 +322,16 @@ class AppRuleBlocker {
         try {
             val denialRows = evaluation.denyingRules.map { denial ->
                 val rule = snapshot.snapshot().appRules.find { it.id == denial.ruleId }
+                val effectiveAllowanceMillis = denial.effectiveAllowanceMillis
                 AppRuleGuardianDenial(
                     ruleId = denial.ruleId,
                     ruleName = rule?.name ?: denial.ruleId,
                     reason = warningStatus(denial),
-                    conditionProgresses = denial.conditionProgresses
+                    conditionProgresses = denial.conditionProgresses,
+                    isAllowanceExhausted = denial.isAllowanceExhausted,
+                    usedMinutes = (denial.usedMillis / MILLIS_PER_MINUTE).coerceAtLeast(0L),
+                    totalAllowedMinutes = (effectiveAllowanceMillis / MILLIS_PER_MINUTE).coerceAtLeast(0L),
+                    earnedAllowanceEnabled = denial.earnedAllowanceEnabled
                 )
             }
             service.startActivity(

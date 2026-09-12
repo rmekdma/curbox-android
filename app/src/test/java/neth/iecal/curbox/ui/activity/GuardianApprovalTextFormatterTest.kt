@@ -161,5 +161,139 @@ class GuardianApprovalTextFormatterTest {
             assertFalse(item.contains("—"))
         }
     }
+
+    @Test
+    fun formatsAllowanceExhaustedWithUsageAndAllowance() {
+        val denial = AppRuleGuardianDenial(
+            ruleId = "rule-1",
+            ruleName = "소셜",
+            reason = "Warning status",
+            isAllowanceExhausted = true,
+            usedMinutes = 30L,
+            totalAllowedMinutes = 30L,
+            earnedAllowanceEnabled = false
+        )
+
+        val reasonTitle = "사용 가능 시간 소진"
+        val bullet = "•"
+        val usageAllowanceText = "${denial.usedMinutes}분/${denial.totalAllowedMinutes}분"
+
+        val formatted = "${denial.ruleName}\n$reasonTitle\n$bullet $usageAllowanceText"
+        assertEquals("소셜\n사용 가능 시간 소진\n• 30분/30분", formatted)
+        assertFalse(formatted.contains("-"))
+        assertFalse(formatted.contains("–"))
+        assertFalse(formatted.contains("—"))
+
+        // English check
+        val reasonTitleEn = "Available time exhausted"
+        val usageAllowanceTextEn = "${denial.usedMinutes}m/${denial.totalAllowedMinutes}m"
+        val formattedEn = "Social\n$reasonTitleEn\n$bullet $usageAllowanceTextEn"
+        assertEquals("Social\nAvailable time exhausted\n• 30m/30m", formattedEn)
+        assertFalse(formattedEn.contains("-"))
+        assertFalse(formattedEn.contains("–"))
+        assertFalse(formattedEn.contains("—"))
+    }
+
+    @Test
+    fun conflictResolutionShowsExhaustedWhenEarnedAllowanceDisabled() {
+        val unmetCond = AppRuleConditionProgress(
+            conditionId = "study",
+            conditionName = "학습",
+            currentMillis = 10 * 60_000L,
+            requiredMillis = 20 * 60_000L,
+            isMet = false
+        )
+        val denial = AppRuleGuardianDenial(
+            ruleId = "rule-1",
+            ruleName = "소셜",
+            reason = "Warning status",
+            conditionProgresses = listOf(unmetCond),
+            isAllowanceExhausted = true,
+            usedMinutes = 30L,
+            totalAllowedMinutes = 30L,
+            earnedAllowanceEnabled = false
+        )
+
+        val unmetConditions = denial.conditionProgresses.filter { !it.isMet && it.remainingShortfallMillis > 0L }
+        val showConditionProgress = unmetConditions.isNotEmpty() && (!denial.isAllowanceExhausted || denial.earnedAllowanceEnabled)
+        assertFalse(showConditionProgress)
+        assertTrue(denial.isAllowanceExhausted)
+
+        val reasonTitle = "사용 가능 시간 소진"
+        val bullet = "•"
+        val usageAllowanceText = "${denial.usedMinutes}분/${denial.totalAllowedMinutes}분"
+        val formatted = "${denial.ruleName}\n$reasonTitle\n$bullet $usageAllowanceText"
+
+        assertEquals("소셜\n사용 가능 시간 소진\n• 30분/30분", formatted)
+        assertFalse(formatted.contains("학습"))
+    }
+
+    @Test
+    fun conflictResolutionShowsConditionWhenEarnedAllowanceEnabled() {
+        val unmetCond = AppRuleConditionProgress(
+            conditionId = "study",
+            conditionName = "학습",
+            currentMillis = 10 * 60_000L,
+            requiredMillis = 20 * 60_000L,
+            isMet = false
+        )
+        val denial = AppRuleGuardianDenial(
+            ruleId = "rule-1",
+            ruleName = "소셜",
+            reason = "Warning status",
+            conditionProgresses = listOf(unmetCond),
+            isAllowanceExhausted = true,
+            usedMinutes = 30L,
+            totalAllowedMinutes = 30L,
+            earnedAllowanceEnabled = true
+        )
+
+        val unmetConditions = denial.conditionProgresses.filter { !it.isMet && it.remainingShortfallMillis > 0L }
+        val showConditionProgress = unmetConditions.isNotEmpty() && (!denial.isAllowanceExhausted || denial.earnedAllowanceEnabled)
+        assertTrue(showConditionProgress)
+
+        val reasonTitle = "사용 조건 미달"
+        val bullet = "•"
+        val conditionItem = "$bullet ${unmetCond.conditionName}: ${unmetCond.shortfallMinutes}분 부족"
+        val formatted = "${denial.ruleName}\n$reasonTitle\n$conditionItem"
+
+        assertEquals("소셜\n사용 조건 미달\n• 학습: 10분 부족", formatted)
+    }
+
+    @Test
+    fun guardianGrantResolvesTimeExhaustionRevealingConditionUnmet() {
+        val unmetCond = AppRuleConditionProgress(
+            conditionId = "total",
+            conditionName = "",
+            currentMillis = 10 * 60_000L,
+            requiredMillis = 20 * 60_000L,
+            isMet = false,
+            isTotalCondition = true
+        )
+
+        // Initially: time exhausted, earned disabled -> shows time exhausted
+        val initialDenial = AppRuleGuardianDenial(
+            ruleId = "rule-1",
+            ruleName = "Social",
+            reason = "Warning status",
+            conditionProgresses = listOf(unmetCond),
+            isAllowanceExhausted = true,
+            usedMinutes = 30L,
+            totalAllowedMinutes = 30L,
+            earnedAllowanceEnabled = false
+        )
+        val showConditionBefore = initialDenial.conditionProgresses.any { !it.isMet && it.remainingShortfallMillis > 0L } &&
+            (!initialDenial.isAllowanceExhausted || initialDenial.earnedAllowanceEnabled)
+        assertFalse(showConditionBefore)
+
+        // After guardian grants 15 minutes: totalAllowedMinutes is now 45m, so isAllowanceExhausted becomes false!
+        val afterGrantDenial = initialDenial.copy(
+            isAllowanceExhausted = false,
+            totalAllowedMinutes = 45L
+        )
+        val showConditionAfter = afterGrantDenial.conditionProgresses.any { !it.isMet && it.remainingShortfallMillis > 0L } &&
+            (!afterGrantDenial.isAllowanceExhausted || afterGrantDenial.earnedAllowanceEnabled)
+        assertTrue(showConditionAfter)
+    }
 }
 

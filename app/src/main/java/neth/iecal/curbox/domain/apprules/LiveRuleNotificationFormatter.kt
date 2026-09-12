@@ -15,7 +15,7 @@ object LiveRuleNotificationFormatter {
         totalName: String,
         unknownGroupName: String
     ): String {
-        val unmetConditions = conditions.filter { !it.isMet && it.requiredMillis > 0L }
+        val unmetConditions = conditions.filter { it.isUnmetWithShortfall }
         if (unmetConditions.isEmpty()) return ""
         return unmetConditions.joinToString(", ") { condition ->
             val name = when {
@@ -36,7 +36,7 @@ object LiveRuleNotificationFormatter {
     ): String {
         val totalName = context.getString(R.string.app_rules_condition_total_short_name)
         val unknownGroupName = context.getString(R.string.app_rules_unknown_contributor_group)
-        val unmetConditions = conditions.filter { !it.isMet && it.requiredMillis > 0L }
+        val unmetConditions = conditions.filter { it.isUnmetWithShortfall }
         if (unmetConditions.isEmpty()) return ""
         return unmetConditions.joinToString(", ") { condition ->
             val name = when {
@@ -101,19 +101,110 @@ object LiveRuleNotificationFormatter {
         }
     }
 
-    fun formatRuleStatusKorean(
+    fun formatRuleExhausted(
         ruleName: String,
         usedMinutes: Long,
         totalAllowedMinutes: Long,
-        guardianExtraMinutes: Long,
-        conditionProgressText: String = ""
-    ): String = formatRuleStatus(
-        ruleName = ruleName,
-        usedMinutes = usedMinutes,
-        totalAllowedMinutes = totalAllowedMinutes,
-        guardianExtraMinutes = guardianExtraMinutes,
-        conditionProgressText = conditionProgressText,
-        template = if (conditionProgressText.isNotBlank()) "[%1\$s] %5\$s %2\$d분 사용 / %3\$d분 허용%4\$s" else "[%1\$s] %2\$d분 사용 / %3\$d분 허용%4\$s",
-        extraTemplate = " (추가 %1\$d분 포함)"
-    )
+        unit: String = "m",
+        template: String = "[%1\$s] Time exhausted: %2\$d%4\$s/%3\$d%4\$s"
+    ): String {
+        return String.format(template, ruleName, usedMinutes, totalAllowedMinutes, unit)
+    }
+
+    fun formatRuleExhausted(
+        context: Context,
+        ruleName: String,
+        usedMinutes: Long,
+        totalAllowedMinutes: Long
+    ): String {
+        return context.getString(
+            R.string.app_rules_notification_time_exhausted,
+            ruleName,
+            usedMinutes,
+            totalAllowedMinutes
+        )
+    }
+
+    fun formatNotificationItem(
+        context: Context,
+        item: LiveRuleNotificationItem
+    ): String {
+        val unmetConditions = item.conditionProgresses.filter { it.isUnmetWithShortfall }
+        val showConditionProgress = unmetConditions.isNotEmpty() && (!item.isAllowanceExhausted || item.earnedAllowanceEnabled)
+
+        return if (showConditionProgress) {
+            val progressText = formatConditionProgresses(context, unmetConditions)
+            formatRuleStatus(
+                context = context,
+                ruleName = item.ruleName,
+                usedMinutes = item.usedMinutes,
+                totalAllowedMinutes = item.totalAllowedMinutes,
+                guardianExtraMinutes = item.guardianExtraMinutes,
+                conditionProgressText = progressText
+            )
+        } else if (item.isAllowanceExhausted) {
+            formatRuleExhausted(
+                context = context,
+                ruleName = item.ruleName,
+                usedMinutes = item.usedMinutes,
+                totalAllowedMinutes = item.totalAllowedMinutes
+            )
+        } else {
+            formatRuleStatus(
+                context = context,
+                ruleName = item.ruleName,
+                usedMinutes = item.usedMinutes,
+                totalAllowedMinutes = item.totalAllowedMinutes,
+                guardianExtraMinutes = item.guardianExtraMinutes
+            )
+        }
+    }
+
+    fun formatNotificationItem(
+        item: LiveRuleNotificationItem,
+        unit: String = "m",
+        totalName: String = "Total",
+        unknownGroupName: String = "Unknown app group (check rule settings)",
+        exhaustedTemplate: String = "[%1\$s] Time exhausted: %2\$d%4\$s/%3\$d%4\$s",
+        statusTemplate: String = if (item.conditionProgresses.any { it.isUnmetWithShortfall }) "[%1\$s] %5\$s %2\$d min used / %3\$d min allowed%4\$s" else "[%1\$s] %2\$d min used / %3\$d min allowed%4\$s",
+        extraTemplate: String = " (includes %1\$d min extra)"
+    ): String {
+        val unmetConditions = item.conditionProgresses.filter { it.isUnmetWithShortfall }
+        val showConditionProgress = unmetConditions.isNotEmpty() && (!item.isAllowanceExhausted || item.earnedAllowanceEnabled)
+
+        return if (showConditionProgress) {
+            val progressText = formatConditionProgresses(
+                conditions = unmetConditions,
+                unit = unit,
+                totalName = totalName,
+                unknownGroupName = unknownGroupName
+            )
+            formatRuleStatus(
+                ruleName = item.ruleName,
+                usedMinutes = item.usedMinutes,
+                totalAllowedMinutes = item.totalAllowedMinutes,
+                guardianExtraMinutes = item.guardianExtraMinutes,
+                conditionProgressText = progressText,
+                template = statusTemplate,
+                extraTemplate = extraTemplate
+            )
+        } else if (item.isAllowanceExhausted) {
+            formatRuleExhausted(
+                ruleName = item.ruleName,
+                usedMinutes = item.usedMinutes,
+                totalAllowedMinutes = item.totalAllowedMinutes,
+                unit = unit,
+                template = exhaustedTemplate
+            )
+        } else {
+            formatRuleStatus(
+                ruleName = item.ruleName,
+                usedMinutes = item.usedMinutes,
+                totalAllowedMinutes = item.totalAllowedMinutes,
+                guardianExtraMinutes = item.guardianExtraMinutes,
+                template = statusTemplate,
+                extraTemplate = extraTemplate
+            )
+        }
+    }
 }

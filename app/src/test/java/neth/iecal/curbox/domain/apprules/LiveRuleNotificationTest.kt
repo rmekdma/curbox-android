@@ -21,6 +21,50 @@ class LiveRuleNotificationTest {
     private val now = Instant.parse("2026-08-17T10:00:00Z").toEpochMilli()
     private val useDayId = "2026-08-17"
 
+    private fun formatRuleStatusKorean(
+        ruleName: String,
+        usedMinutes: Long,
+        totalAllowedMinutes: Long,
+        guardianExtraMinutes: Long = 0L,
+        conditionProgressText: String = ""
+    ): String {
+        return LiveRuleNotificationFormatter.formatRuleStatus(
+            ruleName = ruleName,
+            usedMinutes = usedMinutes,
+            totalAllowedMinutes = totalAllowedMinutes,
+            guardianExtraMinutes = guardianExtraMinutes,
+            conditionProgressText = conditionProgressText,
+            template = if (conditionProgressText.isNotBlank()) "[%1\$s] %5\$s %2\$d분 사용 / %3\$d분 허용%4\$s" else "[%1\$s] %2\$d분 사용 / %3\$d분 허용%4\$s",
+            extraTemplate = " (추가 %1\$d분 포함)"
+        )
+    }
+
+    private fun formatRuleExhaustedKorean(
+        ruleName: String,
+        usedMinutes: Long,
+        totalAllowedMinutes: Long
+    ): String {
+        return LiveRuleNotificationFormatter.formatRuleExhausted(
+            ruleName = ruleName,
+            usedMinutes = usedMinutes,
+            totalAllowedMinutes = totalAllowedMinutes,
+            unit = "분",
+            template = "[%1\$s] 시간 소진: %2\$d%4\$s/%3\$d%4\$s"
+        )
+    }
+
+    private fun formatNotificationItemKorean(item: LiveRuleNotificationItem): String {
+        return LiveRuleNotificationFormatter.formatNotificationItem(
+            item = item,
+            unit = "분",
+            totalName = "전체",
+            unknownGroupName = "알 수 없는 앱 그룹 (규칙 설정 확인 필요)",
+            exhaustedTemplate = "[%1\$s] 시간 소진: %2\$d%4\$s/%3\$d%4\$s",
+            statusTemplate = if (item.conditionProgresses.any { it.isUnmetWithShortfall }) "[%1\$s] %5\$s %2\$d분 사용 / %3\$d분 허용%4\$s" else "[%1\$s] %2\$d분 사용 / %3\$d분 허용%4\$s",
+            extraTemplate = " (추가 %1\$d분 포함)"
+        )
+    }
+
     @Test
     fun formatsRuleStatusWithoutGuardianExtraWhenExtraIsZero() {
         val formatted = LiveRuleNotificationFormatter.formatRuleStatus(
@@ -31,7 +75,7 @@ class LiveRuleNotificationTest {
         )
         assertEquals("[Social] 15 min used / 60 min allowed", formatted)
 
-        val formattedKorean = LiveRuleNotificationFormatter.formatRuleStatusKorean(
+        val formattedKorean = formatRuleStatusKorean(
             ruleName = "소셜",
             usedMinutes = 15,
             totalAllowedMinutes = 60,
@@ -50,7 +94,7 @@ class LiveRuleNotificationTest {
         )
         assertEquals("[Social] 20 min used / 75 min allowed (includes 15 min extra)", formatted)
 
-        val formattedKorean = LiveRuleNotificationFormatter.formatRuleStatusKorean(
+        val formattedKorean = formatRuleStatusKorean(
             ruleName = "소셜",
             usedMinutes = 20,
             totalAllowedMinutes = 75,
@@ -70,7 +114,7 @@ class LiveRuleNotificationTest {
         )
         assertEquals("[Social] (19m/20m) 0 min used / 30 min allowed", formatted)
 
-        val formattedKorean = LiveRuleNotificationFormatter.formatRuleStatusKorean(
+        val formattedKorean = formatRuleStatusKorean(
             ruleName = "소셜",
             usedMinutes = 0,
             totalAllowedMinutes = 30,
@@ -89,7 +133,7 @@ class LiveRuleNotificationTest {
         )
         assertEquals("[BlockAll] 0 min used / 0 min allowed", formatted)
 
-        val formattedKorean = LiveRuleNotificationFormatter.formatRuleStatusKorean(
+        val formattedKorean = formatRuleStatusKorean(
             ruleName = "전체차단",
             usedMinutes = 0,
             totalAllowedMinutes = 0,
@@ -105,7 +149,7 @@ class LiveRuleNotificationTest {
         assertFalse(formattedEn.contains("–"))
         assertFalse(formattedEn.contains("—"))
 
-        val formattedKo = LiveRuleNotificationFormatter.formatRuleStatusKorean("테스트", 10, 30, 5)
+        val formattedKo = formatRuleStatusKorean("테스트", 10, 30, 5)
         assertFalse(formattedKo.contains("-"))
         assertFalse(formattedKo.contains("–"))
         assertFalse(formattedKo.contains("—"))
@@ -172,7 +216,7 @@ class LiveRuleNotificationTest {
             items = emptyList(),
             defaultTitle = "Curbox is active",
             defaultText = "Protecting your digital wellbeing",
-            formatter = { LiveRuleNotificationFormatter.formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) }
+            formatter = { formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) }
         )
 
         assertEquals("Curbox is active", model.title)
@@ -194,7 +238,7 @@ class LiveRuleNotificationTest {
             items = listOf(item),
             defaultTitle = "Curbox",
             defaultText = "Default",
-            formatter = { LiveRuleNotificationFormatter.formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) }
+            formatter = { formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) }
         )
 
         assertEquals("Curbox", model.title)
@@ -227,7 +271,7 @@ class LiveRuleNotificationTest {
             items = items,
             defaultTitle = "Curbox",
             defaultText = "Default",
-            formatter = { LiveRuleNotificationFormatter.formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) }
+            formatter = { formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) }
         )
         assertEquals("[소셜] 15분 사용 / 60분 허용", modelDefault.collapsedText)
         assertEquals(2, modelDefault.expandedLines.size)
@@ -242,7 +286,7 @@ class LiveRuleNotificationTest {
             items = items,
             defaultTitle = "Curbox",
             defaultText = "Default",
-            formatter = { LiveRuleNotificationFormatter.formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) },
+            formatter = { formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) },
             foregroundPackage = "com.game.app",
             rulePackageResolver = { ruleId -> if (ruleId == "rule-2") setOf("com.game.app") else emptySet() }
         )
@@ -316,7 +360,7 @@ class LiveRuleNotificationTest {
         val progressTextKo = LiveRuleNotificationFormatter.formatConditionProgress(curM, reqM, unit = "분")
         assertEquals("(19분/20분)", progressTextKo)
 
-        val formattedKo = LiveRuleNotificationFormatter.formatRuleStatusKorean(
+        val formattedKo = formatRuleStatusKorean(
             ruleName = item.ruleName,
             usedMinutes = item.usedMinutes,
             totalAllowedMinutes = item.totalAllowedMinutes,
@@ -396,6 +440,165 @@ class LiveRuleNotificationTest {
         assertFalse(formattedKo.contains("-"))
         assertFalse(formattedKo.contains("–"))
         assertFalse(formattedKo.contains("—"))
+    }
+
+    @Test
+    fun formatsExhaustedRuleStatusInKoreanAndEnglish() {
+        val formattedKo = formatRuleExhaustedKorean(
+            ruleName = "소셜",
+            usedMinutes = 30,
+            totalAllowedMinutes = 30
+        )
+        assertEquals("[소셜] 시간 소진: 30분/30분", formattedKo)
+        assertFalse(formattedKo.contains("-"))
+        assertFalse(formattedKo.contains("–"))
+        assertFalse(formattedKo.contains("—"))
+
+        val formattedEn = LiveRuleNotificationFormatter.formatRuleExhausted(
+            ruleName = "Social",
+            usedMinutes = 30,
+            totalAllowedMinutes = 30,
+            unit = "m"
+        )
+        assertEquals("[Social] Time exhausted: 30m/30m", formattedEn)
+        assertFalse(formattedEn.contains("-"))
+        assertFalse(formattedEn.contains("–"))
+        assertFalse(formattedEn.contains("—"))
+    }
+
+    @Test
+    fun formatNotificationItemShowsExhaustedWhenAllowanceIsExhaustedWithoutUnmetConditions() {
+        val item = LiveRuleNotificationItem(
+            ruleId = "rule-1",
+            ruleName = "소셜",
+            usedMinutes = 30,
+            totalAllowedMinutes = 30,
+            guardianExtraMinutes = 0,
+            isAllowanceExhausted = true,
+            earnedAllowanceEnabled = false
+        )
+
+        val formattedKo = formatNotificationItemKorean(item)
+        assertEquals("[소셜] 시간 소진: 30분/30분", formattedKo)
+
+        val itemEn = item.copy(ruleName = "Social")
+        val formattedEn = LiveRuleNotificationFormatter.formatNotificationItem(itemEn)
+        assertEquals("[Social] Time exhausted: 30m/30m", formattedEn)
+    }
+
+    @Test
+    fun formatNotificationItemConflictResolutionShowsExhaustedWhenEarnedAllowanceDisabled() {
+        val unmetCond = AppRuleConditionProgress(
+            conditionId = "total",
+            conditionName = "",
+            currentMillis = 10 * 60_000L,
+            requiredMillis = 20 * 60_000L,
+            isMet = false,
+            isTotalCondition = true
+        )
+        val item = LiveRuleNotificationItem(
+            ruleId = "rule-1",
+            ruleName = "소셜",
+            usedMinutes = 30,
+            totalAllowedMinutes = 30,
+            guardianExtraMinutes = 0,
+            conditionProgresses = listOf(unmetCond),
+            isAllowanceExhausted = true,
+            earnedAllowanceEnabled = false
+        )
+
+        val formattedKo = formatNotificationItemKorean(item)
+        assertEquals("[소셜] 시간 소진: 30분/30분", formattedKo)
+        assertFalse(formattedKo.contains("전체"))
+
+        val itemEn = item.copy(ruleName = "Social")
+        val formattedEn = LiveRuleNotificationFormatter.formatNotificationItem(itemEn)
+        assertEquals("[Social] Time exhausted: 30m/30m", formattedEn)
+        assertFalse(formattedEn.contains("Total"))
+    }
+
+    @Test
+    fun formatNotificationItemConflictResolutionShowsConditionWhenEarnedAllowanceEnabled() {
+        val unmetCond = AppRuleConditionProgress(
+            conditionId = "total",
+            conditionName = "",
+            currentMillis = 10 * 60_000L,
+            requiredMillis = 20 * 60_000L,
+            isMet = false,
+            isTotalCondition = true
+        )
+        val item = LiveRuleNotificationItem(
+            ruleId = "rule-1",
+            ruleName = "소셜",
+            usedMinutes = 30,
+            totalAllowedMinutes = 30,
+            guardianExtraMinutes = 0,
+            conditionProgresses = listOf(unmetCond),
+            isAllowanceExhausted = true,
+            earnedAllowanceEnabled = true
+        )
+
+        val formattedKo = formatNotificationItemKorean(item)
+        assertEquals("[소셜] 전체 (10분/20분) 30분 사용 / 30분 허용", formattedKo)
+
+        val itemEn = item.copy(ruleName = "Social")
+        val formattedEn = LiveRuleNotificationFormatter.formatNotificationItem(itemEn)
+        assertEquals("[Social] Total (10m/20m) 30 min used / 30 min allowed", formattedEn)
+    }
+
+    @Test
+    fun computeNotificationItemsCalculatesExhaustedStateEndToEnd() {
+        val group = AppRuleAppGroup.create("Social", listOf("com.social.app"))
+        val contributorGroup = AppRuleAppGroup.create("Study", listOf("com.study.app"))
+        val rule = AppRule(
+            id = "rule-exhausted",
+            name = "Social Limits",
+            weekdays = (0..6).toSet(),
+            startMinute = 0,
+            endMinute = 24 * 60,
+            scope = AppRuleScope.forGroup(group.id),
+            allowedMinutes = 30L,
+            usageConditionEnabled = true,
+            contributorGroupIds = setOf(contributorGroup.id),
+            usageConditionMinutes = 20L,
+            earnedAllowanceEnabled = false
+        )
+        val snapshot = AppRuleSnapshot(listOf(group, contributorGroup), listOf(rule))
+
+        // Target used 30m (exhausted), contributor used 10m (unmet)
+        val sessions = listOf(
+            ForegroundSession(
+                useDayId = useDayId,
+                packageName = "com.social.app",
+                startedAtMs = now - 30 * 60_000L,
+                endedAtMs = now
+            ),
+            ForegroundSession(
+                useDayId = useDayId,
+                packageName = "com.study.app",
+                startedAtMs = now - 10 * 60_000L,
+                endedAtMs = now
+            )
+        )
+
+        val items = LiveRuleNotificationStateCalculator.computeNotificationItems(
+            snapshot = snapshot,
+            sessions = sessions,
+            useDayId = useDayId,
+            nowMs = now,
+            zone = zone
+        )
+
+        assertEquals(1, items.size)
+        val item = items.single()
+        assertEquals(30L, item.usedMinutes)
+        assertEquals(30L, item.totalAllowedMinutes)
+        assertTrue(item.isAllowanceExhausted)
+        assertFalse(item.earnedAllowanceEnabled)
+
+        // Formatted with Korean helper: shows time exhausted, not condition shortfall
+        val formatted = formatNotificationItemKorean(item)
+        assertEquals("[Social Limits] 시간 소진: 30분/30분", formatted)
     }
 }
 

@@ -2,6 +2,8 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleGuardianGrant
+import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.ForegroundSession
@@ -411,17 +413,124 @@ class AppRuleContributorTest {
         assertEquals(45 * MINUTE, after.evaluations.single().allowanceMillis)
     }
 
+    @Test
+    fun allowanceExhaustedPreservedIndependentlyEvenWhenConditionIsUnmet() {
+        val rule = rule(allowedMinutes = 30).copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 20,
+            earnedAllowanceEnabled = false
+        )
+
+        // Target used 30m (exhausted), but contributor used only 10m (unmet)
+        val sessionsExhaustedAndUnmet = listOf(
+            session("com.target", 30),
+            session("com.source", 10)
+        )
+        val result = evaluate(rule, sessionsExhaustedAndUnmet)
+        val evaluation = result.evaluations.single()
+
+        assertFalse(result.isAllowed)
+        assertFalse(evaluation.isConditionMet)
+        assertTrue(evaluation.isAllowanceExhausted)
+        assertEquals(30 * MINUTE, evaluation.usedMillis)
+        assertEquals(30 * MINUTE, evaluation.directAllowanceMillis)
+
+        // Target used 15m (not exhausted), contributor used 10m (unmet)
+        val sessionsNotExhaustedAndUnmet = listOf(
+            session("com.target", 15),
+            session("com.source", 10)
+        )
+        val result2 = evaluate(rule, sessionsNotExhaustedAndUnmet)
+        val evaluation2 = result2.evaluations.single()
+
+        assertFalse(result2.isAllowed)
+        assertFalse(evaluation2.isConditionMet)
+        assertFalse(evaluation2.isAllowanceExhausted)
+    }
+
+    @Test
+    fun guardianGrantRelievesAllowanceExhaustedAndExposesConditionUnmet() {
+        val rule = rule(allowedMinutes = 30).copy(
+            contributorGroupIds = setOf(contributor.id),
+            usageConditionEnabled = true,
+            usageConditionMinutes = 20,
+            earnedAllowanceEnabled = false
+        )
+
+        // Target used 30m (exhausted), contributor used 10m (unmet)
+        val sessions = listOf(
+            session("com.target", 30),
+            session("com.source", 10)
+        )
+
+        // Before grant: exhausted and unmet
+        val before = evaluate(rule, sessions)
+        val beforeEval = before.evaluations.single()
+        assertFalse(before.isAllowed)
+        assertFalse(beforeEval.isConditionMet)
+        assertTrue(beforeEval.isAllowanceExhausted)
+        assertFalse(beforeEval.earnedAllowanceEnabled)
+        assertEquals(30 * MINUTE, beforeEval.usedMillis)
+        assertEquals(0L, beforeEval.guardianAllowanceMillis)
+
+        // Guardian grants 15 minutes extra time
+        val overrides = AppRuleOverrideState(
+            useDayId = USE_DAY,
+            grants = listOf(
+                AppRuleGuardianGrant(
+                    ruleId = rule.id,
+                    useDayId = USE_DAY,
+                    grantedAtMs = now - 5 * MINUTE,
+                    grantedMillis = 15 * MINUTE
+                )
+            )
+        )
+        val after = evaluate(rule, sessions, overrides = overrides)
+        val afterEval = after.evaluations.single()
+
+        // After grant: total allowance is 45m (30 base + 15 grant), used is 30m -> no longer exhausted!
+        // Grant provides usable remaining time (10m remaining out of 15m grant, since 5m was consumed after grant time)
+        assertTrue(after.isAllowed)
+        assertFalse(afterEval.isConditionMet)
+        assertFalse(afterEval.isAllowanceExhausted)
+        assertEquals(15 * MINUTE, afterEval.guardianAllowanceMillis)
+        assertEquals(30 * MINUTE, afterEval.directAllowanceMillis)
+        assertEquals(30 * MINUTE, afterEval.usedMillis)
+        assertEquals(15 * MINUTE, afterEval.allowanceMillis)
+
+        // Verifies the notification immediately exposes the unmet condition shortfall instead of time exhausted
+        val item = LiveRuleNotificationStateCalculator.computeNotificationItems(
+            snapshot = AppRuleSnapshot(listOf(target, contributor), listOf(rule)),
+            sessions = sessions,
+            useDayId = USE_DAY,
+            nowMs = now,
+            zone = zone,
+            overrides = overrides
+        ).single()
+        assertFalse(item.isAllowanceExhausted)
+        val formatted = LiveRuleNotificationFormatter.formatNotificationItem(
+            item = item,
+            unit = "분",
+            totalName = "전체",
+            unknownGroupName = "알 수 없는 앱 그룹"
+        )
+        assertTrue(formatted.contains("(10분/20분)"))
+    }
+
     private fun evaluate(
         rule: AppRule,
         sessions: List<ForegroundSession>,
-        groups: List<AppRuleAppGroup> = listOf(target, contributor)
+        groups: List<AppRuleAppGroup> = listOf(target, contributor),
+        overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): AppRulesEvaluation = AppRuleEvaluator.evaluate(
         snapshot = AppRuleSnapshot(groups, listOf(rule)),
         packageName = "com.target",
         useDayId = USE_DAY,
         sessions = sessions,
         nowMs = now,
-        zone = zone
+        zone = zone,
+        overrides = overrides
     )
 
     private fun rule(

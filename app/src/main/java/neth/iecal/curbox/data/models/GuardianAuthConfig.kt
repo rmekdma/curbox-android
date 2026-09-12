@@ -67,7 +67,11 @@ data class AppRuleGuardianDenial(
     val ruleId: String = "",
     val ruleName: String = "",
     val reason: String = "",
-    val conditionProgresses: List<AppRuleConditionProgress> = emptyList()
+    val conditionProgresses: List<AppRuleConditionProgress> = emptyList(),
+    val isAllowanceExhausted: Boolean = false,
+    val usedMinutes: Long = 0L,
+    val totalAllowedMinutes: Long = 0L,
+    val earnedAllowanceEnabled: Boolean = false
 )
 
 /** Names used by callers that describe the same persisted approval objects. */

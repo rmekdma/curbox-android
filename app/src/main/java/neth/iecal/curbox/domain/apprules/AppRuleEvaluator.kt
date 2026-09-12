@@ -31,8 +31,13 @@ data class AppRuleEvaluation(
     val guardianUsedMillis: Long = 0L,
     val guardianRemainingMillis: Long = 0L,
     val isSkipped: Boolean = false,
-    val conditionProgresses: List<AppRuleConditionProgress> = emptyList()
-)
+    val conditionProgresses: List<AppRuleConditionProgress> = emptyList(),
+    val isAllowanceExhausted: Boolean = false,
+    val earnedAllowanceEnabled: Boolean = false
+) {
+    val effectiveAllowanceMillis: Long
+        get() = if (isConditionMet) allowanceMillis else AppRuleEvaluator.safeAdd(directAllowanceMillis, guardianAllowanceMillis)
+}
 
 data class AppRulesEvaluation(
     val isAllowed: Boolean,
@@ -339,7 +344,9 @@ object AppRuleEvaluator {
                 guardianAllowanceMillis = guardianAllowanceMillis,
                 guardianRemainingMillis = guardianAllowanceMillis,
                 isSkipped = isSkipped,
-                conditionProgresses = conditionProgresses
+                conditionProgresses = conditionProgresses,
+                isAllowanceExhausted = false,
+                earnedAllowanceEnabled = rule.earnedAllowanceEnabled
             )
         }
 
@@ -393,6 +400,12 @@ object AppRuleEvaluator {
             grants = grants
         )
         val remainingMillis = safeAdd(allocation.baseRemainingMillis, allocation.guardianRemainingMillis)
+        val potentialAllowanceMillis = if (hasMissingContributor) {
+            0L
+        } else {
+            safeAdd(safeAdd(directAllowanceMillis, earnedAllowanceMillis), guardianAllowanceMillis)
+        }
+        val isAllowanceExhausted = !isSkipped && !hasMissingContributor && usedMillis >= potentialAllowanceMillis
         return AppRuleEvaluation(
             ruleId = rule.id,
             isApplicable = true,
@@ -412,7 +425,9 @@ object AppRuleEvaluator {
             guardianUsedMillis = allocation.guardianUsedMillis,
             guardianRemainingMillis = allocation.guardianRemainingMillis,
             isSkipped = isSkipped,
-            conditionProgresses = conditionProgresses
+            conditionProgresses = conditionProgresses,
+            isAllowanceExhausted = isAllowanceExhausted,
+            earnedAllowanceEnabled = rule.earnedAllowanceEnabled
         )
     }
 
@@ -704,7 +719,7 @@ object AppRuleEvaluator {
         return AllowanceAllocation(baseRemaining, guardianUsed, guardianRemaining)
     }
 
-    private fun safeAdd(left: Long, right: Long): Long =
+    internal fun safeAdd(left: Long, right: Long): Long =
         if (Long.MAX_VALUE - left < right) Long.MAX_VALUE else left + right
 
     private const val MILLIS_PER_MINUTE = 60_000L

@@ -12,8 +12,10 @@ import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 object GuardianApprovalTextFormatter {
 
     fun formatDenial(context: Context, denial: AppRuleGuardianDenial): CharSequence {
-        val unmetConditions = denial.conditionProgresses.filter { !it.isMet && it.remainingShortfallMillis > 0L }
-        if (unmetConditions.isNotEmpty()) {
+        val unmetConditions = denial.conditionProgresses.filter { it.isUnmetWithShortfall }
+        val showConditionProgress = unmetConditions.isNotEmpty() && (!denial.isAllowanceExhausted || denial.earnedAllowanceEnabled)
+
+        if (showConditionProgress) {
             val reasonTitle = context.getString(R.string.app_rules_lock_reason_condition_not_met)
             val bullet = context.getString(R.string.app_rules_bullet)
 
@@ -38,6 +40,23 @@ object GuardianApprovalTextFormatter {
                 builder.appendBold(shortfallText)
             }
 
+            return builder
+        }
+
+        if (denial.isAllowanceExhausted) {
+            val reasonTitle = context.getString(R.string.app_rules_lock_reason_time_exhausted)
+            val bullet = context.getString(R.string.app_rules_bullet)
+            val usageAllowanceText = context.getString(
+                R.string.app_rules_time_usage_allowance_format,
+                denial.usedMinutes,
+                denial.totalAllowedMinutes
+            )
+
+            val builder = SpannableStringBuilder()
+            builder.appendBold(denial.ruleName).append("\n")
+            builder.appendBold(reasonTitle)
+            builder.append("\n").append(bullet).append(" ")
+            builder.appendBold(usageAllowanceText)
             return builder
         }
 

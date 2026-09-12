@@ -1415,6 +1415,9 @@
     <string name="app_rules_unknown_contributor_group">Unknown app group (check rule settings)</string>
     <string name="app_rules_shortfall_minutes">%1$d min needed</string>
     <string name="app_rules_lock_reason_condition_not_met">Usage condition not met</string>
+    <string name="app_rules_lock_reason_time_exhausted">Available time exhausted</string>
+    <string name="app_rules_time_usage_allowance_format">%1$dm/%2$dm</string>
+    <string name="app_rules_notification_time_exhausted">[%1$s] Time exhausted: %2$dm/%3$dm</string>
     <string name="guardian_approval_title">Guardian approval</string>
     <string name="guardian_approval_message">Choose one rule to approve. Other rules will still be checked.</string>
     <string name="guardian_denial_row">%1$s

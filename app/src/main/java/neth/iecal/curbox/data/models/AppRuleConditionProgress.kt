@@ -17,6 +17,9 @@ data class AppRuleConditionProgress(
     val shortfallMinutes: Long
         get() = if (remainingShortfallMillis <= 0L) 0L else (remainingShortfallMillis + 59_999L) / 60_000L
 
+    val isUnmetWithShortfall: Boolean
+        get() = !isMet && remainingShortfallMillis > 0L
+
     companion object {
         const val CONDITION_ID_TOTAL = "total"
     }
