@@ -70,6 +70,7 @@ class AppRuleBlocker {
     private val handler = Handler(Looper.getMainLooper())
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var notificationTickJob: kotlinx.coroutines.Job? = null
+    private var liveNotificationJob: kotlinx.coroutines.Job? = null
     private var lastShownAt = 0L
     @Volatile private var launchablePackages: Set<String> = emptySet()
     @Volatile private var essentialPackages: Set<String> = emptySet()
@@ -183,8 +184,11 @@ class AppRuleBlocker {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val packageName = event.packageName?.toString().orEmpty()
         if (packageName.isBlank()) return
+        val packageChanged = packageName != currentForegroundPackage
         currentForegroundPackage = packageName
-        updateLiveNotification(packageName)
+        if (packageChanged) {
+            updateLiveNotification(packageName)
+        }
 
         val evaluationEssentialPackages = readEssentialPackagesForEvaluation()
         if (packageName in evaluationEssentialPackages) return
@@ -254,7 +258,8 @@ class AppRuleBlocker {
 
     fun updateLiveNotification(foregroundPackage: String? = null) {
         if (!setupReady || !::service.isInitialized) return
-        scope.launch(Dispatchers.IO) {
+        liveNotificationJob?.cancel()
+        liveNotificationJob = scope.launch(Dispatchers.IO) {
             try {
                 val currentSnapshot = snapshot.snapshot()
                 val now = System.currentTimeMillis()
@@ -302,6 +307,9 @@ class AppRuleBlocker {
                         } else {
                             emptySet()
                         }
+                    },
+                    titleFormatter = { ruleName ->
+                        LiveRuleNotificationFormatter.formatNotificationTitle(service, ruleName)
                     }
                 )
 
@@ -363,6 +371,7 @@ class AppRuleBlocker {
     fun onDestroy() {
         settingsJob?.cancel()
         notificationTickJob?.cancel()
+        liveNotificationJob?.cancel()
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)

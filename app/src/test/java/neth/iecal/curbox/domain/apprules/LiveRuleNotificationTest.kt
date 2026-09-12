@@ -241,7 +241,7 @@ class LiveRuleNotificationTest {
             formatter = { formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) }
         )
 
-        assertEquals("Curbox", model.title)
+        assertEquals("Curbox • 소셜", model.title)
         assertEquals("[소셜] 15분 사용 / 60분 허용", model.collapsedText)
         assertEquals(1, model.expandedLines.size)
         assertEquals("[소셜] 15분 사용 / 60분 허용", model.expandedText)
@@ -273,6 +273,7 @@ class LiveRuleNotificationTest {
             defaultText = "Default",
             formatter = { formatRuleStatusKorean(it.ruleName, it.usedMinutes, it.totalAllowedMinutes, it.guardianExtraMinutes) }
         )
+        assertEquals("Curbox • 소셜", modelDefault.title)
         assertEquals("[소셜] 15분 사용 / 60분 허용", modelDefault.collapsedText)
         assertEquals(2, modelDefault.expandedLines.size)
         assertEquals(
@@ -281,7 +282,7 @@ class LiveRuleNotificationTest {
         )
         assertTrue(modelDefault.hasMultipleRules)
 
-        // With foreground package mapping to rule-2: collapsed shows rule-2
+        // With foreground package mapping to rule-2: foreground rule prioritizes to top
         val modelForeground = LiveRuleNotificationStateCalculator.buildNotificationModel(
             items = items,
             defaultTitle = "Curbox",
@@ -290,10 +291,11 @@ class LiveRuleNotificationTest {
             foregroundPackage = "com.game.app",
             rulePackageResolver = { ruleId -> if (ruleId == "rule-2") setOf("com.game.app") else emptySet() }
         )
+        assertEquals("Curbox • 게임", modelForeground.title)
         assertEquals("[게임] 25분 사용 / 40분 허용 (추가 10분 포함)", modelForeground.collapsedText)
         assertEquals(2, modelForeground.expandedLines.size)
         assertEquals(
-            "[소셜] 15분 사용 / 60분 허용\n[게임] 25분 사용 / 40분 허용 (추가 10분 포함)",
+            "[게임] 25분 사용 / 40분 허용 (추가 10분 포함)\n[소셜] 15분 사용 / 60분 허용",
             modelForeground.expandedText
         )
     }
@@ -599,6 +601,177 @@ class LiveRuleNotificationTest {
         // Formatted with Korean helper: shows time exhausted, not condition shortfall
         val formatted = formatNotificationItemKorean(item)
         assertEquals("[Social Limits] 시간 소진: 30분/30분", formatted)
+    }
+
+    @Test
+    fun computeNotificationItemsExcludesRulesOutsideScheduleWindow() {
+        val group1 = AppRuleAppGroup.create("Social", listOf("com.social.app"))
+        val group2 = AppRuleAppGroup.create("Games", listOf("com.game.app"))
+
+        // now is 2026-08-17 10:00:00 UTC -> Monday (1), minute 600 (10:00)
+        val activeRule = AppRule(
+            id = "rule-active",
+            name = "Social Active Window",
+            weekdays = setOf(1),
+            startMinute = 9 * 60, // 09:00
+            endMinute = 12 * 60,  // 12:00
+            scope = AppRuleScope.forGroup(group1.id),
+            allowedMinutes = 60L
+        )
+
+        val inactiveRule = AppRule(
+            id = "rule-inactive",
+            name = "Games Inactive Window",
+            weekdays = setOf(1),
+            startMinute = 14 * 60, // 14:00
+            endMinute = 18 * 60,  // 18:00
+            scope = AppRuleScope.forGroup(group2.id),
+            allowedMinutes = 60L
+        )
+
+        val snapshot = AppRuleSnapshot(listOf(group1, group2), listOf(activeRule, inactiveRule))
+
+        val items = LiveRuleNotificationStateCalculator.computeNotificationItems(
+            snapshot = snapshot,
+            sessions = emptyList(),
+            useDayId = useDayId,
+            nowMs = now,
+            zone = zone
+        )
+
+        assertEquals(1, items.size)
+        assertEquals("rule-active", items.first().ruleId)
+    }
+
+    @Test
+    fun buildNotificationModelSortsByFourTierPriorityAndUpdatesTitleAndCollapsedText() {
+        val itemOtherAllowed = LiveRuleNotificationItem(
+            ruleId = "other-allowed",
+            ruleName = "동영상",
+            usedMinutes = 10,
+            totalAllowedMinutes = 60,
+            guardianExtraMinutes = 0,
+            isAllowed = true,
+            targetPackages = setOf("com.video.app")
+        )
+        val itemFgBlocked = LiveRuleNotificationItem(
+            ruleId = "fg-blocked",
+            ruleName = "소셜 제한",
+            usedMinutes = 60,
+            totalAllowedMinutes = 60,
+            guardianExtraMinutes = 0,
+            isAllowed = false,
+            isAllowanceExhausted = true,
+            targetPackages = setOf("com.social.app")
+        )
+        val itemFgAllowed = LiveRuleNotificationItem(
+            ruleId = "fg-allowed",
+            ruleName = "소셜 허용",
+            usedMinutes = 10,
+            totalAllowedMinutes = 60,
+            guardianExtraMinutes = 0,
+            isAllowed = true,
+            targetPackages = setOf("com.social.app")
+        )
+        val itemOtherBlocked1 = LiveRuleNotificationItem(
+            ruleId = "other-blocked-1",
+            ruleName = "게임 제한 1",
+            usedMinutes = 30,
+            totalAllowedMinutes = 30,
+            guardianExtraMinutes = 0,
+            isAllowed = false,
+            isAllowanceExhausted = true,
+            targetPackages = setOf("com.game1.app")
+        )
+        val itemOtherBlocked2 = LiveRuleNotificationItem(
+            ruleId = "other-blocked-2",
+            ruleName = "게임 제한 2",
+            usedMinutes = 30,
+            totalAllowedMinutes = 30,
+            guardianExtraMinutes = 0,
+            isAllowed = false,
+            isAllowanceExhausted = true,
+            targetPackages = setOf("com.game2.app")
+        )
+
+        val items = listOf(
+            itemOtherAllowed,
+            itemFgBlocked,
+            itemFgAllowed,
+            itemOtherBlocked1,
+            itemOtherBlocked2
+        )
+
+        val formatter: (LiveRuleNotificationItem) -> String = { formatNotificationItemKorean(it) }
+
+        // Scenario 1: com.social.app in foreground
+        // Tier 1: itemFgBlocked
+        // Tier 2: itemFgAllowed
+        // Tier 3: itemOtherBlocked1, itemOtherBlocked2 (preserves original order)
+        // Tier 4: itemOtherAllowed
+        val modelFg = LiveRuleNotificationStateCalculator.buildNotificationModel(
+            items = items,
+            defaultTitle = "Curbox is active",
+            defaultText = "Default",
+            formatter = formatter,
+            foregroundPackage = "com.social.app"
+        )
+
+        assertEquals("Curbox • 소셜 제한", modelFg.title)
+        assertEquals(formatNotificationItemKorean(itemFgBlocked), modelFg.collapsedText)
+        assertEquals(5, modelFg.expandedLines.size)
+        assertEquals(
+            listOf(itemFgBlocked, itemFgAllowed, itemOtherBlocked1, itemOtherBlocked2, itemOtherAllowed).map(formatter),
+            modelFg.expandedLines
+        )
+
+        // Scenario 2: Home screen or untracked package in foreground
+        // No FG match -> Tier 1 and 2 empty.
+        // Tier 3 (Other blocked): itemFgBlocked, itemOtherBlocked1, itemOtherBlocked2
+        // Tier 4 (Other allowed): itemOtherAllowed, itemFgAllowed
+        val modelHome = LiveRuleNotificationStateCalculator.buildNotificationModel(
+            items = items,
+            defaultTitle = "Curbox is active",
+            defaultText = "Default",
+            formatter = formatter,
+            foregroundPackage = "com.launcher.app"
+        )
+
+        // Tier 3 first element is itemFgBlocked (preserves snapshot order among Tier 3)
+        assertEquals("Curbox • 소셜 제한", modelHome.title)
+        assertEquals(formatNotificationItemKorean(itemFgBlocked), modelHome.collapsedText)
+        assertEquals(
+            listOf(itemFgBlocked, itemOtherBlocked1, itemOtherBlocked2, itemOtherAllowed, itemFgAllowed).map(formatter),
+            modelHome.expandedLines
+        )
+
+        // Scenario 3: Untracked foreground where only other-blocked-1 is blocked
+        val itemsOnlyOtherBlocked = listOf(itemOtherAllowed, itemFgAllowed, itemOtherBlocked1)
+        val modelNoFgRule = LiveRuleNotificationStateCalculator.buildNotificationModel(
+            items = itemsOnlyOtherBlocked,
+            defaultTitle = "Curbox is active",
+            defaultText = "Default",
+            formatter = formatter,
+            foregroundPackage = "com.untracked.app"
+        )
+        // 1순위 규칙은 Tier 3인 itemOtherBlocked1
+        assertEquals("Curbox • 게임 제한 1", modelNoFgRule.title)
+        assertEquals(formatNotificationItemKorean(itemOtherBlocked1), modelNoFgRule.collapsedText)
+    }
+
+    @Test
+    fun formatNotificationTitleFormatsCorrectlyWithoutHyphensOrDashes() {
+        val title = LiveRuleNotificationFormatter.formatNotificationTitle("Social Limits")
+        assertEquals("Curbox • Social Limits", title)
+        assertFalse(title.contains("-"))
+        assertFalse(title.contains("–"))
+        assertFalse(title.contains("—"))
+
+        val titleKo = LiveRuleNotificationFormatter.formatNotificationTitle("소셜")
+        assertEquals("Curbox • 소셜", titleKo)
+        assertFalse(titleKo.contains("-"))
+        assertFalse(titleKo.contains("–"))
+        assertFalse(titleKo.contains("—"))
     }
 }
 

@@ -5,6 +5,14 @@ import neth.iecal.curbox.R
 
 object LiveRuleNotificationFormatter {
 
+    fun formatNotificationTitle(ruleName: String, prefix: String = "Curbox"): String {
+        return "$prefix • $ruleName"
+    }
+
+    fun formatNotificationTitle(context: Context, ruleName: String): String {
+        return context.getString(R.string.app_rules_notification_title, ruleName)
+    }
+
     fun formatConditionProgress(currentMinutes: Long, requiredMinutes: Long, unit: String = "m"): String {
         return "($currentMinutes$unit/$requiredMinutes$unit)"
     }

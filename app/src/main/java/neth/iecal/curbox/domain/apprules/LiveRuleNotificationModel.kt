@@ -10,7 +10,9 @@ data class LiveRuleNotificationItem(
     val guardianExtraMinutes: Long,
     val conditionProgresses: List<AppRuleConditionProgress> = emptyList(),
     val isAllowanceExhausted: Boolean = false,
-    val earnedAllowanceEnabled: Boolean = false
+    val earnedAllowanceEnabled: Boolean = false,
+    val isAllowed: Boolean = true,
+    val targetPackages: Set<String> = emptySet()
 )
 
 data class LiveRuleNotificationModel(
