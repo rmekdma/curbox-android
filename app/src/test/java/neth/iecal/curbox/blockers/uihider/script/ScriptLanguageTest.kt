@@ -39,7 +39,7 @@ class ScriptLanguageTest {
         }
     }
 
-    private fun run(source: String, budget: Budget = Budget()): StubApi {
+    private fun run(source: String, budget: Budget = Budget(timeBudgetMs = 400L)): StubApi {
         val api = StubApi(budget)
         Interpreter(api, budget).run(Parser.parse(source))
         return api
@@ -116,7 +116,7 @@ class ScriptLanguageTest {
 
     @Test fun infiniteLoopIsBudgetAborted() {
         try {
-            run("while true { }")
+            run("while true { }", Budget())
             fail("expected budget to abort the run")
         } catch (e: ScriptError) {
             assertTrue(e.message!!.contains("budget"))

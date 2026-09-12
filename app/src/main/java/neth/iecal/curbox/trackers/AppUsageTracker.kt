@@ -970,6 +970,7 @@ class AppUsageTracker {
         return try {
             root.packageName?.toString().orEmpty()
         } finally {
+            @Suppress("DEPRECATION")
             root.recycle()
         }
     }
