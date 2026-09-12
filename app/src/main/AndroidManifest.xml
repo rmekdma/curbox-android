@@ -145,6 +145,8 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="neth.iecal.curbox.action.APPLY_TEST_APP_RULES" />
+                <action android:name="neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES" />
             </intent-filter>
         </receiver>
 

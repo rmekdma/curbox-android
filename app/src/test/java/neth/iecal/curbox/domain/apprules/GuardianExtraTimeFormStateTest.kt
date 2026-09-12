@@ -189,4 +189,32 @@ class GuardianExtraTimeFormStateTest {
         assertEquals(0L, state.currentTotalMinutes)
         assertEquals("0", state.currentTotalDisplay)
     }
+
+    @Test
+    fun zeroInitialTotalAllowsEnteringAdditionalAndTotalMinutes() {
+        val state = GuardianExtraTimeFormState.initial(currentTotalMinutes = 0L)
+
+        assertEquals(0L, state.currentTotalMinutes)
+        assertEquals("0", state.currentTotalDisplay)
+
+        // Adding 15 minutes additional from 0
+        val withAdditional = state.editAdditionalMinutes("15")
+        assertEquals("15", withAdditional.additionalMinutesText)
+        assertEquals("15", withAdditional.totalMinutesText)
+        assertEquals(15L, withAdditional.previewTotalMinutes)
+        assertEquals(
+            GuardianExtraTimeSubmission.Valid(additionalMinutes = 15L, totalMinutes = 15L),
+            withAdditional.submit()
+        )
+
+        // Setting total to 20 from 0
+        val withTotal = state.editTotalMinutes("20")
+        assertEquals("20", withTotal.totalMinutesText)
+        assertEquals("20", withTotal.additionalMinutesText)
+        assertEquals(20L, withTotal.previewTotalMinutes)
+        assertEquals(
+            GuardianExtraTimeSubmission.Valid(additionalMinutes = 20L, totalMinutes = 20L),
+            withTotal.submit()
+        )
+    }
 }
