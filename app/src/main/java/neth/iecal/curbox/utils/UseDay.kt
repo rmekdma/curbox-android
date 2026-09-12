@@ -39,6 +39,12 @@ interface UseDayCalculator {
 
     /** The returned range is inclusive at the start and exclusive at the end. */
     fun windowFor(useDayId: String): LongRange
+
+    /** Returns the millisecond of the next use-day reset boundary strictly after [nowMs]. */
+    fun nextResetBoundaryAfter(nowMs: Long): Long {
+        val currentWindow = windowFor(idAt(nowMs))
+        return if (currentWindow.last < Long.MAX_VALUE) currentWindow.last + 1L else Long.MAX_VALUE
+    }
 }
 
 class ConfigurableUseDayCalculator(
