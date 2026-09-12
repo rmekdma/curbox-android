@@ -31,14 +31,8 @@ object LiveRuleNotificationFormatter {
         val unmetConditions = conditions.filter { it.isUnmetWithShortfall }
         if (unmetConditions.isEmpty()) return ""
         return unmetConditions.joinToString(", ") { condition ->
-            val name = when {
-                condition.isTotalCondition -> totalName
-                condition.conditionName.isBlank() -> unknownGroupName
-                else -> condition.conditionName
-            }
-            val curM = condition.currentMillis / 60_000L
-            val reqM = condition.requiredMillis / 60_000L
-            val progress = formatConditionProgress(curM, reqM, unit)
+            val name = condition.resolveDisplayName(totalName, unknownGroupName)
+            val progress = formatConditionProgress(condition.currentMinutes, condition.requiredMinutes, unit)
             "$name $progress"
         }
     }
@@ -52,14 +46,12 @@ object LiveRuleNotificationFormatter {
         val unmetConditions = conditions.filter { it.isUnmetWithShortfall }
         if (unmetConditions.isEmpty()) return ""
         return unmetConditions.joinToString(", ") { condition ->
-            val name = when {
-                condition.isTotalCondition -> totalName
-                condition.conditionName.isBlank() -> unknownGroupName
-                else -> condition.conditionName
-            }
-            val curM = condition.currentMillis / 60_000L
-            val reqM = condition.requiredMillis / 60_000L
-            val progress = context.getString(R.string.app_rules_condition_progress_format, curM, reqM)
+            val name = condition.resolveDisplayName(totalName, unknownGroupName)
+            val progress = context.getString(
+                R.string.app_rules_condition_progress_format,
+                condition.currentMinutes,
+                condition.requiredMinutes
+            )
             "$name $progress"
         }
     }

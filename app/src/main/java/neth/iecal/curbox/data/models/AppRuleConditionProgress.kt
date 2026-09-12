@@ -26,6 +26,15 @@ data class AppRuleConditionProgress(
     val isUnmetWithShortfall: Boolean
         get() = !isMet && remainingShortfallMillis > 0L
 
+    fun resolveDisplayName(
+        totalName: String,
+        unknownGroupName: String
+    ): String = when {
+        isTotalCondition -> totalName
+        conditionName.isBlank() -> unknownGroupName
+        else -> conditionName
+    }
+
     companion object {
         const val CONDITION_ID_TOTAL = "total"
 

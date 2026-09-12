@@ -28,11 +28,10 @@ object GuardianApprovalTextFormatter {
             builder.appendBold(reasonTitle)
 
             unmetConditions.forEach { condition: AppRuleConditionProgress ->
-                val conditionName = when {
-                    condition.isTotalCondition -> context.getString(R.string.app_rules_condition_total_short_name)
-                    condition.conditionName.isBlank() -> context.getString(R.string.app_rules_unknown_contributor_group)
-                    else -> condition.conditionName
-                }
+                val conditionName = condition.resolveDisplayName(
+                    totalName = context.getString(R.string.app_rules_condition_total_short_name),
+                    unknownGroupName = context.getString(R.string.app_rules_unknown_contributor_group)
+                )
                 val progressText = context.getString(
                     R.string.app_rules_time_usage_allowance_format,
                     condition.currentMinutes,
