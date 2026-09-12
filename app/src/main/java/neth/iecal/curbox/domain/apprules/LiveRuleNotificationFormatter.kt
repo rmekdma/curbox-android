@@ -5,8 +5,12 @@ import neth.iecal.curbox.R
 
 object LiveRuleNotificationFormatter {
 
-    fun formatNotificationTitle(ruleName: String, prefix: String = "Curbox"): String {
-        return "$prefix • $ruleName"
+    fun formatNotificationTitle(
+        ruleName: String,
+        prefix: String = "Curbox",
+        template: String = "%1\$s • %2\$s"
+    ): String {
+        return String.format(template, prefix, ruleName)
     }
 
     fun formatNotificationTitle(context: Context, ruleName: String): String {

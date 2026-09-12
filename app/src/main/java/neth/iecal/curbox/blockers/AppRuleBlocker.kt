@@ -286,7 +286,6 @@ class AppRuleBlocker {
                     essentialExcludedPackages = evaluationEssentialPackages,
                     overrides = overrideState
                 )
-                val membershipResolver = AppRuleMembershipResolver(currentSnapshot)
                 val model = LiveRuleNotificationStateCalculator.buildNotificationModel(
                     items = items,
                     defaultTitle = defaultTitle,
@@ -295,19 +294,6 @@ class AppRuleBlocker {
                         LiveRuleNotificationFormatter.formatNotificationItem(service, item)
                     },
                     foregroundPackage = foregroundPackage ?: currentForegroundPackage,
-                    rulePackageResolver = { ruleId ->
-                        val rule = currentSnapshot.appRules.find { it.id == ruleId }
-                        if (rule != null) {
-                            membershipResolver.targetPackagesAt(
-                                rule = rule,
-                                atMs = now,
-                                launchablePackages = launchablePackages,
-                                essentialExcludedPackages = evaluationEssentialPackages
-                            )
-                        } else {
-                            emptySet()
-                        }
-                    },
                     titleFormatter = { ruleName ->
                         LiveRuleNotificationFormatter.formatNotificationTitle(service, ruleName)
                     }

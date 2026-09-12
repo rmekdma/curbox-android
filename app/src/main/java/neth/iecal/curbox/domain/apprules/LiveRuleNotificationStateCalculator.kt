@@ -92,10 +92,8 @@ object LiveRuleNotificationStateCalculator {
         // (4) Other app allowed
         // Stable sort preserves original snapshot order within the same tier.
         val sortedItems = items.sortedBy { item ->
-            val isForeground = !foregroundPackage.isNullOrBlank() && (
-                rulePackageResolver?.invoke(item.ruleId)?.contains(foregroundPackage) == true ||
-                item.targetPackages.contains(foregroundPackage)
-            )
+            val targets = rulePackageResolver?.invoke(item.ruleId) ?: item.targetPackages
+            val isForeground = !foregroundPackage.isNullOrBlank() && targets.contains(foregroundPackage)
             val isBlocked = !item.isAllowed
             when {
                 isForeground && isBlocked -> 1
