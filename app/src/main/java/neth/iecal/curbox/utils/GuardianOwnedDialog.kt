@@ -11,18 +11,26 @@ import kotlinx.coroutines.launch
  * the ownership marker, including cancel, outside/back dismissal, and a failure while showing.
  */
 object GuardianOwnedDialog {
-    fun <T : Dialog> show(dialog: T): T {
+    fun <T : Dialog> show(
+        dialog: T,
+        onCancel: (() -> Unit)? = null,
+        onDismiss: (() -> Unit)? = null
+    ): T {
         GuardianSessionRegistry.markOwnedDialogShown()
         var released = false
         fun release() {
             if (!released) {
                 released = true
                 GuardianSessionRegistry.markOwnedDialogHidden()
+                onDismiss?.invoke()
             }
         }
 
         try {
-            dialog.setOnCancelListener { release() }
+            dialog.setOnCancelListener {
+                onCancel?.invoke()
+                release()
+            }
             dialog.setOnDismissListener { release() }
             dialog.show()
         } catch (error: Throwable) {
