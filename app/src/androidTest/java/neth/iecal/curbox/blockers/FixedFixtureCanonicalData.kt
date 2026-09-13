@@ -69,32 +69,6 @@ data class FixedFixtureMetadata(
     val exclusionTotals: Map<String, Int>
 )
 
-data class EvidenceManifest(
-    val manifestSchemaVersion: String,
-    val canonicalizationVersion: String,
-    val runId: String,
-    val pseudonymousDeviceId: String,
-    val sourceCommit: String,
-    val harnessCommit: String,
-    val protocolRevision: String,
-    val appVersion: String,
-    val applicationId: String,
-    val variant: String,
-    val targetApkFile: String,
-    val targetApkBytes: Long,
-    val targetApkSha256: String,
-    val instrumentationApkFile: String,
-    val instrumentationApkBytes: Long,
-    val instrumentationApkSha256: String,
-    val samplesJsonlBytes: Long,
-    val samplesJsonlSha256: String,
-    val metadataJsonBytes: Long,
-    val metadataJsonSha256: String,
-    val deviceStagingDeleted: Boolean,
-    val evidenceCommitParent: String,
-    val notes: String
-)
-
 data class DeviceDigests(
     val samplesJsonlBytes: Long,
     val samplesJsonlSha256: String,
@@ -210,40 +184,6 @@ fun serializeCanonicalDeviceDigests(digests: DeviceDigests): ByteArray {
     writer.name("samplesJsonlSha256").value(digests.samplesJsonlSha256)
     writer.name("metadataJsonBytes").value(digests.metadataJsonBytes)
     writer.name("metadataJsonSha256").value(digests.metadataJsonSha256)
-    writer.endObject()
-    writer.flush()
-    baos.write('\n'.code)
-    return baos.toByteArray()
-}
-
-fun serializeCanonicalEvidenceManifest(manifest: EvidenceManifest): ByteArray {
-    val baos = ByteArrayOutputStream()
-    val writer = JsonWriter(OutputStreamWriter(baos, StandardCharsets.UTF_8))
-    writer.setIndent("")
-    writer.beginObject()
-    writer.name("manifestSchemaVersion").value(manifest.manifestSchemaVersion)
-    writer.name("canonicalizationVersion").value(manifest.canonicalizationVersion)
-    writer.name("runId").value(manifest.runId)
-    writer.name("pseudonymousDeviceId").value(manifest.pseudonymousDeviceId)
-    writer.name("sourceCommit").value(manifest.sourceCommit)
-    writer.name("harnessCommit").value(manifest.harnessCommit)
-    writer.name("protocolRevision").value(manifest.protocolRevision)
-    writer.name("appVersion").value(manifest.appVersion)
-    writer.name("applicationId").value(manifest.applicationId)
-    writer.name("variant").value(manifest.variant)
-    writer.name("targetApkFile").value(manifest.targetApkFile)
-    writer.name("targetApkBytes").value(manifest.targetApkBytes)
-    writer.name("targetApkSha256").value(manifest.targetApkSha256)
-    writer.name("instrumentationApkFile").value(manifest.instrumentationApkFile)
-    writer.name("instrumentationApkBytes").value(manifest.instrumentationApkBytes)
-    writer.name("instrumentationApkSha256").value(manifest.instrumentationApkSha256)
-    writer.name("samplesJsonlBytes").value(manifest.samplesJsonlBytes)
-    writer.name("samplesJsonlSha256").value(manifest.samplesJsonlSha256)
-    writer.name("metadataJsonBytes").value(manifest.metadataJsonBytes)
-    writer.name("metadataJsonSha256").value(manifest.metadataJsonSha256)
-    writer.name("deviceStagingDeleted").value(manifest.deviceStagingDeleted)
-    writer.name("evidenceCommitParent").value(manifest.evidenceCommitParent)
-    writer.name("notes").value(manifest.notes)
     writer.endObject()
     writer.flush()
     baos.write('\n'.code)
