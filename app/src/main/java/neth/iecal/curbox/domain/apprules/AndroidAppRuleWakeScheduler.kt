@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import neth.iecal.curbox.CrashLogger
 
 /**
  * Abstraction for platform AlarmManager operations to enable deterministic unit testing.
@@ -22,10 +23,9 @@ interface AlarmPublisher {
 
 /**
  * Production implementation of [AppRuleWakeScheduler] using platform [AlarmManager],
- * monotonic delay conversion, and a capped 20-second [Handler] fallback.
+ * monotonic delay conversion, and a capped 20-second [Handler] fallback and recovery mechanism.
  */
 class AndroidAppRuleWakeScheduler internal constructor(
-    private val context: Context,
     private val alarmPublisher: AlarmPublisher,
     private val handlerPostDelayed: (Runnable, Long) -> Boolean,
     private val handlerRemoveCallbacks: (Runnable) -> Unit,
@@ -33,6 +33,8 @@ class AndroidAppRuleWakeScheduler internal constructor(
     private val elapsedRealtimeMs: () -> Long,
     private val pendingIntentFactory: (key: String, token: Long) -> PendingIntent,
     private val cancelPendingIntent: (PendingIntent) -> Unit,
+    private val registerReceiver: (BroadcastReceiver, IntentFilter) -> Unit = { _, _ -> },
+    private val unregisterReceiver: (BroadcastReceiver) -> Unit = { _ -> },
     private val onNonFatalError: (Throwable) -> Unit,
     override var onWake: ((key: String, token: Long) -> Unit)? = null
 ) : AppRuleWakeScheduler {
@@ -50,10 +52,13 @@ class AndroidAppRuleWakeScheduler internal constructor(
         handler: Handler = Handler(Looper.getMainLooper()),
         wallClockMs: () -> Long = { System.currentTimeMillis() },
         elapsedRealtimeMs: () -> Long = { SystemClock.elapsedRealtime() },
-        onNonFatalError: (Throwable) -> Unit = { },
+        onNonFatalError: (Throwable) -> Unit = { error ->
+            CrashLogger(context).logNonFatalError(
+                if (error is Exception) error else Exception(error)
+            )
+        },
         onWake: ((key: String, token: Long) -> Unit)? = null
     ) : this(
-        context = context,
         alarmPublisher = SystemAlarmPublisher(alarmManager),
         handlerPostDelayed = { runnable, delay -> handler.postDelayed(runnable, delay) },
         handlerRemoveCallbacks = { runnable -> handler.removeCallbacks(runnable) },
@@ -76,8 +81,20 @@ class AndroidAppRuleWakeScheduler internal constructor(
         cancelPendingIntent = { pendingIntent ->
             try {
                 pendingIntent.cancel()
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
+                onNonFatalError(t)
             }
+        },
+        registerReceiver = { receiver, filter ->
+            ContextCompat.registerReceiver(
+                context,
+                receiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        },
+        unregisterReceiver = { receiver ->
+            context.unregisterReceiver(receiver)
         },
         onNonFatalError = onNonFatalError,
         onWake = onWake
@@ -102,161 +119,175 @@ class AndroidAppRuleWakeScheduler internal constructor(
     private class ActiveRegistration(
         val token: Long,
         val pendingIntent: PendingIntent,
-        val handlerRunnable: Runnable
+        val handlerRunnable: Runnable?,
+        val alarmScheduled: Boolean
     )
 
     private val lock = Any()
     private val registrations = mutableMapOf<String, ActiveRegistration>()
     @Volatile private var isReceiverRegistered = false
 
-    val receiver: BroadcastReceiver = object : BroadcastReceiver() {
+    internal val receiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             onAlarmReceived(intent)
         }
     }
 
-    fun registerReceiver() {
-        synchronized(lock) {
-            if (isReceiverRegistered) return
-            try {
-                ContextCompat.registerReceiver(
-                    context,
-                    receiver,
-                    IntentFilter(ACTION_APP_RULE_WAKE),
-                    ContextCompat.RECEIVER_NOT_EXPORTED
-                )
-                isReceiverRegistered = true
-            } catch (t: Throwable) {
-                onNonFatalError(t)
-            }
+    private fun ensureReceiverRegistered() {
+        if (isReceiverRegistered) return
+        try {
+            registerReceiver(receiver, IntentFilter(ACTION_APP_RULE_WAKE))
+            isReceiverRegistered = true
+        } catch (t: Throwable) {
+            onNonFatalError(t)
         }
     }
 
-    fun unregisterReceiver() {
-        synchronized(lock) {
-            if (!isReceiverRegistered) return
-            try {
-                context.unregisterReceiver(receiver)
-            } catch (t: Throwable) {
-                onNonFatalError(t)
-            } finally {
-                isReceiverRegistered = false
-            }
+    private fun unregisterReceiverIfNeeded() {
+        if (!isReceiverRegistered) return
+        try {
+            unregisterReceiver(receiver)
+        } catch (t: Throwable) {
+            onNonFatalError(t)
+        } finally {
+            isReceiverRegistered = false
         }
     }
 
     override fun schedule(key: String, dueAtWallClockMs: Long, token: Long) {
-        val (oldRegistration, newPendingIntent, newRunnable, triggerAtElapsedMs, handlerDelayMs) = synchronized(lock) {
-            val old = registrations.remove(key)
+        val currentWall = wallClockMs()
+        val currentElapsed = elapsedRealtimeMs()
+        val remainingDelayMs = AppRuleWallClockScheduler.delayUntil(
+            dueAtWallClockMs = dueAtWallClockMs,
+            nowWallClockMs = currentWall,
+            nowElapsedRealtimeMs = currentElapsed
+        )
+        val triggerAtElapsed = currentElapsed + remainingDelayMs
+        val pendingIntent = pendingIntentFactory(key, token)
 
-            val currentWall = wallClockMs()
-            val currentElapsed = elapsedRealtimeMs()
-            val remainingDelayMs = AppRuleWallClockScheduler.delayUntil(
-                dueAtWallClockMs = dueAtWallClockMs,
-                nowWallClockMs = currentWall,
-                nowElapsedRealtimeMs = currentElapsed
-            )
-            val triggerAtElapsed = currentElapsed + remainingDelayMs
-            val handlerDelay = minOf(remainingDelayMs, MAX_HANDLER_DELAY_MS).coerceAtLeast(0L)
-
-            val pendingIntent = pendingIntentFactory(key, token)
-            val runnable = Runnable {
-                handleWake(key, token)
-            }
-
-            registrations[key] = ActiveRegistration(
-                token = token,
-                pendingIntent = pendingIntent,
-                handlerRunnable = runnable
-            )
-
-            ScheduleBundle(old, pendingIntent, runnable, triggerAtElapsed, handlerDelay)
-        }
-
-        // Clean up previous registration outside the lock
-        oldRegistration?.let { old ->
-            cancelAlarmInternal(old.pendingIntent)
-            handlerRemoveCallbacks(old.handlerRunnable)
-        }
-
-        // Post handler capped to MAX_HANDLER_DELAY_MS
-        handlerPostDelayed(newRunnable, handlerDelayMs)
-
-        // Schedule AlarmManager via AlarmPublisher
+        var alarmPublished = false
         try {
             alarmPublisher.setExactAndAllowWhileIdle(
                 AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                triggerAtElapsedMs,
-                newPendingIntent
+                triggerAtElapsed,
+                pendingIntent
             )
+            alarmPublished = true
         } catch (_: SecurityException) {
             try {
                 alarmPublisher.setAndAllowWhileIdle(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    triggerAtElapsedMs,
-                    newPendingIntent
+                    triggerAtElapsed,
+                    pendingIntent
                 )
+                alarmPublished = true
             } catch (t: Throwable) {
                 onNonFatalError(t)
             }
         } catch (t: Throwable) {
             onNonFatalError(t)
         }
+
+        val handlerRunnable: Runnable?
+        val handlerDelayMs: Long?
+        if (alarmPublished) {
+            if (remainingDelayMs <= MAX_HANDLER_DELAY_MS) {
+                handlerRunnable = Runnable { handleWake(key, token) }
+                handlerDelayMs = remainingDelayMs.coerceAtLeast(0L)
+            } else {
+                handlerRunnable = null
+                handlerDelayMs = null
+            }
+        } else {
+            // AlarmManager unavailable or failed: fall back to handler with 20s recovery cap
+            handlerRunnable = Runnable { handleWake(key, token) }
+            handlerDelayMs = minOf(remainingDelayMs, MAX_HANDLER_DELAY_MS).coerceAtLeast(0L)
+        }
+
+        val oldRegistration = synchronized(lock) {
+            ensureReceiverRegistered()
+            val old = registrations.remove(key)
+            registrations[key] = ActiveRegistration(
+                token = token,
+                pendingIntent = pendingIntent,
+                handlerRunnable = handlerRunnable,
+                alarmScheduled = alarmPublished
+            )
+            old
+        }
+
+        oldRegistration?.let(::disposeRegistration)
+        if (handlerRunnable != null && handlerDelayMs != null) {
+            handlerPostDelayed(handlerRunnable, handlerDelayMs)
+        }
     }
 
     override fun cancel(key: String) {
-        val removed = synchronized(lock) {
-            registrations.remove(key)
+        val (removed, shouldUnregister) = synchronized(lock) {
+            val rem = registrations.remove(key)
+            val shouldUnreg = registrations.isEmpty() && isReceiverRegistered
+            rem to shouldUnreg
         }
-        removed?.let { reg ->
-            cancelAlarmInternal(reg.pendingIntent)
-            handlerRemoveCallbacks(reg.handlerRunnable)
+        removed?.let(::disposeRegistration)
+        if (shouldUnregister) {
+            unregisterReceiverIfNeeded()
         }
     }
 
     override fun cancelAll() {
-        val all = synchronized(lock) {
+        val (all, shouldUnregister) = synchronized(lock) {
             val copy = registrations.values.toList()
             registrations.clear()
-            copy
+            val shouldUnreg = isReceiverRegistered
+            copy to shouldUnreg
         }
-        all.forEach { reg ->
-            cancelAlarmInternal(reg.pendingIntent)
-            handlerRemoveCallbacks(reg.handlerRunnable)
+        all.forEach(::disposeRegistration)
+        if (shouldUnregister) {
+            unregisterReceiverIfNeeded()
         }
     }
 
-    fun onAlarmReceived(intent: Intent?) {
+    internal fun onAlarmReceived(intent: Intent?) {
         if (intent == null) return
+        if (!intent.hasExtra(EXTRA_KEY) || !intent.hasExtra(EXTRA_TOKEN)) return
         val key = intent.getStringExtra(EXTRA_KEY) ?: return
-        val token = intent.getLongExtra(EXTRA_TOKEN, -1L)
-        if (token == -1L) return
-        onAlarmTriggered(key, token)
+        val token = intent.getLongExtra(EXTRA_TOKEN, 0L)
+        handleWake(key, token)
     }
 
-    fun onAlarmTriggered(key: String, token: Long) {
+    internal fun onAlarmTriggered(key: String, token: Long) {
         handleWake(key, token)
     }
 
     private fun handleWake(key: String, token: Long) {
-        val activeToClean = synchronized(lock) {
+        val (activeToClean, shouldUnregister) = synchronized(lock) {
             val current = registrations[key]
             if (current != null && current.token == token) {
                 registrations.remove(key)
-                current
+                val shouldUnreg = registrations.isEmpty() && isReceiverRegistered
+                current to shouldUnreg
             } else {
                 null
             }
         } ?: return
 
-        cancelAlarmInternal(activeToClean.pendingIntent)
-        handlerRemoveCallbacks(activeToClean.handlerRunnable)
+        disposeRegistration(activeToClean)
+        if (shouldUnregister) {
+            unregisterReceiverIfNeeded()
+        }
 
         try {
             onWake?.invoke(key, token)
         } catch (t: Throwable) {
             onNonFatalError(t)
         }
+    }
+
+    private fun disposeRegistration(reg: ActiveRegistration) {
+        if (reg.alarmScheduled) {
+            cancelAlarmInternal(reg.pendingIntent)
+        }
+        reg.handlerRunnable?.let(handlerRemoveCallbacks)
     }
 
     private fun cancelAlarmInternal(pendingIntent: PendingIntent) {
@@ -267,12 +298,4 @@ class AndroidAppRuleWakeScheduler internal constructor(
         }
         cancelPendingIntent(pendingIntent)
     }
-
-    private data class ScheduleBundle(
-        val oldRegistration: ActiveRegistration?,
-        val pendingIntent: PendingIntent,
-        val runnable: Runnable,
-        val triggerAtElapsedMs: Long,
-        val handlerDelayMs: Long
-    )
 }

@@ -25,22 +25,19 @@ class FakeWakeScheduler(
         val dueAtWallClockMs: Long,
         val scheduledElapsedRealtimeMs: Long,
         val alarmDueElapsedMs: Long,
-        val handlerDueElapsedMs: Long
+        val handlerFallbackDueElapsedMs: Long,
+        val isAlarmActive: Boolean = true
     ) {
         val effectiveDueElapsedMs: Long
-            get() = minOf(alarmDueElapsedMs, handlerDueElapsedMs)
+            get() = if (isAlarmActive) alarmDueElapsedMs else handlerFallbackDueElapsedMs
     }
 
     private val lock = Any()
     private val scheduled = mutableMapOf<String, ScheduledWake>()
-    val cancellationHistory = mutableListOf<String>()
 
     override fun schedule(key: String, dueAtWallClockMs: Long, token: Long) {
         synchronized(lock) {
-            val existing = scheduled.remove(key)
-            if (existing != null) {
-                cancellationHistory.add(key)
-            }
+            scheduled.remove(key)
             val delayMs = AppRuleWallClockScheduler.delayUntil(
                 dueAtWallClockMs = dueAtWallClockMs,
                 nowWallClockMs = currentWallClockMs,
@@ -56,23 +53,31 @@ class FakeWakeScheduler(
                 dueAtWallClockMs = dueAtWallClockMs,
                 scheduledElapsedRealtimeMs = currentElapsedRealtimeMs,
                 alarmDueElapsedMs = alarmDue,
-                handlerDueElapsedMs = handlerDue
+                handlerFallbackDueElapsedMs = handlerDue,
+                isAlarmActive = true
             )
+        }
+    }
+
+    /**
+     * Simulates an alarm manager publication or platform alarm failure for [key],
+     * activating the 20-second capped handler fallback mechanism.
+     */
+    fun simulateAlarmFailure(key: String) {
+        synchronized(lock) {
+            val existing = scheduled[key] ?: return
+            scheduled[key] = existing.copy(isAlarmActive = false)
         }
     }
 
     override fun cancel(key: String) {
         synchronized(lock) {
-            val removed = scheduled.remove(key)
-            if (removed != null) {
-                cancellationHistory.add(key)
-            }
+            scheduled.remove(key)
         }
     }
 
     override fun cancelAll() {
         synchronized(lock) {
-            cancellationHistory.addAll(scheduled.keys)
             scheduled.clear()
         }
     }
@@ -143,7 +148,6 @@ class FakeWakeScheduler(
                 }
             }
         }
-        // Dispatch outside the lock, ordered by earliest due time
         dueEntries.sortedBy { it.effectiveDueElapsedMs }.forEach { entry ->
             onWake?.invoke(entry.key, entry.token)
         }

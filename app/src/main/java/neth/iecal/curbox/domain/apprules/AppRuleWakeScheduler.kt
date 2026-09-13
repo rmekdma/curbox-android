@@ -11,13 +11,6 @@ interface AppRuleWakeScheduler {
     var onWake: ((key: String, token: Long) -> Unit)?
 
     /**
-     * Convenience setter for [onWake].
-     */
-    fun setWakeListener(listener: ((key: String, token: Long) -> Unit)?) {
-        this.onWake = listener
-    }
-
-    /**
      * Schedules a wake for [key] at wall clock millisecond [dueAtWallClockMs] with unique [token].
      * Any existing alarm or handler for [key] is atomically replaced and cancelled.
      */

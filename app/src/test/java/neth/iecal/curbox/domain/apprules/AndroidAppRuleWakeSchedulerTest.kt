@@ -2,7 +2,9 @@ package neth.iecal.curbox.domain.apprules
 
 import android.app.AlarmManager
 import android.app.PendingIntent
-import android.content.ContextWrapper
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -45,12 +47,8 @@ class AndroidAppRuleWakeSchedulerTest {
         }
     }
 
-    private class StubContext(private val pkgName: String = "neth.iecal.curbox.test") : ContextWrapper(null) {
-        override fun getPackageName(): String = pkgName
-    }
-
     @Test
-    fun scheduleCalculatesMonotonicDelayAndCapsHandlerToTwentySeconds() {
+    fun scheduleArmsAlarmForLongDelayWithoutPrematureHandlerWake() {
         val currentWallClock = 1_000_000_000L
         val currentElapsed = 50_000L
         val recordedAlarms = mutableListOf<TestAlarmRecord>()
@@ -64,7 +62,6 @@ class AndroidAppRuleWakeSchedulerTest {
         )
 
         val scheduler = AndroidAppRuleWakeScheduler(
-            context = StubContext(),
             alarmPublisher = alarmPublisher,
             handlerPostDelayed = { runnable, delay ->
                 postedHandlers.add(runnable to delay)
@@ -88,7 +85,83 @@ class AndroidAppRuleWakeSchedulerTest {
         assertSame(dummyPi, recordedAlarms[0].operation)
         assertTrue(recordedAlarms[0].exact)
 
-        // Handler must be capped at 20_000L
+        // Healthy alarm > 20s must NOT post handler (avoids premature wake at 20s)
+        assertTrue(postedHandlers.isEmpty())
+    }
+
+    @Test
+    fun scheduleArmsBothAlarmAndHandlerForShortDelay() {
+        val currentWallClock = 1_000_000_000L
+        val currentElapsed = 50_000L
+        val recordedAlarms = mutableListOf<TestAlarmRecord>()
+        val postedHandlers = mutableListOf<Pair<Runnable, Long>>()
+        val dummyPi = createDummyPendingIntent()
+
+        val alarmPublisher = FakeAlarmPublisher(
+            onSetExact = { type, trigger, op ->
+                recordedAlarms.add(TestAlarmRecord(type, trigger, op, exact = true))
+            }
+        )
+
+        val scheduler = AndroidAppRuleWakeScheduler(
+            alarmPublisher = alarmPublisher,
+            handlerPostDelayed = { runnable, delay ->
+                postedHandlers.add(runnable to delay)
+                true
+            },
+            handlerRemoveCallbacks = { },
+            wallClockMs = { currentWallClock },
+            elapsedRealtimeMs = { currentElapsed },
+            pendingIntentFactory = { _, _ -> dummyPi },
+            cancelPendingIntent = { },
+            onNonFatalError = { throw it }
+        )
+
+        // Schedule for 10 seconds (<= 20s)
+        scheduler.schedule("pkg.short", dueAtWallClockMs = 1_000_010_000L, token = 102L)
+
+        assertEquals(1, recordedAlarms.size)
+        assertEquals(60_000L, recordedAlarms[0].triggerAtMillis)
+
+        // Within 20s, handler is posted for fast in-process trigger at exact delay
+        assertEquals(1, postedHandlers.size)
+        assertEquals(10_000L, postedHandlers[0].second)
+    }
+
+    @Test
+    fun scheduleFallsBackToCappedHandlerWhenAlarmManagerFails() {
+        val currentWallClock = 1_000_000_000L
+        val currentElapsed = 50_000L
+        val postedHandlers = mutableListOf<Pair<Runnable, Long>>()
+        val dummyPi = createDummyPendingIntent()
+
+        val alarmPublisher = FakeAlarmPublisher(
+            onSetExact = { _, _, _ ->
+                throw SecurityException("Caller not allowed to schedule exact alarms")
+            },
+            onSetInexact = { _, _, _ ->
+                throw RuntimeException("AlarmManager unavailable")
+            }
+        )
+
+        val scheduler = AndroidAppRuleWakeScheduler(
+            alarmPublisher = alarmPublisher,
+            handlerPostDelayed = { runnable, delay ->
+                postedHandlers.add(runnable to delay)
+                true
+            },
+            handlerRemoveCallbacks = { },
+            wallClockMs = { currentWallClock },
+            elapsedRealtimeMs = { currentElapsed },
+            pendingIntentFactory = { _, _ -> dummyPi },
+            cancelPendingIntent = { },
+            onNonFatalError = { }
+        )
+
+        // Schedule for 60s, but AlarmManager completely failed
+        scheduler.schedule("pkg.fallback", dueAtWallClockMs = 1_000_060_000L, token = 202L)
+
+        // Recovery mechanism: handler activates with 20s cap
         assertEquals(1, postedHandlers.size)
         assertEquals(20_000L, postedHandlers[0].second)
     }
@@ -110,7 +183,6 @@ class AndroidAppRuleWakeSchedulerTest {
         )
 
         val scheduler = AndroidAppRuleWakeScheduler(
-            context = StubContext(),
             alarmPublisher = alarmPublisher,
             handlerPostDelayed = { _, _ -> true },
             handlerRemoveCallbacks = { },
@@ -142,7 +214,6 @@ class AndroidAppRuleWakeSchedulerTest {
         var callCount = 0
 
         val scheduler = AndroidAppRuleWakeScheduler(
-            context = StubContext(),
             alarmPublisher = FakeAlarmPublisher(),
             handlerPostDelayed = { runnable, delay ->
                 postedHandlers.add(runnable to delay)
@@ -159,7 +230,8 @@ class AndroidAppRuleWakeSchedulerTest {
             onNonFatalError = { throw it }
         )
 
-        scheduler.schedule("pkg.replace", dueAtWallClockMs = 1_000_030_000L, token = 1L)
+        // Schedule 10s (arms both alarm and handler)
+        scheduler.schedule("pkg.replace", dueAtWallClockMs = 1_000_010_000L, token = 1L)
         assertEquals(1, postedHandlers.size)
         val firstRunnable = postedHandlers[0].first
 
@@ -172,20 +244,14 @@ class AndroidAppRuleWakeSchedulerTest {
     }
 
     @Test
-    fun alarmDeliveryNotifiesWakeAndRemovesHandlerCallback() {
+    fun alarmDeliveryNotifiesWakeAndSupportsNegativeOneToken() {
         val wakes = mutableListOf<Pair<String, Long>>()
-        val removedRunnables = mutableListOf<Runnable>()
-        val postedHandlers = mutableListOf<Pair<Runnable, Long>>()
         val dummyPi = createDummyPendingIntent()
 
         val scheduler = AndroidAppRuleWakeScheduler(
-            context = StubContext(),
             alarmPublisher = FakeAlarmPublisher(),
-            handlerPostDelayed = { runnable, delay ->
-                postedHandlers.add(runnable to delay)
-                true
-            },
-            handlerRemoveCallbacks = { removedRunnables.add(it) },
+            handlerPostDelayed = { _, _ -> true },
+            handlerRemoveCallbacks = { },
             wallClockMs = { 1_000_000_000L },
             elapsedRealtimeMs = { 50_000L },
             pendingIntentFactory = { _, _ -> dummyPi },
@@ -194,18 +260,16 @@ class AndroidAppRuleWakeSchedulerTest {
             onWake = { key, token -> wakes.add(key to token) }
         )
 
-        scheduler.schedule("pkg.wake", dueAtWallClockMs = 1_000_010_000L, token = 99L)
-        assertEquals(1, postedHandlers.size)
+        // Token -1L must be fully supported
+        scheduler.schedule("pkg.wake", dueAtWallClockMs = 1_000_010_000L, token = -1L)
 
-        scheduler.onAlarmTriggered("pkg.wake", 99L)
+        scheduler.onAlarmTriggered("pkg.wake", -1L)
 
-        assertEquals(listOf("pkg.wake" to 99L), wakes)
-        assertEquals(1, removedRunnables.size)
-        assertEquals(postedHandlers[0].first, removedRunnables[0])
+        assertEquals(listOf("pkg.wake" to -1L), wakes)
 
         // Second delivery with same token must be ignored (already fired)
-        scheduler.onAlarmTriggered("pkg.wake", 99L)
-        assertEquals(listOf("pkg.wake" to 99L), wakes)
+        scheduler.onAlarmTriggered("pkg.wake", -1L)
+        assertEquals(listOf("pkg.wake" to -1L), wakes)
     }
 
     @Test
@@ -216,7 +280,6 @@ class AndroidAppRuleWakeSchedulerTest {
         val dummyPi = createDummyPendingIntent()
 
         val scheduler = AndroidAppRuleWakeScheduler(
-            context = StubContext(),
             alarmPublisher = FakeAlarmPublisher(),
             handlerPostDelayed = { runnable, delay ->
                 postedHandlers.add(runnable to delay)
@@ -255,7 +318,6 @@ class AndroidAppRuleWakeSchedulerTest {
         val piC = createDummyPendingIntent()
 
         val scheduler = AndroidAppRuleWakeScheduler(
-            context = StubContext(),
             alarmPublisher = FakeAlarmPublisher(),
             handlerPostDelayed = { _, _ -> true },
             handlerRemoveCallbacks = { removedRunnables.add(it) },
@@ -283,5 +345,84 @@ class AndroidAppRuleWakeSchedulerTest {
         scheduler.cancelAll()
         assertEquals(3, cancelledPendingIntents.size)
         assertEquals(3, removedRunnables.size)
+    }
+
+    @Test
+    fun receiverLifecycleIsEncapsulatedAndManagedWithRegistrations() {
+        val registeredReceivers = mutableListOf<Pair<BroadcastReceiver, IntentFilter>>()
+        val unregisteredReceivers = mutableListOf<BroadcastReceiver>()
+        val dummyPi = createDummyPendingIntent()
+
+        val scheduler = AndroidAppRuleWakeScheduler(
+            alarmPublisher = FakeAlarmPublisher(),
+            handlerPostDelayed = { _, _ -> true },
+            handlerRemoveCallbacks = { },
+            wallClockMs = { 1_000_000_000L },
+            elapsedRealtimeMs = { 50_000L },
+            pendingIntentFactory = { _, _ -> dummyPi },
+            cancelPendingIntent = { },
+            registerReceiver = { r, f -> registeredReceivers.add(r to f) },
+            unregisterReceiver = { r -> unregisteredReceivers.add(r) },
+            onNonFatalError = { throw it }
+        )
+
+        // First schedule registers receiver
+        scheduler.schedule("pkg.first", dueAtWallClockMs = 1_000_010_000L, token = 10L)
+        assertEquals(1, registeredReceivers.size)
+        org.junit.Assert.assertNotNull(registeredReceivers[0].first)
+        org.junit.Assert.assertNotNull(registeredReceivers[0].second)
+        assertEquals(0, unregisteredReceivers.size)
+
+        // Second schedule does not re-register
+        scheduler.schedule("pkg.second", dueAtWallClockMs = 1_000_020_000L, token = 20L)
+        assertEquals(1, registeredReceivers.size)
+        assertEquals(0, unregisteredReceivers.size)
+
+        // Cancelling first does not unregister since second remains
+        scheduler.cancel("pkg.first")
+        assertEquals(0, unregisteredReceivers.size)
+
+        // Cancelling second leaves registrations empty -> unregisters receiver
+        scheduler.cancel("pkg.second")
+        assertEquals(1, unregisteredReceivers.size)
+        assertSame(registeredReceivers[0].first, unregisteredReceivers[0])
+
+        // Scheduling again re-registers receiver
+        scheduler.schedule("pkg.third", dueAtWallClockMs = 1_000_030_000L, token = 30L)
+        assertEquals(2, registeredReceivers.size)
+
+        // cancelAll unregisters receiver
+        scheduler.cancelAll()
+        assertEquals(2, unregisteredReceivers.size)
+    }
+
+    @Test
+    fun onAlarmTriggeredHandlesWakeAndUnregistersWhenEmpty() {
+        val wakes = mutableListOf<Pair<String, Long>>()
+        val unregisteredReceivers = mutableListOf<BroadcastReceiver>()
+        val dummyPi = createDummyPendingIntent()
+
+        val scheduler = AndroidAppRuleWakeScheduler(
+            alarmPublisher = FakeAlarmPublisher(),
+            handlerPostDelayed = { _, _ -> true },
+            handlerRemoveCallbacks = { },
+            wallClockMs = { 1_000_000_000L },
+            elapsedRealtimeMs = { 50_000L },
+            pendingIntentFactory = { _, _ -> dummyPi },
+            cancelPendingIntent = { },
+            unregisterReceiver = { unregisteredReceivers.add(it) },
+            onNonFatalError = { throw it },
+            onWake = { key, token -> wakes.add(key to token) }
+        )
+
+        scheduler.schedule("pkg.intent", dueAtWallClockMs = 1_000_010_000L, token = 777L)
+
+        scheduler.onAlarmReceived(null)
+        assertEquals(0, wakes.size)
+
+        scheduler.onAlarmTriggered("pkg.intent", 777L)
+
+        assertEquals(listOf("pkg.intent" to 777L), wakes)
+        assertEquals(1, unregisteredReceivers.size)
     }
 }

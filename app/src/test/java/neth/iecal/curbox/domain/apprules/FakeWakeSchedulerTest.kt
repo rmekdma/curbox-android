@@ -63,7 +63,7 @@ class FakeWakeSchedulerTest {
     }
 
     @Test
-    fun handlerCapsWakeDelayToTwentySeconds() {
+    fun longAlarmWakesAtFullDelayWithoutPrematureWake() {
         val wakes = mutableListOf<Pair<String, Long>>()
         val scheduler = FakeWakeScheduler(
             initialWallClockMs = 1_000_000_000L,
@@ -71,16 +71,40 @@ class FakeWakeSchedulerTest {
             onWake = { key, token -> wakes.add(key to token) }
         )
 
-        // 60 seconds from now (exceeds 20s handler cap)
+        // 60 seconds from now
         scheduler.schedule("com.example.long", dueAtWallClockMs = 1_000_060_000L, token = 42L)
+
+        // At 20 seconds, healthy alarm must not wake prematurely
+        scheduler.advanceTimeBy(20_000L)
+        assertTrue(wakes.isEmpty())
+        assertTrue(scheduler.hasScheduled("com.example.long"))
+
+        // At 60 seconds, alarm wakes
+        scheduler.advanceTimeBy(40_000L)
+        assertEquals(listOf("com.example.long" to 42L), wakes)
+        assertFalse(scheduler.hasScheduled("com.example.long"))
+    }
+
+    @Test
+    fun handlerFallbackCapsWakeDelayToTwentySecondsWhenAlarmFails() {
+        val wakes = mutableListOf<Pair<String, Long>>()
+        val scheduler = FakeWakeScheduler(
+            initialWallClockMs = 1_000_000_000L,
+            initialElapsedRealtimeMs = 10_000L,
+            onWake = { key, token -> wakes.add(key to token) }
+        )
+
+        // 60 seconds from now, but platform alarm fails
+        scheduler.schedule("com.example.failed", dueAtWallClockMs = 1_000_060_000L, token = 55L)
+        scheduler.simulateAlarmFailure("com.example.failed")
 
         scheduler.advanceTimeBy(19_999L)
         assertTrue(wakes.isEmpty())
 
-        // At 20s, handler fallback triggers
+        // At 20s, handler fallback activates to provide bounded recovery
         scheduler.advanceTimeBy(1L)
-        assertEquals(listOf("com.example.long" to 42L), wakes)
-        assertFalse(scheduler.hasScheduled("com.example.long"))
+        assertEquals(listOf("com.example.failed" to 55L), wakes)
+        assertFalse(scheduler.hasScheduled("com.example.failed"))
     }
 
     @Test
