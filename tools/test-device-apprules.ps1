@@ -116,14 +116,17 @@ try {
         appRules = @($rule)
     }
 
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     $testSettingsJson = $settingsObj | ConvertTo-Json -Depth 20 -Compress
-    Set-Content -Path $testSettingsFile -Value $testSettingsJson -Encoding UTF8
+    [System.IO.File]::WriteAllText($testSettingsFile, $testSettingsJson, $utf8NoBom)
 
     Write-Step "3. Pushing test configuration to device..."
-    adb push $testSettingsFile "/data/local/tmp/settings_test.json" | Out-Null
-    adb shell "run-as neth.iecal.curbox.debug cp /data/local/tmp/settings_test.json files/datastore/settings.json"
-    adb shell "rm /data/local/tmp/settings_test.json"
-    Write-Success "Injected test settings into DataStore."
+    adb shell "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p neth.iecal.curbox.debug" | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    $rulesSnapshotJson = ($settingsObj.appRuleSnapshot | ConvertTo-Json -Depth 20 -Compress).Replace('"', '\"')
+    adb shell "am broadcast -a neth.iecal.curbox.action.APPLY_TEST_APP_RULES -p neth.iecal.curbox.debug --es extra_app_rules_json '$rulesSnapshotJson'" | Out-Null
+    Write-Success "Injected test AppRules via broadcast seam."
 
     Write-Step "4. Refreshing Curbox AppBlockerService..."
     adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p neth.iecal.curbox.debug" | Out-Null

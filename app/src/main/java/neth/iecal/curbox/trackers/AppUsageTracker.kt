@@ -70,6 +70,10 @@ class AppUsageTracker {
     private lateinit var sessionRepository: CurrentUseDaySessionRepository
     private lateinit var usageResetRepository: RoomUsageResetRepository
 
+    /** Narrow Android-test seam; setup still owns and invokes recoverOpenSessions below. */
+    internal var sessionRepositoryOverrideForTesting:
+        ((AppDatabase) -> CurrentUseDaySessionRepository)? = null
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val usageResetCommands = Channel<UsageResetCommand>(Channel.UNLIMITED)
     private var usageResetJob: Job? = null
@@ -87,6 +91,8 @@ class AppUsageTracker {
     private var lastCleanupGenerationStartedAtMs = Long.MIN_VALUE
     private var pendingSettingsSnapshot: Settings? = null
     private var destroying = false
+    private var workerUsageResetHandler: ((Set<String>, String) -> Boolean)? = null
+    private val foregroundSessionOwnership = ForegroundSessionOwnership()
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var screenOn = true
     /** All state below is owned by the accessibility service main thread. */
@@ -121,16 +127,19 @@ class AppUsageTracker {
 
     fun setup(service: BaseBlockingService) {
         this.service = service
+        foregroundSessionOwnership.returnToTracker()
+        workerUsageResetHandler = null
         crashLogger = CrashLogger(service)
         ownPackage = service.packageName
         val database = AppDatabase.getInstance(service)
         dao = database.appUsageDao()
-        sessionRepository = RoomCurrentUseDaySessionRepository(
-            database.foregroundSessionDao(),
-            database.foregroundLaunchDao(),
-            database.appUsageDao(),
-            database
-        )
+        sessionRepository = sessionRepositoryOverrideForTesting?.invoke(database)
+            ?: RoomCurrentUseDaySessionRepository(
+                database.foregroundSessionDao(),
+                database.foregroundLaunchDao(),
+                database.appUsageDao(),
+                database
+            )
         usageResetRepository = RoomUsageResetRepository(database)
 
         try {
@@ -210,6 +219,12 @@ class AppUsageTracker {
     }
 
     private fun applySettingsSnapshot(settings: Settings) {
+        foregroundSessionOwnership.runIfTrackerOwner {
+            applyTrackerSettingsSnapshot(settings)
+        }
+    }
+
+    private fun applyTrackerSettingsSnapshot(settings: Settings) {
         if (destroying) return
         val nextReset = safeResetTime(settings.useDayResetHour, settings.useDayResetMinute)
         val nextDecision = AppUsageTrackingPolicy.decide(
@@ -245,17 +260,36 @@ class AppUsageTracker {
     }
 
     fun onEvent(event: AccessibilityEvent?) {
-        if (destroying || !recordingEnabled || !screenOn || event == null) return
-        // A reset command owns the service-process writer until its Room transaction and
-        // foreground restart commit.  Deferring visibility reconciliation keeps a heartbeat or
-        // accessibility event from racing the reset transaction.
-        if (activeUsageResetCommands > 0) return
-        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
-        ) return
+        foregroundSessionOwnership.runIfTrackerOwner {
+            if (destroying || !recordingEnabled || !screenOn || event == null) {
+                return@runIfTrackerOwner
+            }
+            // A reset command owns the service-process writer until its Room transaction and
+            // foreground restart commit. Deferring visibility reconciliation keeps a heartbeat
+            // or accessibility event from racing the reset transaction.
+            if (activeUsageResetCommands > 0) return@runIfTrackerOwner
+            if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
+            ) return@runIfTrackerOwner
 
-        val visiblePackages = queryVisiblePackages(event)
-        reconcileVisiblePackages(visiblePackages)
+            val visiblePackages = queryVisiblePackages(event)
+            reconcileVisiblePackages(visiblePackages)
+        }
+    }
+
+    internal fun handoffForegroundOwnershipToDecisionWorker(
+        onUsageReset: (Set<String>, String) -> Boolean = { _, _ -> false }
+    ) {
+        workerUsageResetHandler = onUsageReset
+        try {
+            foregroundSessionOwnership.handoffToWorker {
+                stopHeartbeat()
+                endAllSessions()
+            }
+        } catch (error: Throwable) {
+            workerUsageResetHandler = null
+            throw error
+        }
     }
 
     /**
@@ -272,6 +306,20 @@ class AppUsageTracker {
             .filter(String::isNotEmpty)
             .toSet()
         if (normalizedPackages.isEmpty()) return
+
+        if (foregroundSessionOwnership.isWorkerOwner()) {
+            val handled = try {
+                workerUsageResetHandler?.invoke(normalizedPackages, requestId) ?: false
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+                false
+            }
+            if (handled) return
+            logNonFatal(IllegalStateException("serialized foreground reset handler is unavailable"))
+            return
+        }
 
         // The UI timestamp is only a delivery hint.  All packages in one command share the
         // service-main acceptance time, so a delayed cross-process broadcast cannot replay an old
@@ -433,14 +481,18 @@ class AppUsageTracker {
         ) setOf(packageName) else emptySet()
     }
 
-    private fun reconcileVisiblePackages(nextPackages: Set<String>) {
+    private fun reconcileVisiblePackages(
+        nextPackages: Set<String>,
+        observedWallMs: Long? = null,
+        observedElapsedMs: Long? = null
+    ) {
         if (!recordingEnabled) {
             endAllSessions()
             return
         }
 
-        val nowWall = System.currentTimeMillis()
-        val nowElapsed = SystemClock.elapsedRealtime()
+        val nowWall = observedWallMs ?: System.currentTimeMillis()
+        val nowElapsed = observedElapsedMs ?: SystemClock.elapsedRealtime()
         val previousPackages = activeSessions.keys.toSet()
 
         // Flush retained sessions before changing the set. This makes the preceding package's
@@ -473,7 +525,7 @@ class AppUsageTracker {
             ): Long = startSession(
                 packageName = packageName,
                 startedAtWallMs = startedAtMs,
-                startedAtElapsedMs = SystemClock.elapsedRealtime(),
+                startedAtElapsedMs = observedElapsedMs ?: SystemClock.elapsedRealtime(),
                 recordLaunch = packageName !in resetRestartPackages,
                 useDayId = useDayId
             )
@@ -860,7 +912,9 @@ class AppUsageTracker {
 
     private val heartbeat = object : Runnable {
         override fun run() {
-            if (destroying || !recordingEnabled || activeSessions.isEmpty() || activeUsageResetCommands > 0) return
+            if (foregroundSessionOwnership.isWorkerOwner() || destroying || !recordingEnabled ||
+                activeSessions.isEmpty() || activeUsageResetCommands > 0
+            ) return
             try {
                 val nowWall = System.currentTimeMillis()
                 val nowElapsed = SystemClock.elapsedRealtime()
@@ -876,6 +930,7 @@ class AppUsageTracker {
     }
 
     private fun startHeartbeat() {
+        if (foregroundSessionOwnership.isWorkerOwner()) return
         mainHandler.removeCallbacks(heartbeat)
         mainHandler.postDelayed(heartbeat, HEARTBEAT_MS)
     }
@@ -930,8 +985,9 @@ class AppUsageTracker {
                 Intent.ACTION_SCREEN_OFF -> {
                     screenOn = false
                     try {
-                        if (activeUsageResetCommands > 0) return
-                        endAllSessions()
+                        foregroundSessionOwnership.runIfTrackerOwner {
+                            if (activeUsageResetCommands == 0) endAllSessions()
+                        }
                     } catch (error: Exception) {
                         logNonFatal(error)
                     }
@@ -946,20 +1002,24 @@ class AppUsageTracker {
     }
 
     private fun resumeVisibleApplications() {
-        if (destroying || !recordingEnabled || !screenOn || activeUsageResetCommands > 0) return
-        try {
-            val windows = service.windows.map { window ->
-                VisibleApplicationWindow(packageNameForWindow(window), window.type)
+        foregroundSessionOwnership.runIfTrackerOwner {
+            if (destroying || !recordingEnabled || !screenOn || activeUsageResetCommands > 0) {
+                return@runIfTrackerOwner
             }
-            reconcileVisiblePackages(
-                VisibleApplicationPackages.fromWindows(
-                    windows,
-                    ownPackage,
-                    Constants.SYSTEM_UI_PACKAGE_NAME
+            try {
+                val windows = service.windows.map { window ->
+                    VisibleApplicationWindow(packageNameForWindow(window), window.type)
+                }
+                reconcileVisiblePackages(
+                    VisibleApplicationPackages.fromWindows(
+                        windows,
+                        ownPackage,
+                        Constants.SYSTEM_UI_PACKAGE_NAME
+                    )
                 )
-            )
-        } catch (error: Exception) {
-            logNonFatal(error)
+            } catch (error: Exception) {
+                logNonFatal(error)
+            }
         }
     }
 
@@ -1023,6 +1083,7 @@ class AppUsageTracker {
 
     fun onDestroy() {
         destroying = true
+        workerUsageResetHandler = null
         val resetWasActive = activeUsageResetCommands > 0
         val shutdownSnapshots = if (!resetWasActive) {
             activeSessions.values.map {

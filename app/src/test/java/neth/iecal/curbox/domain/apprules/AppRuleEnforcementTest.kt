@@ -4,8 +4,10 @@ import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.ForegroundSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.ZoneId
@@ -112,13 +114,52 @@ class AppRuleEnforcementTest {
         val enforcement = AppRuleEnforcement(repository, ZoneId.of("UTC"))
         val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
 
-        assertTrue(
-            enforcement.checkSafely(snapshot, "com.example.reader", "2026-08-17", now).isAllowed
+        assertSame(
+            SafeAppRuleEvaluationResult.RecoverableFailure,
+            enforcement.checkSafely(snapshot, "com.example.reader", "2026-08-17", now)
         )
         repository.fail = false
-        assertFalse(
-            enforcement.checkSafely(snapshot, "com.example.reader", "2026-08-17", now).isAllowed
+        val success = enforcement.checkSafely(
+            snapshot,
+            "com.example.reader",
+            "2026-08-17",
+            now
+        ) as SafeAppRuleEvaluationResult.Success
+        assertFalse(success.evaluation.isAllowed)
+    }
+
+    @Test
+    fun cancellationFailureIsRethrownWithoutUsingTheFailOpenFallback() = runBlocking {
+        val group = AppRuleAppGroup("group", "Reader", listOf("com.example.reader"))
+        val snapshot = AppRuleSnapshot(
+            appGroups = listOf(group),
+            appRules = listOf(
+                AppRule(
+                    id = "rule",
+                    name = "Reader",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope.forGroup(group.id),
+                    allowedMinutes = 0
+                )
+            )
         )
+        val repository = CancellingSessionRepository()
+        val enforcement = AppRuleEnforcement(repository, ZoneId.of("UTC"))
+        val thrown = try {
+            enforcement.checkSafely(
+                snapshot = snapshot,
+                packageName = "com.example.reader",
+                useDayId = "2026-08-17",
+                nowMs = java.time.Instant.parse("2026-08-17T10:30:00Z").toEpochMilli()
+            )
+            null
+        } catch (error: Throwable) {
+            error
+        }
+
+        assertTrue(thrown is CancellationException)
     }
 
     private open class FakeSessionRepository(
@@ -144,6 +185,12 @@ class AppRuleEnforcementTest {
         override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
             if (fail) throw IllegalStateException("temporary storage failure")
             return super.sessionsForUseDay(useDayId)
+        }
+    }
+
+    private class CancellingSessionRepository : FakeSessionRepository(emptyList()) {
+        override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+            throw CancellationException("injected evaluator cancellation")
         }
     }
 }

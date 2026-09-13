@@ -1,6 +1,9 @@
 package neth.iecal.curbox.ui.activity
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
@@ -13,6 +16,7 @@ import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -39,12 +43,37 @@ import kotlinx.coroutines.withContext
 
 /** Internal approval surface. It has no exported intent or broadcast write path. */
 class GuardianApprovalActivity : AppCompatActivity() {
+    private data class GuardianApprovalPayload(
+        val packageName: String,
+        val denials: List<AppRuleGuardianDenial>
+    )
+
     private lateinit var binding: ActivityGuardianApprovalBinding
     private val dataStore by lazy { DataStoreManager(applicationContext) }
     private var denials: List<AppRuleGuardianDenial> = emptyList()
     private var selectedRuleId: String? = null
     private var hasPassword = false
     private var grantInProgress = false
+    private var guardianClosedBroadcastSent = false
+    private var guardianStateReceiverRegistered = false
+
+    private val guardianStateRequestReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != INTENT_ACTION_STATE_REQUEST ||
+                guardianClosedBroadcastSent || isFinishing
+            ) return
+            val packageName = this@GuardianApprovalActivity.intent
+                .getStringExtra(EXTRA_PACKAGE)
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?: return
+            sendBroadcast(
+                Intent(INTENT_ACTION_OPENED)
+                    .setPackage(this@GuardianApprovalActivity.packageName)
+                    .putExtra(EXTRA_GUARDIAN_PACKAGE, packageName)
+            )
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,16 +94,19 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 navigateHomeAndFinish()
             }
         })
-        denials = runCatching {
-            Gson().fromJson<List<AppRuleGuardianDenial>>(
-                intent.getStringExtra(EXTRA_DENIALS).orEmpty(),
-                object : TypeToken<List<AppRuleGuardianDenial>>() {}.type
-            )
-        }.getOrNull().orEmpty()
-        if (denials.isEmpty()) {
+        val payload = readValidatedPayload(intent)
+        if (payload == null) {
             finish()
             return
         }
+        denials = payload.denials
+        ContextCompat.registerReceiver(
+            this,
+            guardianStateRequestReceiver,
+            IntentFilter(INTENT_ACTION_STATE_REQUEST),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        guardianStateReceiverRegistered = true
         selectedRuleId = denials.first().ruleId
         render()
         lifecycleScope.launch {
@@ -82,8 +114,46 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val payload = readValidatedPayload(intent) ?: return
+        if (isFinishing) return
+        setIntent(intent)
+        denials = payload.denials
+        selectedRuleId = denials.first().ruleId
+        render()
+    }
+
+    private fun readValidatedPayload(sourceIntent: Intent): GuardianApprovalPayload? {
+        val packageName = runCatching {
+            sourceIntent.getStringExtra(EXTRA_PACKAGE)
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+        }.getOrNull() ?: return null
+        val parsedDenials = runCatching {
+            Gson().fromJson<List<AppRuleGuardianDenial?>>(
+                sourceIntent.getStringExtra(EXTRA_DENIALS).orEmpty(),
+                object : TypeToken<List<AppRuleGuardianDenial?>>() {}.type
+            )
+        }.getOrNull() ?: return null
+        if (parsedDenials.isEmpty()) return null
+
+        val validatedDenials = parsedDenials.map { denial ->
+            runCatching {
+                denial?.takeIf { it.ruleId.isNotBlank() }
+            }.getOrNull()
+        }
+        if (validatedDenials.any { it == null }) return null
+
+        return GuardianApprovalPayload(
+            packageName = packageName,
+            denials = validatedDenials.filterNotNull()
+        )
+    }
+
     private fun render() {
         val choices = binding.approvalChoices
+        choices.removeAllViews()
         denials.forEachIndexed { index, denial ->
             choices.addView(RadioButton(this).apply {
                 id = index + 1
@@ -232,10 +302,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
                         ).isEnabled = false
                         dialog.dismiss()
                         authenticateThen(
-                            onAuthenticated = { password ->
-                                writeGrant(password, ruleId, submission.additionalMinutes)
-                            },
-                            onCancelled = { grantInProgress = false }
+                            ruleId = ruleId,
+                            onCancelled = { grantInProgress = false },
+                            onAuthenticated = { capturedRuleId, password ->
+                                writeGrant(capturedRuleId, password, submission.additionalMinutes)
+                            }
                         )
                     }
                 }
@@ -245,6 +316,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun requestSkip() {
+        val ruleId = selectedRuleId ?: return
         val labels = arrayOf(
             getString(R.string.guardian_skip_15_minutes),
             getString(R.string.guardian_skip_30_minutes),
@@ -254,7 +326,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
             .setTitle(R.string.guardian_skip_rule)
             .setSingleChoiceItems(labels, 0) { dialog, which ->
                 dialog.dismiss()
-                authenticateThen(onAuthenticated = { password -> writeSkip(password, which) })
+                authenticateThen(ruleId) { capturedRuleId, password ->
+                    writeSkip(capturedRuleId, password, which)
+                }
             }
             .setNegativeButton(R.string.cancel, null)
             .create()
@@ -262,11 +336,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun authenticateThen(
-        onAuthenticated: (String) -> Unit,
-        onCancelled: () -> Unit = {}
+        ruleId: String,
+        onCancelled: () -> Unit = {},
+        onAuthenticated: (ruleId: String, password: String) -> Unit
     ) {
         if (!hasPassword) {
-            onAuthenticated("")
+            onAuthenticated(ruleId, "")
             return
         }
         val input = EditText(this).apply {
@@ -280,7 +355,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     val password = input.text.toString()
                     if (dataStore.guardianPasswordIsValid(password)) {
-                        onAuthenticated(password)
+                        onAuthenticated(ruleId, password)
                     } else {
                         onCancelled()
                         toast(R.string.guardian_wrong_password)
@@ -292,7 +367,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         GuardianOwnedDialog.show(dialog, onCancel = onCancelled)
     }
 
-    private fun writeGrant(password: String, ruleId: String, minutes: Long) {
+    private fun writeGrant(ruleId: String, password: String, minutes: Long) {
         lifecycleScope.launch(Dispatchers.IO) {
             val success = try {
                 val settings = dataStore.settings.first()
@@ -316,8 +391,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
-    private fun writeSkip(password: String, option: Int) {
-        val ruleId = selectedRuleId ?: return
+    private fun writeSkip(ruleId: String, password: String, option: Int) {
         lifecycleScope.launch(Dispatchers.IO) {
             val success = try {
                 val settings = dataStore.settings.first()
@@ -347,8 +421,31 @@ class GuardianApprovalActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
+            notifyGuardianClosed()
             finish()
         }
+    }
+
+    override fun onDestroy() {
+        if (guardianStateReceiverRegistered) {
+            runCatching { unregisterReceiver(guardianStateRequestReceiver) }
+            guardianStateReceiverRegistered = false
+        }
+        super.onDestroy()
+    }
+
+    private fun notifyGuardianClosed() {
+        if (guardianClosedBroadcastSent) return
+        val packageName = intent.getStringExtra(EXTRA_PACKAGE)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return
+        guardianClosedBroadcastSent = true
+        sendBroadcast(
+            Intent(INTENT_ACTION_CLOSED)
+                .setPackage(this.packageName)
+                .putExtra(EXTRA_GUARDIAN_PACKAGE, packageName)
+        )
     }
 
     private fun navigateHomeAndFinish() {
@@ -373,5 +470,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_DENIALS = "app_rule_denials_json"
         const val EXTRA_PACKAGE = "launch_package"
+        const val INTENT_ACTION_CLOSED = "neth.iecal.curbox.guardian.approval.closed"
+        const val INTENT_ACTION_OPENED = "neth.iecal.curbox.guardian.approval.opened"
+        const val INTENT_ACTION_STATE_REQUEST = "neth.iecal.curbox.guardian.approval.state_request"
+        const val EXTRA_GUARDIAN_PACKAGE = "guardian_package"
     }
 }

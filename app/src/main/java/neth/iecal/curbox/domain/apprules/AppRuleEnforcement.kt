@@ -7,6 +7,12 @@ import neth.iecal.curbox.utils.UseDayCalculator
 import kotlinx.coroutines.CancellationException
 import java.time.ZoneId
 
+sealed interface SafeAppRuleEvaluationResult {
+    data class Success(val evaluation: AppRulesEvaluation) : SafeAppRuleEvaluationResult
+
+    data object RecoverableFailure : SafeAppRuleEvaluationResult
+}
+
 /**
  * Small adapter used at the service boundary. It keeps Room access behind the public session
  * repository seam while leaving the actual decision deterministic and Android free.
@@ -58,22 +64,32 @@ class AppRuleEnforcement(
         useDayGenerationStartedAtMs: Long = 0L,
         availablePackages: Set<String> = emptySet(),
         essentialExcludedPackages: Set<String> = emptySet(),
-        overrides: AppRuleOverrideState = AppRuleOverrideState()
-    ): AppRulesEvaluation = try {
-        check(
-            snapshot,
-            packageName,
-            useDayId,
-            nowMs,
-            calculator,
-            useDayGenerationStartedAtMs,
-            availablePackages,
-            essentialExcludedPackages,
-            overrides
+        overrides: AppRuleOverrideState = AppRuleOverrideState(),
+        onNonFatalError: (Throwable) -> Unit = {}
+    ): SafeAppRuleEvaluationResult = try {
+        SafeAppRuleEvaluationResult.Success(
+            check(
+                snapshot,
+                packageName,
+                useDayId,
+                nowMs,
+                calculator,
+                useDayGenerationStartedAtMs,
+                availablePackages,
+                essentialExcludedPackages,
+                overrides
+            )
         )
     } catch (error: CancellationException) {
         throw error
-    } catch (_: Exception) {
-        AppRulesEvaluation(isAllowed = true, denyingRules = emptyList(), evaluations = emptyList())
+    } catch (error: Throwable) {
+        try {
+            onNonFatalError(error)
+        } catch (reportingError: CancellationException) {
+            throw reportingError
+        } catch (_: Throwable) {
+            // Reporting must not turn a recoverable evaluator failure into a worker failure.
+        }
+        SafeAppRuleEvaluationResult.RecoverableFailure
     }
 }

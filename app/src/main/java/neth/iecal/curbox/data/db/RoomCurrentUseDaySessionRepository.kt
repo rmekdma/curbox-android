@@ -6,6 +6,9 @@ import neth.iecal.curbox.domain.apprules.CurrentUseDayUsageRepository
 import neth.iecal.curbox.domain.apprules.ForegroundLaunch
 import neth.iecal.curbox.domain.apprules.ForegroundUsageCheckpoint
 import androidx.room.withTransaction
+import neth.iecal.curbox.utils.TimeTools
+import java.time.Instant
+import java.time.ZoneId
 
 class RoomCurrentUseDaySessionRepository(
     private val dao: ForegroundSessionDao,
@@ -53,6 +56,27 @@ class RoomCurrentUseDaySessionRepository(
                 packageName = packageName,
                 launchedAtMs = launchedAtMs,
                 useDayGenerationStartedAtMs = generationStartedAtMs
+            )
+        )
+    }
+
+    override suspend fun recordLaunchStatistics(packageName: String, launchedAtMs: Long) {
+        val usageDao = appUsageDao ?: return
+        val date = TimeTools.dayKey(
+            Instant.ofEpochMilli(launchedAtMs)
+                .atZone(ZoneId.systemDefault())
+                .toLocalDate()
+        )
+        val existing = usageDao.get(date, packageName)
+        usageDao.upsert(
+            existing?.copy(
+                launchCount = existing.launchCount + 1,
+                lastUsed = maxOf(existing.lastUsed, launchedAtMs)
+            ) ?: AppUsageEntity(
+                date = date,
+                packageName = packageName,
+                launchCount = 1,
+                lastUsed = launchedAtMs
             )
         )
     }
