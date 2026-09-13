@@ -10,7 +10,7 @@ become a product requirement without a separate user decision.
 
 **Blocked by:** 21 — Long-boundary foreground decision closure; 22 — Recheck policy closure; 23 — Visibility-window closure; 24 — Callback flush closure; 25 — Guardian lifecycle closure; 26 — Debug fixture reliability closure
 
-**Status:** approved-awaiting-implementation
+**Status:** done
 
 ## Approved protocol — revision T27-P6 (2026-09-10)
 
