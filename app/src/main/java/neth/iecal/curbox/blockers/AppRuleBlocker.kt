@@ -12,6 +12,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
+import androidx.annotation.VisibleForTesting
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
@@ -401,6 +402,8 @@ class AppRuleBlocker {
     internal var alarmPublicationObserver: ((String) -> Unit)? = null
     /** Deterministic seam at worker-generated recheck-plan delivery. */
     internal var recheckPlanDeliveryObserver: ((RecheckPlanUpdate) -> Unit)? = null
+    /** Passive seam immediately at DecisionOutcomeSink.publish entry before external effects. */
+    internal var decisionOutcomeSinkObserver: ((DecisionOutcome) -> Unit)? = null
 
     fun setup(service: BaseBlockingService) {
         servicePackageName = service.packageName
@@ -681,6 +684,7 @@ class AppRuleBlocker {
                 repository = sessionRepository,
                 outcomeSink = object : DecisionOutcomeSink {
                     override fun publish(outcome: DecisionOutcome) {
+                        decisionOutcomeSinkObserver?.invoke(outcome)
                         publishDecisionOutcome(outcome, workerInstanceToken)
                     }
                 },
@@ -2080,15 +2084,26 @@ class AppRuleBlocker {
             if (packageName.isBlank()) return
             synchronized(runtimeLock) {
                 if (!isReadyForChecks()) return
-                if (action == GuardianApprovalActivity.INTENT_ACTION_OPENED) {
-                    activeGuardianPackage = packageName
-                } else if (activeGuardianPackage == packageName) {
-                    activeGuardianPackage = null
-                    lastShownAt = 0L
-                }
+                applyGuardianLifecycleTransition(action, packageName)
             }
         }
     }
+
+    private fun applyGuardianLifecycleTransition(action: String, packageName: String) {
+        if (action == GuardianApprovalActivity.INTENT_ACTION_OPENED) {
+            activeGuardianPackage = packageName
+        } else if (activeGuardianPackage == packageName) {
+            activeGuardianPackage = null
+            lastShownAt = 0L
+        }
+    }
+
+    @VisibleForTesting
+    internal fun closeGuardianForInstrumentation(packageName: String): Boolean =
+        synchronized(runtimeLock) {
+            applyGuardianLifecycleTransition(GuardianApprovalActivity.INTENT_ACTION_CLOSED, packageName)
+            activeGuardianPackage == null && lastShownAt == 0L
+        }
 
     private fun handleScreenOff() {
         val screenOffPackage = synchronized(runtimeLock) {

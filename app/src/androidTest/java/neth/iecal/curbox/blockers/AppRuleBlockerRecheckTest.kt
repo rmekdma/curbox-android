@@ -120,6 +120,55 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun closeGuardianForInstrumentationResetsActivePackageAndLastShownAtOnlyWhenPackageMatches() {
+        val blocker = AppRuleBlocker()
+        setField(blocker, "setupReady", true)
+        setField(blocker, "activeGuardianPackage", PACKAGE)
+        setField(blocker, "lastShownAt", 12345L)
+
+        // Different package should return false and not mutate state
+        org.junit.Assert.assertFalse(blocker.closeGuardianForInstrumentation(OTHER_PACKAGE))
+        org.junit.Assert.assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+        org.junit.Assert.assertEquals(12345L, getField(blocker, "lastShownAt"))
+
+        // Matching package should reset and return true
+        org.junit.Assert.assertTrue(blocker.closeGuardianForInstrumentation(PACKAGE))
+        org.junit.Assert.assertNull(getField(blocker, "activeGuardianPackage"))
+        org.junit.Assert.assertEquals(0L, getField(blocker, "lastShownAt"))
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun decisionOutcomeSinkObserverReceivesDecisionOutcomeAtPublishEntry() {
+        val observedOutcomes = java.util.concurrent.CopyOnWriteArrayList<neth.iecal.curbox.domain.apprules.DecisionOutcome>()
+        val blocker = AppRuleBlocker().apply {
+            decisionOutcomeSinkObserver = { outcome ->
+                observedOutcomes.add(outcome)
+            }
+        }
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        service.lastBackPressTimeStamp = 0L
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        coordinator.accept(snapshotWithGlobalDeny())
+
+        sendWindowEvent(blocker, PACKAGE)
+        org.junit.Assert.assertTrue(
+            "decisionOutcomeSinkObserver must observe outcome at publish entry",
+            awaitCondition { observedOutcomes.isNotEmpty() }
+        )
+        val outcome = observedOutcomes.first()
+        org.junit.Assert.assertEquals(1, outcome.packageDecisions.size)
+        org.junit.Assert.assertEquals(PACKAGE, outcome.packageDecisions[0].packageName)
+        blocker.onDestroy()
+    }
+
+    @Test
     fun screenOffImmediatelyEndsForegroundEvidenceAndInvalidatesPendingRecheck() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         val queued = ArrayDeque<Runnable>()
