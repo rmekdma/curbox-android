@@ -1,9 +1,10 @@
 package neth.iecal.curbox.blockers
 
 import neth.iecal.curbox.domain.apprules.ApplicationWindowProvenanceCache
+import neth.iecal.curbox.domain.apprules.ApplicationWindowsFact
 import neth.iecal.curbox.domain.apprules.ApplicationWindowsFreshness
+import neth.iecal.curbox.domain.apprules.ForegroundReadState
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,9 +17,8 @@ class ApplicationWindowProvenanceCacheTest {
         val result = cache.resolve(
             snapshot(
                 packages = setOf("com.example.current"),
-                hasApplicationWindow = true,
                 hasUnknown = true,
-                count = 2
+                unknownSlotCount = 1
             ),
             capturedAtElapsedMs = 7_000L
         )
@@ -26,25 +26,21 @@ class ApplicationWindowProvenanceCacheTest {
         assertEquals(setOf("com.example.current"), result.packages)
         assertEquals(setOf("com.example.other"), result.stalePackages)
         assertEquals(ApplicationWindowsFreshness.FRESH, result.freshness)
-        assertEquals(1_000L, result.capturedAtElapsedMs)
-        assertTrue(result.hasApplicationWindow)
-        assertTrue(result.hasUnknownApplicationWindow)
-        assertFalse(result.providerFailed)
-        assertEquals(2, result.applicationWindowCount)
+        assertEquals(1, result.unknownSlotCount)
+        assertEquals(ForegroundReadState.AVAILABLE, result.readState)
     }
 
     @Test
     fun uncertainReadsSeparateCurrentPackagesFromCarriedStalePackages() {
         val uncertainReads = listOf(
-            snapshot(hasApplicationWindow = false, hasUnknown = true),
-            snapshot(hasApplicationWindow = true, hasUnknown = true, count = 1),
+            snapshot(packages = emptySet(), hasUnknown = true, unknownSlotCount = 1),
+            snapshot(packages = emptySet(), hasUnknown = true, unknownSlotCount = 1),
             snapshot(
                 packages = setOf("com.example.partial"),
-                hasApplicationWindow = true,
                 hasUnknown = true,
-                count = 2
+                unknownSlotCount = 1
             ),
-            snapshot(hasApplicationWindow = false, hasUnknown = true, providerFailed = true)
+            snapshot(packages = emptySet(), hasUnknown = true, providerFailed = true)
         )
 
         uncertainReads.forEach { uncertain ->
@@ -63,10 +59,8 @@ class ApplicationWindowProvenanceCacheTest {
                 },
                 result.freshness
             )
-            assertEquals(1_000L, result.capturedAtElapsedMs)
-            assertEquals(uncertain.hasApplicationWindow, result.hasApplicationWindow)
-            assertEquals(uncertain.hasUnknownApplicationWindow, result.hasUnknownApplicationWindow)
-            assertEquals(uncertain.providerFailed, result.providerFailed)
+            assertEquals(uncertain.unknownSlotCount, result.unknownSlotCount)
+            assertEquals(uncertain.readState, result.readState)
         }
     }
 
@@ -78,7 +72,7 @@ class ApplicationWindowProvenanceCacheTest {
         val result = cache.resolve(resolvedOther(), capturedAtElapsedMs = 60_000L)
 
         assertEquals(ApplicationWindowsFreshness.FRESH, result.freshness)
-        assertEquals(60_000L, result.capturedAtElapsedMs)
+        assertEquals(setOf("com.example.other"), result.packages)
         assertTrue(result.stalePackages.isEmpty())
     }
 
@@ -89,35 +83,34 @@ class ApplicationWindowProvenanceCacheTest {
 
         cache.clear()
         val result = cache.resolve(
-            snapshot(hasApplicationWindow = false, hasUnknown = true),
+            snapshot(packages = emptySet(), hasUnknown = true, unknownSlotCount = 1),
             capturedAtElapsedMs = 7_000L
         )
 
         assertEquals(ApplicationWindowsFreshness.FRESH, result.freshness)
-        assertEquals(7_000L, result.capturedAtElapsedMs)
         assertTrue(result.packages.isEmpty())
         assertTrue(result.stalePackages.isEmpty())
-        assertFalse(result.providerFailed)
     }
 
     private fun resolvedOther() = snapshot(
         packages = setOf("com.example.other"),
-        hasApplicationWindow = true,
         hasUnknown = false,
-        count = 1
+        unknownSlotCount = 0
     )
 
     private fun snapshot(
         packages: Set<String> = emptySet(),
-        hasApplicationWindow: Boolean,
-        hasUnknown: Boolean,
-        providerFailed: Boolean = false,
-        count: Int = packages.size
-    ) = AppRuleBlocker.ApplicationWindowSnapshot(
+        hasUnknown: Boolean = false,
+        unknownSlotCount: Int = if (hasUnknown) 1 else 0,
+        providerFailed: Boolean = false
+    ) = ApplicationWindowsFact(
         packages = packages,
-        hasApplicationWindow = hasApplicationWindow,
-        hasUnknownApplicationWindow = hasUnknown,
-        providerFailed = providerFailed,
-        applicationWindowCount = count
+        unknownSlotCount = unknownSlotCount,
+        readState = when {
+            providerFailed -> ForegroundReadState.FAILED
+            packages.isEmpty() && unknownSlotCount == 0 -> ForegroundReadState.EMPTY
+            else -> ForegroundReadState.AVAILABLE
+        },
+        freshness = ApplicationWindowsFreshness.FRESH
     )
 }

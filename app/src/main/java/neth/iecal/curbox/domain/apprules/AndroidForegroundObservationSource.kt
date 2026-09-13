@@ -192,24 +192,6 @@ private fun captureAndroidFacts(
         eventWallMs = trigger.eventPackage?.let { capturedAtWallMs },
         eventElapsedMs = trigger.eventPackage?.let { capturedAtElapsedMs }
     )
-    if (trigger.kind == ObservationKind.SCREEN_OFF) {
-        val normalizedPackage = trigger.eventPackage?.trim()?.takeIf(String::isNotEmpty)
-        return ForegroundFacts(
-            capturedAtWallMs = capturedAtWallMs,
-            capturedAtElapsedMs = capturedAtElapsedMs,
-            signal = signal,
-            activeRoot = ActiveRootFact(
-                packageName = normalizedPackage,
-                readState = if (normalizedPackage == null) {
-                    ForegroundReadState.EMPTY
-                } else {
-                    ForegroundReadState.AVAILABLE
-                }
-            ),
-            applicationWindows = ApplicationWindowsFact(),
-            displayState = DisplayState.SCREEN_OFF
-        ).normalized()
-    }
     return ForegroundFacts(
         capturedAtWallMs = capturedAtWallMs,
         capturedAtElapsedMs = capturedAtElapsedMs,
