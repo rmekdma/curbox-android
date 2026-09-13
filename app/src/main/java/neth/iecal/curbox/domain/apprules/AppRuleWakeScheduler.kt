@@ -25,4 +25,8 @@ interface AppRuleWakeScheduler {
      * Cancels all scheduled wakes.
      */
     fun cancelAll()
+
+    companion object {
+        const val MAX_HANDLER_DELAY_MS = 20_000L
+    }
 }

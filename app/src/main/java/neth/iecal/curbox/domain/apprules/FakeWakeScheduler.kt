@@ -13,7 +13,7 @@ class FakeWakeScheduler(
 ) : AppRuleWakeScheduler {
 
     companion object {
-        const val MAX_HANDLER_DELAY_MS = 20_000L
+        const val MAX_HANDLER_DELAY_MS = AppRuleWakeScheduler.MAX_HANDLER_DELAY_MS
     }
 
     var currentWallClockMs: Long = initialWallClockMs

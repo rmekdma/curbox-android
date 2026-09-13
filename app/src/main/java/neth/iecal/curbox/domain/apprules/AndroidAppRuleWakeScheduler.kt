@@ -43,7 +43,7 @@ class AndroidAppRuleWakeScheduler internal constructor(
         const val ACTION_APP_RULE_WAKE = "neth.iecal.curbox.domain.apprules.ACTION_APP_RULE_WAKE"
         const val EXTRA_KEY = "neth.iecal.curbox.domain.apprules.EXTRA_KEY"
         const val EXTRA_TOKEN = "neth.iecal.curbox.domain.apprules.EXTRA_TOKEN"
-        const val MAX_HANDLER_DELAY_MS = 20_000L
+        const val MAX_HANDLER_DELAY_MS = AppRuleWakeScheduler.MAX_HANDLER_DELAY_MS
     }
 
     constructor(
@@ -118,7 +118,7 @@ class AndroidAppRuleWakeScheduler internal constructor(
 
     private class ActiveRegistration(
         val token: Long,
-        val pendingIntent: PendingIntent,
+        val pendingIntent: PendingIntent?,
         val handlerRunnable: Runnable?,
         val alarmScheduled: Boolean
     )
@@ -129,7 +129,11 @@ class AndroidAppRuleWakeScheduler internal constructor(
 
     internal val receiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            onAlarmReceived(intent)
+            try {
+                onAlarmReceived(intent)
+            } catch (t: Throwable) {
+                onNonFatalError(t)
+            }
         }
     }
 
@@ -154,6 +158,17 @@ class AndroidAppRuleWakeScheduler internal constructor(
         }
     }
 
+    private fun removeRegistrationLocked(
+        key: String,
+        expectedToken: Long? = null
+    ): Pair<ActiveRegistration, Boolean>? {
+        val current = registrations[key] ?: return null
+        if (expectedToken != null && current.token != expectedToken) return null
+        registrations.remove(key)
+        val shouldUnregister = registrations.isEmpty() && isReceiverRegistered
+        return current to shouldUnregister
+    }
+
     override fun schedule(key: String, dueAtWallClockMs: Long, token: Long) {
         val currentWall = wallClockMs()
         val currentElapsed = elapsedRealtimeMs()
@@ -163,29 +178,36 @@ class AndroidAppRuleWakeScheduler internal constructor(
             nowElapsedRealtimeMs = currentElapsed
         )
         val triggerAtElapsed = currentElapsed + remainingDelayMs
-        val pendingIntent = pendingIntentFactory(key, token)
+        val pendingIntent = try {
+            pendingIntentFactory(key, token)
+        } catch (t: Throwable) {
+            onNonFatalError(t)
+            null
+        }
 
         var alarmPublished = false
-        try {
-            alarmPublisher.setExactAndAllowWhileIdle(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                triggerAtElapsed,
-                pendingIntent
-            )
-            alarmPublished = true
-        } catch (_: SecurityException) {
+        if (pendingIntent != null) {
             try {
-                alarmPublisher.setAndAllowWhileIdle(
+                alarmPublisher.setExactAndAllowWhileIdle(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
                     triggerAtElapsed,
                     pendingIntent
                 )
                 alarmPublished = true
+            } catch (_: SecurityException) {
+                try {
+                    alarmPublisher.setAndAllowWhileIdle(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        triggerAtElapsed,
+                        pendingIntent
+                    )
+                    alarmPublished = true
+                } catch (t: Throwable) {
+                    onNonFatalError(t)
+                }
             } catch (t: Throwable) {
                 onNonFatalError(t)
             }
-        } catch (t: Throwable) {
-            onNonFatalError(t)
         }
 
         val handlerRunnable: Runnable?
@@ -224,11 +246,9 @@ class AndroidAppRuleWakeScheduler internal constructor(
 
     override fun cancel(key: String) {
         val (removed, shouldUnregister) = synchronized(lock) {
-            val rem = registrations.remove(key)
-            val shouldUnreg = registrations.isEmpty() && isReceiverRegistered
-            rem to shouldUnreg
-        }
-        removed?.let(::disposeRegistration)
+            removeRegistrationLocked(key)
+        } ?: return
+        disposeRegistration(removed)
         if (shouldUnregister) {
             unregisterReceiverIfNeeded()
         }
@@ -255,20 +275,9 @@ class AndroidAppRuleWakeScheduler internal constructor(
         handleWake(key, token)
     }
 
-    internal fun onAlarmTriggered(key: String, token: Long) {
-        handleWake(key, token)
-    }
-
-    private fun handleWake(key: String, token: Long) {
+    internal fun handleWake(key: String, token: Long) {
         val (activeToClean, shouldUnregister) = synchronized(lock) {
-            val current = registrations[key]
-            if (current != null && current.token == token) {
-                registrations.remove(key)
-                val shouldUnreg = registrations.isEmpty() && isReceiverRegistered
-                current to shouldUnreg
-            } else {
-                null
-            }
+            removeRegistrationLocked(key, expectedToken = token)
         } ?: return
 
         disposeRegistration(activeToClean)
@@ -284,7 +293,7 @@ class AndroidAppRuleWakeScheduler internal constructor(
     }
 
     private fun disposeRegistration(reg: ActiveRegistration) {
-        if (reg.alarmScheduled) {
+        if (reg.alarmScheduled && reg.pendingIntent != null) {
             cancelAlarmInternal(reg.pendingIntent)
         }
         reg.handlerRunnable?.let(handlerRemoveCallbacks)

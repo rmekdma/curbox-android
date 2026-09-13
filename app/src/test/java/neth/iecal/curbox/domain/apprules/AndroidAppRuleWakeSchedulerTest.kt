@@ -263,12 +263,12 @@ class AndroidAppRuleWakeSchedulerTest {
         // Token -1L must be fully supported
         scheduler.schedule("pkg.wake", dueAtWallClockMs = 1_000_010_000L, token = -1L)
 
-        scheduler.onAlarmTriggered("pkg.wake", -1L)
+        scheduler.handleWake("pkg.wake", -1L)
 
         assertEquals(listOf("pkg.wake" to -1L), wakes)
 
         // Second delivery with same token must be ignored (already fired)
-        scheduler.onAlarmTriggered("pkg.wake", -1L)
+        scheduler.handleWake("pkg.wake", -1L)
         assertEquals(listOf("pkg.wake" to -1L), wakes)
     }
 
@@ -304,8 +304,8 @@ class AndroidAppRuleWakeSchedulerTest {
         assertEquals(1, cancelledPendingIntents.size)
         assertSame(dummyPi, cancelledPendingIntents[0])
 
-        // Alarm arriving afterwards should be ignored
-        scheduler.onAlarmTriggered("pkg.handler", 88L)
+        // Wake arriving afterwards should be ignored
+        scheduler.handleWake("pkg.handler", 88L)
         assertEquals(listOf("pkg.handler" to 88L), wakes)
     }
 
@@ -397,7 +397,7 @@ class AndroidAppRuleWakeSchedulerTest {
     }
 
     @Test
-    fun onAlarmTriggeredHandlesWakeAndUnregistersWhenEmpty() {
+    fun handleWakeDispatchesWakeAndUnregistersWhenEmpty() {
         val wakes = mutableListOf<Pair<String, Long>>()
         val unregisteredReceivers = mutableListOf<BroadcastReceiver>()
         val dummyPi = createDummyPendingIntent()
@@ -420,9 +420,69 @@ class AndroidAppRuleWakeSchedulerTest {
         scheduler.onAlarmReceived(null)
         assertEquals(0, wakes.size)
 
-        scheduler.onAlarmTriggered("pkg.intent", 777L)
+        scheduler.handleWake("pkg.intent", 777L)
 
         assertEquals(listOf("pkg.intent" to 777L), wakes)
         assertEquals(1, unregisteredReceivers.size)
+    }
+
+    @Test
+    fun scheduleFallsBackToCappedHandlerWhenPendingIntentFactoryFails() {
+        val currentWallClock = 1_000_000_000L
+        val currentElapsed = 50_000L
+        val postedHandlers = mutableListOf<Pair<Runnable, Long>>()
+        val errors = mutableListOf<Throwable>()
+
+        val scheduler = AndroidAppRuleWakeScheduler(
+            alarmPublisher = FakeAlarmPublisher(),
+            handlerPostDelayed = { runnable, delay ->
+                postedHandlers.add(runnable to delay)
+                true
+            },
+            handlerRemoveCallbacks = { },
+            wallClockMs = { currentWallClock },
+            elapsedRealtimeMs = { currentElapsed },
+            pendingIntentFactory = { _, _ ->
+                throw RuntimeException("TooManyPendingIntentsException")
+            },
+            cancelPendingIntent = { },
+            onNonFatalError = { errors.add(it) }
+        )
+
+        scheduler.schedule("pkg.pi_failure", dueAtWallClockMs = 1_000_060_000L, token = 303L)
+
+        assertEquals(1, errors.size)
+        assertEquals("TooManyPendingIntentsException", errors[0].message)
+
+        assertEquals(1, postedHandlers.size)
+        assertEquals(20_000L, postedHandlers[0].second)
+    }
+
+    @Test
+    fun receiverOnReceiveCatchesAndLogsErrorsWithoutCrashing() {
+        val errors = mutableListOf<Throwable>()
+        val dummyPi = createDummyPendingIntent()
+
+        val scheduler = AndroidAppRuleWakeScheduler(
+            alarmPublisher = FakeAlarmPublisher(),
+            handlerPostDelayed = { _, _ -> true },
+            handlerRemoveCallbacks = { },
+            wallClockMs = { 1_000_000_000L },
+            elapsedRealtimeMs = { 50_000L },
+            pendingIntentFactory = { _, _ -> dummyPi },
+            cancelPendingIntent = { },
+            onNonFatalError = { errors.add(it) }
+        )
+
+        val faultyIntent = object : Intent() {
+            override fun hasExtra(name: String?): Boolean {
+                throw RuntimeException("Intent extras corrupted")
+            }
+        }
+
+        scheduler.receiver.onReceive(null, faultyIntent)
+
+        assertEquals(1, errors.size)
+        assertEquals("Intent extras corrupted", errors[0].message)
     }
 }
