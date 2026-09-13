@@ -14,9 +14,10 @@ import neth.iecal.curbox.CrashLogger
  * Production adapter from Accessibility framework state to the Android-free observation seam.
  * It reports raw read failures and leaves all policy interpretation to [ForegroundEvidenceModule].
  */
-class AndroidForegroundObservationSource private constructor(
+class AndroidForegroundObservationSource internal constructor(
     private val factProvider: (ObservationTrigger) -> ForegroundFacts,
-    private val errorReporter: (Throwable) -> Unit
+    private val errorReporter: (Throwable) -> Unit,
+    internal val windowProvenanceCache: ApplicationWindowProvenanceCache = ApplicationWindowProvenanceCache()
 ) : ForegroundObservationSource {
     constructor(
         service: AccessibilityService,
@@ -41,11 +42,48 @@ class AndroidForegroundObservationSource private constructor(
     )
 
     override fun capture(trigger: ObservationTrigger): ForegroundFacts = try {
-        factProvider(trigger).normalized()
+        if (shouldInvalidateCache(trigger.kind)) {
+            windowProvenanceCache.invalidate()
+        }
+        val facts = if (trigger.kind == ObservationKind.SCREEN_OFF) {
+            val normalizedPackage = trigger.eventPackage?.trim()?.takeIf(String::isNotEmpty)
+            ForegroundFacts(
+                capturedAtWallMs = trigger.requestedAtWallMs,
+                capturedAtElapsedMs = trigger.requestedAtElapsedMs,
+                signal = SignalFact(
+                    kind = ObservationKind.SCREEN_OFF,
+                    eventPackage = normalizedPackage,
+                    eventWallMs = normalizedPackage?.let { trigger.requestedAtWallMs },
+                    eventElapsedMs = normalizedPackage?.let { trigger.requestedAtElapsedMs }
+                ),
+                activeRoot = ActiveRootFact(
+                    packageName = normalizedPackage,
+                    readState = if (normalizedPackage == null) {
+                        ForegroundReadState.EMPTY
+                    } else {
+                        ForegroundReadState.AVAILABLE
+                    }
+                ),
+                applicationWindows = ApplicationWindowsFact(),
+                displayState = DisplayState.SCREEN_OFF
+            )
+        } else {
+            factProvider(trigger)
+        }.normalized()
+        facts.copy(
+            applicationWindows = windowProvenanceCache.resolve(
+                raw = facts.applicationWindows,
+                capturedAtElapsedMs = facts.capturedAtElapsedMs
+            )
+        ).normalized()
     } catch (error: CancellationException) {
         throw error
     } catch (error: Throwable) {
         reportNonFatal(errorReporter, error)
+        val rawFailedWindows = ApplicationWindowsFact(
+            unknownSlotCount = 1,
+            readState = ForegroundReadState.FAILED
+        )
         ForegroundFacts(
             capturedAtWallMs = trigger.requestedAtWallMs,
             capturedAtElapsedMs = trigger.requestedAtElapsedMs,
@@ -56,12 +94,22 @@ class AndroidForegroundObservationSource private constructor(
                 eventElapsedMs = trigger.eventPackage?.let { trigger.requestedAtElapsedMs }
             ),
             activeRoot = ActiveRootFact(readState = ForegroundReadState.FAILED),
-            applicationWindows = ApplicationWindowsFact(
-                unknownSlotCount = 1,
-                readState = ForegroundReadState.FAILED
+            applicationWindows = windowProvenanceCache.resolve(
+                raw = rawFailedWindows,
+                capturedAtElapsedMs = trigger.requestedAtElapsedMs
             ),
             displayState = DisplayState.UNKNOWN
-        )
+        ).normalized()
+    }
+
+    private fun shouldInvalidateCache(kind: ObservationKind): Boolean = when (kind) {
+        ObservationKind.RECONNECT,
+        ObservationKind.SCREEN_OFF,
+        ObservationKind.REFRESH -> true
+        ObservationKind.REAL_EVENT,
+        ObservationKind.SYNTHETIC_RECHECK,
+        ObservationKind.SCREEN_WAKE,
+        ObservationKind.USER_PRESENT -> false
     }
 
     /**
@@ -144,6 +192,24 @@ private fun captureAndroidFacts(
         eventWallMs = trigger.eventPackage?.let { capturedAtWallMs },
         eventElapsedMs = trigger.eventPackage?.let { capturedAtElapsedMs }
     )
+    if (trigger.kind == ObservationKind.SCREEN_OFF) {
+        val normalizedPackage = trigger.eventPackage?.trim()?.takeIf(String::isNotEmpty)
+        return ForegroundFacts(
+            capturedAtWallMs = capturedAtWallMs,
+            capturedAtElapsedMs = capturedAtElapsedMs,
+            signal = signal,
+            activeRoot = ActiveRootFact(
+                packageName = normalizedPackage,
+                readState = if (normalizedPackage == null) {
+                    ForegroundReadState.EMPTY
+                } else {
+                    ForegroundReadState.AVAILABLE
+                }
+            ),
+            applicationWindows = ApplicationWindowsFact(),
+            displayState = DisplayState.SCREEN_OFF
+        ).normalized()
+    }
     return ForegroundFacts(
         capturedAtWallMs = capturedAtWallMs,
         capturedAtElapsedMs = capturedAtElapsedMs,

@@ -1,5 +1,6 @@
 package neth.iecal.curbox.blockers
 
+import neth.iecal.curbox.domain.apprules.ApplicationWindowProvenanceCache
 import neth.iecal.curbox.domain.apprules.ApplicationWindowsFreshness
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

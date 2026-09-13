@@ -656,12 +656,12 @@ class AppRuleBlockerDestroyFaultRedTest {
 
             blocker.onDestroy()
             blocker.setup(service)
-            setField(blocker, "foregroundObservationSource", null)
             providerRelease.countDown()
             providerThread.join(WAIT_TIMEOUT_MS)
             check(!providerThread.isAlive) { "stale application-window provider remained blocked" }
 
-            val cache = getField(blocker, "applicationWindowProvenanceCache")
+            val source = getField(blocker, "foregroundObservationSource")
+            val cache = getField(source!!, "windowProvenanceCache")
             check(getField(cache!!, "cached") == null) {
                 "stale provider repopulated application provenance after reconnect"
             }
@@ -729,13 +729,13 @@ class AppRuleBlockerDestroyFaultRedTest {
 
             blocker.onDestroy()
             blocker.setup(service)
-            setField(blocker, "foregroundObservationSource", null)
             providerRelease.countDown()
             recheckThread.join(WAIT_TIMEOUT_MS)
             check(!recheckThread.isAlive) { "stale scheduled provider remained blocked" }
             recheckFailure.get()?.let { throw it }
 
-            val cache = getField(blocker, "applicationWindowProvenanceCache")
+            val source = getField(blocker, "foregroundObservationSource")
+            val cache = getField(source!!, "windowProvenanceCache")
             check(getField(cache!!, "cached") == null) {
                 "stale scheduled provider repopulated application provenance after reconnect"
             }

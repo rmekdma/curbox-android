@@ -102,12 +102,6 @@ import java.util.concurrent.atomic.AtomicLong
 @JvmInline
 private value class AppRuleWorkerInstanceToken(val value: Long)
 
-/** Adapter-local provenance identity; it never crosses the app-rule domain boundary. */
-internal data class ApplicationWindowProvenanceToken(
-    val lifecycleGeneration: Long,
-    val recheckGeneration: Long
-)
-
 /** Enforces the new atomic app-rule snapshot without changing the legacy blocker. */
 class AppRuleBlocker {
     companion object {
@@ -197,7 +191,6 @@ class AppRuleBlocker {
     private val schedulerRegistrationToken = AtomicLong(0L)
     private val scheduledRecoveryCallbacks = mutableMapOf<String, ScheduledRecoveryRegistration>()
     private var pendingSchedulerWakeGeneration: Long? = null
-    private val applicationWindowProvenanceCache = ApplicationWindowProvenanceCache()
     private var foregroundEvidenceModule = ForegroundEvidenceModule()
     private var foregroundObservationSource: AndroidForegroundObservationSource? = null
     private var sourceOrderSequencer = AtomicConnectionScopedSourceOrderSequencer()
@@ -232,8 +225,7 @@ class AppRuleBlocker {
     private data class CapturedLifecycleBoundary(
         val connectionGeneration: Long,
         val recheckGeneration: Long,
-        val foregroundEvidenceSuspended: Boolean,
-        val provenanceToken: ApplicationWindowProvenanceToken
+        val foregroundEvidenceSuspended: Boolean
     )
 
     private data class ScheduledRecheck(
@@ -413,15 +405,9 @@ class AppRuleBlocker {
             setupReady = false
             currentWorkerInstanceToken = null
             // A reconnect must invalidate work captured by the previous service connection.
-            val nextRecheckGeneration = recheckGeneration.incrementAndGet()
+            recheckGeneration.incrementAndGet()
             pendingWorkerEvaluations.clear()
             pendingNotificationPublication = null
-            applicationWindowProvenanceCache.beginGeneration(
-                ApplicationWindowProvenanceToken(
-                    lifecycleGeneration = connectionGeneration,
-                    recheckGeneration = nextRecheckGeneration
-                )
-            )
             cancelPendingExternalEffectsLocked()
         }
         cancelledExternalEffects.forEach(::finishDrainWork)
@@ -1293,8 +1279,7 @@ class AppRuleBlocker {
             } else {
                 captureForegroundObservation(
                     event = event,
-                    kind = kind,
-                    provenanceToken = capturedBoundary?.provenanceToken
+                    kind = kind
                 )
             }
             val request = DecisionRequest(
@@ -1708,7 +1693,6 @@ class AppRuleBlocker {
             pendingSchedulerWakeGeneration = null
             pendingWorkerEvaluations.clear()
             pendingNotificationPublication = null
-            applicationWindowProvenanceCache.invalidate()
             cancelPendingExternalEffectsLocked()
         }
         cancelledExternalEffects.forEach(::finishDrainWork)
@@ -1884,8 +1868,7 @@ class AppRuleBlocker {
             )
             val facts = captureForegroundFacts(
                 event = null,
-                kind = observationKind,
-                provenanceToken = observationBoundary.provenanceToken
+                kind = observationKind
             )
             val result = foregroundEvidenceModule.classify(facts, policy)
             val moduleVisiblePackages = result.outcomes
@@ -2114,13 +2097,7 @@ class AppRuleBlocker {
             // Invalidate both keyed boundary callbacks and any reconciliation callback already
             // posted for the visible display. The screen-off broadcast is the terminal signal for
             // this foreground observation; no provider retry may run until wake.
-            val nextRecheckGeneration = recheckGeneration.incrementAndGet()
-            applicationWindowProvenanceCache.beginGeneration(
-                ApplicationWindowProvenanceToken(
-                    lifecycleGeneration = lifecycleGeneration.get(),
-                    recheckGeneration = nextRecheckGeneration
-                )
-            )
+            recheckGeneration.incrementAndGet()
             suspendedForegroundPackage = packageName
             currentForegroundPackage = null
             currentForegroundEvidenceAtElapsedMs = 0L
@@ -2297,13 +2274,7 @@ class AppRuleBlocker {
             overrideState = settings.appRuleOverrideState
             usageTrackingDecision = nextUsageTrackingDecision
             if (candidate != null) snapshot.accept(candidate)
-            val nextRecheckGeneration = recheckGeneration.incrementAndGet()
-            applicationWindowProvenanceCache.beginGeneration(
-                ApplicationWindowProvenanceToken(
-                    lifecycleGeneration = lifecycleGeneration.get(),
-                    recheckGeneration = nextRecheckGeneration
-                )
-            )
+            recheckGeneration.incrementAndGet()
             true
         }
         if (changed) cancelScheduledRechecks()
@@ -2328,14 +2299,12 @@ class AppRuleBlocker {
 
     private fun captureForegroundFacts(
         event: AccessibilityEvent?,
-        kind: ObservationKind,
-        provenanceToken: ApplicationWindowProvenanceToken? = null
-    ): ForegroundFacts = captureForegroundObservation(event, kind, provenanceToken).facts
+        kind: ObservationKind
+    ): ForegroundFacts = captureForegroundObservation(event, kind).facts
 
     private fun captureForegroundObservation(
         event: AccessibilityEvent?,
-        kind: ObservationKind,
-        provenanceToken: ApplicationWindowProvenanceToken? = null
+        kind: ObservationKind
     ): CapturedForegroundObservation {
         val trigger = ObservationTrigger(
             sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity(),
@@ -2355,31 +2324,14 @@ class AppRuleBlocker {
                 source.capture(trigger)
             }
         } else {
-            captureLegacyForegroundFacts(event, trigger, provenanceToken)
-        }
-        val factsWithProvenance = if (source != null) {
-            facts.copy(
-                applicationWindows = applicationWindowProvenanceCache.resolve(
-                    raw = facts.applicationWindows.toApplicationWindowSnapshot(),
-                    capturedAtElapsedMs = facts.capturedAtElapsedMs,
-                    expectedToken = provenanceToken
-                ).toForegroundFact()
-            )
-        } else {
-            facts.copy(
-                applicationWindows = applicationWindowProvenanceCache.resolve(
-                    raw = facts.applicationWindows.toApplicationWindowSnapshot(),
-                    capturedAtElapsedMs = facts.capturedAtElapsedMs,
-                    expectedToken = provenanceToken
-                ).toForegroundFact()
-            )
+            captureLegacyForegroundFacts(event, trigger)
         }
         val normalizedFacts = if (screenOnAwaitingUserPresent &&
-            factsWithProvenance.displayState == DisplayState.UNLOCKED
+            facts.displayState == DisplayState.UNLOCKED
         ) {
-            factsWithProvenance.copy(displayState = DisplayState.KEYGUARD)
+            facts.copy(displayState = DisplayState.KEYGUARD)
         } else {
-            factsWithProvenance
+            facts
         }
         return CapturedForegroundObservation(trigger.sourceOrderIdentity, normalizedFacts)
     }
@@ -2424,8 +2376,7 @@ class AppRuleBlocker {
 
     private fun captureLegacyForegroundFacts(
         event: AccessibilityEvent?,
-        trigger: ObservationTrigger,
-        provenanceToken: ApplicationWindowProvenanceToken? = null
+        trigger: ObservationTrigger
     ): ForegroundFacts {
         val eventPackage = event?.packageName
             ?.toString()
@@ -2433,7 +2384,7 @@ class AppRuleBlocker {
             ?.takeIf(String::isNotEmpty)
         val eventElapsedMs = event?.eventTime?.takeIf { it > 0L }
         val activeWindow = readActiveWindowSnapshot()
-        val applicationWindows = readApplicationWindowSnapshot(provenanceToken)
+        val applicationWindows = readApplicationWindowSnapshot()
         return ForegroundFacts(
             capturedAtWallMs = trigger.requestedAtWallMs,
             capturedAtElapsedMs = trigger.requestedAtElapsedMs,
@@ -2469,23 +2420,6 @@ class AppRuleBlocker {
             },
             freshness = freshness,
             stalePackages = stalePackages
-        )
-
-    private fun ApplicationWindowsFact.toApplicationWindowSnapshot(): ApplicationWindowSnapshot =
-        ApplicationWindowSnapshot(
-            packages = packages,
-            stalePackages = stalePackages,
-            hasApplicationWindow = readState != ForegroundReadState.EMPTY ||
-                packages.isNotEmpty() || unknownSlotCount > 0,
-            hasUnknownApplicationWindow = readState == ForegroundReadState.FAILED ||
-                unknownSlotCount > 0,
-            providerFailed = readState == ForegroundReadState.FAILED,
-            applicationWindowCount = (packages.size + unknownSlotCount).coerceAtLeast(
-                if (readState == ForegroundReadState.FAILED) 1 else 0
-            ),
-            unknownSlotCount = unknownSlotCount,
-            freshness = freshness,
-            capturedAtElapsedMs = 0L
         )
 
     private fun legacyDisplayState(): DisplayState {
@@ -3477,8 +3411,7 @@ class AppRuleBlocker {
         )
         val facts = captureForegroundFacts(
             event = null,
-            kind = ObservationKind.SYNTHETIC_RECHECK,
-            provenanceToken = capturedBoundary.provenanceToken
+            kind = ObservationKind.SYNTHETIC_RECHECK
         )
         val result = foregroundEvidenceModule.classify(
             facts = facts,
@@ -3512,24 +3445,19 @@ class AppRuleBlocker {
         }
     }
 
-    private fun readApplicationWindowSnapshot(
-        provenanceToken: ApplicationWindowProvenanceToken? = null
-    ): ApplicationWindowSnapshot {
+    private fun readApplicationWindowSnapshot(): ApplicationWindowSnapshot {
         applicationWindowSnapshotProvider?.let { provider ->
             return try {
-                applyApplicationWindowProvenance(provider(), provenanceToken)
+                provider()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 logNonFatal(error)
-                applyApplicationWindowProvenance(
-                    ApplicationWindowSnapshot(
-                        packages = emptySet(),
-                        hasApplicationWindow = false,
-                        hasUnknownApplicationWindow = true,
-                        providerFailed = true
-                    ),
-                    provenanceToken
+                ApplicationWindowSnapshot(
+                    packages = emptySet(),
+                    hasApplicationWindow = false,
+                    hasUnknownApplicationWindow = true,
+                    providerFailed = true
                 )
             }
         }
@@ -3539,25 +3467,19 @@ class AppRuleBlocker {
             throw error
         } catch (error: Throwable) {
             logNonFatal(error)
-            return applyApplicationWindowProvenance(
-                ApplicationWindowSnapshot(
-                    packages = emptySet(),
-                    hasApplicationWindow = false,
-                    hasUnknownApplicationWindow = true,
-                    providerFailed = true
-                ),
-                provenanceToken
+            return ApplicationWindowSnapshot(
+                packages = emptySet(),
+                hasApplicationWindow = false,
+                hasUnknownApplicationWindow = true,
+                providerFailed = true
             )
         }
         if (windows.isNullOrEmpty()) {
-            return applyApplicationWindowProvenance(
-                ApplicationWindowSnapshot(
-                    packages = emptySet(),
-                    hasApplicationWindow = false,
-                    hasUnknownApplicationWindow = true,
-                    providerFailed = false
-                ),
-                provenanceToken
+            return ApplicationWindowSnapshot(
+                packages = emptySet(),
+                hasApplicationWindow = false,
+                hasUnknownApplicationWindow = true,
+                providerFailed = false
             )
         }
 
@@ -3599,27 +3521,15 @@ class AppRuleBlocker {
             hasUnknownPackage = true
             unknownSlotCount++
         }
-        return applyApplicationWindowProvenance(
-            ApplicationWindowSnapshot(
-                packages = packages,
-                hasApplicationWindow = hasApplicationWindow || applicationWindowCount > 0,
-                hasUnknownApplicationWindow = !hasApplicationWindow || hasUnknownPackage,
-                providerFailed = providerFailed,
-                applicationWindowCount = applicationWindowCount,
-                unknownSlotCount = unknownSlotCount
-            ),
-            provenanceToken
+        return ApplicationWindowSnapshot(
+            packages = packages,
+            hasApplicationWindow = hasApplicationWindow || applicationWindowCount > 0,
+            hasUnknownApplicationWindow = !hasApplicationWindow || hasUnknownPackage,
+            providerFailed = providerFailed,
+            applicationWindowCount = applicationWindowCount,
+            unknownSlotCount = unknownSlotCount
         )
     }
-
-    private fun applyApplicationWindowProvenance(
-        raw: ApplicationWindowSnapshot,
-        provenanceToken: ApplicationWindowProvenanceToken? = null
-    ): ApplicationWindowSnapshot = applicationWindowProvenanceCache.resolve(
-        raw = raw,
-        capturedAtElapsedMs = observationElapsedRealtimeMs(),
-        expectedToken = provenanceToken
-    )
 
     @Suppress("DEPRECATION")
     private fun readActiveWindowSnapshot(): ActiveWindowSnapshot {
@@ -3896,11 +3806,7 @@ class AppRuleBlocker {
         CapturedLifecycleBoundary(
             connectionGeneration = connectionGeneration,
             recheckGeneration = capturedRecheckGeneration,
-            foregroundEvidenceSuspended = foregroundEvidenceSuspended,
-            provenanceToken = ApplicationWindowProvenanceToken(
-                lifecycleGeneration = connectionGeneration,
-                recheckGeneration = capturedRecheckGeneration
-            )
+            foregroundEvidenceSuspended = foregroundEvidenceSuspended
         )
     }
 
@@ -4243,89 +4149,4 @@ internal fun retryRejectedWorkerSubmission(
         onRepeatedRejection()
     }
     return retryResult
-}
-
-internal class ApplicationWindowProvenanceCache {
-    private data class CachedObservation(
-        val packages: Set<String>,
-        val capturedAtElapsedMs: Long
-    )
-
-    private var cached: CachedObservation? = null
-    private var generationBound = false
-    private var currentToken: ApplicationWindowProvenanceToken? = null
-
-    @Synchronized
-    fun beginGeneration(token: ApplicationWindowProvenanceToken) {
-        generationBound = true
-        currentToken = token
-        cached = null
-    }
-
-    @Synchronized
-    fun invalidate() {
-        generationBound = true
-        currentToken = null
-        cached = null
-    }
-
-    @Synchronized
-    fun resolve(
-        raw: AppRuleBlocker.ApplicationWindowSnapshot,
-        capturedAtElapsedMs: Long,
-        expectedToken: ApplicationWindowProvenanceToken? = null
-    ): AppRuleBlocker.ApplicationWindowSnapshot {
-        if (expectedToken != null) {
-            if (generationBound && currentToken != expectedToken) {
-                return raw.copy(
-                    packages = raw.packages.toSet(),
-                    stalePackages = raw.stalePackages.toSet() - raw.packages,
-                    freshness = ApplicationWindowsFreshness.FRESH,
-                    capturedAtElapsedMs = capturedAtElapsedMs
-                )
-            }
-            if (!generationBound) {
-                generationBound = true
-                currentToken = expectedToken
-            }
-        }
-        val packages = raw.packages.toSet()
-        val rawStalePackages = raw.stalePackages.toSet() - packages
-        val resolvedNonempty = packages.isNotEmpty() &&
-            raw.hasApplicationWindow &&
-            !raw.hasUnknownApplicationWindow &&
-            !raw.providerFailed
-        if (resolvedNonempty) {
-            cached = CachedObservation(packages, capturedAtElapsedMs)
-            return raw.copy(
-                packages = packages,
-                stalePackages = emptySet(),
-                freshness = ApplicationWindowsFreshness.FRESH,
-                capturedAtElapsedMs = capturedAtElapsedMs
-            )
-        }
-        val previous = cached ?: return raw.copy(
-            packages = packages,
-            stalePackages = rawStalePackages,
-            freshness = ApplicationWindowsFreshness.FRESH,
-            capturedAtElapsedMs = capturedAtElapsedMs
-        )
-        val carriedPackages = previous.packages - packages
-        return raw.copy(
-            packages = packages,
-            stalePackages = (rawStalePackages + carriedPackages).toSet(),
-            freshness = if (packages.isEmpty()) {
-                ApplicationWindowsFreshness.STALE
-            } else {
-                ApplicationWindowsFreshness.FRESH
-            },
-            capturedAtElapsedMs = previous.capturedAtElapsedMs
-        )
-    }
-
-    @Synchronized
-    fun clear() {
-        cached = null
-    }
-
 }
