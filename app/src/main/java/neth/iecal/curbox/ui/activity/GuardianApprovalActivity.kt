@@ -303,10 +303,10 @@ class GuardianApprovalActivity : AppCompatActivity() {
                         dialog.dismiss()
                         authenticateThen(
                             ruleId = ruleId,
+                            onCancelled = { grantInProgress = false },
                             onAuthenticated = { capturedRuleId, password ->
                                 writeGrant(capturedRuleId, password, submission.additionalMinutes)
-                            },
-                            onCancelled = { grantInProgress = false }
+                            }
                         )
                     }
                 }
@@ -337,8 +337,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
     private fun authenticateThen(
         ruleId: String,
-        onAuthenticated: (ruleId: String, password: String) -> Unit,
-        onCancelled: () -> Unit = {}
+        onCancelled: () -> Unit = {},
+        onAuthenticated: (ruleId: String, password: String) -> Unit
     ) {
         if (!hasPassword) {
             onAuthenticated(ruleId, "")

@@ -34,6 +34,7 @@ object AppRuleRecheckPlanner {
             .asSequence()
             .filter { it.isActive && it.remainingMillis > 0L }
             .map { it.remainingMillis }
+            .minOrNull()
         val evaluatedRuleIds = evaluation.evaluations.map { it.ruleId }.toSet()
         val nextSkipBoundary = AppRuleGuardianOverrides.nextSkipBoundaryMs(
             state = overrideState,

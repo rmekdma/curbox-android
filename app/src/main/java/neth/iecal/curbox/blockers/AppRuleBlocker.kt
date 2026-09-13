@@ -1399,6 +1399,7 @@ class AppRuleBlocker {
         val runtime = captureRuleRuntime()
         val generation = runtime.generation
         val connectionGeneration = lifecycleGeneration.get()
+        val notificationForeground = foregroundPackage ?: currentForegroundPackage
         liveNotificationJob?.cancel()
         liveNotificationJob = scope.launch(Dispatchers.IO) {
             val finishNotification = beginDrainWork(inFlightNotifications)
