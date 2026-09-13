@@ -952,10 +952,10 @@ framework facts와 evidence policy 해석을 하나의 deep module 뒤에 둔다
 
 ### Phase 2 — async decision worker
 
-**현재 상태:** `implementation, fault/cancellation contracts, and measurement recorded done; numeric drain decision pending user authorization; OEM verification open`. Ticket 11–15와 ticket 18의 worker, scheduler, fault/cancellation 및 lifecycle
+**현재 상태:** `done — implementation, fault/cancellation contracts, measurement, and drain decision closed; OEM verification open`. Ticket 11–15와 ticket 18의 worker, scheduler, fault/cancellation 및 lifecycle
 measurement evidence는 완료됐다. Ticket 24의 callback-flush ordering은 focused evidence로
 닫혔고, ticket 27의 callback/decision p95 measurement 결과도 기록됐다. Ticket 28의 stop/drain/cancellation evidence
-정리와 결정 질문이 작성되어 사용자 결정을 대기 중이다. T25 closure와 T26 fixture closure는 별도 deterministic evidence로 기록됐고,
+정리와 사용자 명시적 결정("RecoveryOnlyStop 유지")이 완료되었다. T25 closure와 T26 fixture closure는 별도 deterministic evidence로 기록됐고,
 Xiaomi validation은 별도 scope다.
 
 `887aab62` 이후 T25 accepted-review verification은 [canonical baseline의 follow-up

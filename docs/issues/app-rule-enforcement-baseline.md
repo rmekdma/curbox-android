@@ -406,7 +406,7 @@ the latter is authoritative for the current Phase 4 status.
 | 25 | `done` | The frozen repeated-denial Guardian identifier passes deterministic same-instance, refreshed-screen, visibility, and cleanup evidence; the historical connected observation remains in the inventory. |
 | 26 | `done` | The frozen debug application-id fixture now compares the target context with the variant-generated application ID. Focused repetition is green; the remaining full-suite observation is outside Ticket 20's frozen inventory and is not assigned to T26. |
 | 27 | `done` | The approved T27-P6 protocol was run; fixed synthetic callback-to-decision-publication-entry p95 observed at 63.040 ms across 200 measured rows (100 allow / 100 deny) with zero exclusions and verified canonical evidence retention. |
-| 28 | `pending-user-decision` | Stop, drain, and cancellation evidence documented; production retains RecoveryOnlyStop without a numeric budget; decision question framed awaiting user authorization. |
+| 28 | `done` | Stop, drain, and cancellation evidence documented; user explicitly decided to retain RecoveryOnlyStop without a numeric budget; production stop behavior is preserved. |
 
 ### Phases 0–4
 
@@ -414,7 +414,7 @@ the latter is authoritative for the current Phase 4 status.
 | --- | --- | --- |
 | Phase 0 | `complete — policy and deterministic RED-contract stage` | Its failures are inputs to later implementation tickets, not fixed results. |
 | Phase 1 | `T21/T22/T23/T24/T25/T26 deterministic closure recorded; verification open` | Xiaomi device verification remains open. |
-| Phase 2 | `implementation and fault/cancellation contracts recorded done; measurement recorded; drain decision pending user response` | T24 callback ordering and T27 p95 measurement are closed; T28 evidence is documented with decision question pending user response; Xiaomi OEM validation remains T29. |
+| Phase 2 | `done — implementation, fault/cancellation contracts, measurement, and drain decision closed` | T24 callback ordering and T27 p95 measurement are closed; T28 drain decision resolved to retain RecoveryOnlyStop; Xiaomi OEM validation remains T29. |
 | Phase 3 | `done — NO-GO` | Do not add a per-package coordinator unless its entry condition is newly reproduced. |
 | Phase 4 | `done — NO-GO; architecture gate closed` | Revisit only if production cleanup ordering or containment changes. |
 
@@ -431,7 +431,7 @@ historical 24 failures, or the later connected results, into a green release gat
   latest full suite still has one execution-specific `WarningActivityLifecycleTest` failure outside
   Ticket 20's frozen inventory; it is not assigned to T26 or relabeled as a fixture failure.
 - Ticket 27's fixed synthetic callback-to-decision-publication-entry p95 is recorded at 63.040 ms under approved protocol T27-P6.
-- Ticket 28's stop/drain evidence is documented; production preserves RecoveryOnlyStop and the decision question is framed for user authorization without selecting an operational threshold.
+- Ticket 28's stop/drain evidence is documented; user explicitly decided to retain RecoveryOnlyStop; production preserves RecoveryOnlyStop without an operational numeric budget.
 - Ticket 29 is last and targets exactly `Xiaomi Pad Pro 2025 12.7` on Android 15 or Android 16.
   The exact installed build/channel must be captured at execution; the current iPlay50 evidence is
   not a substitute.

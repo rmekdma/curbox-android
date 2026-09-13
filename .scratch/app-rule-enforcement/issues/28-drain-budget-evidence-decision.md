@@ -4,13 +4,20 @@
 
 **Blocked by:** 20 — Canonical connected-suite failure inventory and documentation baseline reconciliation
 
-**Status:** pending-user-decision
+**Status:** done
 
 - [x] Collect and document evidence for the existing stop, cancellation, drain, and quiescence behavior against the already approved lifecycle invariants.
 - [x] Determine from evidence whether a production numeric drain budget or completion guarantee is actually required, without selecting one.
 - [x] If such a decision is required, stop implementation and ask the user exactly: “Should production adopt a numeric drain budget or completion guarantee, and what exact value and completion semantics should it have?”
-- [ ] Do not introduce a numeric budget, deadline implementation, architecture change, or altered stop behavior before the user's decision; record the decision or deferral in the canonical documentation. (Awaiting user decision)
+- [x] Do not introduce a numeric budget, deadline implementation, architecture change, or altered stop behavior before the user's decision; record the decision or deferral in the canonical documentation.
 - [x] Preserve the existing recovery-only behavior and report all evidence, test results, and remaining uncertainty.
+
+## User decision — 2026-09-13
+
+The user explicitly decided: **"RecoveryOnlyStop 유지"** (retain `RecoveryOnlyStop`).
+- Production continues to use `RecoveryOnlyStop` without an operational numeric drain budget (`TotalDrainDeadline`) or completion guarantee (`DeadlineDrainStop`).
+- Immediate lifecycle invalidation, worker/job/handler cancellation, and durable reconnect recovery via `recoverOpenSessions()` remain the canonical production behavior.
+- No production source changes or numeric thresholds were introduced.
 
 ## Implementation evidence — 2026-09-13
 
