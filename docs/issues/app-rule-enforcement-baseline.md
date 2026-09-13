@@ -394,7 +394,7 @@ The detailed ticket records remain in [.scratch/app-rule-enforcement/issues](../
 Ticket 17's component-only limitation and ticket 19's later full-service decision are both retained;
 the latter is authoritative for the current Phase 4 status.
 
-### Tickets 20–26
+### Tickets 20–29
 
 | Ticket | Canonical status | Evidence or interpretation |
 | --- | --- | --- |
@@ -407,6 +407,7 @@ the latter is authoritative for the current Phase 4 status.
 | 26 | `done` | The frozen debug application-id fixture now compares the target context with the variant-generated application ID. Focused repetition is green; the remaining full-suite observation is outside Ticket 20's frozen inventory and is not assigned to T26. |
 | 27 | `done` | The approved T27-P6 protocol was run; fixed synthetic callback-to-decision-publication-entry p95 observed at 63.040 ms across 200 measured rows (100 allow / 100 deny) with zero exclusions and verified canonical evidence retention. |
 | 28 | `done` | Stop, drain, and cancellation evidence documented; user explicitly decided to retain RecoveryOnlyStop without a numeric budget; production stop behavior is preserved. |
+| 29 | `open (stopped on hardware mismatch; protocol proposal recorded)` | Execution start captured connected device `iPlay50_mini_Pro` (Android 13 / SDK 33, build `TP1A.220624.014`, observed channel `unavailable`); confirmed mismatch against target `Xiaomi Pad Pro 2025 12.7` (Android 15/16); stopped immediately without device substitution; objective OEM deep-sleep protocol proposal recorded; actual test conditions and validation results remain pending target hardware and user approval. |
 
 ### Phases 0–4
 
@@ -433,8 +434,7 @@ historical 24 failures, or the later connected results, into a green release gat
 - Ticket 27's fixed synthetic callback-to-decision-publication-entry p95 is recorded at 63.040 ms under approved protocol T27-P6.
 - Ticket 28's stop/drain evidence is documented; user explicitly decided to retain RecoveryOnlyStop; production preserves RecoveryOnlyStop without an operational numeric budget.
 - Ticket 29 is last and targets exactly `Xiaomi Pad Pro 2025 12.7` on Android 15 or Android 16.
-  The exact installed build/channel must be captured at execution; the current iPlay50 evidence is
-  not a substitute.
+  At execution start, the connected device was observed as `iPlay50_mini_Pro` on Android 13 (build `TP1A.220624.014`, observed channel `unavailable`); execution stopped immediately without substitution. An objective OEM deep-sleep protocol proposal was recorded; actual test conditions and validation results remain pending target hardware and user approval. Ticket 29 remains open.
 - `AR004 Xiaomi Pad Pro 2025 12.7 device verification complete` and `reported incident closed` remain open. No
   current evidence claims OEM resolution or release readiness.
 
