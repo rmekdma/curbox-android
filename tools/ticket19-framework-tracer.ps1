@@ -1,6 +1,7 @@
 param(
     [string]$Serial = 'T811MA256GB23418064398',
-    [string]$AdbPath = 'C:\Users\DELL\AppData\Local\Android\Sdk\platform-tools\adb.exe'
+    [string]$AdbPath = 'C:\Users\DELL\AppData\Local\Android\Sdk\platform-tools\adb.exe',
+    [switch]$SkipServicePreconditions = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1128,13 +1129,15 @@ $initialWakefulness = Get-Wakefulness
 if ($initialWakefulness -notin @('Awake', 'Dozing')) {
     throw "refusing to mutate from unsupported wakefulness baseline: $initialWakefulness"
 }
-if (@($initialServices | Where-Object {
-    $_ -match '(?i)(lock\s*me\s*out|lockmeout|com\.teqtic)'
-}).Count -ne 0) {
-    throw "refusing to mutate a baseline containing intentionally removed Lock Me Out: $($initialServices -join ':')"
-}
-if (@($initialServices | Where-Object { $_ -match '(?i)safeincloud' }).Count -eq 0) {
-    throw "refusing to mutate because SafeInCloud is absent: $($initialServices -join ':')"
+if (-not $SkipServicePreconditions) {
+    if (@($initialServices | Where-Object {
+        $_ -match '(?i)(lock\s*me\s*out|lockmeout|com\.teqtic)'
+    }).Count -ne 0) {
+        throw "refusing to mutate a baseline containing intentionally removed Lock Me Out: $($initialServices -join ':')"
+    }
+    if (@($initialServices | Where-Object { $_ -match '(?i)safeincloud' }).Count -eq 0) {
+        throw "refusing to mutate because SafeInCloud is absent: $($initialServices -join ':')"
+    }
 }
 $script:ownedServices = @($initialServices)
 $script:ownedEnabled = $initialAccessibilityEnabled
