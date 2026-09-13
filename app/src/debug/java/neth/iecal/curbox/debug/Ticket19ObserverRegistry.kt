@@ -25,11 +25,9 @@ import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.AcceptedRuleRuntimeSnapshot
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
 import neth.iecal.curbox.domain.apprules.DecisionOutcome
-import neth.iecal.curbox.domain.apprules.DecisionOutcomeSink
 import neth.iecal.curbox.domain.apprules.DecisionRequest
 import neth.iecal.curbox.domain.apprules.ObservationKind
 import neth.iecal.curbox.domain.apprules.RuntimeRevision
-import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
 import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
 import neth.iecal.curbox.domain.apprules.SourceOrderReservation
 import neth.iecal.curbox.services.AppBlockerService
@@ -86,7 +84,6 @@ internal object Ticket19ObserverRegistry {
     private var externalOutcomeEvaluationDenied = false
     private var externalOutcomeDeniedPublished = false
     private var externalOutcomeWarningCalled = false
-    private var causalWrappedWorkerIdentity = 0
     private var temporaryRulePresent = false
     private var temporaryRuleEffectivePresent = false
     private var temporaryRulePendingPresent = false
@@ -1289,9 +1286,6 @@ internal object Ticket19ObserverRegistry {
 
     private fun armExternalOutcome(argument: String?) {
         val token = requireUuid(argument)
-        val blocker = synchronized(lock) { blockerRef?.get() }
-            ?: error("no current AppRuleBlocker")
-        installCausalWorkerObservers(blocker)
         synchronized(lock) {
             externalOutcomeToken = token
             externalOutcomeArmedAtElapsedMs = SystemClock.elapsedRealtime()
@@ -1305,43 +1299,6 @@ internal object Ticket19ObserverRegistry {
         }
     }
 
-    private fun installCausalWorkerObservers(blocker: AppRuleBlocker) {
-        val worker = readField(blocker, "decisionWorker") as SerializedDecisionWorker
-        val workerIdentity = System.identityHashCode(worker)
-        synchronized(lock) {
-            if (causalWrappedWorkerIdentity == workerIdentity) return
-        }
-        val evaluationField = findField(worker, "onEvaluation")
-        @Suppress("UNCHECKED_CAST")
-        val previousEvaluation = evaluationField.get(worker) as? ((
-            DecisionRequest,
-            AcceptedRuleRuntimeSnapshot,
-            String,
-            AppRulesEvaluation
-        ) -> Unit)
-        evaluationField.set(
-            worker,
-            { request: DecisionRequest,
-                accepted: AcceptedRuleRuntimeSnapshot,
-                packageName: String,
-                evaluation: AppRulesEvaluation ->
-                observeCausalEvaluation(request, packageName, evaluation)
-                previousEvaluation?.invoke(request, accepted, packageName, evaluation)
-            }
-        )
-        val outcomeField = findField(worker, "outcomeSink")
-        val previousOutcome = outcomeField.get(worker) as DecisionOutcomeSink
-        outcomeField.set(worker, object : DecisionOutcomeSink {
-            override fun publish(outcome: DecisionOutcome) {
-                observeCausalOutcome(outcome)
-                previousOutcome.publish(outcome)
-            }
-        })
-        synchronized(lock) {
-            causalWrappedWorkerIdentity = workerIdentity
-            recordEventLocked("causal_worker_observers_installed", "worker=$workerIdentity")
-        }
-    }
 
     private fun observeCausalEvaluation(
         request: DecisionRequest,
