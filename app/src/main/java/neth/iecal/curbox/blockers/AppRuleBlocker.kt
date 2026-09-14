@@ -51,6 +51,8 @@ import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleReceiverLifecycle
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.AppRuleWallClockScheduler
+import neth.iecal.curbox.domain.apprules.AppRuleWakeScheduler
+import neth.iecal.curbox.domain.apprules.AndroidAppRuleWakeScheduler
 import neth.iecal.curbox.domain.apprules.ActiveRootFact
 import neth.iecal.curbox.domain.apprules.AndroidForegroundObservationSource
 import neth.iecal.curbox.domain.apprules.AppUsageTrackingDecision
@@ -103,7 +105,7 @@ import java.util.concurrent.atomic.AtomicLong
 private value class AppRuleWorkerInstanceToken(val value: Long)
 
 /** Enforces the new atomic app-rule snapshot without changing the legacy blocker. */
-class AppRuleBlocker {
+class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     companion object {
         const val INTENT_ACTION_REFRESH_APP_RULES = "neth.iecal.curbox.refresh.app_rules"
         private const val MILLIS_PER_MINUTE = 60_000L
@@ -148,7 +150,15 @@ class AppRuleBlocker {
     private val runtimeLock = Any()
     /** Serializes readiness, runtime capture, replacement, and installation as one handoff. */
     private val decisionWorkerLock = Any()
-    private val handler = Handler(Looper.getMainLooper())
+    private var handlerInstance: Handler? = null
+    private fun getHandler(): Handler {
+        var h = handlerInstance
+        if (h == null) {
+            h = Handler(Looper.getMainLooper())
+            handlerInstance = h
+        }
+        return h
+    }
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var notificationTickJob: kotlinx.coroutines.Job? = null
     private var liveNotificationJob: kotlinx.coroutines.Job? = null
@@ -248,12 +258,13 @@ class AppRuleBlocker {
     private data class ScheduledAlarmRegistration(
         val token: Long,
         val originatingSourceOrderIdentity: SourceOrderIdentity?,
-        val pendingIntent: PendingIntent,
-        val callback: Runnable,
+        val pendingIntent: PendingIntent? = null,
+        val callback: Runnable? = null,
         val generation: Long
     )
 
     private data class ScheduledRegistrationCleanup(
+        val token: Long? = null,
         val pendingIntent: PendingIntent? = null,
         val recoveryRunnable: Runnable? = null
     )
@@ -397,6 +408,18 @@ class AppRuleBlocker {
     /** Passive seam immediately at DecisionOutcomeSink.publish entry before external effects. */
     internal var decisionOutcomeSinkObserver: ((DecisionOutcome) -> Unit)? = null
 
+    internal var wakeScheduler: AppRuleWakeScheduler? = wakeScheduler
+        set(value) {
+            field = value
+            value?.onWake = { key, token ->
+                onWakeFromScheduler(key, token)
+            }
+        }
+
+    init {
+        this.wakeScheduler = wakeScheduler
+    }
+
     fun setup(service: BaseBlockingService) {
         servicePackageName = service.packageName
         val connectionGeneration = lifecycleGeneration.incrementAndGet()
@@ -424,7 +447,7 @@ class AppRuleBlocker {
         settingsJob?.cancel()
         notificationTickJob?.cancel()
         cancelScheduledRechecks()
-        handler.removeCallbacksAndMessages(null)
+        handlerInstance?.removeCallbacksAndMessages(null)
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)
         receiverLifecycle = null
         // A reconnect owns a fresh scope. This cancels untracked refresh/notification jobs from
@@ -442,6 +465,14 @@ class AppRuleBlocker {
         pendingSchedulerWakeGeneration = null
         lastShownAt = 0L
         this.service = service
+        if (wakeScheduler == null) {
+            wakeScheduler = AndroidAppRuleWakeScheduler(
+                context = service,
+                wallClockMs = { wallClockMsProvider() },
+                elapsedRealtimeMs = { elapsedRealtimeMsProvider() },
+                onNonFatalError = ::logNonFatal
+            )
+        }
         crashLogger = CrashLogger(service)
         foregroundEvidenceModule = ForegroundEvidenceModule()
         sourceOrderSequencer = AtomicConnectionScopedSourceOrderSequencer()
@@ -841,7 +872,7 @@ class AppRuleBlocker {
                     isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken)
                 }
             ) return
-            handler.post {
+            getHandler().post {
                 if (!enterPostedEffect(permit)) return@post
                 try {
                     if (!isCurrentWorkerOutcome(outcome, workerInstanceToken)) return@post
@@ -1707,7 +1738,7 @@ class AppRuleBlocker {
             } catch (error: Throwable) {
                 logNonFatal(error)
             }
-            handler.removeCallbacksAndMessages(null)
+            handlerInstance?.removeCallbacksAndMessages(null)
             synchronized(decisionWorkerLock) {
                 val worker = decisionWorker
                 decisionWorker = null
@@ -1739,7 +1770,7 @@ class AppRuleBlocker {
             } catch (error: Throwable) {
                 logNonFatal(error)
             }
-            handler.removeCallbacksAndMessages(null)
+            handlerInstance?.removeCallbacksAndMessages(null)
         }
         val workerStartedAtElapsedMs = observationElapsedRealtimeMs()
         val workerResult = synchronized(decisionWorkerLock) {
@@ -1958,6 +1989,62 @@ class AppRuleBlocker {
         }
     }
 
+    internal fun onWakeFromScheduler(packageName: String, token: Long) {
+        if (!isReadyForChecks()) return
+        val generation = synchronized(runtimeLock) {
+            if (!isReadyForChecks()) return
+            val registration = scheduledAlarms[packageName]
+                ?.takeIf { token < 0L || it.token == token }
+            val scheduled = scheduledRechecks[packageName]
+                ?.takeIf {
+                    token < 0L || registration == null ||
+                        (it.registrationToken == registration.token &&
+                            (registration.callback == null || it.runnable === registration.callback) &&
+                            it.generation == registration.generation)
+                }
+            val recovery = scheduledRecoveryCallbacks[packageName]
+                ?.takeIf {
+                    token < 0L || registration == null ||
+                        (it.registrationToken == registration.token &&
+                            it.generation == registration.generation &&
+                            (registration.callback == null || it.runnable === registration.callback))
+                }
+            if (registration != null && scheduled == null && recovery == null) {
+                // The token matched a registration, but its callback was replaced or
+                // cancelled. Remove only that exact registration and reject the delivery.
+                removeAlarmRegistrationLocked(
+                    packageName,
+                    registration.callback,
+                    registration.token
+                )
+                return
+            }
+            if (registration != null && recheckGeneration.get() != registration.generation) {
+                removeAlarmRegistrationLocked(
+                    packageName,
+                    registration.callback,
+                    registration.token
+                )
+                return
+            }
+            if (registration != null) {
+                removeAlarmRegistrationLocked(
+                    packageName,
+                    registration.callback,
+                    registration.token
+                )
+            } else {
+                scheduledAlarms.remove(packageName)
+            }
+            if (scheduled != null) scheduledRechecks.remove(packageName)
+            if (recovery != null) scheduledRecoveryCallbacks.remove(packageName)
+            registration?.generation ?: scheduled?.generation ?: recheckGeneration.get()
+        }
+        // Coalesce an alarm into one guarded observation. The actual framework reads and
+        // decision work happen from the posted reconciliation callback, outside onReceive.
+        onSchedulerWake(generation)
+    }
+
     private val schedulerWakeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (!isReadyForChecks()) return
@@ -1965,53 +2052,7 @@ class AppRuleBlocker {
                 ?.takeIf(String::isNotBlank)
                 ?: return
             val token = intent.getLongExtra(EXTRA_SCHEDULER_TOKEN, -1L)
-            val generation = synchronized(runtimeLock) {
-                if (!isReadyForChecks()) return
-                val registration = scheduledAlarms[packageName]
-                    ?.takeIf { it.token == token }
-                    ?: return
-                val scheduled = scheduledRechecks[packageName]
-                    ?.takeIf {
-                        it.registrationToken == registration.token &&
-                            it.runnable === registration.callback &&
-                            it.generation == registration.generation
-                    }
-                val recovery = scheduledRecoveryCallbacks[packageName]
-                    ?.takeIf {
-                        it.registrationToken == registration.token &&
-                            it.generation == registration.generation &&
-                            it.runnable === registration.callback
-                    }
-                if (scheduled == null && recovery == null) {
-                    // The token matched a registration, but its callback was replaced or
-                    // cancelled. Remove only that exact registration and reject the delivery.
-                    removeAlarmRegistrationLocked(
-                        packageName,
-                        registration.callback,
-                        registration.token
-                    )
-                    return
-                }
-                if (recheckGeneration.get() != registration.generation) {
-                    removeAlarmRegistrationLocked(
-                        packageName,
-                        registration.callback,
-                        registration.token
-                    )
-                    return
-                }
-                removeAlarmRegistrationLocked(
-                    packageName,
-                    registration.callback,
-                    registration.token
-                )
-                if (scheduled != null) scheduledRechecks.remove(packageName)
-                if (recovery != null) scheduledRecoveryCallbacks.remove(packageName)
-                registration.generation
-            }
-            // Coalesce an alarm into one guarded observation. The actual framework reads and
-            // decision work happen from the posted reconciliation callback, outside onReceive.
-            onSchedulerWake(generation)
+            onWakeFromScheduler(packageName, token)
         }
     }
 
@@ -2552,7 +2593,7 @@ class AppRuleBlocker {
             }
             val posted = try {
                 visibleApplicationCheckPostDelayed?.invoke(callback, retryDelay)
-                    ?: handler.postDelayed(callback, retryDelay)
+                    ?: getHandler().postDelayed(callback, retryDelay)
             } catch (error: CancellationException) {
                 finishExternalEffect(permit)
                 throw error
@@ -3007,7 +3048,7 @@ class AppRuleBlocker {
                     ) {
                         false
                     } else {
-                        handler.postDelayed(recoveryRunnable, recoveryDelay)
+                        getHandler().postDelayed(recoveryRunnable, recoveryDelay)
                     }
                 }
                 armPostedEffect(permit, posted) {
@@ -3066,8 +3107,7 @@ class AppRuleBlocker {
         generation: Long,
         permit: ExternalEffectPermit
     ): Boolean {
-        val alarmManager = service.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-            ?: return false
+        val scheduler = wakeScheduler
         val registration = synchronized(runtimeLock) {
             val primary = scheduledRechecks[packageName]
                 ?.takeIf { it.runnable === runnable && it.generation == generation }
@@ -3081,17 +3121,26 @@ class AppRuleBlocker {
         } ?: return false
         val token = registration.first
         val originatingSourceOrderIdentity = registration.second
-        val requestCode = token.toInt()
-        val wakeIntent = Intent(SCHEDULER_WAKE_ACTION)
-            .setPackage(service.packageName)
-            .putExtra(EXTRA_SCHEDULER_PACKAGE, packageName)
-            .putExtra(EXTRA_SCHEDULER_TOKEN, token)
-        val pendingIntent = PendingIntent.getBroadcast(
-            service,
-            requestCode,
-            wakeIntent,
-            PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val pendingIntent = if (::service.isInitialized) {
+            try {
+                val requestCode = token.toInt()
+                val wakeIntent = Intent(SCHEDULER_WAKE_ACTION)
+                    .setPackage(service.packageName)
+                    .putExtra(EXTRA_SCHEDULER_PACKAGE, packageName)
+                    .putExtra(EXTRA_SCHEDULER_TOKEN, token)
+                PendingIntent.getBroadcast(
+                    service,
+                    requestCode,
+                    wakeIntent,
+                    PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            } catch (e: Throwable) {
+                logNonFatal(e)
+                null
+            }
+        } else {
+            null
+        }
         val previousAlarm = synchronized(runtimeLock) {
             if (!isReadyForChecks() || recheckGeneration.get() != generation ||
                 !isCurrentSchedulerCallbackLocked(packageName, runnable)
@@ -3111,6 +3160,53 @@ class AppRuleBlocker {
             old?.pendingIntent
         }
         previousAlarm?.let(::cancelAlarm)
+
+        if (scheduler != null) {
+            val dueAtWallClockMs = synchronized(runtimeLock) {
+                scheduledRechecks[packageName]?.dueAtWallClockMs
+            } ?: safeWallClockAdd(observationWallClockMs(), delayMillis)
+
+            return try {
+                if (!isCurrentSchedulerCallback(packageName, runnable, generation)) {
+                    removeAlarmRegistration(packageName, runnable, token)
+                    return false
+                }
+                alarmBeforeFrameworkCallObserver?.invoke(packageName)
+                if (!beginExternalEffectCall(permit) {
+                        isReadyForChecks() &&
+                            recheckGeneration.get() == generation &&
+                            isCurrentSchedulerCallbackLocked(packageName, runnable)
+                    }
+                ) return false
+
+                scheduler.schedule(
+                    key = packageName,
+                    dueAtWallClockMs = dueAtWallClockMs,
+                    token = token
+                )
+
+                alarmPublicationObserver?.invoke(packageName)
+                if (!isCurrentSchedulerCallback(packageName, runnable, generation)) {
+                    removeAlarmRegistration(packageName, runnable, token)
+                    return false
+                }
+                true
+            } catch (error: Throwable) {
+                removeAlarmRegistration(packageName, runnable, token)
+                throw error
+            } finally {
+                completeExternalEffectCall(permit)
+            }
+        }
+
+        val alarmManager = if (::service.isInitialized) {
+            service.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+        } else {
+            null
+        } ?: return false
+
+        if (pendingIntent == null) return false
+
         val triggerAtElapsedMs = safeElapsedRealtimeAdd(
             observationElapsedRealtimeMs(),
             delayMillis
@@ -3656,28 +3752,32 @@ class AppRuleBlocker {
                 ?.let { currentOrigin == it }
                 ?: true
             if (!hasExpectedIdentity || !tokenMatches || !originMatches) {
-                null to ScheduledRegistrationCleanup()
+                false to (null to ScheduledRegistrationCleanup())
             } else {
                 val scheduled = scheduledRechecks.remove(packageName)
                 val registrationToken = scheduled?.registrationToken ?: currentToken
                 val cleanup = registrationToken?.let {
                     removeScheduledRegistrationLocked(packageName, it)
                 } ?: ScheduledRegistrationCleanup()
-                scheduled?.runnable to cleanup
+                true to (scheduled?.runnable to cleanup)
             }
         }
-        cancellation.first?.let(::removeHandlerCallback)
-        cancellation.second.pendingIntent?.let(::cancelAlarm)
-        cancellation.second.recoveryRunnable?.let(::removeHandlerCallback)
+        if (cancellation.first) {
+            wakeScheduler?.cancel(packageName)
+        }
+        cancellation.second.first?.let(::removeHandlerCallback)
+        cancellation.second.second.pendingIntent?.let(::cancelAlarm)
+        cancellation.second.second.recoveryRunnable?.let(::removeHandlerCallback)
     }
 
     private fun cancelScheduledRechecks() {
+        wakeScheduler?.cancelAll()
         val callbacks = synchronized(runtimeLock) {
             val scheduled = scheduledRechecks.values.map(ScheduledRecheck::runnable)
             val recovery = scheduledRecoveryCallbacks.values.map(
                 ScheduledRecoveryRegistration::runnable
             )
-            val alarms = scheduledAlarms.values.map(ScheduledAlarmRegistration::pendingIntent)
+            val alarms = scheduledAlarms.values.mapNotNull(ScheduledAlarmRegistration::pendingIntent)
             scheduledRechecks.clear()
             scheduledRecoveryCallbacks.clear()
             scheduledAlarms.clear()
@@ -3707,6 +3807,9 @@ class AppRuleBlocker {
             token?.let { removeScheduledRegistrationLocked(packageName, it) }
                 ?: ScheduledRegistrationCleanup()
         }
+        if (cleanup.token != null) {
+            wakeScheduler?.cancel(packageName)
+        }
         cleanup.pendingIntent?.let(::cancelAlarm)
         cleanup.recoveryRunnable?.let(::removeHandlerCallback)
         runnable?.let(::removeHandlerCallback)
@@ -3723,6 +3826,7 @@ class AppRuleBlocker {
             ?.takeIf { it.registrationToken == registrationToken }
             ?.let { scheduledRecoveryCallbacks.remove(packageName)?.runnable }
         return ScheduledRegistrationCleanup(
+            token = registrationToken,
             pendingIntent = pendingIntent,
             recoveryRunnable = recoveryRunnable
         )
@@ -3769,11 +3873,12 @@ class AppRuleBlocker {
 
     private fun removeAlarmRegistrationLocked(
         packageName: String,
-        runnable: Runnable,
+        runnable: Runnable?,
         token: Long
     ): PendingIntent? {
         val registration = scheduledAlarms[packageName]
-        if (registration?.callback !== runnable || registration.token != token
+        if ((runnable != null && registration?.callback !== runnable) ||
+            registration?.token != token
         ) {
             return null
         }
@@ -3781,7 +3886,8 @@ class AppRuleBlocker {
         return registration.pendingIntent
     }
 
-    private fun cancelAlarm(pendingIntent: PendingIntent) {
+    private fun cancelAlarm(pendingIntent: PendingIntent?) {
+        if (pendingIntent == null) return
         try {
             if (::service.isInitialized) {
                 (service.getSystemService(Context.ALARM_SERVICE) as? AlarmManager)
@@ -3818,7 +3924,7 @@ class AppRuleBlocker {
         }
 
     private fun isReadyForChecks(): Boolean =
-        setupReady && !destroyed && ::service.isInitialized && scope.isActive
+        setupReady && !destroyed && (::service.isInitialized || wakeScheduler != null) && scope.isActive
 
     private fun isReadyForChecks(connectionGeneration: Long): Boolean =
         isReadyForChecks() &&
@@ -4092,7 +4198,7 @@ class AppRuleBlocker {
                 it(runnable)
                 return
             }
-            handler.removeCallbacks(runnable)
+            handlerInstance?.removeCallbacks(runnable)
         } catch (error: Throwable) {
             logNonFatal(error)
         }
