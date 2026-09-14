@@ -1734,11 +1734,7 @@ internal object Ticket19ObserverRegistry {
 
     private fun appRuleWorkCounts(blocker: AppRuleBlocker): Map<String, Int> {
         val counts = linkedMapOf(
-            "refreshes" to atomicIntField(blocker, "inFlightRefreshes"),
-            "notifications" to atomicIntField(blocker, "inFlightNotifications"),
-            "callbacks" to atomicIntField(blocker, "inFlightCallbacks"),
-            "usageResetCompletions" to atomicIntField(blocker, "inFlightUsageResetCompletions"),
-            "recheckPlans" to atomicIntField(blocker, "inFlightRecheckPlans")
+            "callbacks" to atomicIntField(blocker, "inFlightCallbacks")
         )
         val worker = readFieldOrNull(blocker, "decisionWorker")
         counts["workerQueued"] = worker?.let { atomicIntField(it, "queuedWorkCount") } ?: 0

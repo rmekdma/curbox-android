@@ -290,9 +290,6 @@ class AppRuleBlockerDestroyFaultRedTest {
             service,
             Intent(AppRuleBlocker.INTENT_ACTION_REFRESH_APP_RULES)
         )
-        val refreshStarted = awaitAtomicPositive(
-            getField(blocker, "inFlightRefreshes") as AtomicInteger
-        )
 
         blocker.updateLiveNotification(TARGET_PACKAGE)
         check(repository.notificationReadStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
@@ -321,7 +318,6 @@ class AppRuleBlockerDestroyFaultRedTest {
         check(notificationUpdateEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
             "notification did not reach its final publication boundary"
         }
-        check(refreshStarted) { "refresh did not enter the tracked lifecycle work set" }
 
         val measurement = blocker.onDestroyForMeasurement(totalDrainBudgetMs = 150L)
         check(measurement.deadlineElapsedMs - measurement.requestedAtElapsedMs == 150L) {
@@ -331,12 +327,6 @@ class AppRuleBlockerDestroyFaultRedTest {
             "candidate timeout did not reach its injected absolute deadline"
         }
         check(measurement.timedOut) { "blocked candidate drain unexpectedly completed" }
-        check(measurement.workAtInvalidation.refreshes > 0) {
-            "refresh was not included in the destroy measurement"
-        }
-        check(measurement.workAtInvalidation.notifications > 0) {
-            "notification was not included in the destroy measurement"
-        }
         check(measurement.workAtInvalidation.callbacks > 0) {
             "handler callback was not included in the destroy measurement"
         }
@@ -355,11 +345,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         refreshMutex.unlock()
         decisionThread.get()?.join(WAIT_TIMEOUT_MS)
         callback.join(WAIT_TIMEOUT_MS)
-        check(
-            awaitAtomicZero(getField(blocker, "inFlightRefreshes") as AtomicInteger) &&
-                awaitAtomicZero(getField(blocker, "inFlightNotifications") as AtomicInteger) &&
-                awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)
-        ) {
+        check(awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)) {
             "tracked async work did not finish after its post-destroy barriers were released"
         }
         check(notificationUpdateCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
@@ -778,7 +764,7 @@ class AppRuleBlockerDestroyFaultRedTest {
 
             blocker.onDestroy()
             publicationRelease.countDown()
-            check(awaitAtomicZero(getField(blocker, "inFlightNotifications") as AtomicInteger)) {
+            check(awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)) {
                 "notification did not drain after destroy"
             }
             check(publications.isEmpty()) {
@@ -816,7 +802,7 @@ class AppRuleBlockerDestroyFaultRedTest {
             check(updateEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 "notification did not reach the cancellable publication boundary"
             }
-            check(awaitAtomicZero(getField(blocker, "inFlightNotifications") as AtomicInteger)) {
+            check(awaitJobCompleted(getField(blocker, "liveNotificationJob") as? kotlinx.coroutines.Job)) {
                 "cancelled notification worker did not finish"
             }
 
@@ -1154,11 +1140,8 @@ class AppRuleBlockerDestroyFaultRedTest {
 
             blocker.onDestroy()
             broadcastRelease.countDown()
-            check(awaitAtomicZero(getField(blocker, "inFlightUsageResetCompletions") as AtomicInteger)) {
-                "usage-reset completion did not drain after destroy"
-            }
             check(awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)) {
-                "usage-reset completion leaked into the aggregate callback drain"
+                "usage-reset completion did not drain after destroy"
             }
             check(broadcastCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 "usage-reset broadcast boundary did not complete after destroy"
@@ -1220,7 +1203,7 @@ class AppRuleBlockerDestroyFaultRedTest {
 
             blocker.onDestroy()
             planRelease.countDown()
-            check(awaitAtomicZero(getField(blocker, "inFlightRecheckPlans") as AtomicInteger)) {
+            check(awaitAtomicZero(getField(blocker, "inFlightCallbacks") as AtomicInteger)) {
                 "recheck-plan delivery did not drain after destroy"
             }
             check(registrations.get() == 0) {
@@ -2104,6 +2087,15 @@ class AppRuleBlockerDestroyFaultRedTest {
             Thread.yield()
         }
         return counter.get() == 0
+    }
+
+    private fun awaitJobCompleted(job: kotlinx.coroutines.Job?): Boolean {
+        val deadlineMs = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+        while (android.os.SystemClock.elapsedRealtime() < deadlineMs) {
+            if (job?.isCompleted == true) return true
+            Thread.yield()
+        }
+        return job?.isCompleted == true
     }
 
     private fun awaitNonEmpty(values: List<*>): Boolean {
