@@ -98,15 +98,46 @@ enum class PublicationStatus {
     RECOVERABLE_FAILURE
 }
 
-data class DecisionOutcome(
-    val sourceOrderIdentity: SourceOrderIdentity,
-    val lifecycleGeneration: LifecycleGeneration,
-    val acceptedRuntimeRevision: RuntimeRevision,
-    val packageDecisions: List<PackageDecision>,
-    val commitStatus: CommitStatus,
-    val followUp: FollowUpKind,
-    val publicationStatus: PublicationStatus
-)
+sealed class DecisionOutcome {
+    data class EnforcementOutcome(
+        val sourceOrderIdentity: SourceOrderIdentity,
+        val lifecycleGeneration: LifecycleGeneration,
+        val acceptedRuntimeRevision: RuntimeRevision,
+        val packageDecisions: List<PackageDecision>,
+        val commitStatus: CommitStatus,
+        val followUp: FollowUpKind,
+        val publicationStatus: PublicationStatus
+    ) : DecisionOutcome()
+
+    data class RecheckPlanReady(
+        val update: RecheckPlanUpdate
+    ) : DecisionOutcome()
+
+    data class UsageResetFinished(
+        val request: UsageResetRequest,
+        val succeeded: Boolean
+    ) : DecisionOutcome()
+
+    companion object {
+        operator fun invoke(
+            sourceOrderIdentity: SourceOrderIdentity,
+            lifecycleGeneration: LifecycleGeneration,
+            acceptedRuntimeRevision: RuntimeRevision,
+            packageDecisions: List<PackageDecision>,
+            commitStatus: CommitStatus,
+            followUp: FollowUpKind,
+            publicationStatus: PublicationStatus
+        ): EnforcementOutcome = EnforcementOutcome(
+            sourceOrderIdentity = sourceOrderIdentity,
+            lifecycleGeneration = lifecycleGeneration,
+            acceptedRuntimeRevision = acceptedRuntimeRevision,
+            packageDecisions = packageDecisions,
+            commitStatus = commitStatus,
+            followUp = followUp,
+            publicationStatus = publicationStatus
+        )
+    }
+}
 
 /** Worker-owned boundary derivation handed to the scheduler adapter as immutable values. */
 data class RecheckPlanUpdate(
@@ -207,16 +238,8 @@ class SerializedDecisionWorker internal constructor(
         System.nanoTime() / 1_000_000L
     },
     private val onNonFatalError: (Throwable) -> Unit = {},
-    private val onEvaluation: ((
-        DecisionRequest,
-        AcceptedRuleRuntimeSnapshot,
-        String,
-        AppRulesEvaluation
-    ) -> Unit)? = null,
     private val onRequestCancellation: ((CancellationException) -> Unit)? = null,
-    private val onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
-    private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository),
-    private val onRecheckPlan: ((RecheckPlanUpdate) -> Unit)? = null
+    private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository)
 ) {
     private sealed interface Work {
         data class Decision(val request: DecisionRequest) : Work
@@ -534,21 +557,7 @@ class SerializedDecisionWorker internal constructor(
                 }
             }
             if (!isCurrent(request, accepted)) return
-            try {
-                runInterruptible {
-                    onEvaluation?.invoke(
-                        request,
-                        accepted,
-                        packageName,
-                        evaluation
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                reportNonFatal(error)
-            }
-            if (!isCurrent(request, accepted)) return
+
             evaluatedPackages += packageName to evaluation
             decisions += PackageDecision(
                 packageName = packageName,
@@ -716,15 +725,17 @@ class SerializedDecisionWorker internal constructor(
         if (!isCurrent(request, accepted)) return
         try {
             runInterruptible {
-                onRecheckPlan?.invoke(
-                    RecheckPlanUpdate(
-                        sourceOrderIdentity = request.sourceOrderIdentity,
-                        lifecycleGeneration = request.lifecycleGeneration,
-                        acceptedRuntimeRevision = accepted.runtimeRevision,
-                        packageName = packageName,
-                        plan = plan,
-                        expectedRegistrationSourceOrderIdentity =
-                            expectedRegistrationSourceOrderIdentity
+                outcomeSink.publish(
+                    DecisionOutcome.RecheckPlanReady(
+                        RecheckPlanUpdate(
+                            sourceOrderIdentity = request.sourceOrderIdentity,
+                            lifecycleGeneration = request.lifecycleGeneration,
+                            acceptedRuntimeRevision = accepted.runtimeRevision,
+                            packageName = packageName,
+                            plan = plan,
+                            expectedRegistrationSourceOrderIdentity =
+                                expectedRegistrationSourceOrderIdentity
+                        )
                     )
                 )
             }
@@ -751,15 +762,17 @@ class SerializedDecisionWorker internal constructor(
         if (!isCurrent(request, accepted)) return
         try {
             runInterruptible {
-                onRecheckPlan?.invoke(
-                    RecheckPlanUpdate(
-                        sourceOrderIdentity = request.sourceOrderIdentity,
-                        lifecycleGeneration = request.lifecycleGeneration,
-                        acceptedRuntimeRevision = accepted.runtimeRevision,
-                        packageName = packageName,
-                        plan = null,
-                        expectedRegistrationSourceOrderIdentity =
-                            expectedRegistrationSourceOrderIdentity
+                outcomeSink.publish(
+                    DecisionOutcome.RecheckPlanReady(
+                        RecheckPlanUpdate(
+                            sourceOrderIdentity = request.sourceOrderIdentity,
+                            lifecycleGeneration = request.lifecycleGeneration,
+                            acceptedRuntimeRevision = accepted.runtimeRevision,
+                            packageName = packageName,
+                            plan = null,
+                            expectedRegistrationSourceOrderIdentity =
+                                expectedRegistrationSourceOrderIdentity
+                        )
                     )
                 )
             }
@@ -802,7 +815,9 @@ class SerializedDecisionWorker internal constructor(
     ) {
         try {
             runInterruptible {
-                onUsageResetComplete(request, succeeded)
+                outcomeSink.publish(
+                    DecisionOutcome.UsageResetFinished(request, succeeded)
+                )
             }
         } catch (error: CancellationException) {
             throw error

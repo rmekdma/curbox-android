@@ -669,30 +669,29 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 outcomeSink = object : DecisionOutcomeSink {
                     override fun publish(outcome: DecisionOutcome) {
                         decisionOutcomeSinkObserver?.invoke(outcome)
-                        publishDecisionOutcome(outcome, workerInstanceToken)
+                        when (outcome) {
+                            is DecisionOutcome.EnforcementOutcome -> {
+                                publishDecisionOutcome(outcome, workerInstanceToken)
+                            }
+                            is DecisionOutcome.RecheckPlanReady -> {
+                                applyRecheckPlan(workerInstanceToken, outcome.update)
+                            }
+                            is DecisionOutcome.UsageResetFinished -> {
+                                publishUsageResetComplete(
+                                    workerInstanceToken,
+                                    outcome.request,
+                                    outcome.succeeded
+                                )
+                            }
+                        }
                     }
                 },
                 workerScope = scope,
                 onNonFatalError = ::logNonFatal,
-                onEvaluation = { request, accepted, packageName, evaluation ->
-                    observeWorkerEvaluation(
-                        workerInstanceToken,
-                        request,
-                        accepted,
-                        packageName,
-                        evaluation
-                    )
-                },
                 onRequestCancellation = { error ->
                     decisionRequestCancellationObserver?.invoke(error)
                 },
-                onRecheckPlan = { update ->
-                    applyRecheckPlan(workerInstanceToken, update)
-                },
                 usageResetRepository = usageResetRepository,
-                onUsageResetComplete = { request, succeeded ->
-                    publishUsageResetComplete(workerInstanceToken, request, succeeded)
-                },
                 enforcement = enforcement,
                 elapsedRealtimeMs = { observationElapsedRealtimeMs() }
             ).also {
@@ -822,7 +821,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     private fun publishDecisionOutcome(
-        outcome: DecisionOutcome,
+        outcome: DecisionOutcome.EnforcementOutcome,
         workerInstanceToken: AppRuleWorkerInstanceToken
     ) {
         val permit = synchronized(runtimeLock) {
@@ -895,7 +894,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     private fun showWarningFromDecision(
-        outcome: DecisionOutcome,
+        outcome: DecisionOutcome.EnforcementOutcome,
         decision: neth.iecal.curbox.domain.apprules.PackageDecision,
         workerInstanceToken: AppRuleWorkerInstanceToken
     ) {
@@ -960,14 +959,14 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     private fun isCurrentWorkerOutcome(
-        outcome: DecisionOutcome,
+        outcome: DecisionOutcome.EnforcementOutcome,
         workerInstanceToken: AppRuleWorkerInstanceToken
     ): Boolean = synchronized(runtimeLock) {
         isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken)
     }
 
     private fun isCurrentWorkerOutcomeLocked(
-        outcome: DecisionOutcome,
+        outcome: DecisionOutcome.EnforcementOutcome,
         workerInstanceToken: AppRuleWorkerInstanceToken
     ): Boolean =
         isReadyForChecks() &&

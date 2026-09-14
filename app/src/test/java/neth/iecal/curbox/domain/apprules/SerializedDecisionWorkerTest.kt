@@ -202,7 +202,7 @@ class SerializedDecisionWorkerTest {
             assertTrue(outcomes.awaitCount(2))
             assertEquals(
                 listOf(LifecycleGeneration(2L), LifecycleGeneration(3L)),
-                outcomes.values.map(DecisionOutcome::lifecycleGeneration)
+                outcomes.enforcementOutcomes.map { it.lifecycleGeneration }
             )
         } finally {
             oldRepository.releaseRead()
@@ -221,6 +221,7 @@ class SerializedDecisionWorkerTest {
         val releaseOldPublication = CountDownLatch(1)
         fun taggedSink(token: Long) = object : DecisionOutcomeSink {
             override fun publish(outcome: DecisionOutcome) {
+                if (outcome !is DecisionOutcome.EnforcementOutcome) return
                 if (token == 11L) {
                     // The worker has passed its final freshness check and entered the host
                     // publication boundary. Replace it before allowing the old publication to
@@ -335,7 +336,7 @@ class SerializedDecisionWorkerTest {
             repository.evaluatorFailure = null
             worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
             assertTrue(outcomes.awaitCount(1))
-            assertFalse(outcomes.values.single().packageDecisions.single().isAllowed)
+            assertFalse(outcomes.enforcementOutcomes.single().packageDecisions.single().isAllowed)
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
@@ -345,11 +346,9 @@ class SerializedDecisionWorkerTest {
     fun recoverableFailureWithoutApplicableRulePreservesEligibilityWithoutDenial() {
         val repository = RecordingRepository()
         val outcomes = RecordingOutcomeSink()
-        val evaluations = Collections.synchronizedList(mutableListOf<AppRulesEvaluation>())
         val worker = worker(
             repository = repository,
-            sink = outcomes,
-            onEvaluation = { _, _, _, evaluation -> evaluations += evaluation }
+            sink = outcomes
         )
         try {
             assertEquals(
@@ -371,11 +370,7 @@ class SerializedDecisionWorkerTest {
             )
             assertTrue(outcomes.awaitCount(2))
 
-            val evaluation = evaluations.last()
-            assertTrue("an inapplicable package must remain allowed", evaluation.isAllowed)
-            assertTrue(evaluation.denyingRules.isEmpty())
-            assertTrue(evaluation.evaluations.isEmpty())
-            val decision = outcomes.values.last().packageDecisions.single()
+            val decision = outcomes.enforcementOutcomes.last().packageDecisions.single()
             assertTrue("an inapplicable package must not be denied", decision.isAllowed)
             assertTrue("an inapplicable package must not carry denial ids", decision.denyingRuleIds.isEmpty())
         } finally {
@@ -403,7 +398,7 @@ class SerializedDecisionWorkerTest {
             repository.startFailure = null
             worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
             assertTrue(outcomes.awaitCount(1))
-            assertFalse(outcomes.values.single().packageDecisions.single().isAllowed)
+            assertFalse(outcomes.enforcementOutcomes.single().packageDecisions.single().isAllowed)
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
@@ -436,7 +431,7 @@ class SerializedDecisionWorkerTest {
                 worker.submit(request(2L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
             )
             assertTrue(outcomes.awaitCount(1))
-            assertFalse(outcomes.values.last().packageDecisions.single().isAllowed)
+            assertFalse(outcomes.enforcementOutcomes.last().packageDecisions.single().isAllowed)
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
@@ -446,8 +441,6 @@ class SerializedDecisionWorkerTest {
     fun validEmptyEvaluationStillPublishesEvaluationAndEvidenceOutcome() {
         val repository = RecordingRepository()
         val outcomes = RecordingOutcomeSink()
-        val evaluations = Collections.synchronizedList(mutableListOf<AppRulesEvaluation>())
-        val evaluationPublished = CountDownLatch(1)
         val base = acceptedRuntime(RuntimeRevision(1L))
         val excludedRuntime = base.copy(
             runtime = base.runtime.copy(
@@ -466,21 +459,15 @@ class SerializedDecisionWorkerTest {
         val worker = worker(
             repository = repository,
             sink = outcomes,
-            acceptedRuntime = excludedRuntime,
-            onEvaluation = { _, _, _, evaluation ->
-                evaluations += evaluation
-                evaluationPublished.countDown()
-            }
+            acceptedRuntime = excludedRuntime
         )
         try {
             assertEquals(
                 SubmissionResult.ACCEPTED,
                 worker.submit(request(1L, 1L, OTHER_PACKAGE, capturedAtMs = 1_000L))
             )
-            assertTrue(evaluationPublished.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
             assertTrue(outcomes.awaitCount(1))
-            assertTrue(evaluations.single().evaluations.isEmpty())
-            assertTrue(outcomes.values.single().packageDecisions.single().isAllowed)
+            assertTrue(outcomes.enforcementOutcomes.single().packageDecisions.single().isAllowed)
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
@@ -533,7 +520,7 @@ class SerializedDecisionWorkerTest {
                     )
                 )
                 assertTrue(recoveredOutcomes.awaitCount(1))
-                assertFalse(recoveredOutcomes.values.single().packageDecisions.single().isAllowed)
+                assertFalse(recoveredOutcomes.enforcementOutcomes.single().packageDecisions.single().isAllowed)
             } finally {
                 recoveredWorker.stop(recoveryStop(LifecycleGeneration(2L)))
             }
@@ -545,18 +532,23 @@ class SerializedDecisionWorkerTest {
 
     @Test
     fun cancellationPropagatesToTheWorkerBoundaryWithoutBeingLogged() {
-        val repository = RecordingRepository()
-        val outcomes = RecordingOutcomeSink()
         val evaluationStarted = CountDownLatch(1)
+        val workerScopeJob = SupervisorJob()
+        val workerScope = CoroutineScope(Dispatchers.IO + workerScopeJob)
+        val repository = object : RecordingRepository() {
+            override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+                evaluationStarted.countDown()
+                workerScopeJob.cancel(CancellationException("injected evaluator cancellation"))
+                throw CancellationException("injected evaluator cancellation")
+            }
+        }
+        val outcomes = RecordingOutcomeSink()
         val errors = Collections.synchronizedList(mutableListOf<Throwable>())
         val worker = worker(
             repository = repository,
             sink = outcomes,
             onNonFatalError = { errors += it },
-            onEvaluation = { _, _, _, _ ->
-                evaluationStarted.countDown()
-                throw CancellationException("injected evaluator cancellation")
-            }
+            workerScope = workerScope
         )
         try {
             worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
@@ -582,7 +574,6 @@ class SerializedDecisionWorkerTest {
         val repository = RecordingRepository()
         repository.evaluatorFailure = IllegalStateException("injected evaluator failure")
         val outcomes = RecordingOutcomeSink()
-        val evaluations = Collections.synchronizedList(mutableListOf<AppRulesEvaluation>())
         val workerReference = AtomicReference<SerializedDecisionWorker>()
         val worker = worker(
             repository = repository,
@@ -592,20 +583,18 @@ class SerializedDecisionWorkerTest {
                     lifecycleGeneration = LifecycleGeneration(2L),
                     acceptedRuntime = acceptedRuntime(RuntimeRevision(2L))
                 )
-            },
-            onEvaluation = { _, _, _, evaluation -> evaluations += evaluation }
+            }
         )
         workerReference.set(worker)
         try {
             worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
             assertTrue(outcomes.awaitIdle())
-            assertTrue(evaluations.isEmpty())
             assertTrue(outcomes.values.isEmpty())
 
             repository.evaluatorFailure = null
             worker.submit(request(2L, 2L, TARGET_PACKAGE, capturedAtMs = 2_000L))
             assertTrue(outcomes.awaitCount(1))
-            assertFalse(outcomes.values.single().packageDecisions.single().isAllowed)
+            assertFalse(outcomes.enforcementOutcomes.single().packageDecisions.single().isAllowed)
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(2L)))
         }
@@ -644,11 +633,9 @@ class SerializedDecisionWorkerTest {
     fun workerOwnsWallClockBoundaryDerivationBeforePublishingOutcome() {
         val repository = RecordingRepository()
         val outcomes = RecordingOutcomeSink()
-        val plans = Collections.synchronizedList(mutableListOf<RecheckPlanUpdate>())
         val worker = worker(
             repository = repository,
-            sink = outcomes,
-            onRecheckPlan = { plans += it }
+            sink = outcomes
         )
         try {
             assertEquals(
@@ -657,7 +644,7 @@ class SerializedDecisionWorkerTest {
             )
             assertTrue(outcomes.awaitCount(1))
 
-            val update = plans.single()
+            val update = outcomes.recheckPlans.single()
             assertEquals(SourceOrderIdentity(1L), update.sourceOrderIdentity)
             assertEquals(LifecycleGeneration(1L), update.lifecycleGeneration)
             assertEquals(RuntimeRevision(1L), update.acceptedRuntimeRevision)
@@ -696,7 +683,7 @@ class SerializedDecisionWorkerTest {
                 "evaluator started while the durable commit was blocked",
                 repository.secondEvaluationStarted.await(100L, TimeUnit.MILLISECONDS)
             )
-            assertEquals("decision published while the durable commit was blocked", 1, outcomes.values.size)
+            assertEquals("decision published while the durable commit was blocked", 1, outcomes.enforcementOutcomes.size)
 
             repository.releaseCommit()
             assertTrue(outcomes.awaitCount(2))
@@ -704,7 +691,7 @@ class SerializedDecisionWorkerTest {
 
             worker.submit(request(3L, 1L, TARGET_PACKAGE, capturedAtMs = 61_002L))
             assertTrue(outcomes.awaitCount(3))
-            val finalDecision = outcomes.values.last().packageDecisions.single()
+            val finalDecision = outcomes.enforcementOutcomes.last().packageDecisions.single()
             assertEquals(TARGET_PACKAGE, finalDecision.packageName)
             assertFalse("evaluator did not observe the committed minute", finalDecision.isAllowed)
         } finally {
@@ -783,16 +770,10 @@ class SerializedDecisionWorkerTest {
         val repository = RecordingRepository()
         val resetRepository = RecordingUsageResetRepository(repository)
         val outcomes = RecordingOutcomeSink()
-        val resetCompleted = CountDownLatch(1)
-        var resetSucceeded = false
         val worker = worker(
             repository = repository,
             sink = outcomes,
-            usageResetRepository = resetRepository,
-            onUsageResetComplete = { _, succeeded ->
-                resetSucceeded = succeeded
-                resetCompleted.countDown()
-            }
+            usageResetRepository = resetRepository
         )
         try {
             worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
@@ -814,8 +795,8 @@ class SerializedDecisionWorkerTest {
                     resetAtElapsedMs = 2_000L
                 )
             )
-            assertTrue(resetCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
-            assertTrue("reset did not complete successfully", resetSucceeded)
+            assertTrue(outcomes.awaitUsageResetCount(1))
+            assertTrue("reset did not complete successfully", outcomes.usageResets.single().second)
 
             val restart = resetRepository.commands.single().restarts.single()
             assertEquals(oldSessionId, restart.activeSessionId)
@@ -829,6 +810,41 @@ class SerializedDecisionWorkerTest {
                 "next checkpoint used the stale pre-reset session ID",
                 repository.committedCheckpoints.any { it.sessionId == restartedSessionId }
             )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun usageResetFailurePublishesFailedOutcomeAndReportsNonFatal() {
+        val repository = RecordingRepository()
+        val resetRepository = RecordingUsageResetRepository(repository)
+        resetRepository.resetFailure = IllegalStateException("injected reset failure")
+        val outcomes = RecordingOutcomeSink()
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            usageResetRepository = resetRepository,
+            onNonFatalError = { errors += it }
+        )
+        try {
+            val request = UsageResetRequest(
+                useDayId = "1970-01-01",
+                generationStartedAtMs = 0L,
+                packageNames = setOf(TARGET_PACKAGE),
+                resetAtMs = 2_000L,
+                requestId = "reset-fail-1"
+            )
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitUsageReset(request, resetAtElapsedMs = 2_000L)
+            )
+            assertTrue(outcomes.awaitUsageResetCount(1))
+            val (publishedRequest, succeeded) = outcomes.usageResets.single()
+            assertEquals(request, publishedRequest)
+            assertFalse("failed reset must report succeeded = false", succeeded)
+            assertEquals(1, errors.size)
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
@@ -895,7 +911,7 @@ class SerializedDecisionWorkerTest {
             assertTrue(outcomes.awaitCount(3))
             assertEquals(
                 listOf(TARGET_PACKAGE, OTHER_PACKAGE, TARGET_PACKAGE),
-                outcomes.values.flatMap { it.packageDecisions.map(PackageDecision::packageName) }
+                outcomes.enforcementOutcomes.flatMap { it.packageDecisions.map(PackageDecision::packageName) }
             )
 
             val rows = repository.persistedSessions()
@@ -912,8 +928,7 @@ class SerializedDecisionWorkerTest {
     fun staleLifecycleAndRuntimeRevisionCannotPublishSideEffects() {
         val repository = BlockingReadRepository()
         val outcomes = RecordingOutcomeSink()
-        val plans = Collections.synchronizedList(mutableListOf<RecheckPlanUpdate>())
-        val worker = worker(repository, outcomes, onRecheckPlan = { plans += it })
+        val worker = worker(repository, outcomes)
         try {
             worker.submit(request(1L, 1L, TARGET_PACKAGE))
             assertTrue(repository.readStarted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
@@ -926,7 +941,7 @@ class SerializedDecisionWorkerTest {
             assertTrue(repository.firstReadFinished.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
             assertTrue(outcomes.awaitIdle())
             assertTrue("stale request published: ${outcomes.values}", outcomes.values.isEmpty())
-            assertTrue("stale request scheduled: $plans", plans.isEmpty())
+            assertTrue("stale request scheduled: ${outcomes.recheckPlans}", outcomes.recheckPlans.isEmpty())
 
             val staleRevisionRequest = request(
                 sourceOrder = 2L,
@@ -940,11 +955,11 @@ class SerializedDecisionWorkerTest {
             assertEquals(SubmissionResult.ACCEPTED, worker.submit(staleRevisionRequest))
             assertTrue(outcomes.awaitIdle())
             assertTrue("stale revision published: ${outcomes.values}", outcomes.values.isEmpty())
-            assertTrue("stale revision scheduled: $plans", plans.isEmpty())
+            assertTrue("stale revision scheduled: ${outcomes.recheckPlans}", outcomes.recheckPlans.isEmpty())
 
             worker.submit(request(3L, 2L, OTHER_PACKAGE, capturedAtMs = 2_000L))
             assertTrue(outcomes.awaitCount(1))
-            assertEquals(RuntimeRevision(2L), outcomes.values.single().acceptedRuntimeRevision)
+            assertEquals(RuntimeRevision(2L), outcomes.enforcementOutcomes.single().acceptedRuntimeRevision)
         } finally {
             repository.releaseRead()
             worker.stop(recoveryStop(LifecycleGeneration(2L)))
@@ -972,11 +987,11 @@ class SerializedDecisionWorkerTest {
                 )
             )
             assertTrue(outcomes.awaitCount(1))
-            assertEquals(RuntimeRevision(3L), outcomes.values.single().acceptedRuntimeRevision)
-            assertEquals(LifecycleGeneration(1L), outcomes.values.single().lifecycleGeneration)
+            assertEquals(RuntimeRevision(3L), outcomes.enforcementOutcomes.single().acceptedRuntimeRevision)
+            assertEquals(LifecycleGeneration(1L), outcomes.enforcementOutcomes.single().lifecycleGeneration)
             assertTrue(
                 "latest runtime should allow the visible package",
-                outcomes.values.single().packageDecisions.single().isAllowed
+                outcomes.enforcementOutcomes.single().packageDecisions.single().isAllowed
             )
 
             assertEquals(
@@ -997,12 +1012,12 @@ class SerializedDecisionWorkerTest {
             assertEquals(
                 "stale runtime publication must not publish a second visible outcome",
                 1,
-                outcomes.values.size
+                outcomes.enforcementOutcomes.size
             )
 
             worker.submit(request(3L, 1L, TARGET_PACKAGE, capturedAtMs = 2_000L))
             assertTrue(outcomes.awaitCount(2))
-            val finalOutcome = outcomes.values.last()
+            val finalOutcome = outcomes.enforcementOutcomes.last()
             assertEquals(RuntimeRevision(3L), finalOutcome.acceptedRuntimeRevision)
             assertEquals(LifecycleGeneration(1L), finalOutcome.lifecycleGeneration)
             assertTrue(
@@ -1016,28 +1031,30 @@ class SerializedDecisionWorkerTest {
 
     @Test
     fun supersedingNoOpRuntimePublicationDoesNotLoseLatestVisibleOutcome() {
-        val repository = RecordingRepository()
-        val latestRuntimeRevision = AtomicReference(RuntimeRevision(3L))
-        val published = Collections.synchronizedList(mutableListOf<DecisionOutcome>())
         val evaluationStarted = CountDownLatch(1)
         val releaseEvaluation = CountDownLatch(1)
         val blockFirstEvaluation = AtomicBoolean(true)
+        val repository = object : RecordingRepository() {
+            override suspend fun sessionsForUseDay(useDayId: String): List<ForegroundSession> {
+                if (blockFirstEvaluation.compareAndSet(true, false)) {
+                    evaluationStarted.countDown()
+                    assertTrue(releaseEvaluation.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+                }
+                return super.sessionsForUseDay(useDayId)
+            }
+        }
+        val latestRuntimeRevision = AtomicReference(RuntimeRevision(3L))
+        val published = Collections.synchronizedList(mutableListOf<DecisionOutcome.EnforcementOutcome>())
         val sink = object : DecisionOutcomeSink {
             override fun publish(outcome: DecisionOutcome) {
-                if (outcome.acceptedRuntimeRevision == latestRuntimeRevision.get()) {
+                if (outcome is DecisionOutcome.EnforcementOutcome && outcome.acceptedRuntimeRevision == latestRuntimeRevision.get()) {
                     published += outcome
                 }
             }
         }
         val worker = worker(
             repository = repository,
-            sink = sink,
-            onEvaluation = { _, _, _, _ ->
-                if (blockFirstEvaluation.compareAndSet(true, false)) {
-                    evaluationStarted.countDown()
-                    assertTrue(releaseEvaluation.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
-                }
-            }
+            sink = sink
         )
         try {
             assertEquals(
@@ -1122,17 +1139,9 @@ class SerializedDecisionWorkerTest {
         lifecycleGeneration: LifecycleGeneration = LifecycleGeneration(1L),
         usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true),
         usageResetRepository: UsageResetRepository = RecordingUsageResetRepository(repository),
-        onUsageResetComplete: (UsageResetRequest, Boolean) -> Unit = { _, _ -> },
         onNonFatalError: (Throwable) -> Unit = {},
         elapsedRealtimeMs: () -> Long = { System.nanoTime() / 1_000_000L },
-        onEvaluation: ((
-            DecisionRequest,
-            AcceptedRuleRuntimeSnapshot,
-            String,
-            AppRulesEvaluation
-        ) -> Unit)? = null,
-        workerScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
-        onRecheckPlan: (RecheckPlanUpdate) -> Unit = {}
+        workerScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     ): SerializedDecisionWorker = SerializedDecisionWorker(
         lifecycleGeneration = lifecycleGeneration,
         acceptedRuntime = acceptedRuntime.copy(
@@ -1143,12 +1152,9 @@ class SerializedDecisionWorkerTest {
         repository = repository,
         outcomeSink = sink,
         usageResetRepository = usageResetRepository,
-        onUsageResetComplete = onUsageResetComplete,
         onNonFatalError = onNonFatalError,
         elapsedRealtimeMs = elapsedRealtimeMs,
-        onEvaluation = onEvaluation,
-        workerScope = workerScope,
-        onRecheckPlan = onRecheckPlan
+        workerScope = workerScope
     )
 
     private fun request(
@@ -1275,11 +1281,53 @@ class SerializedDecisionWorkerTest {
     private class RecordingOutcomeSink : DecisionOutcomeSink {
         val values = Collections.synchronizedList(mutableListOf<DecisionOutcome>())
 
+        val recheckPlans: List<RecheckPlanUpdate>
+            get() = synchronized(values) {
+                values.filterIsInstance<DecisionOutcome.RecheckPlanReady>().map { it.update }
+            }
+
+        val usageResets: List<Pair<UsageResetRequest, Boolean>>
+            get() = synchronized(values) {
+                values.filterIsInstance<DecisionOutcome.UsageResetFinished>().map { it.request to it.succeeded }
+            }
+
+        val enforcementOutcomes: List<DecisionOutcome.EnforcementOutcome>
+            get() = synchronized(values) {
+                values.filterIsInstance<DecisionOutcome.EnforcementOutcome>()
+            }
+
         override fun publish(outcome: DecisionOutcome) {
             values += outcome
         }
 
         fun awaitCount(expected: Int): Boolean {
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
+            while (System.nanoTime() < deadline) {
+                if (enforcementOutcomes.size >= expected) return true
+                Thread.yield()
+            }
+            return enforcementOutcomes.size >= expected
+        }
+
+        fun awaitRecheckPlanCount(expected: Int): Boolean {
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
+            while (System.nanoTime() < deadline) {
+                if (recheckPlans.size >= expected) return true
+                Thread.yield()
+            }
+            return recheckPlans.size >= expected
+        }
+
+        fun awaitUsageResetCount(expected: Int): Boolean {
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
+            while (System.nanoTime() < deadline) {
+                if (usageResets.size >= expected) return true
+                Thread.yield()
+            }
+            return usageResets.size >= expected
+        }
+
+        fun awaitTotalCount(expected: Int): Boolean {
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
             while (System.nanoTime() < deadline) {
                 if (values.size >= expected) return true
@@ -1425,6 +1473,7 @@ class SerializedDecisionWorkerTest {
     private class RecordingUsageResetRepository(
         private val repository: RecordingRepository
     ) : UsageResetRepository {
+        @Volatile var resetFailure: Throwable? = null
         val commands = Collections.synchronizedList(mutableListOf<ResetCommand>())
         val restartedSessionIds = Collections.synchronizedList(mutableListOf<Pair<String, Long>>())
 
@@ -1435,6 +1484,7 @@ class SerializedDecisionWorkerTest {
             request: UsageResetRequest,
             restarts: List<UsageResetSessionRestart>
         ): UsageResetResult {
+            resetFailure?.let { throw it }
             commands += ResetCommand(request, restarts)
             val restarted = restarts.map { restart ->
                 val id = repository.restartSession(restart)

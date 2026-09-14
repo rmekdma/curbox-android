@@ -1339,6 +1339,7 @@ internal object Ticket19ObserverRegistry {
     }
 
     private fun observeCausalOutcome(outcome: DecisionOutcome) {
+        if (outcome !is DecisionOutcome.EnforcementOutcome) return
         synchronized(lock) {
             val sourceIdentity = externalOutcomeSourceIdentity ?: return
             if (externalOutcomeWindowState != "CONSUMED" ||
