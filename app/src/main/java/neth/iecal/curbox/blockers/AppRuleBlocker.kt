@@ -673,6 +673,15 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                             is DecisionOutcome.EnforcementOutcome -> {
                                 publishDecisionOutcome(outcome, workerInstanceToken)
                             }
+                            is DecisionOutcome.EvaluationReady -> {
+                                observeWorkerEvaluation(
+                                    workerInstanceToken,
+                                    outcome.request,
+                                    outcome.accepted,
+                                    outcome.packageName,
+                                    outcome.evaluation
+                                )
+                            }
                             is DecisionOutcome.RecheckPlanReady -> {
                                 applyRecheckPlan(workerInstanceToken, outcome.update)
                             }

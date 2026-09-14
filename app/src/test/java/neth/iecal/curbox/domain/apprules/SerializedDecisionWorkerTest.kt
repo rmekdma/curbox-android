@@ -369,7 +369,12 @@ class SerializedDecisionWorkerTest {
                 )
             )
             assertTrue(outcomes.awaitCount(2))
+            assertTrue(outcomes.awaitEvaluationCount(2))
 
+            val evaluation = outcomes.evaluations.last().evaluation
+            assertTrue("an inapplicable package must remain allowed", evaluation.isAllowed)
+            assertTrue(evaluation.denyingRules.isEmpty())
+            assertTrue(evaluation.evaluations.isEmpty())
             val decision = outcomes.enforcementOutcomes.last().packageDecisions.single()
             assertTrue("an inapplicable package must not be denied", decision.isAllowed)
             assertTrue("an inapplicable package must not carry denial ids", decision.denyingRuleIds.isEmpty())
@@ -589,6 +594,7 @@ class SerializedDecisionWorkerTest {
         try {
             worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
             assertTrue(outcomes.awaitIdle())
+            assertTrue(outcomes.evaluations.isEmpty())
             assertTrue(outcomes.values.isEmpty())
 
             repository.evaluatorFailure = null
@@ -845,6 +851,30 @@ class SerializedDecisionWorkerTest {
             assertEquals(request, publishedRequest)
             assertFalse("failed reset must report succeeded = false", succeeded)
             assertEquals(1, errors.size)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun evaluationOutcomeIsPublishedToDecisionOutcomeSinkWithFidelity() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = repository,
+            sink = outcomes
+        )
+        try {
+            val req = request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L)
+            assertEquals(SubmissionResult.ACCEPTED, worker.submit(req))
+            assertTrue(outcomes.awaitEvaluationCount(1))
+            val evalReady = outcomes.evaluations.single()
+            assertEquals(req.sourceOrderIdentity, evalReady.request.sourceOrderIdentity)
+            assertEquals(LifecycleGeneration(1L), evalReady.request.lifecycleGeneration)
+            assertEquals(RuntimeRevision(1L), evalReady.accepted.runtimeRevision)
+            assertEquals(TARGET_PACKAGE, evalReady.packageName)
+            assertFalse(evalReady.evaluation.isAllowed)
+            assertTrue(outcomes.awaitCount(1))
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
@@ -1291,6 +1321,11 @@ class SerializedDecisionWorkerTest {
                 values.filterIsInstance<DecisionOutcome.UsageResetFinished>().map { it.request to it.succeeded }
             }
 
+        val evaluations: List<DecisionOutcome.EvaluationReady>
+            get() = synchronized(values) {
+                values.filterIsInstance<DecisionOutcome.EvaluationReady>()
+            }
+
         val enforcementOutcomes: List<DecisionOutcome.EnforcementOutcome>
             get() = synchronized(values) {
                 values.filterIsInstance<DecisionOutcome.EnforcementOutcome>()
@@ -1300,41 +1335,29 @@ class SerializedDecisionWorkerTest {
             values += outcome
         }
 
-        fun awaitCount(expected: Int): Boolean {
+        fun awaitCondition(predicate: () -> Boolean): Boolean {
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
             while (System.nanoTime() < deadline) {
-                if (enforcementOutcomes.size >= expected) return true
+                if (predicate()) return true
                 Thread.yield()
             }
-            return enforcementOutcomes.size >= expected
+            return predicate()
         }
 
-        fun awaitRecheckPlanCount(expected: Int): Boolean {
-            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
-            while (System.nanoTime() < deadline) {
-                if (recheckPlans.size >= expected) return true
-                Thread.yield()
-            }
-            return recheckPlans.size >= expected
-        }
+        fun awaitCount(expected: Int): Boolean =
+            awaitCondition { enforcementOutcomes.size >= expected }
 
-        fun awaitUsageResetCount(expected: Int): Boolean {
-            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
-            while (System.nanoTime() < deadline) {
-                if (usageResets.size >= expected) return true
-                Thread.yield()
-            }
-            return usageResets.size >= expected
-        }
+        fun awaitEvaluationCount(expected: Int): Boolean =
+            awaitCondition { evaluations.size >= expected }
 
-        fun awaitTotalCount(expected: Int): Boolean {
-            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
-            while (System.nanoTime() < deadline) {
-                if (values.size >= expected) return true
-                Thread.yield()
-            }
-            return values.size >= expected
-        }
+        fun awaitRecheckPlanCount(expected: Int): Boolean =
+            awaitCondition { recheckPlans.size >= expected }
+
+        fun awaitUsageResetCount(expected: Int): Boolean =
+            awaitCondition { usageResets.size >= expected }
+
+        fun awaitTotalCount(expected: Int): Boolean =
+            awaitCondition { values.size >= expected }
 
         fun awaitIdle(): Boolean {
             Thread.sleep(50L)

@@ -109,6 +109,13 @@ sealed class DecisionOutcome {
         val publicationStatus: PublicationStatus
     ) : DecisionOutcome()
 
+    data class EvaluationReady(
+        val request: DecisionRequest,
+        val accepted: AcceptedRuleRuntimeSnapshot,
+        val packageName: String,
+        val evaluation: AppRulesEvaluation
+    ) : DecisionOutcome()
+
     data class RecheckPlanReady(
         val update: RecheckPlanUpdate
     ) : DecisionOutcome()
@@ -117,26 +124,6 @@ sealed class DecisionOutcome {
         val request: UsageResetRequest,
         val succeeded: Boolean
     ) : DecisionOutcome()
-
-    companion object {
-        operator fun invoke(
-            sourceOrderIdentity: SourceOrderIdentity,
-            lifecycleGeneration: LifecycleGeneration,
-            acceptedRuntimeRevision: RuntimeRevision,
-            packageDecisions: List<PackageDecision>,
-            commitStatus: CommitStatus,
-            followUp: FollowUpKind,
-            publicationStatus: PublicationStatus
-        ): EnforcementOutcome = EnforcementOutcome(
-            sourceOrderIdentity = sourceOrderIdentity,
-            lifecycleGeneration = lifecycleGeneration,
-            acceptedRuntimeRevision = acceptedRuntimeRevision,
-            packageDecisions = packageDecisions,
-            commitStatus = commitStatus,
-            followUp = followUp,
-            publicationStatus = publicationStatus
-        )
-    }
 }
 
 /** Worker-owned boundary derivation handed to the scheduler adapter as immutable values. */
@@ -557,6 +544,23 @@ class SerializedDecisionWorker internal constructor(
                 }
             }
             if (!isCurrent(request, accepted)) return
+            try {
+                runInterruptible {
+                    outcomeSink.publish(
+                        DecisionOutcome.EvaluationReady(
+                            request = request,
+                            accepted = accepted,
+                            packageName = packageName,
+                            evaluation = evaluation
+                        )
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                reportNonFatal(error)
+            }
+            if (!isCurrent(request, accepted)) return
 
             evaluatedPackages += packageName to evaluation
             decisions += PackageDecision(
@@ -864,7 +868,7 @@ class SerializedDecisionWorker internal constructor(
         if (!isCurrent(request, accepted)) return
         try {
             outcomeSink.publish(
-                DecisionOutcome(
+                DecisionOutcome.EnforcementOutcome(
                     sourceOrderIdentity = request.sourceOrderIdentity,
                     lifecycleGeneration = request.lifecycleGeneration,
                     acceptedRuntimeRevision = accepted.runtimeRevision,
