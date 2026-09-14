@@ -21,6 +21,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
+import neth.iecal.curbox.domain.apprules.FakeWakeScheduler
 import neth.iecal.curbox.domain.apprules.ForegroundUsageCheckpoint
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.services.BaseBlockingService
@@ -998,11 +999,13 @@ class AppRuleBlockerDestroyFaultRedTest {
                 20_000L,
                 0L
             )
-            val scheduled = getField(blocker, "scheduledRechecks") as Map<*, *>
-            val registration = checkNotNull(scheduled[TARGET_PACKAGE]) {
+            val fakeScheduler = checkNotNull(blocker.wakeScheduler as? FakeWakeScheduler) {
+                "FakeWakeScheduler is required"
+            }
+            val registration = checkNotNull(fakeScheduler.getScheduled(TARGET_PACKAGE)) {
                 "primary recheck registration was not created"
             }
-            val registrationToken = getField(registration, "registrationToken") as Long
+            val registrationToken = registration.token
             blocker.recheckRecoveryPostDelayed = { _, _ ->
                 recoveryPosts.incrementAndGet()
                 true
@@ -1807,6 +1810,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         snapshot: AppRuleSnapshot,
         observer: (AppRulesEvaluation) -> Unit
     ): AppRuleBlocker = AppRuleBlocker().apply {
+        wakeScheduler = FakeWakeScheduler()
         screenInteractiveProvider = { true }
         keyguardLockedProvider = { false }
         evaluationResultObserver = observer

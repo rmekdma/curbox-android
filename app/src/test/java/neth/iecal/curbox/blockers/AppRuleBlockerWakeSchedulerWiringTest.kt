@@ -45,7 +45,7 @@ class AppRuleBlockerWakeSchedulerWiringTest {
     }
 
     @Test
-    fun scheduleRecheckDelegatesToWakeSchedulerAndMirrorsState() {
+    fun scheduleRecheckDelegatesToWakeSchedulerAndCancelsCleanly() {
         val fakeScheduler = FakeWakeScheduler(
             initialWallClockMs = 1_000_000_000L,
             initialElapsedRealtimeMs = 10_000L
@@ -74,28 +74,15 @@ class AppRuleBlockerWakeSchedulerWiringTest {
         val expectedDueWallClockMs = 1_000_005_000L
         assertEquals(expectedDueWallClockMs, scheduledWake?.dueAtWallClockMs)
 
-        // 2. Verify legacy maps are mirrored
-        val legacyScheduledRechecks = getField(blocker, "scheduledRechecks") as Map<*, *>
-        val legacyScheduledAlarms = getField(blocker, "scheduledAlarms") as Map<*, *>
-        assertTrue(legacyScheduledRechecks.containsKey(TEST_PACKAGE))
-        assertTrue(legacyScheduledAlarms.containsKey(TEST_PACKAGE))
-
-        val alarmRegistration = legacyScheduledAlarms[TEST_PACKAGE]
-        assertNotNull(alarmRegistration)
-        val token = getField(alarmRegistration!!, "token") as Long
-        assertEquals(token, scheduledWake?.token)
-
-        // 3. Cancel recheck and verify both scheduler and legacy maps are updated
-        invokePrivate(blocker, "cancelScheduledRecheck", TEST_PACKAGE, token, null)
+        // 2. Cancel recheck and verify scheduler is updated
+        invokePrivate(blocker, "cancelScheduledRecheck", TEST_PACKAGE)
         assertFalse(fakeScheduler.hasScheduled(TEST_PACKAGE))
-        assertFalse(legacyScheduledRechecks.containsKey(TEST_PACKAGE))
-        assertFalse(legacyScheduledAlarms.containsKey(TEST_PACKAGE))
 
         blocker.onDestroy()
     }
 
     @Test
-    fun triggerWakeFromSchedulerReconcilesAndCleansUpLegacyMaps() {
+    fun triggerWakeFromSchedulerReconcilesAndTriggersObservationCheck() {
         val fakeScheduler = FakeWakeScheduler(
             initialWallClockMs = 1_000_000_000L,
             initialElapsedRealtimeMs = 10_000L
@@ -122,18 +109,12 @@ class AppRuleBlockerWakeSchedulerWiringTest {
         invokePrivate(blocker, "scheduleRecheck", TEST_PACKAGE, 5_000L, 20_000L, 0L)
         assertTrue(fakeScheduler.hasScheduled(TEST_PACKAGE))
 
-        val legacyScheduledRechecks = getField(blocker, "scheduledRechecks") as Map<*, *>
-        val legacyScheduledAlarms = getField(blocker, "scheduledAlarms") as Map<*, *>
-        assertTrue(legacyScheduledRechecks.containsKey(TEST_PACKAGE))
-        assertTrue(legacyScheduledAlarms.containsKey(TEST_PACKAGE))
-
         // Trigger wake through fakeScheduler
         val triggered = fakeScheduler.triggerWake(TEST_PACKAGE)
         assertTrue(triggered)
 
-        // Verify that onWake cleaned up the legacy maps
-        assertFalse(legacyScheduledRechecks.containsKey(TEST_PACKAGE))
-        assertFalse(legacyScheduledAlarms.containsKey(TEST_PACKAGE))
+        // Verify that scheduler no longer has the package scheduled
+        assertFalse(fakeScheduler.hasScheduled(TEST_PACKAGE))
 
         // Verify that a visible application check was posted (observation wake)
         assertTrue(observationChecks.get() > 0)
@@ -142,7 +123,7 @@ class AppRuleBlockerWakeSchedulerWiringTest {
     }
 
     @Test
-    fun cancelAllDelegatesToWakeSchedulerAndClearsLegacyMaps() {
+    fun cancelAllDelegatesToWakeScheduler() {
         val fakeScheduler = FakeWakeScheduler(
             initialWallClockMs = 1_000_000_000L,
             initialElapsedRealtimeMs = 10_000L
@@ -166,10 +147,7 @@ class AppRuleBlockerWakeSchedulerWiringTest {
         invokePrivate(blocker, "cancelScheduledRechecks")
 
         assertFalse(fakeScheduler.hasScheduled(TEST_PACKAGE))
-        val legacyScheduledRechecks = getField(blocker, "scheduledRechecks") as Map<*, *>
-        val legacyScheduledAlarms = getField(blocker, "scheduledAlarms") as Map<*, *>
-        assertTrue(legacyScheduledRechecks.isEmpty())
-        assertTrue(legacyScheduledAlarms.isEmpty())
+        assertEquals(0, fakeScheduler.scheduledCount())
 
         blocker.onDestroy()
     }

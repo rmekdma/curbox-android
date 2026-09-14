@@ -18,6 +18,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleRecheckPlan
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
+import neth.iecal.curbox.domain.apprules.FakeWakeScheduler
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.LifecycleGeneration
 import neth.iecal.curbox.domain.apprules.ObservationKind
@@ -175,7 +176,8 @@ class AppRuleBlockerRecheckTest {
         var evaluations = 0
         var posts = 0
         var removals = 0
-        val blocker = AppRuleBlocker().apply {
+        val fakeScheduler = FakeWakeScheduler()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
             recheckPostDelayed = { runnable, _ ->
                 posts++
                 queued.addLast(runnable)
@@ -204,7 +206,7 @@ class AppRuleBlockerRecheckTest {
         assertEquals(true, getField(blocker, "foregroundEvidenceSuspended"))
         assertTrue(
             "screen-off must cancel every pending boundary without evaluating",
-            (getField(blocker, "scheduledRechecks") as Map<*, *>).isEmpty()
+            scheduledKeys(blocker).isEmpty()
         )
         assertEquals(0, evaluations)
         assertEquals(1, posts)
@@ -447,7 +449,8 @@ class AppRuleBlockerRecheckTest {
     fun scheduledRecheckReevaluatesGlobalDenialAfterTargetUsageAndGuardianExtra() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
-        val blocker = AppRuleBlocker()
+        val fakeScheduler = FakeWakeScheduler()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler)
         val schedulerHandler = android.os.Handler(android.os.Looper.getMainLooper())
         blocker.recheckPostDelayed = { runnable, delayMillis ->
             schedulerHandler.postDelayed(runnable, delayMillis)
@@ -510,9 +513,9 @@ class AppRuleBlockerRecheckTest {
         assertTrue("the target rule's guardian remainder must keep the app open", service.startedActivities.isEmpty())
         assertTrue(
             "initial guardian remainder must schedule a callback " +
-                "(scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
+                "(scheduled=${scheduledKeys(blocker)})",
             awaitCondition {
-                (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+                scheduledKeys(blocker).isNotEmpty()
             }
         )
         coordinator.accept(snapshotWithTargetAndGlobalDeny())
@@ -524,7 +527,7 @@ class AppRuleBlockerRecheckTest {
             "the scheduled recheck must open approval for the newly active global denial " +
                 "(windowsReads=${service.windowsReads}, " +
                 "current=${getField(blocker, "currentForegroundPackage")}, " +
-                "scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
+                "scheduled=${scheduledKeys(blocker)})",
             awaitCondition { service.startedActivities.isNotEmpty() }
         )
         val intent = service.startedActivities.last()
@@ -754,7 +757,8 @@ class AppRuleBlockerRecheckTest {
         var activeRootReads = 0
         var applicationWindowReads = 0
         val evaluatedRuleIds = mutableListOf<String>()
-        val blocker = AppRuleBlocker().apply {
+        val fakeScheduler = FakeWakeScheduler()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
             activeWindowSnapshotProvider = {
                 activeRootReads++
                 AppRuleBlocker.ActiveWindowSnapshot(
@@ -809,7 +813,7 @@ class AppRuleBlockerRecheckTest {
         assertEquals(listOf("other"), evaluatedRuleIds)
         assertTrue(
             "the not-visible event outcome must cancel its existing boundary",
-            PACKAGE !in (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
+            PACKAGE !in scheduledKeys(blocker)
         )
         assertEquals(1, activeRootReads)
         assertEquals(1, applicationWindowReads)
@@ -975,7 +979,8 @@ class AppRuleBlockerRecheckTest {
     fun recentForegroundEvidenceSurvivesAStaleOtherApplicationWindow() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
-        val blocker = AppRuleBlocker()
+        val fakeScheduler = FakeWakeScheduler()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler)
         val schedulerHandler = android.os.Handler(android.os.Looper.getMainLooper())
         blocker.recheckPostDelayed = { runnable, delayMillis ->
             schedulerHandler.postDelayed(runnable, delayMillis)
@@ -1027,9 +1032,9 @@ class AppRuleBlockerRecheckTest {
         sendWindowEvent(blocker, PACKAGE)
         assertTrue(
             "the target allowance boundary must be scheduled before visibility recovery " +
-                "(scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys})",
+                "(scheduled=${scheduledKeys(blocker)})",
             awaitCondition {
-                (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+                scheduledKeys(blocker).isNotEmpty()
             }
         )
         SystemClock.sleep(4_500L)
@@ -1041,7 +1046,7 @@ class AppRuleBlockerRecheckTest {
                 "evidenceAt=${getField(blocker, "currentForegroundEvidenceAtElapsedMs")}, " +
                 "nowElapsed=${SystemClock.elapsedRealtime()}, " +
                 "suspended=${getField(blocker, "foregroundEvidenceSuspended")}, " +
-                "scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).values})",
+                "scheduled=${scheduledKeys(blocker)})",
             awaitCondition { service.startedActivities.isNotEmpty() }
         )
         blocker.onDestroy()
@@ -1051,7 +1056,8 @@ class AppRuleBlockerRecheckTest {
     fun recentForegroundEvidenceSurvivesWindowProviderException() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
-        val blocker = AppRuleBlocker()
+        val fakeScheduler = FakeWakeScheduler()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler)
         val schedulerHandler = android.os.Handler(android.os.Looper.getMainLooper())
         blocker.recheckPostDelayed = { runnable, delayMillis ->
             schedulerHandler.postDelayed(runnable, delayMillis)
@@ -1100,7 +1106,7 @@ class AppRuleBlockerRecheckTest {
         assertTrue(
             "the target allowance boundary must survive the provider failure",
             awaitCondition {
-                (getField(blocker, "scheduledRechecks") as Map<*, *>).isNotEmpty()
+                scheduledKeys(blocker).isNotEmpty()
             }
         )
         SystemClock.sleep(4_500L)
@@ -1152,7 +1158,8 @@ class AppRuleBlockerRecheckTest {
     fun splitScreenKnownWindowsKeepIndependentBoundaryJobsWhenOneRootIsUnknown() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
-        val blocker = AppRuleBlocker()
+        val fakeScheduler = FakeWakeScheduler()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler)
         blocker.applicationWindowSnapshotProvider = {
             // Model a split-screen snapshot where B has a readable root and A's root is null.
             AppRuleBlocker.ApplicationWindowSnapshot(
@@ -1182,13 +1189,11 @@ class AppRuleBlockerRecheckTest {
         assertTrue(
             "split-screen reconciliation must publish both boundary jobs",
             awaitCondition {
-                val scheduled = (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
+                val scheduled = scheduledKeys(blocker)
                 PACKAGE in scheduled && OTHER_PACKAGE in scheduled
             }
         )
-        val scheduledPackages = (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
-            .map { it.toString() }
-            .toSet()
+        val scheduledPackages = scheduledKeys(blocker)
         assertTrue(
             "the current split-screen package must retain its boundary",
             PACKAGE in scheduledPackages
@@ -1263,7 +1268,11 @@ class AppRuleBlockerRecheckTest {
             it.attach(InstrumentationContext.context)
             it.lastBackPressTimeStamp = 0L
         }
-        val blocker = AppRuleBlocker()
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = baseWallClockMs,
+            initialElapsedRealtimeMs = baseElapsedRealtimeMs
+        )
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler)
         val phase = AtomicReference(DeadlineEvidencePhase.INITIAL)
         val wallClockMs = AtomicLong(baseWallClockMs)
         val elapsedRealtimeMs = AtomicLong(baseElapsedRealtimeMs)
@@ -1382,15 +1391,7 @@ class AppRuleBlockerRecheckTest {
                 initialAlarmsReady.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             )
             assertEquals(requiredPackages, initialAlarmPackages.toSet())
-            val scheduledAlarms = getField(blocker, "scheduledAlarms") as Map<*, *>
-            val scheduledRechecks = getField(blocker, "scheduledRechecks") as Map<*, *>
-            assertEquals(requiredPackages, scheduledAlarms.keys.toSet())
-            assertTrue(
-                "initial plans must retain both packages in keyed rechecks",
-                requiredPackages.all { packageName ->
-                    scheduledRechecks.containsKey(packageName)
-                }
-            )
+            assertEquals(requiredPackages, scheduledKeys(blocker))
             val initialTokens = requiredPackages.sorted().associateWith { packageName ->
                 scheduledAlarmToken(blocker, packageName)
             }
@@ -1428,14 +1429,9 @@ class AppRuleBlockerRecheckTest {
             }
             deliverSchedulerWake(firstPackage)
             assertTrue(
-                "first receiver delivery must remove only its keyed alarm registration",
-                !scheduledAlarms.containsKey(firstPackage) &&
-                    scheduledAlarms.containsKey(secondPackage)
-            )
-            assertTrue(
-                "first receiver delivery must remove only its keyed recheck",
-                !scheduledRechecks.containsKey(firstPackage) &&
-                    scheduledRechecks.containsKey(secondPackage)
+                "first receiver delivery must remove only its keyed registration",
+                !scheduledKeys(blocker).contains(firstPackage) &&
+                    scheduledKeys(blocker).contains(secondPackage)
             )
             assertEquals(
                 "the first receiver delivery must already coalesce one visible callback",
@@ -1444,15 +1440,9 @@ class AppRuleBlockerRecheckTest {
             )
             deliverSchedulerWake(secondPackage)
             assertTrue(
-                "both receiver deliveries must remove both keyed alarm registrations",
+                "both receiver deliveries must remove both keyed registrations",
                 requiredPackages.none { packageName ->
-                    scheduledAlarms.containsKey(packageName)
-                }
-            )
-            assertTrue(
-                "both receiver deliveries must remove both keyed rechecks",
-                requiredPackages.none { packageName ->
-                    scheduledRechecks.containsKey(packageName)
+                    scheduledKeys(blocker).contains(packageName)
                 }
             )
             assertEquals(
@@ -1513,7 +1503,8 @@ class AppRuleBlockerRecheckTest {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         val queued = ArrayDeque<Runnable>()
         val delays = mutableListOf<Long>()
-        val blocker = AppRuleBlocker().apply {
+        val fakeScheduler = FakeWakeScheduler()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
             activeWindowSnapshotProvider = {
                 AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
             }
@@ -1547,10 +1538,10 @@ class AppRuleBlockerRecheckTest {
         assertEquals(listOf(250L, 500L, 750L), delays.take(3))
         assertTrue(
             "package-less observation retry must terminate after the third attempt " +
-                "(scheduled=${(getField(blocker, "scheduledRechecks") as Map<*, *>).keys}, " +
+                "(scheduled=${scheduledKeys(blocker)}, " +
                 "delays=$delays)",
-            (getField(blocker, "scheduledRechecks") as Map<*, *>).keys.none {
-                it.toString().contains("foreground-observation")
+            scheduledKeys(blocker).none {
+                it.contains("foreground-observation")
             }
         )
         blocker.onDestroy()
@@ -1561,7 +1552,8 @@ class AppRuleBlockerRecheckTest {
         listOf(false, true).forEach { throws ->
             val service = RecordingService().also { it.attach(InstrumentationContext.context) }
             var postAttempts = 0
-            val blocker = AppRuleBlocker().apply {
+            val fakeScheduler = FakeWakeScheduler()
+            val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
                 recheckPostDelayed = { _, _ ->
                     postAttempts++
                     if (throws) error("scheduler post failed")
@@ -1576,7 +1568,7 @@ class AppRuleBlockerRecheckTest {
             assertEquals(3, postAttempts)
             assertTrue(
                 "failed scheduler posts must retain the package boundary",
-                PACKAGE in (getField(blocker, "scheduledRechecks") as Map<*, *>).keys
+                PACKAGE in scheduledKeys(blocker)
             )
             blocker.onDestroy()
         }
@@ -1727,7 +1719,11 @@ class AppRuleBlockerRecheckTest {
         var wallClockMs = 1_000_000L
         var elapsedRealtimeMs = 5_000L
         var evaluations = 0
-        val blocker = AppRuleBlocker().apply {
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = wallClockMs,
+            initialElapsedRealtimeMs = elapsedRealtimeMs
+        )
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
             wallClockMsProvider = { wallClockMs }
             elapsedRealtimeMsProvider = { elapsedRealtimeMs }
             visibleApplicationCheckPostDelayed = { runnable, _ ->
@@ -1802,7 +1798,11 @@ class AppRuleBlockerRecheckTest {
         var elapsedRealtimeMs = 5_000L
         var primaryAttempts = 0
         var evaluations = 0
-        val blocker = AppRuleBlocker().apply {
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = wallClockMs,
+            initialElapsedRealtimeMs = elapsedRealtimeMs
+        )
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
             wallClockMsProvider = { wallClockMs }
             elapsedRealtimeMsProvider = { elapsedRealtimeMs }
             recheckPostDelayed = { _, _ ->
@@ -1884,7 +1884,11 @@ class AppRuleBlockerRecheckTest {
         var wallClockMs = 1_000_000L
         var elapsedRealtimeMs = 5_000L
         var primaryAttempts = 0
-        val blocker = AppRuleBlocker().apply {
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = wallClockMs,
+            initialElapsedRealtimeMs = elapsedRealtimeMs
+        )
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
             wallClockMsProvider = { wallClockMs }
             elapsedRealtimeMsProvider = { elapsedRealtimeMs }
             recheckPostDelayed = { _, _ ->
@@ -1917,8 +1921,8 @@ class AppRuleBlockerRecheckTest {
         assertEquals(3, primaryAttempts)
         val recoveryToken = scheduledAlarmToken(blocker)
         assertTrue(
-            "the failed primary post must leave a production recovery callback",
-            (getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).containsKey(PACKAGE)
+            "the failed primary post must leave a registered wake",
+            scheduledKeys(blocker).contains(PACKAGE)
         )
 
         invokePrivate(
@@ -1946,12 +1950,8 @@ class AppRuleBlockerRecheckTest {
             wakeQueue.isEmpty()
         )
         assertTrue(
-            "plan removal must remove the paired recovery callback",
-            (getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).isEmpty()
-        )
-        assertTrue(
-            "plan removal must remove the paired alarm token",
-            (getField(blocker, "scheduledAlarms") as Map<*, *>).isEmpty()
+            "plan removal must remove the paired scheduled wake",
+            scheduledKeys(blocker).isEmpty()
         )
         blocker.onDestroy()
     }
@@ -1962,7 +1962,11 @@ class AppRuleBlockerRecheckTest {
         var wallClockMs = 1_000_000L
         var elapsedRealtimeMs = 5_000L
         var primaryAttempts = 0
-        val blocker = AppRuleBlocker().apply {
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = wallClockMs,
+            initialElapsedRealtimeMs = elapsedRealtimeMs
+        )
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
             wallClockMsProvider = { wallClockMs }
             elapsedRealtimeMsProvider = { elapsedRealtimeMs }
             recheckPostDelayed = { _, _ ->
@@ -2001,20 +2005,18 @@ class AppRuleBlockerRecheckTest {
         // This is the old worker update arriving after a newer plan has installed its recovery.
         applyPlan(1L, null)
 
-        val alarmsAfterStaleCancel = getField(blocker, "scheduledAlarms") as Map<*, *>
         assertEquals(
             "a stale plan cancellation must not remove the replacement alarm",
             replacementToken,
-            getField(alarmsAfterStaleCancel[PACKAGE]!!, "token")
+            scheduledAlarmToken(blocker)
         )
         assertTrue(
-            "a stale plan cancellation must retain the replacement recovery callback",
-            (getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).containsKey(PACKAGE)
+            "a stale plan cancellation must retain the replacement scheduled wake",
+            scheduledKeys(blocker).contains(PACKAGE)
         )
 
         applyPlan(2L, null)
-        assertTrue((getField(blocker, "scheduledAlarms") as Map<*, *>).isEmpty())
-        assertTrue((getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).isEmpty())
+        assertTrue(scheduledKeys(blocker).isEmpty())
         blocker.onDestroy()
     }
 
@@ -2026,7 +2028,11 @@ class AppRuleBlockerRecheckTest {
         var useReplacementObservation = false
         var replacementToken = Long.MIN_VALUE
         lateinit var blocker: AppRuleBlocker
-        blocker = AppRuleBlocker().apply {
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = wallClockMs,
+            initialElapsedRealtimeMs = elapsedRealtimeMs
+        )
+        blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
             wallClockMsProvider = { wallClockMs }
             elapsedRealtimeMsProvider = { elapsedRealtimeMs }
             screenInteractiveProvider = { true }
@@ -2084,19 +2090,14 @@ class AppRuleBlockerRecheckTest {
         )
 
         assertTrue("the observation must install a replacement registration", replacementToken != oldToken)
-        val alarmsAfterStaleCancel = getField(blocker, "scheduledAlarms") as Map<*, *>
         assertTrue(
-            "the replacement alarm must still be registered: ${alarmsAfterStaleCancel.keys}",
-            alarmsAfterStaleCancel.containsKey(PACKAGE)
+            "the replacement wake must still be registered: ${scheduledKeys(blocker)}",
+            scheduledKeys(blocker).contains(PACKAGE)
         )
         assertEquals(
             "a stale NotVisible cancellation must not remove the replacement alarm",
             replacementToken,
-            getField(alarmsAfterStaleCancel[PACKAGE]!!, "token")
-        )
-        assertTrue(
-            "a stale NotVisible cancellation must retain the replacement recovery callback",
-            (getField(blocker, "scheduledRecoveryCallbacks") as Map<*, *>).containsKey(PACKAGE)
+            scheduledAlarmToken(blocker)
         )
         blocker.onDestroy()
     }
@@ -2109,7 +2110,11 @@ class AppRuleBlockerRecheckTest {
             val delays = mutableListOf<Long>()
             var wallClockMs = 1_000_000L
             var elapsedRealtimeMs = 5_000L
-            val blocker = AppRuleBlocker().apply {
+            val fakeScheduler = FakeWakeScheduler(
+                initialWallClockMs = wallClockMs,
+                initialElapsedRealtimeMs = elapsedRealtimeMs
+            )
+            val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
                 wallClockMsProvider = { wallClockMs }
                 elapsedRealtimeMsProvider = { elapsedRealtimeMs }
                 screenInteractiveProvider = { true }
@@ -2143,6 +2148,8 @@ class AppRuleBlockerRecheckTest {
             invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
             wallClockMs += 1_000L
             elapsedRealtimeMs += 1_000L
+            fakeScheduler.currentWallClockMs = wallClockMs
+            fakeScheduler.currentElapsedRealtimeMs = elapsedRealtimeMs
             val recoveryAttempts = if (suspended) 1 else 4
             repeat(recoveryAttempts) { attempt ->
                 queued.removeFirst().run()
@@ -2150,6 +2157,8 @@ class AppRuleBlockerRecheckTest {
                     val nextDelay = delays.last()
                     wallClockMs += nextDelay
                     elapsedRealtimeMs += nextDelay
+                    fakeScheduler.currentWallClockMs = wallClockMs
+                    fakeScheduler.currentElapsedRealtimeMs = elapsedRealtimeMs
                 }
             }
 
@@ -2157,12 +2166,11 @@ class AppRuleBlockerRecheckTest {
                 "${if (suspended) "suspended" else "unknown"} recovery must not clamp to 1ms",
                 delays.last() >= 20_000L
             )
-            val scheduled = (getField(blocker, "scheduledRechecks") as Map<*, *>)
-                .get(PACKAGE) ?: error("relative recovery must retain a scheduled package")
-            val dueAtWallClockMs = getField(scheduled, "dueAtWallClockMs") as Long?
+            val scheduled = fakeScheduler.getScheduled(PACKAGE)
+                ?: error("relative recovery must retain a scheduled package")
             assertTrue(
                 "relative recovery must own a fresh future absolute due time",
-                dueAtWallClockMs != null && dueAtWallClockMs > wallClockMs
+                scheduled.dueAtWallClockMs > wallClockMs
             )
             blocker.onDestroy()
         }
@@ -2283,7 +2291,8 @@ class AppRuleBlockerRecheckTest {
     @Test
     fun unrelatedSettingsEmissionKeepsExistingBoundaryJob() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
-        val blocker = AppRuleBlocker()
+        val fakeScheduler = FakeWakeScheduler()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler)
         val snapshot = snapshotWithTargetAllowance()
         val repository = EmptySessionRepository()
         setField(blocker, "service", service)
@@ -2295,7 +2304,7 @@ class AppRuleBlockerRecheckTest {
         coordinator.accept(snapshot)
 
         invokePrivate(blocker, "scheduleRecheck", PACKAGE, 10_000L, 20_000L, 0L)
-        val before = (getField(blocker, "scheduledRechecks") as Map<*, *>).size
+        val before = scheduledKeys(blocker).size
         val changed = invokePrivateResult(
             blocker,
             "applySettingsSnapshot",
@@ -2305,7 +2314,7 @@ class AppRuleBlockerRecheckTest {
         assertTrue("an unrelated DataStore emission must not invalidate a boundary job", !changed)
         assertTrue(
             "the existing app boundary must remain scheduled",
-            (getField(blocker, "scheduledRechecks") as Map<*, *>).size == before
+            scheduledKeys(blocker).size == before
         )
         blocker.onDestroy()
     }
@@ -2504,14 +2513,21 @@ class AppRuleBlockerRecheckTest {
     private fun getField(target: Any, name: String): Any? =
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
 
+    private fun scheduledKeys(blocker: AppRuleBlocker): Set<String> {
+        val scheduler = blocker.wakeScheduler as? FakeWakeScheduler ?: return emptySet()
+        return scheduler.scheduledKeys()
+    }
+
     private fun scheduledAlarmToken(
         blocker: AppRuleBlocker,
         packageName: String = PACKAGE
     ): Long {
-        val alarms = getField(blocker, "scheduledAlarms") as Map<*, *>
-        val registration = alarms[packageName]
+        val scheduler = checkNotNull(blocker.wakeScheduler as? FakeWakeScheduler) {
+            "FakeWakeScheduler is required on blocker"
+        }
+        val entry = scheduler.getScheduled(packageName)
             ?: error("scheduled alarm registration is missing for $packageName")
-        return getField(registration, "token") as Long
+        return entry.token
     }
 
     private fun invokePrivate(target: Any, name: String, vararg args: Any?) {

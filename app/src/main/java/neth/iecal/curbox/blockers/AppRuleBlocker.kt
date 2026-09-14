@@ -194,12 +194,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     @Volatile private var screenOnAwaitingUserPresent = false
     private val recheckGeneration = AtomicLong(0L)
     private val lifecycleGeneration = AtomicLong(0L)
-    private val scheduledRechecks = mutableMapOf<String, ScheduledRecheck>()
-    /** Canonical identity for every AlarmManager registration, including recovery alarms. */
-    private val scheduledAlarms = mutableMapOf<String, ScheduledAlarmRegistration>()
-    /** One identity spans the primary callback, recovery callback, and wake alarm. */
-    private val schedulerRegistrationToken = AtomicLong(0L)
-    private val scheduledRecoveryCallbacks = mutableMapOf<String, ScheduledRecoveryRegistration>()
+    private val schedulerTokenSequence = AtomicLong(0L)
     private var pendingSchedulerWakeGeneration: Long? = null
     private var foregroundEvidenceModule = ForegroundEvidenceModule()
     private var foregroundObservationSource: AndroidForegroundObservationSource? = null
@@ -236,38 +231,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val connectionGeneration: Long,
         val recheckGeneration: Long,
         val foregroundEvidenceSuspended: Boolean
-    )
-
-    private data class ScheduledRecheck(
-        val registrationToken: Long,
-        val originatingSourceOrderIdentity: SourceOrderIdentity?,
-        val generation: Long,
-        val runnable: Runnable,
-        val dueAtWallClockMs: Long?,
-        val maxDelayMillis: Long?,
-        val relativeDelayMillis: Long?
-    )
-
-    private data class ScheduledRecoveryRegistration(
-        val registrationToken: Long,
-        val originatingSourceOrderIdentity: SourceOrderIdentity?,
-        val generation: Long,
-        val runnable: Runnable
-    )
-
-    private data class ScheduledAlarmRegistration(
-        val token: Long,
-        val originatingSourceOrderIdentity: SourceOrderIdentity?,
-        val pendingIntent: PendingIntent? = null,
-        val callback: Runnable? = null,
-        val generation: Long
-    )
-
-    private data class ScheduledRegistrationCleanup(
-        val token: Long? = null,
-        val pendingIntent: PendingIntent? = null,
-        val recoveryRunnable: Runnable? = null,
-        val recheckRunnable: Runnable? = null
     )
 
     private class ExternalEffectPermit(
@@ -1109,26 +1072,16 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             // Revalidate immediately after the delivery barrier and before scheduler state or
             // registration changes. Destroy can cancel the reserved permit while the observer is
             // blocked.
-            val generation = synchronized(runtimeLock) {
+            synchronized(runtimeLock) {
                 if (!isCurrentWorkerRecheckLocked(workerInstanceToken, update)) return
-                recheckGeneration.get()
             }
             val plan = update.plan
             if (plan == null) {
-                cancelScheduledRecheck(
-                    packageName = update.packageName,
-                    expectedOriginatingSourceOrderIdentity =
-                        update.expectedRegistrationSourceOrderIdentity
-                            ?: update.sourceOrderIdentity
-                )
+                cancelScheduledRecheck(update.packageName)
             } else {
                 scheduleRecheckAtWallClock(
                     packageName = update.packageName,
-                    dueAtWallClockMs = plan.dueAtWallClockMs,
-                    maxDelayMillis = plan.maxDelayMillis,
-                    relativeDelayMillis = plan.delayMillis,
-                    generation = generation,
-                    originatingSourceOrderIdentity = update.sourceOrderIdentity
+                    dueAtWallClockMs = plan.dueAtWallClockMs
                 )
             }
         } catch (error: CancellationException) {
@@ -1760,6 +1713,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             if (isDefaultWakeScheduler) {
                 wakeScheduler = null
                 isDefaultWakeScheduler = false
+            } else {
+                wakeScheduler?.onWake = null
             }
             return null
         }
@@ -1809,6 +1764,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             if (isDefaultWakeScheduler) {
                 wakeScheduler = null
                 isDefaultWakeScheduler = false
+            } else {
+                wakeScheduler?.onWake = null
             }
         }
         val effectDrainCompleted = awaitDrainWorkUntil(deadline.elapsedRealtimeMs)
@@ -1888,21 +1845,12 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
 
     private fun checkCurrentlyVisibleApplications(
         observationKind: ObservationKind,
-        observationAttempt: Int,
-        expectedObservationRegistrationToken: Long? = null
+        observationAttempt: Int = 0
     ) {
         val observationBoundary = captureLifecycleBoundary() ?: return
         val connectionGeneration = observationBoundary.connectionGeneration
         val observationGeneration = observationBoundary.recheckGeneration
         try {
-            val expectedRegistrationTokens = synchronized(runtimeLock) {
-                val packageNames = scheduledRechecks.keys +
-                    scheduledRecoveryCallbacks.keys +
-                    scheduledAlarms.keys
-                packageNames.associateWith { packageName ->
-                    scheduledRegistrationTokenLocked(packageName)
-                }
-            }
             val configuredEssentialPackages =
                 readEssentialPackagesForEvaluation(connectionGeneration)
             val policy = ForegroundEvidencePolicySnapshot(
@@ -1965,11 +1913,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 if (!isReadyForChecks() || recheckGeneration.get() != generation) return
                 when (outcome) {
                     is ForegroundEvidenceOutcome.NotVisible ->
-                        cancelScheduledRecheck(
-                            packageName = outcome.packageName,
-                            expectedRegistrationToken =
-                                expectedRegistrationTokens[outcome.packageName]
-                        )
+                        cancelScheduledRecheck(packageName = outcome.packageName)
                     is ForegroundEvidenceOutcome.Visible -> {
                         if (outcome.decisionPermission ==
                                 neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
@@ -1981,17 +1925,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 }
             }
             if (needsObservationRetry && observationAttempt < MAX_VISIBILITY_RETRIES) {
-                postScheduledRecheck(
-                    packageName = OBSERVATION_RECHECK_KEY,
-                    generation = generation,
+                postVisibleApplicationCheck(
                     delayMillis = VISIBILITY_RETRY_DELAY_MS * (observationAttempt + 1),
-                    visibilityAttempt = observationAttempt + 1
-                )
-            } else {
-                cancelScheduledRecheck(
-                    packageName = OBSERVATION_RECHECK_KEY,
-                    expectedRegistrationToken = expectedObservationRegistrationToken
-                        ?: expectedRegistrationTokens[OBSERVATION_RECHECK_KEY]
+                    connectionGeneration = connectionGeneration,
+                    observationKind = ObservationKind.SYNTHETIC_RECHECK
                 )
             }
         } catch (error: CancellationException) {
@@ -2001,56 +1938,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
     }
 
+    @Suppress("UNUSED_PARAMETER")
     internal fun onWakeFromScheduler(packageName: String, token: Long) {
         if (!isReadyForChecks()) return
-        val generation = synchronized(runtimeLock) {
-            if (!isReadyForChecks()) return
-            val registration = scheduledAlarms[packageName]
-                ?.takeIf { token < 0L || it.token == token }
-            fun matchesAlarmRegistration(registrationToken: Long, callback: Runnable?, gen: Long): Boolean =
-                token < 0L || registration == null ||
-                    (registrationToken == registration.token &&
-                        gen == registration.generation &&
-                        (registration.callback == null || callback === registration.callback))
-
-            val scheduled = scheduledRechecks[packageName]
-                ?.takeIf { matchesAlarmRegistration(it.registrationToken, it.runnable, it.generation) }
-            val recovery = scheduledRecoveryCallbacks[packageName]
-                ?.takeIf { matchesAlarmRegistration(it.registrationToken, it.runnable, it.generation) }
-            if (registration != null && scheduled == null && recovery == null) {
-                // The token matched a registration, but its callback was replaced or
-                // cancelled. Remove only that exact registration and reject the delivery.
-                removeAlarmRegistrationLocked(
-                    packageName,
-                    registration.callback,
-                    registration.token
-                )
-                return
-            }
-            if (registration != null && recheckGeneration.get() != registration.generation) {
-                removeAlarmRegistrationLocked(
-                    packageName,
-                    registration.callback,
-                    registration.token
-                )
-                return
-            }
-            if (registration != null) {
-                removeAlarmRegistrationLocked(
-                    packageName,
-                    registration.callback,
-                    registration.token
-                )
-            } else {
-                scheduledAlarms.remove(packageName)
-            }
-            if (scheduled != null) scheduledRechecks.remove(packageName)
-            if (recovery != null) scheduledRecoveryCallbacks.remove(packageName)
-            registration?.generation ?: scheduled?.generation ?: recheckGeneration.get()
-        }
-        // Coalesce an alarm into one guarded observation. The actual framework reads and
-        // decision work happen from the posted reconciliation callback, outside onReceive.
-        onSchedulerWake(generation)
+        onSchedulerWake(recheckGeneration.get())
     }
 
     private val schedulerWakeReceiver = object : BroadcastReceiver() {
@@ -2681,6 +2572,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         null
     }
 
+    @Suppress("UNUSED_PARAMETER")
     private fun scheduleRecheck(
         packageName: String,
         remainingMillis: Long,
@@ -2693,771 +2585,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             dueAtWallClockMs = safeWallClockAdd(
                 observationWallClockMs(),
                 remainingMillis
-            ),
-            maxDelayMillis = maxDelayMillis,
-            relativeDelayMillis = remainingMillis,
-            generation = generation
+            )
         )
     }
-
-    /** Relative recovery must not inherit an already-expired semantic boundary. */
-    private fun relativeRecoveryDueAtWallClockMs(delayMillis: Long): Long =
-        safeWallClockAdd(
-            observationWallClockMs(),
-            delayMillis.coerceAtLeast(1L)
-        )
 
     private fun scheduleRecheckAtWallClock(
         packageName: String,
-        dueAtWallClockMs: Long,
-        maxDelayMillis: Long,
-        relativeDelayMillis: Long? = null,
-        generation: Long,
-        originatingSourceOrderIdentity: SourceOrderIdentity? = null
+        dueAtWallClockMs: Long
     ) {
         if (!isReadyForChecks() || packageName.isBlank()) return
-        postScheduledRecheck(
-            packageName = packageName,
-            generation = generation,
-            delayMillis = relativeDelayMillis ?: AppRuleWallClockScheduler.delayUntil(
-                dueAtWallClockMs = dueAtWallClockMs,
-                nowWallClockMs = observationWallClockMs(),
-                nowElapsedRealtimeMs = observationElapsedRealtimeMs()
-            ),
-            visibilityAttempt = 0,
-            maxDelayMillis = maxDelayMillis,
-            dueAtWallClockMs = dueAtWallClockMs,
-            relativeDelayMillis = relativeDelayMillis,
-            originatingSourceOrderIdentity = originatingSourceOrderIdentity
-        )
-    }
-
-    private fun postScheduledRecheck(
-        packageName: String,
-        generation: Long,
-        delayMillis: Long,
-        visibilityAttempt: Int,
-        postAttempt: Int = 1,
-        maxDelayMillis: Long? = null,
-        dueAtWallClockMs: Long? = null,
-        relativeDelayMillis: Long? = null,
-        originatingSourceOrderIdentity: SourceOrderIdentity? = null
-    ) {
-        lateinit var postPermit: ExternalEffectPermit
-        lateinit var runnable: Runnable
-        runnable = Runnable {
-            if (!enterPostedEffect(postPermit)) return@Runnable
-            try {
-                if (!isReadyForChecks() || recheckGeneration.get() != generation) return@Runnable
-                if (packageName == OBSERVATION_RECHECK_KEY) {
-                    runObservationRecheck(generation, visibilityAttempt, runnable)
-                } else {
-                    runScheduledRecheck(packageName, generation, visibilityAttempt, runnable)
-                }
-            } finally {
-                finishExternalEffect(postPermit)
-            }
-        }
-        val registrationToken = schedulerRegistrationToken.incrementAndGet()
-        val remainingDelay = dueAtWallClockMs?.let { dueAt ->
-            AppRuleWallClockScheduler.delayUntil(
-                dueAtWallClockMs = dueAt,
-                nowWallClockMs = observationWallClockMs(),
-                nowElapsedRealtimeMs = observationElapsedRealtimeMs()
-            )
-        } ?: delayMillis
-        val retryDelay = VISIBILITY_RETRY_DELAY_MS * (postAttempt - 1L)
-        val postDelay = maxOf(remainingDelay, retryDelay).let { delay ->
-            if (maxDelayMillis == null) {
-                delay.coerceAtLeast(1L)
-            } else {
-                delay.coerceAtMost(maxDelayMillis.coerceAtLeast(1L)).coerceAtLeast(1L)
-            }
-        }
-        val replacement = synchronized(runtimeLock) {
-            if (!isReadyForChecks() || recheckGeneration.get() != generation) return
-            val old = scheduledRechecks.remove(packageName)
-            val oldCleanup = old?.let {
-                removeScheduledRegistrationLocked(packageName, it.registrationToken)
-            } ?: ScheduledRegistrationCleanup()
-            scheduledRechecks[packageName] = ScheduledRecheck(
-                registrationToken = registrationToken,
-                originatingSourceOrderIdentity = originatingSourceOrderIdentity,
-                generation = generation,
-                runnable = runnable,
-                dueAtWallClockMs = dueAtWallClockMs,
-                maxDelayMillis = maxDelayMillis,
-                relativeDelayMillis = relativeDelayMillis ?: delayMillis.takeIf { it > 0L }
-            )
-            val permit = reserveExternalEffectLocked(inFlightCallbacks) {
-                isReadyForChecks() &&
-                    recheckGeneration.get() == generation &&
-                    scheduledRechecks[packageName]?.let {
-                        it.runnable === runnable && it.generation == generation
-                    } == true
-            } ?: return
-            Triple(old, oldCleanup, permit)
-        }
-        replacement.first?.let { removeHandlerCallback(it.runnable) }
-        replacement.second.pendingIntent?.let(::cancelAlarm)
-        replacement.second.recoveryRunnable?.let(::removeHandlerCallback)
-        postPermit = replacement.third
-        if (!startExternalEffect(postPermit) {
-                isReadyForChecks() &&
-                    recheckGeneration.get() == generation &&
-                    isCurrentScheduledCallback(packageName, runnable, generation)
-            }
-        ) {
-            removeScheduledCallback(packageName, runnable, registrationToken)
-            return
-        }
-        try {
-            recheckBeforeFrameworkPostObserver?.invoke(packageName)
-            val posted = if (recheckPostDelayed != null) {
-                if (!beginExternalEffectCall(postPermit) {
-                        isReadyForChecks() &&
-                            recheckGeneration.get() == generation &&
-                            isCurrentScheduledCallback(packageName, runnable, generation)
-                    }
-                ) {
-                    false
-                } else {
-                    recheckPostDelayed!!.invoke(runnable, postDelay)
-                }
-            } else {
-                postWakeCapableCallback(
-                    packageName = packageName,
-                    runnable = runnable,
-                    delayMillis = postDelay,
-                    generation = generation,
-                    permit = postPermit
-                )
-            }
-            val armed = armPostedEffect(postPermit, posted) {
-                isReadyForChecks() &&
-                    recheckGeneration.get() == generation &&
-                    isCurrentScheduledCallback(packageName, runnable, generation)
-            }
-            if (!isCurrentScheduledCallback(packageName, runnable, generation)) {
-                removeScheduledCallback(packageName, runnable, registrationToken)
-                return
-            }
-            if (!armed) {
-                recoverScheduledPost(
-                    packageName = packageName,
-                    generation = generation,
-                    visibilityAttempt = visibilityAttempt,
-                    postAttempt = postAttempt,
-                    delayMillis = delayMillis,
-                    maxDelayMillis = maxDelayMillis,
-                    dueAtWallClockMs = dueAtWallClockMs,
-                    relativeDelayMillis = relativeDelayMillis,
-                    registrationToken = registrationToken,
-                    originatingSourceOrderIdentity = originatingSourceOrderIdentity
-                )
-            }
-        } catch (error: CancellationException) {
-            finishExternalEffect(postPermit)
-            throw error
-        } catch (error: Throwable) {
-            logNonFatal(error)
-            finishExternalEffect(postPermit)
-            if (isCurrentScheduledCallback(packageName, runnable, generation)) {
-                recoverScheduledPost(
-                    packageName = packageName,
-                    generation = generation,
-                    visibilityAttempt = visibilityAttempt,
-                    postAttempt = postAttempt,
-                    delayMillis = delayMillis,
-                    maxDelayMillis = maxDelayMillis,
-                    dueAtWallClockMs = dueAtWallClockMs,
-                    relativeDelayMillis = relativeDelayMillis,
-                    registrationToken = registrationToken,
-                    originatingSourceOrderIdentity = originatingSourceOrderIdentity
-                )
-            } else {
-                removeScheduledCallback(packageName, runnable, registrationToken)
-            }
-        }
-    }
-
-    private fun recoverScheduledPost(
-        packageName: String,
-        generation: Long,
-        visibilityAttempt: Int,
-        postAttempt: Int,
-        delayMillis: Long,
-        maxDelayMillis: Long?,
-        dueAtWallClockMs: Long?,
-        relativeDelayMillis: Long?,
-        registrationToken: Long,
-        originatingSourceOrderIdentity: SourceOrderIdentity?
-    ) {
-        if (postAttempt >= MAX_SCHEDULER_POST_ATTEMPTS ||
-            !isReadyForChecks() || recheckGeneration.get() != generation
-        ) {
-            if (postAttempt >= MAX_SCHEDULER_POST_ATTEMPTS) {
-                rearmScheduledPost(
-                    packageName = packageName,
-                    generation = generation,
-                    visibilityAttempt = visibilityAttempt,
-                    delayMillis = delayMillis,
-                    maxDelayMillis = maxDelayMillis,
-                    dueAtWallClockMs = dueAtWallClockMs,
-                    relativeDelayMillis = relativeDelayMillis,
-                    registrationToken = registrationToken,
-                    originatingSourceOrderIdentity = originatingSourceOrderIdentity
-                )
-            }
-            return
-        }
-        postScheduledRecheck(
-            packageName = packageName,
-            generation = generation,
-            delayMillis = delayMillis,
-            visibilityAttempt = visibilityAttempt,
-            postAttempt = postAttempt + 1,
-            maxDelayMillis = maxDelayMillis,
-            dueAtWallClockMs = dueAtWallClockMs,
-            relativeDelayMillis = relativeDelayMillis,
-            originatingSourceOrderIdentity = originatingSourceOrderIdentity
-        )
-    }
-
-    private fun rearmScheduledPost(
-        packageName: String,
-        generation: Long,
-        visibilityAttempt: Int,
-        delayMillis: Long,
-        maxDelayMillis: Long?,
-        dueAtWallClockMs: Long?,
-        relativeDelayMillis: Long?,
-        registrationToken: Long,
-        originatingSourceOrderIdentity: SourceOrderIdentity?
-    ) {
-        if (!isReadyForChecks() || recheckGeneration.get() != generation) return
-        val nowWallClockMs = observationWallClockMs()
-        val recoveryDueAtWallClockMs = dueAtWallClockMs
-            ?.takeIf { it > nowWallClockMs }
-            ?: relativeRecoveryDueAtWallClockMs(relativeDelayMillis ?: delayMillis)
-        val requestedRecoveryDelayMillis = relativeDelayMillis ?: delayMillis
-        val recoveryDelay = AppRuleWallClockScheduler.delayUntil(
-            dueAtWallClockMs = recoveryDueAtWallClockMs,
-            nowWallClockMs = nowWallClockMs,
-            nowElapsedRealtimeMs = observationElapsedRealtimeMs()
-        ).coerceAtLeast(1L)
-        lateinit var recoveryRunnable: Runnable
-        lateinit var recoveryPermit: ExternalEffectPermit
-        recoveryRunnable = Runnable {
-            if (!enterPostedEffect(recoveryPermit)) return@Runnable
-            val current = synchronized(runtimeLock) {
-                val registration = scheduledRecoveryCallbacks[packageName]
-                if (registration?.registrationToken != registrationToken ||
-                    registration.generation != generation ||
-                    registration.runnable !== recoveryRunnable
-                ) {
-                    false
-                } else {
-                    scheduledRecoveryCallbacks.remove(packageName)
-                    true
-                }
-            }
-            try {
-                if (!current || !isReadyForChecks() || recheckGeneration.get() != generation) {
-                    return@Runnable
-                }
-                val dueAtWallClockMsForRearm = recoveryDueAtWallClockMs
-                    .takeIf { it > observationWallClockMs() }
-                    ?: relativeRecoveryDueAtWallClockMs(requestedRecoveryDelayMillis)
-                postScheduledRecheck(
-                    packageName = packageName,
-                    generation = generation,
-                    delayMillis = delayMillis,
-                    visibilityAttempt = visibilityAttempt,
-                    postAttempt = 1,
-                    maxDelayMillis = maxDelayMillis,
-                    dueAtWallClockMs = dueAtWallClockMsForRearm,
-                    relativeDelayMillis = requestedRecoveryDelayMillis,
-                    originatingSourceOrderIdentity = originatingSourceOrderIdentity
-                )
-            } finally {
-                finishExternalEffect(recoveryPermit)
-            }
-        }
-        val previousRecovery = synchronized(runtimeLock) {
-            val current = scheduledRechecks[packageName]
-            if (!isReadyForChecks() || recheckGeneration.get() != generation ||
-                current?.registrationToken != registrationToken
-            ) return
-            val previousToken = scheduledRecoveryCallbacks[packageName]?.registrationToken
-            val previousCleanup = previousToken?.let {
-                removeScheduledRegistrationLocked(packageName, it)
-            } ?: ScheduledRegistrationCleanup()
-            scheduledRecoveryCallbacks[packageName] = ScheduledRecoveryRegistration(
-                registrationToken = registrationToken,
-                originatingSourceOrderIdentity = originatingSourceOrderIdentity,
-                generation = generation,
-                runnable = recoveryRunnable
-            )
-            val permit = reserveExternalEffectLocked(inFlightCallbacks) {
-                isReadyForChecks() &&
-                    recheckGeneration.get() == generation &&
-                    scheduledRecoveryCallbacks[packageName]?.let {
-                        it.registrationToken == registrationToken &&
-                            it.runnable === recoveryRunnable
-                    } == true
-            } ?: return
-            Triple(previousCleanup, permit, recoveryRunnable)
-        }
-        previousRecovery.first.pendingIntent?.let(::cancelAlarm)
-        previousRecovery.first.recoveryRunnable?.let(::removeHandlerCallback)
-        recoveryPermit = previousRecovery.second
-
-        fun postRecoveryWithPermit(
-            permit: ExternalEffectPermit,
-            useRecoveryAdapter: Boolean
-        ): Boolean {
-            if (!startExternalEffect(permit) {
-                    isReadyForChecks() &&
-                        recheckGeneration.get() == generation &&
-                        scheduledRecoveryCallbacks[packageName]?.let {
-                            it.registrationToken == registrationToken &&
-                                it.runnable === recoveryRunnable
-                        } == true
-                }
-            ) return false
-            return try {
-                recheckBeforeFrameworkPostObserver?.invoke(packageName)
-                val posted = if (useRecoveryAdapter && recheckRecoveryPostDelayed != null) {
-                    if (!beginExternalEffectCall(permit) {
-                            isReadyForChecks() &&
-                                recheckGeneration.get() == generation &&
-                                isCurrentSchedulerCallbackLocked(packageName, recoveryRunnable)
-                        }
-                    ) {
-                        false
-                    } else {
-                        recheckRecoveryPostDelayed!!.invoke(recoveryRunnable, recoveryDelay)
-                    }
-                } else if (useRecoveryAdapter) {
-                    postWakeCapableCallback(
-                        packageName = packageName,
-                        runnable = recoveryRunnable,
-                        delayMillis = recoveryDelay,
-                        generation = generation,
-                        permit = permit
-                    )
-                } else {
-                    if (!beginExternalEffectCall(permit) {
-                            isReadyForChecks() &&
-                                recheckGeneration.get() == generation &&
-                                isCurrentSchedulerCallbackLocked(packageName, recoveryRunnable)
-                        }
-                    ) {
-                        false
-                    } else {
-                        getHandler().postDelayed(recoveryRunnable, recoveryDelay)
-                    }
-                }
-                armPostedEffect(permit, posted) {
-                    isReadyForChecks() &&
-                        recheckGeneration.get() == generation &&
-                        isCurrentSchedulerCallback(packageName, recoveryRunnable, generation)
-                }
-            } catch (error: CancellationException) {
-                finishExternalEffect(permit)
-                throw error
-            } catch (error: Throwable) {
-                logNonFatal(error)
-                finishExternalEffect(permit)
-                false
-            }
-        }
-
-        val posted = postRecoveryWithPermit(recoveryPermit, useRecoveryAdapter = true)
-        if (!posted) {
-            // A failed primary adapter must still have a bounded local recovery. The wake-capable
-            // path is preferred; this last fallback is only for an unavailable AlarmManager.
-            val fallbackPermit = synchronized(runtimeLock) {
-                reserveExternalEffectLocked(inFlightCallbacks) {
-                    isReadyForChecks() &&
-                        recheckGeneration.get() == generation &&
-                        scheduledRecoveryCallbacks[packageName]?.let {
-                            it.registrationToken == registrationToken &&
-                                it.runnable === recoveryRunnable
-                        } == true
-                }
-            }
-            val fallbackPosted = if (fallbackPermit == null) {
-                false
-            } else {
-                recoveryPermit = fallbackPermit
-                postRecoveryWithPermit(fallbackPermit, useRecoveryAdapter = false)
-            }
-            if (!fallbackPosted) {
-                synchronized(runtimeLock) {
-                    val registration = scheduledRecoveryCallbacks[packageName]
-                    if (registration?.registrationToken == registrationToken &&
-                        registration.runnable === recoveryRunnable
-                    ) {
-                        scheduledRecoveryCallbacks.remove(packageName)
-                    }
-                }
-            }
-        }
-    }
-
-    /** Uses an elapsed-realtime wake alarm in production; Handler remains only a test adapter. */
-    private fun postWakeCapableCallback(
-        packageName: String,
-        runnable: Runnable,
-        delayMillis: Long,
-        generation: Long,
-        permit: ExternalEffectPermit
-    ): Boolean {
-        val scheduler = wakeScheduler
-        val registration = synchronized(runtimeLock) {
-            val primary = scheduledRechecks[packageName]
-                ?.takeIf { it.runnable === runnable && it.generation == generation }
-            val recovery = scheduledRecoveryCallbacks[packageName]
-                ?.takeIf { it.runnable === runnable && it.generation == generation }
-            primary?.let {
-                it.registrationToken to it.originatingSourceOrderIdentity
-            } ?: recovery?.let {
-                it.registrationToken to it.originatingSourceOrderIdentity
-            }
-        } ?: return false
-        val token = registration.first
-        val originatingSourceOrderIdentity = registration.second
-        val pendingIntent = if (::service.isInitialized) {
-            try {
-                val requestCode = token.toInt()
-                val wakeIntent = Intent(SCHEDULER_WAKE_ACTION)
-                    .setPackage(service.packageName)
-                    .putExtra(EXTRA_SCHEDULER_PACKAGE, packageName)
-                    .putExtra(EXTRA_SCHEDULER_TOKEN, token)
-                PendingIntent.getBroadcast(
-                    service,
-                    requestCode,
-                    wakeIntent,
-                    PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-            } catch (e: Throwable) {
-                logNonFatal(e)
-                null
-            }
-        } else {
-            null
-        }
-        val previousAlarm = synchronized(runtimeLock) {
-            if (!isReadyForChecks() || recheckGeneration.get() != generation ||
-                !isCurrentSchedulerCallbackLocked(packageName, runnable)
-            ) {
-                return false
-            }
-            val old = scheduledAlarms.put(
-                packageName,
-                ScheduledAlarmRegistration(
-                    token = token,
-                    originatingSourceOrderIdentity = originatingSourceOrderIdentity,
-                    pendingIntent = pendingIntent,
-                    callback = runnable,
-                    generation = generation
-                )
-            )
-            old?.pendingIntent
-        }
-        previousAlarm?.let(::cancelAlarm)
-
-        if (scheduler != null) {
-            val dueAtWallClockMs = synchronized(runtimeLock) {
-                scheduledRechecks[packageName]?.dueAtWallClockMs
-            } ?: safeWallClockAdd(observationWallClockMs(), delayMillis)
-
-            return try {
-                if (!isCurrentSchedulerCallback(packageName, runnable, generation)) {
-                    removeAlarmRegistration(packageName, runnable, token)
-                    return false
-                }
-                alarmBeforeFrameworkCallObserver?.invoke(packageName)
-                if (!beginExternalEffectCall(permit) {
-                        isReadyForChecks() &&
-                            recheckGeneration.get() == generation &&
-                            isCurrentSchedulerCallbackLocked(packageName, runnable)
-                    }
-                ) return false
-
-                scheduler.schedule(
-                    key = packageName,
-                    dueAtWallClockMs = dueAtWallClockMs,
-                    token = token
-                )
-
-                alarmPublicationObserver?.invoke(packageName)
-                if (!isCurrentSchedulerCallback(packageName, runnable, generation)) {
-                    removeAlarmRegistration(packageName, runnable, token)
-                    return false
-                }
-                true
-            } catch (error: Throwable) {
-                removeAlarmRegistration(packageName, runnable, token)
-                throw error
-            } finally {
-                completeExternalEffectCall(permit)
-            }
-        }
-
-        val alarmManager = if (::service.isInitialized) {
-            service.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-        } else {
-            null
-        } ?: return false
-
-        if (pendingIntent == null) return false
-
-        val triggerAtElapsedMs = safeElapsedRealtimeAdd(
-            observationElapsedRealtimeMs(),
-            delayMillis
-        )
-        return try {
-            if (!isCurrentSchedulerCallback(packageName, runnable, generation)) {
-                removeAlarmRegistration(packageName, runnable, token)
-                return false
-            }
-            alarmBeforeFrameworkCallObserver?.invoke(packageName)
-            if (!beginExternalEffectCall(permit) {
-                    isReadyForChecks() &&
-                        recheckGeneration.get() == generation &&
-                        isCurrentSchedulerCallbackLocked(packageName, runnable)
-                }
-            ) return false
-            try {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    triggerAtElapsedMs,
-                    pendingIntent
-                )
-            } catch (_: SecurityException) {
-                alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    triggerAtElapsedMs,
-                    pendingIntent
-                )
-            }
-            alarmPublicationObserver?.invoke(packageName)
-            if (!isCurrentSchedulerCallback(packageName, runnable, generation)) {
-                removeAlarmRegistration(packageName, runnable, token)
-                return false
-            }
-            true
-        } catch (error: Throwable) {
-            removeAlarmRegistration(packageName, runnable, token)
-            throw error
-        } finally {
-            completeExternalEffectCall(permit)
-        }
-    }
-
-    private fun runObservationRecheck(
-        generation: Long,
-        observationAttempt: Int,
-        runnable: Runnable
-    ) {
-        try {
-            val scheduled = synchronized(runtimeLock) {
-                val scheduled = scheduledRechecks[OBSERVATION_RECHECK_KEY]
-                if (scheduled == null || scheduled.runnable !== runnable ||
-                    scheduled.generation != generation
-                ) {
-                    return@synchronized null
-                }
-                scheduledRechecks.remove(OBSERVATION_RECHECK_KEY)
-                scheduled
-            }
-            if (scheduled == null) return
-            if (!isReadyForChecks() || recheckGeneration.get() != generation) return
-            checkCurrentlyVisibleApplications(
-                observationKind = ObservationKind.SYNTHETIC_RECHECK,
-                observationAttempt = observationAttempt,
-                expectedObservationRegistrationToken = scheduled.registrationToken
-            )
-        } catch (_: CancellationException) {
-            return
-        } catch (error: Throwable) {
-            logNonFatal(error)
-            if (observationAttempt < MAX_VISIBILITY_RETRIES &&
-                isReadyForChecks() && recheckGeneration.get() == generation
-            ) {
-                postScheduledRecheck(
-                    packageName = OBSERVATION_RECHECK_KEY,
-                    generation = generation,
-                    delayMillis = VISIBILITY_RETRY_DELAY_MS * (observationAttempt + 1),
-                    visibilityAttempt = observationAttempt + 1
-                )
-            }
-        }
-    }
-
-    private fun runScheduledRecheck(
-        packageName: String,
-        generation: Long,
-        visibilityAttempt: Int,
-        runnable: Runnable
-    ) {
-        var scheduledPlan: ScheduledRecheck? = null
-        try {
-            val scheduled = synchronized(runtimeLock) {
-                val scheduled = scheduledRechecks[packageName]
-                if (scheduled == null || scheduled.runnable !== runnable ||
-                    scheduled.generation != generation
-                ) {
-                    return@synchronized null
-                }
-                scheduledRechecks.remove(packageName)
-                scheduled
-            }
-            if (scheduled == null) return
-            scheduledPlan = scheduled
-            val remainingDelay = scheduled.dueAtWallClockMs?.let { dueAt ->
-                AppRuleWallClockScheduler.delayUntil(
-                    dueAtWallClockMs = dueAt,
-                    nowWallClockMs = observationWallClockMs(),
-                    nowElapsedRealtimeMs = observationElapsedRealtimeMs()
-                )
-            } ?: 0L
-            if (remainingDelay > 0L) {
-                postScheduledRecheck(
-                    packageName = packageName,
-                    generation = generation,
-                    delayMillis = 0L,
-                    visibilityAttempt = visibilityAttempt,
-                    maxDelayMillis = scheduled.maxDelayMillis,
-                    dueAtWallClockMs = scheduled.dueAtWallClockMs,
-                    relativeDelayMillis = scheduled.relativeDelayMillis,
-                    originatingSourceOrderIdentity =
-                        scheduled.originatingSourceOrderIdentity
-                )
-                return
-            }
-            if (!isReadyForChecks() || recheckGeneration.get() != generation) return
-            if (foregroundEvidenceSuspended) {
-                // An essential overlay owns the foreground effect. Keep this package's boundary
-                // keyed and recover it after the overlay releases the suspended evidence.
-                postScheduledRecheck(
-                    packageName = packageName,
-                    generation = generation,
-                    delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
-                    visibilityAttempt = 0,
-                    maxDelayMillis = scheduled.maxDelayMillis,
-                    dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
-                        UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS
-                    ),
-                    originatingSourceOrderIdentity =
-                        scheduled.originatingSourceOrderIdentity
-                )
-                return
-            }
-            val observed = observeForegroundOutcome(packageName, generation) ?: return
-            when (val outcome = observed.outcome) {
-                is ForegroundEvidenceOutcome.Visible -> {
-                    if (outcome.decisionPermission ==
-                        neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
-                    ) {
-                        dispatchSyntheticCheck(packageName, observed.capturedBoundary)
-                    }
-                }
-                is ForegroundEvidenceOutcome.NotVisible -> Unit
-                is ForegroundEvidenceOutcome.Unknown,
-                null -> {
-                    if (shouldUseRecentForegroundEvidence(packageName, observed.facts)) {
-                        dispatchSyntheticCheck(
-                            packageName = packageName,
-                            capturedBoundary = observed.capturedBoundary
-                        )
-                        return
-                    }
-                    val failClosedCandidate = outcome is ForegroundEvidenceOutcome.Unknown &&
-                        outcome.candidatePackage == packageName &&
-                        outcome.decisionPermission ==
-                            neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED
-                    if (visibilityAttempt < MAX_VISIBILITY_RETRIES) {
-                        postScheduledRecheck(
-                            packageName = packageName,
-                            generation = generation,
-                            delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
-                            visibilityAttempt = visibilityAttempt + 1,
-                            maxDelayMillis = scheduled.maxDelayMillis,
-                            dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
-                                VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1)
-                            ),
-                            originatingSourceOrderIdentity =
-                                scheduled.originatingSourceOrderIdentity
-                        )
-                    } else if (failClosedCandidate) {
-                        // R5 A is a bounded, package-checked fallback. The module grants this
-                        // permission without renewing evidence validity; the evaluator remains the
-                        // final allow/deny authority.
-                        dispatchSyntheticCheck(
-                            packageName = packageName,
-                            capturedBoundary = observed.capturedBoundary
-                        )
-                    } else {
-                        // Null, partial, keyguard, and stale evidence keep this keyed boundary
-                        // alive until a reliable observation or the next wake/reconnect.
-                        postScheduledRecheck(
-                            packageName = packageName,
-                            generation = generation,
-                            delayMillis = UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS,
-                            visibilityAttempt = 0,
-                            maxDelayMillis = scheduled.maxDelayMillis,
-                            dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
-                                UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS
-                            ),
-                            originatingSourceOrderIdentity =
-                                scheduled.originatingSourceOrderIdentity
-                        )
-                    }
-                }
-            }
-        } catch (error: CancellationException) {
-            // This is a non-coroutine Handler callback. Cancellation from callback work is an
-            // ordinary feature exit here: do not log, enforce, or schedule recovery.
-            return
-        } catch (error: Throwable) {
-            logNonFatal(error)
-            val plan = scheduledPlan ?: return
-            try {
-                if (visibilityAttempt < MAX_VISIBILITY_RETRIES &&
-                    isReadyForChecks() && recheckGeneration.get() == generation
-                ) {
-                    postScheduledRecheck(
-                        packageName = packageName,
-                        generation = generation,
-                        delayMillis = VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1),
-                        visibilityAttempt = visibilityAttempt + 1,
-                        maxDelayMillis = plan.maxDelayMillis,
-                        dueAtWallClockMs = relativeRecoveryDueAtWallClockMs(
-                            VISIBILITY_RETRY_DELAY_MS * (visibilityAttempt + 1)
-                        ),
-                        originatingSourceOrderIdentity = plan.originatingSourceOrderIdentity
-                    )
-                } else if (isReadyForChecks() && recheckGeneration.get() == generation) {
-                    // After the bounded ordinary-failure retries, preserve R5's fail-closed
-                    // behavior for this keyed package. Cancellation exits above without logging,
-                    // enforcing, or scheduling recovery.
-                    dispatchSyntheticCheck(
-                        packageName = packageName,
-                        generation = generation
-                    )
-                }
-            } catch (recoveryCancellation: CancellationException) {
-                return
-            } catch (recoveryError: Throwable) {
-                // Even the bounded recovery path is part of the Handler callback's containment
-                // boundary. A provider or logging failure must never escape into Accessibility.
-                logNonFatal(recoveryError)
-            }
-        }
+        val token = schedulerTokenSequence.incrementAndGet()
+        wakeScheduler?.schedule(packageName, dueAtWallClockMs, token)
     }
 
     @Suppress("DEPRECATION")
@@ -3733,180 +2871,12 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             packageName != Constants.SYSTEM_UI_PACKAGE_NAME
     }
 
-    private fun scheduledRegistrationTokenLocked(packageName: String): Long? =
-        scheduledRechecks[packageName]?.registrationToken
-            ?: scheduledRecoveryCallbacks[packageName]?.registrationToken
-            ?: scheduledAlarms[packageName]?.token
-
-    private fun scheduledRegistrationOriginLocked(
-        packageName: String
-    ): SourceOrderIdentity? =
-        scheduledRechecks[packageName]?.originatingSourceOrderIdentity
-            ?: scheduledRecoveryCallbacks[packageName]?.originatingSourceOrderIdentity
-            ?: scheduledAlarms[packageName]?.originatingSourceOrderIdentity
-
-    private fun cancelScheduledRecheck(
-        packageName: String,
-        expectedRegistrationToken: Long? = null,
-        expectedOriginatingSourceOrderIdentity: SourceOrderIdentity? = null
-    ) {
-        val cleanup = synchronized(runtimeLock) {
-            val hasExpectedIdentity = expectedRegistrationToken != null ||
-                expectedOriginatingSourceOrderIdentity != null
-            val currentToken = scheduledRegistrationTokenLocked(packageName)
-            val currentOrigin = scheduledRegistrationOriginLocked(packageName)
-            val tokenMatches = expectedRegistrationToken?.let { currentToken == it } ?: true
-            val originMatches = expectedOriginatingSourceOrderIdentity
-                ?.let { currentOrigin == it }
-                ?: true
-            if (!hasExpectedIdentity || !tokenMatches || !originMatches) {
-                ScheduledRegistrationCleanup()
-            } else {
-                val scheduled = scheduledRechecks.remove(packageName)
-                val registrationToken = scheduled?.registrationToken ?: currentToken
-                val partialCleanup = registrationToken?.let {
-                    removeScheduledRegistrationLocked(packageName, it)
-                } ?: ScheduledRegistrationCleanup()
-                partialCleanup.copy(
-                    token = registrationToken,
-                    recheckRunnable = scheduled?.runnable
-                )
-            }
-        }
-        if (cleanup.token != null) {
-            wakeScheduler?.cancel(packageName)
-        }
-        cleanup.recheckRunnable?.let(::removeHandlerCallback)
-        cleanup.pendingIntent?.let(::cancelAlarm)
-        cleanup.recoveryRunnable?.let(::removeHandlerCallback)
+    private fun cancelScheduledRecheck(packageName: String) {
+        wakeScheduler?.cancel(packageName)
     }
 
     private fun cancelScheduledRechecks() {
-        val callbacks = synchronized(runtimeLock) {
-            wakeScheduler?.cancelAll()
-            val scheduled = scheduledRechecks.values.map(ScheduledRecheck::runnable)
-            val recovery = scheduledRecoveryCallbacks.values.map(
-                ScheduledRecoveryRegistration::runnable
-            )
-            val alarms = scheduledAlarms.values.mapNotNull(ScheduledAlarmRegistration::pendingIntent)
-            scheduledRechecks.clear()
-            scheduledRecoveryCallbacks.clear()
-            scheduledAlarms.clear()
-            Triple(scheduled, recovery, alarms)
-        }
-        callbacks.first.forEach(::removeHandlerCallback)
-        callbacks.second.forEach(::removeHandlerCallback)
-        callbacks.third.forEach(::cancelAlarm)
-    }
-
-    private fun removeScheduledCallback(
-        packageName: String,
-        runnable: Runnable?,
-        registrationToken: Long? = null
-    ) {
-        val cleanup = synchronized(runtimeLock) {
-            val token = registrationToken
-                ?: scheduledRechecks[packageName]
-                    ?.takeIf { runnable == null || it.runnable === runnable }
-                    ?.registrationToken
-                ?: scheduledRecoveryCallbacks[packageName]
-                    ?.takeIf { runnable == null || it.runnable === runnable }
-                    ?.registrationToken
-                ?: scheduledAlarms[packageName]
-                    ?.takeIf { runnable == null || it.callback === runnable }
-                    ?.token
-            token?.let { removeScheduledRegistrationLocked(packageName, it) }
-                ?: ScheduledRegistrationCleanup()
-        }
-        if (cleanup.token != null) {
-            wakeScheduler?.cancel(packageName)
-        }
-        cleanup.pendingIntent?.let(::cancelAlarm)
-        cleanup.recoveryRunnable?.let(::removeHandlerCallback)
-        runnable?.let(::removeHandlerCallback)
-    }
-
-    private fun removeScheduledRegistrationLocked(
-        packageName: String,
-        registrationToken: Long
-    ): ScheduledRegistrationCleanup {
-        val pendingIntent = scheduledAlarms[packageName]
-            ?.takeIf { it.token == registrationToken }
-            ?.let { scheduledAlarms.remove(packageName)?.pendingIntent }
-        val recoveryRunnable = scheduledRecoveryCallbacks[packageName]
-            ?.takeIf { it.registrationToken == registrationToken }
-            ?.let { scheduledRecoveryCallbacks.remove(packageName)?.runnable }
-        return ScheduledRegistrationCleanup(
-            token = registrationToken,
-            pendingIntent = pendingIntent,
-            recoveryRunnable = recoveryRunnable
-        )
-    }
-
-    private fun isCurrentScheduledCallback(
-        packageName: String,
-        runnable: Runnable,
-        generation: Long
-    ): Boolean = synchronized(runtimeLock) {
-        isReadyForChecks() &&
-            recheckGeneration.get() == generation &&
-            scheduledRechecks[packageName]?.let {
-                it.runnable === runnable && it.generation == generation
-            } == true
-    }
-
-    private fun isCurrentSchedulerCallbackLocked(
-        packageName: String,
-        runnable: Runnable
-    ): Boolean = scheduledRechecks[packageName]?.runnable === runnable ||
-        scheduledRecoveryCallbacks[packageName]?.runnable === runnable
-
-    private fun isCurrentSchedulerCallback(
-        packageName: String,
-        runnable: Runnable,
-        generation: Long
-    ): Boolean = synchronized(runtimeLock) {
-        isReadyForChecks() &&
-            recheckGeneration.get() == generation &&
-            isCurrentSchedulerCallbackLocked(packageName, runnable)
-    }
-
-    private fun removeAlarmRegistration(
-        packageName: String,
-        runnable: Runnable,
-        token: Long
-    ) {
-        val pendingIntent = synchronized(runtimeLock) {
-            removeAlarmRegistrationLocked(packageName, runnable, token)
-        }
-        pendingIntent?.let(::cancelAlarm)
-    }
-
-    private fun removeAlarmRegistrationLocked(
-        packageName: String,
-        runnable: Runnable?,
-        token: Long
-    ): PendingIntent? {
-        val registration = scheduledAlarms[packageName]
-        if ((runnable != null && registration?.callback !== runnable) ||
-            registration?.token != token
-        ) {
-            return null
-        }
-        scheduledAlarms.remove(packageName)
-        return registration.pendingIntent
-    }
-
-    private fun cancelAlarm(pendingIntent: PendingIntent?) {
-        if (pendingIntent == null) return
-        try {
-            if (::service.isInitialized) {
-                (service.getSystemService(Context.ALARM_SERVICE) as? AlarmManager)
-                    ?.cancel(pendingIntent)
-            }
-        } catch (error: Throwable) {
-            logNonFatal(error)
-        }
+        wakeScheduler?.cancelAll()
     }
 
     private fun captureLifecycleBoundary(
