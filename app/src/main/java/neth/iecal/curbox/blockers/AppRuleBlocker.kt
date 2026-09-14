@@ -150,7 +150,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private val runtimeLock = Any()
     /** Serializes readiness, runtime capture, replacement, and installation as one handoff. */
     private val decisionWorkerLock = Any()
-    private var handlerInstance: Handler? = null
+    @Volatile private var handlerInstance: Handler? = null
     private fun getHandler(): Handler {
         var h = handlerInstance
         if (h == null) {
@@ -413,6 +413,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     internal var wakeScheduler: AppRuleWakeScheduler? = wakeScheduler
         set(value) {
             field = value
+            isDefaultWakeScheduler = false
             value?.onWake = { key, token ->
                 onWakeFromScheduler(key, token)
             }
