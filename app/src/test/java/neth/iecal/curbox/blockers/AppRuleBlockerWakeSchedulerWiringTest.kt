@@ -1,6 +1,5 @@
 package neth.iecal.curbox.blockers
 
-import android.app.PendingIntent
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleSnapshot
@@ -17,15 +16,6 @@ class AppRuleBlockerWakeSchedulerWiringTest {
 
     private companion object {
         const val TEST_PACKAGE = "com.example.target"
-    }
-
-    private fun createDummyPendingIntent(): PendingIntent {
-        val unsafeClass = Class.forName("sun.misc.Unsafe")
-        val field = unsafeClass.getDeclaredField("theUnsafe")
-        field.isAccessible = true
-        val unsafe = field.get(null)
-        val allocateMethod = unsafeClass.getMethod("allocateInstance", Class::class.java)
-        return allocateMethod.invoke(unsafe, PendingIntent::class.java) as PendingIntent
     }
 
     private fun getField(target: Any, name: String): Any? =
