@@ -15,7 +15,11 @@
     - Tap-Node: Locate and tap UI element
     - Assert-WindowFocus: Assert current focused activity on device
     - New-GuardianPinAuthConfig: Generate PBKDF2 salt/verifier GuardianAuthConfig object
+    - New-TestAppGroup: Generate AppRuleAppGroup object with default membership history
     - New-ContributorAppRuleConfig: Generate AppRuleSnapshot with contributor condition rule
+    - New-TimeRangeAppRuleConfig: Generate AppRuleSnapshot with timeRanges schedule rule
+    - Get-DeviceTimeInfo: Query and calculate device local time in minutes and seconds
+    - Wait-DeviceMinute: Wait until device reaches target minute
     - Set-DeviceUsageGeneration: Reset useDay session generation to start fresh tracking epoch
 #>
 
@@ -268,6 +272,24 @@ function New-GuardianPinAuthConfig(
     }
 }
 
+function New-TestAppGroup(
+    [string]$GroupId,
+    [string]$GroupName,
+    [string[]]$Packages
+) {
+    return [PSCustomObject]@{
+        id = $GroupId
+        name = $GroupName
+        selectedPackages = @($Packages)
+        membershipHistory = @(
+            [PSCustomObject]@{
+                effectiveFromMs = [long]::MinValue
+                selectedPackages = @($Packages)
+            }
+        )
+    }
+}
+
 function New-ContributorAppRuleConfig(
     [string]$TargetPackage,
     [string]$ContributorPackage = "com.initialcoms.ridi",
@@ -277,29 +299,8 @@ function New-ContributorAppRuleConfig(
     [string]$ContributorGroupId = "test-contrib-group-01",
     [string]$RuleId = "test-rule-01"
 ) {
-    $groupTarget = [PSCustomObject]@{
-        id = $TargetGroupId
-        name = "테스트 타깃 앱"
-        selectedPackages = @($TargetPackage)
-        membershipHistory = @(
-            [PSCustomObject]@{
-                effectiveFromMs = [long]::MinValue
-                selectedPackages = @($TargetPackage)
-            }
-        )
-    }
-
-    $groupContrib = [PSCustomObject]@{
-        id = $ContributorGroupId
-        name = "학습"
-        selectedPackages = @($ContributorPackage)
-        membershipHistory = @(
-            [PSCustomObject]@{
-                effectiveFromMs = [long]::MinValue
-                selectedPackages = @($ContributorPackage)
-            }
-        )
-    }
+    $groupTarget = New-TestAppGroup -GroupId $TargetGroupId -GroupName "테스트 타깃 앱" -Packages @($TargetPackage)
+    $groupContrib = New-TestAppGroup -GroupId $ContributorGroupId -GroupName "학습" -Packages @($ContributorPackage)
 
     $rule = [PSCustomObject]@{
         id = $RuleId
@@ -335,4 +336,87 @@ function New-ContributorAppRuleConfig(
         appRules = @($rule)
     }
 }
+
+function Get-DeviceTimeInfo([string]$DateString = "") {
+    if (-not $DateString) {
+        $DateString = (adb shell "date +'%H %M %S'" | Out-String).Trim()
+    }
+    if ($DateString -match '(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})') {
+        $hour = [int]$matches[1]
+        $minute = [int]$matches[2]
+        $second = [int]$matches[3]
+        $currentMinute = ($hour * 60) + $minute
+        $nextMinute = ($currentMinute + 1) % 1440
+        $secondsUntilNextMinute = 60 - $second
+        $timeString = "{0:D2}:{1:D2}:{2:D2}" -f $hour, $minute, $second
+        return [PSCustomObject]@{
+            Hour = $hour
+            Minute = $minute
+            Second = $second
+            CurrentMinute = $currentMinute
+            NextMinute = $nextMinute
+            SecondsUntilNextMinute = $secondsUntilNextMinute
+            TimeString = $timeString
+        }
+    } else {
+        Write-Error "Failed to parse time from device date output: '$DateString'"
+        return $null
+    }
+}
+
+function Wait-DeviceMinute([int]$TargetMinute) {
+    $currentTime = Get-DeviceTimeInfo
+    if ($currentTime.CurrentMinute -ne $TargetMinute) {
+        $remaining = $currentTime.SecondsUntilNextMinute
+        Write-Host "Device is at minute $($currentTime.TimeString). Waiting ${remaining}s for minute ${TargetMinute}:00..." -ForegroundColor Cyan
+        Start-Sleep -Seconds $remaining
+    } else {
+        Write-Host "Current minute ($($currentTime.TimeString)) already reached target start minute ($TargetMinute)." -ForegroundColor Yellow
+    }
+}
+
+function New-TimeRangeAppRuleConfig(
+    [string]$TargetPackage,
+    [int]$StartMinute,
+    [int]$EndMinute,
+    [long]$AllowedMinutes = 0,
+    [string]$TargetGroupId = "test-target-group-01",
+    [string]$RuleId = "test-rule-timerange-01"
+) {
+    $groupTarget = New-TestAppGroup -GroupId $TargetGroupId -GroupName "테스트 타깃 앱" -Packages @($TargetPackage)
+
+    $rule = [PSCustomObject]@{
+        id = $RuleId
+        name = "시간대 차단 테스트"
+        isActive = $true
+        weekdays = @(0, 1, 2, 3, 4, 5, 6)
+        startMinute = $StartMinute
+        endMinute = $EndMinute
+        appGroupId = $TargetGroupId
+        allowedMinutes = $AllowedMinutes
+        usageConditionEnabled = $false
+        usageConditionMinutes = 0
+        contributorGroupConditionMinutes = [PSCustomObject]@{}
+        contributorGroupIds = @()
+        earnedAllowanceEnabled = $false
+        timeRanges = @(
+            [PSCustomObject]@{
+                startMinute = $StartMinute
+                endMinute = $EndMinute
+            }
+        )
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($TargetGroupId)
+            excludedGroupIds = @()
+        }
+    }
+
+    return [PSCustomObject]@{
+        appGroups = @($groupTarget)
+        appRules = @($rule)
+    }
+}
+
+
 
