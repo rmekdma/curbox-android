@@ -17,6 +17,18 @@
     - New-GuardianPinAuthConfig: Generate PBKDF2 salt/verifier GuardianAuthConfig object
 #>
 
+function Write-Step([string]$Msg) {
+    Write-Host "`n====> $Msg" -ForegroundColor Cyan
+}
+
+function Write-Success([string]$Msg) {
+    Write-Host "[PASS] $Msg" -ForegroundColor Green
+}
+
+function Write-Fail([string]$Msg) {
+    Write-Host "[FAIL] $Msg" -ForegroundColor Red
+}
+
 function Assert-AdbDevice {
     $device = (adb devices | Select-String -Pattern "device$")
     if (-not $device) {
