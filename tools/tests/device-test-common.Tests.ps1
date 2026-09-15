@@ -51,4 +51,25 @@ Describe "Device Test Common Helpers" {
             $bounds.Found | Should Be $false
         }
     }
+
+    Context "New-ContributorAppRuleConfig" {
+        It "builds a valid AppRuleSnapshot structure with target and contributor groups" {
+            $snapshot = New-ContributorAppRuleConfig -TargetPackage "com.test.target" -ContributorPackage "com.test.contrib" -RequiredMinutes 1
+            $snapshot | Should Not BeNullOrEmpty
+            $snapshot.appGroups.Count | Should Be 2
+            $snapshot.appRules.Count | Should Be 1
+
+            $targetGroup = $snapshot.appGroups | Where-Object { $_.selectedPackages -contains "com.test.target" }
+            $contribGroup = $snapshot.appGroups | Where-Object { $_.selectedPackages -contains "com.test.contrib" }
+            $targetGroup | Should Not BeNullOrEmpty
+            $contribGroup | Should Not BeNullOrEmpty
+
+            $rule = $snapshot.appRules[0]
+            $rule.isActive | Should Be $true
+            $rule.usageConditionEnabled | Should Be $true
+            ($rule.contributorGroupIds -contains $contribGroup.id) | Should Be $true
+            $rule.contributorGroupConditionMinutes.($contribGroup.id) | Should Be 1
+            $rule.allowedMinutes | Should Be 1440
+        }
+    }
 }

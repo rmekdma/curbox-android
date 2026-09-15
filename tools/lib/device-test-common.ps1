@@ -15,6 +15,8 @@
     - Tap-Node: Locate and tap UI element
     - Assert-WindowFocus: Assert current focused activity on device
     - New-GuardianPinAuthConfig: Generate PBKDF2 salt/verifier GuardianAuthConfig object
+    - New-ContributorAppRuleConfig: Generate AppRuleSnapshot with contributor condition rule
+    - Set-DeviceUsageGeneration: Reset useDay session generation to start fresh tracking epoch
 #>
 
 function Write-Step([string]$Msg) {
@@ -39,6 +41,25 @@ function Assert-AdbDevice {
 function Set-DeviceAwake([bool]$Awake = $true) {
     $val = if ($Awake) { "true" } else { "false" }
     adb shell "svc power stayon $val" | Out-Null
+    if ($Awake) {
+        $screenState = (adb shell "dumpsys display | grep -i mScreenState" | Out-String)
+        if ($screenState -match "OFF") {
+            adb shell "input keyevent 26" | Out-Null # POWER
+            Start-Sleep -Milliseconds 500
+        }
+        adb shell "input keyevent 224" | Out-Null # WAKEUP
+        adb shell "wm dismiss-keyguard" | Out-Null
+        adb shell "input keyevent 82" | Out-Null # UNLOCK / MENU
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+function Push-TempStringToDevice([string]$Content, [string]$RemotePath) {
+    $tempLocal = [System.IO.Path]::GetTempFileName()
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($tempLocal, $Content, $utf8NoBom)
+    adb push $tempLocal $RemotePath | Out-Null
+    Remove-Item $tempLocal -Force -ErrorAction SilentlyContinue
 }
 
 function Backup-DeviceSettings([string]$DestinationPath, [string]$PackageName = "neth.iecal.curbox.debug") {
@@ -65,17 +86,49 @@ function Restore-DeviceSettings([string]$BackupPath, [string]$PackageName = "net
     return $true
 }
 
-function Inject-TestAppRules($AppRuleSnapshot, [string]$PackageName = "neth.iecal.curbox.debug") {
+function Set-DeviceUsageGeneration([long]$GenerationStartedAtMs = 0, [string]$PackageName = "neth.iecal.curbox.debug") {
+    if ($GenerationStartedAtMs -le 0) {
+        $GenerationStartedAtMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    }
+    $rawSettings = (adb shell "run-as $PackageName cat files/datastore/settings.json" | Out-String).Trim().Trim([char]65279)
+    if ($rawSettings -and $rawSettings -match "\{") {
+        $settingsObj = $rawSettings | ConvertFrom-Json
+        $settingsObj.useDayGenerationStartedAtMs = $GenerationStartedAtMs
+
+        $jsonStr = $settingsObj | ConvertTo-Json -Depth 20 -Compress
+        Push-TempStringToDevice -Content $jsonStr -RemotePath "/data/local/tmp/settings_gen.json"
+        adb shell "run-as $PackageName cp /data/local/tmp/settings_gen.json files/datastore/settings.json" | Out-Null
+        adb shell "run-as $PackageName chmod 660 files/datastore/settings.json" | Out-Null
+        adb shell "rm -f /data/local/tmp/settings_gen.json" | Out-Null
+
+        adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
+        adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
+        Start-Sleep -Seconds 1
+    }
+    return $GenerationStartedAtMs
+}
+
+function Inject-TestAppRules($AppRuleSnapshot, [string]$PackageName = "neth.iecal.curbox.debug", [long]$UsageGenerationStartedAtMs = 0) {
     adb shell "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName" | Out-Null
     Start-Sleep -Milliseconds 500
+
+    if ($UsageGenerationStartedAtMs -gt 0) {
+        Set-DeviceUsageGeneration -GenerationStartedAtMs $UsageGenerationStartedAtMs -PackageName $PackageName | Out-Null
+    }
 
     $rulesSnapshotJson = if ($AppRuleSnapshot -is [string]) {
         $AppRuleSnapshot
     } else {
         ($AppRuleSnapshot | ConvertTo-Json -Depth 20 -Compress)
     }
-    $escapedJson = $rulesSnapshotJson.Replace('"', '\"')
-    adb shell "am broadcast -a neth.iecal.curbox.action.APPLY_TEST_APP_RULES -p $PackageName --es extra_app_rules_json '$escapedJson'" | Out-Null
+
+    Push-TempStringToDevice -Content $rulesSnapshotJson -RemotePath "/data/local/tmp/app_rules_inject.json"
+
+    $shScript = "CONTENT=`$(cat /data/local/tmp/app_rules_inject.json)`nam broadcast -a neth.iecal.curbox.action.APPLY_TEST_APP_RULES -p $PackageName --es extra_app_rules_json `"`$CONTENT`"`n"
+    Push-TempStringToDevice -Content $shScript -RemotePath "/data/local/tmp/inject.sh"
+
+    adb shell "chmod 755 /data/local/tmp/inject.sh; /data/local/tmp/inject.sh" | Out-Null
+    adb shell "rm -f /data/local/tmp/app_rules_inject.json /data/local/tmp/inject.sh" | Out-Null
     adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
     adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
     Start-Sleep -Seconds 1
@@ -161,7 +214,10 @@ function Tap-Node([string]$Xml, [string]$Pattern, [string]$Label = "", [switch]$
 }
 
 function Assert-WindowFocus([string]$ExpectedActivity, [switch]$PassThru) {
-    $windowFocus = adb shell "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
+    $windowFocus = adb shell "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
+    if (-not $windowFocus -or $windowFocus.Trim() -eq "") {
+        $windowFocus = adb shell "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
+    }
     $isMatch = $windowFocus -match $ExpectedActivity
     if (-not $isMatch -and -not $PassThru) {
         Write-Error "Window focus mismatch! Expected '$ExpectedActivity' but observed: $($windowFocus.Trim())"
@@ -211,3 +267,72 @@ function New-GuardianPinAuthConfig(
         kdfIterations = $Iterations
     }
 }
+
+function New-ContributorAppRuleConfig(
+    [string]$TargetPackage,
+    [string]$ContributorPackage = "com.initialcoms.ridi",
+    [long]$RequiredMinutes = 1,
+    [long]$AllowedMinutes = 1440,
+    [string]$TargetGroupId = "test-target-group-01",
+    [string]$ContributorGroupId = "test-contrib-group-01",
+    [string]$RuleId = "test-rule-01"
+) {
+    $groupTarget = [PSCustomObject]@{
+        id = $TargetGroupId
+        name = "테스트 타깃 앱"
+        selectedPackages = @($TargetPackage)
+        membershipHistory = @(
+            [PSCustomObject]@{
+                effectiveFromMs = [long]::MinValue
+                selectedPackages = @($TargetPackage)
+            }
+        )
+    }
+
+    $groupContrib = [PSCustomObject]@{
+        id = $ContributorGroupId
+        name = "학습"
+        selectedPackages = @($ContributorPackage)
+        membershipHistory = @(
+            [PSCustomObject]@{
+                effectiveFromMs = [long]::MinValue
+                selectedPackages = @($ContributorPackage)
+            }
+        )
+    }
+
+    $rule = [PSCustomObject]@{
+        id = $RuleId
+        name = "게임 제한"
+        isActive = $true
+        weekdays = @(0, 1, 2, 3, 4, 5, 6)
+        startMinute = 0
+        endMinute = 0
+        appGroupId = $TargetGroupId
+        allowedMinutes = $AllowedMinutes
+        usageConditionEnabled = $true
+        usageConditionMinutes = $RequiredMinutes
+        contributorGroupConditionMinutes = [PSCustomObject]@{
+            $ContributorGroupId = $RequiredMinutes
+        }
+        contributorGroupIds = @($ContributorGroupId)
+        earnedAllowanceEnabled = $false
+        timeRanges = @(
+            [PSCustomObject]@{
+                startMinute = 0
+                endMinute = 0
+            }
+        )
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($TargetGroupId)
+            excludedGroupIds = @()
+        }
+    }
+
+    return [PSCustomObject]@{
+        appGroups = @($groupTarget, $groupContrib)
+        appRules = @($rule)
+    }
+}
+
