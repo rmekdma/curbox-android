@@ -1456,64 +1456,99 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     }
                 }
                 if (publicationCandidate != null) {
-                    val (candidate, publication) = publicationCandidate
-                    try {
-                        if (!startExternalEffect(publication) {
-                                isReadyForChecks(connectionGeneration) &&
-                                    recheckGeneration.get() == generation &&
-                                    pendingNotificationPublication == candidate
-                            }
-                        ) return@launch
-                        notificationPostObserver?.let { postObserver ->
-                            runInterruptible { postObserver(model) }
-                        }
-                        // The post observer is deliberately before the final publication check;
-                        // destroy can invalidate the reserved publication while it is blocked.
-                        synchronized(runtimeLock) {
-                            if (!isReadyForChecks(connectionGeneration) ||
-                                recheckGeneration.get() != generation
-                            ) return@launch
-                        }
-                        notificationUpdateObserver?.let { updateObserver ->
-                            runInterruptible { updateObserver(model) }
-                        }
-                        synchronized(runtimeLock) {
-                            if (!isReadyForChecks(connectionGeneration) ||
-                                recheckGeneration.get() != generation
-                            ) return@launch
-                        }
-                        notificationBeforeFrameworkCallObserver?.invoke(model)
-                        if (!beginExternalEffectCall(publication) {
-                                isReadyForChecks(connectionGeneration) &&
-                                    recheckGeneration.get() == generation &&
-                                    pendingNotificationPublication == candidate
-                            }
-                        ) return@launch
-                        service.updateForegroundNotification(model)
-                        synchronized(runtimeLock) {
-                            if (isReadyForChecks(connectionGeneration) &&
-                                recheckGeneration.get() == generation &&
-                                pendingNotificationPublication == candidate
-                            ) {
-                                lastPostedNotificationModel = model
-                                pendingNotificationPublication = null
-                            }
-                        }
-                        notificationPublicationObserver?.invoke(model)
-                    } finally {
-                        completeExternalEffectCall(publication)
-                        finishExternalEffect(publication)
-                        synchronized(runtimeLock) {
-                            if (pendingNotificationPublication == candidate) {
-                                pendingNotificationPublication = null
-                            }
-                        }
-                    }
+                    publishLiveNotificationIfCurrent(
+                        candidate = publicationCandidate.first,
+                        publication = publicationCandidate.second,
+                        model = model,
+                        connectionGeneration = connectionGeneration,
+                        generation = generation
+                    )
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 logNonFatal(error)
+            }
+        }
+    }
+
+    private suspend fun publishLiveNotificationIfCurrent(
+        candidate: PendingNotificationPublication,
+        publication: ExternalEffectPermit,
+        model: LiveRuleNotificationModel,
+        connectionGeneration: Long,
+        generation: Long
+    ) {
+        try {
+            if (!startExternalEffect(publication) {
+                    isNotificationPublicationCurrentLocked(candidate, connectionGeneration, generation)
+                }
+            ) return
+            notificationPostObserver?.let { postObserver ->
+                runInterruptible { postObserver(model) }
+            }
+            if (!isNotificationPublicationCurrent(candidate, connectionGeneration, generation)) {
+                return
+            }
+            notificationUpdateObserver?.let { updateObserver ->
+                runInterruptible { updateObserver(model) }
+            }
+            if (!isNotificationPublicationCurrent(candidate, connectionGeneration, generation)) {
+                return
+            }
+            notificationBeforeFrameworkCallObserver?.invoke(model)
+            if (!beginExternalEffectCall(publication) {
+                    isNotificationPublicationCurrentLocked(candidate, connectionGeneration, generation)
+                }
+            ) return
+            service.updateForegroundNotification(model)
+            finalizeLiveNotificationSuccess(candidate, model, connectionGeneration, generation)
+            notificationPublicationObserver?.invoke(model)
+        } finally {
+            completeExternalEffectCall(publication)
+            finishExternalEffect(publication)
+            cleanupPendingNotificationCandidate(candidate)
+        }
+    }
+
+    private fun isNotificationPublicationCurrentLocked(
+        candidate: PendingNotificationPublication,
+        connectionGeneration: Long,
+        generation: Long
+    ): Boolean {
+        return isReadyForChecks(connectionGeneration) &&
+            recheckGeneration.get() == generation &&
+            pendingNotificationPublication == candidate
+    }
+
+    private fun isNotificationPublicationCurrent(
+        candidate: PendingNotificationPublication,
+        connectionGeneration: Long,
+        generation: Long
+    ): Boolean {
+        return synchronized(runtimeLock) {
+            isNotificationPublicationCurrentLocked(candidate, connectionGeneration, generation)
+        }
+    }
+
+    private fun finalizeLiveNotificationSuccess(
+        candidate: PendingNotificationPublication,
+        model: LiveRuleNotificationModel,
+        connectionGeneration: Long,
+        generation: Long
+    ) {
+        synchronized(runtimeLock) {
+            if (isNotificationPublicationCurrentLocked(candidate, connectionGeneration, generation)) {
+                lastPostedNotificationModel = model
+                pendingNotificationPublication = null
+            }
+        }
+    }
+
+    private fun cleanupPendingNotificationCandidate(candidate: PendingNotificationPublication) {
+        synchronized(runtimeLock) {
+            if (pendingNotificationPublication == candidate) {
+                pendingNotificationPublication = null
             }
         }
     }
