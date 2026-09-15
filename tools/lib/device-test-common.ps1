@@ -49,9 +49,7 @@ function Restore-DeviceSettings([string]$BackupPath, [string]$PackageName = "net
     adb shell "run-as $PackageName cp /data/local/tmp/settings_backup.json files/datastore/settings.json" | Out-Null
     adb shell "run-as $PackageName chmod 660 files/datastore/settings.json" | Out-Null
     adb shell "rm -f /data/local/tmp/settings_backup.json" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
+    Clear-TestAppRules -PackageName $PackageName
     return $true
 }
 
@@ -97,17 +95,36 @@ function Dump-UI([int]$MaxRetries = 3) {
 
 function Wait-For-UI([string]$Pattern, [int]$TimeoutSeconds = 8) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastUi = ""
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        $ui = Dump-UI
-        if ($ui -match $Pattern) {
-            return $ui
+        $lastUi = Dump-UI
+        if ($lastUi -match $Pattern) {
+            return $lastUi
         }
         Start-Sleep -Milliseconds 500
     }
-    return Dump-UI
+    return $lastUi
 }
 
 function Get-NodeBounds([string]$Xml, [string]$Pattern) {
+    # Attempt structured XML XPath query if pattern matches attribute
+    if ($Pattern -match '^([a-zA-Z0-9_\-]+)="([^"]+)"$') {
+        $attrName = $matches[1]
+        $attrValue = $matches[2]
+        try {
+            [xml]$doc = $Xml
+            $node = $doc.SelectSingleNode("//node[@$attrName='$attrValue']")
+            if ($node -and $node.bounds -match '\[(\d+),(\d+)\]\[(\d+),(\d+)\]') {
+                $x1 = [int]$matches[1]; $y1 = [int]$matches[2]; $x2 = [int]$matches[3]; $y2 = [int]$matches[4]
+                $cx = [int](($x1 + $x2) / 2); $cy = [int](($y1 + $y2) / 2)
+                return @{ Found = $true; X = $cx; Y = $cy; X1 = $x1; Y1 = $y1; X2 = $x2; Y2 = $y2 }
+            }
+        } catch {
+            # Fall back to regex on XML parse error
+        }
+    }
+
+    # Regex fallback
     if ($Xml -match "$Pattern[^>]*bounds=`"\[(\d+),(\d+)\]\[(\d+),(\d+)\]`"") {
         $x1 = [int]$matches[1]; $y1 = [int]$matches[2]; $x2 = [int]$matches[3]; $y2 = [int]$matches[4]
         $cx = [int](($x1 + $x2) / 2); $cy = [int](($y1 + $y2) / 2)
@@ -131,13 +148,19 @@ function Tap-Node([string]$Xml, [string]$Pattern, [string]$Label = "", [switch]$
     return $false
 }
 
-function Assert-WindowFocus([string]$ExpectedActivity) {
+function Assert-WindowFocus([string]$ExpectedActivity, [switch]$PassThru) {
     $windowFocus = adb shell "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
     $isMatch = $windowFocus -match $ExpectedActivity
-    return @{
-        Success = $isMatch
-        RawFocus = $windowFocus.Trim()
+    if (-not $isMatch -and -not $PassThru) {
+        Write-Error "Window focus mismatch! Expected '$ExpectedActivity' but observed: $($windowFocus.Trim())"
     }
+    if ($PassThru) {
+        return @{
+            Success = $isMatch
+            RawFocus = $windowFocus.Trim()
+        }
+    }
+    return $isMatch
 }
 
 function New-GuardianPinAuthConfig(

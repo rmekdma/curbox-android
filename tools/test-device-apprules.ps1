@@ -144,7 +144,7 @@ try {
     Start-Sleep -Seconds 3
 
     Write-Step "7. Checking if GuardianApprovalActivity is displayed..."
-    $focusResult = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity"
+    $focusResult = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
     Write-Host "Focused Window/App: $($focusResult.RawFocus)"
 
     $isGuardianTop = $focusResult.Success
@@ -182,6 +182,7 @@ try {
 
 } finally {
     Write-Step "8. Cleanup & Restoring original settings.json..."
+    Set-DeviceAwake $false
     if (Test-Path $backupFile) {
         Restore-DeviceSettings -BackupPath $backupFile | Out-Null
         adb shell "input keyevent 3" # HOME
