@@ -29,6 +29,7 @@
     - Get-DeviceProcessPid: Query running process PID from ps/ps -ef
     - Test-AccessibilityServiceBound: Verify whether accessibility service is bound
     - Stop-ServiceProcess: Terminate or induce crash on target process PID
+    - Enable-AccessibilityService: Ensure accessibility service is enabled in secure settings
 #>
 
 function Write-Step([string]$Msg) {
@@ -600,6 +601,17 @@ function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = ":app_block
     $currentPid = Get-DeviceProcessPid -ProcessName $ProcessName
     if ($currentPid -eq $TargetPid) {
         adb shell "am crash $TargetPid" | Out-Null
+    }
+    return $true
+}
+
+function Enable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.debug", [string]$ServiceName = "neth.iecal.curbox.services.AppBlockerService") {
+    $fullService = "$PackageName/$ServiceName"
+    $enabledServices = (adb shell "settings get secure enabled_accessibility_services" | Out-String).Trim()
+    if ($enabledServices -notmatch [regex]::Escape($fullService)) {
+        adb shell "settings put secure enabled_accessibility_services $fullService" | Out-Null
+        adb shell "settings put secure accessibility_enabled 1" | Out-Null
+        Start-Sleep -Seconds 2
     }
     return $true
 }

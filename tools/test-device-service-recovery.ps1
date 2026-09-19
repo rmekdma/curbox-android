@@ -7,12 +7,12 @@
     1. Pre-flight check: Assert ADB device connectivity and verify AppBlockerService is enabled.
     2. Backs up settings.json from device and acquires device wake lock (Set-DeviceAwake $true).
     3. Injects test AppRule configuration blocking the target package.
-    4. Launches target package and verifies initial blocking (GuardianApprovalActivity or WarningActivity).
+    4. Launches target package, verifies initial blocking, and dismisses overlay to Home while retaining target app in background.
     5. Queries and records the current PID of `:app_blocker_service` using Get-DeviceProcessPid.
     6. Forcibly terminates the service process using Stop-ServiceProcess (kill -9 / am crash).
     7. Polls `dumpsys accessibility` and process state until a new PID is assigned, service is re-bound, and warmup completes.
-    8. Brings target app to the foreground and verifies it is immediately intercepted and blocked with no leaks.
-    9. Restores original settings.json, clears rule overrides, stops target package, and reverts wake lock.
+    8. Brings target app back to the foreground (without force-stop) and verifies it is immediately intercepted and blocked with no leaks.
+    9. Restores original settings.json, unconditionally clears rule overrides, stops target package, and reverts wake lock.
 #>
 
 param(
@@ -38,17 +38,32 @@ if (-not (Test-Path $tmpDir)) {
 $backupFile = Join-Path $tmpDir "settings_backup.json"
 $passedAll = $true
 
+function Assert-TargetBlocked([int]$TimeoutSeconds = 10) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastFocus = ""
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $focusCheck = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity|WarningActivity" -PassThru
+        $lastFocus = $focusCheck.RawFocus
+        if ($focusCheck.Success) {
+            return @{
+                Blocked = $true
+                Focus = $lastFocus
+                ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return @{
+        Blocked = $false
+        Focus = $lastFocus
+        ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    }
+}
+
 try {
     Write-Step "0. Preflight: Ensuring device is awake and accessibility service is enabled..."
     Set-DeviceAwake $true
-
-    $enabledServices = (adb shell "settings get secure enabled_accessibility_services" | Out-String).Trim()
-    if ($enabledServices -notmatch "neth\.iecal\.curbox.*AppBlockerService") {
-        Write-Host "Enabling Curbox AppBlockerService in secure settings..." -ForegroundColor Yellow
-        adb shell "settings put secure enabled_accessibility_services neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService" | Out-Null
-        adb shell "settings put secure accessibility_enabled 1" | Out-Null
-        Start-Sleep -Seconds 2
-    }
+    Enable-AccessibilityService | Out-Null
 
     $isBoundInitial = Test-AccessibilityServiceBound
     if (-not $isBoundInitial) {
@@ -92,25 +107,19 @@ try {
     Start-Sleep -Milliseconds 500
     adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
 
-    $initialBlockSw = [System.Diagnostics.Stopwatch]::StartNew()
-    $initialBlocked = $false
-    $initialFocus = ""
-    while ($initialBlockSw.Elapsed.TotalSeconds -lt 10) {
-        $focusCheck = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity|WarningActivity" -PassThru
-        $initialFocus = $focusCheck.RawFocus
-        if ($focusCheck.Success) {
-            $initialBlocked = $true
-            break
-        }
-        Start-Sleep -Milliseconds 500
-    }
-
-    if ($initialBlocked) {
-        Write-Success "Initial blocking screen verified on top! Focus: $initialFocus"
+    $initialCheck = Assert-TargetBlocked -TimeoutSeconds 10
+    if ($initialCheck.Blocked) {
+        Write-Success "Initial blocking screen verified on top after $($initialCheck.ElapsedSeconds)s! Focus: $($initialCheck.Focus)"
     } else {
-        Write-Fail "Target app was NOT blocked initially! Current focus: $initialFocus"
+        Write-Fail "Target app was NOT blocked initially! Current focus: $($initialCheck.Focus)"
         $passedAll = $false
     }
+
+    # Dismiss blocking overlay back to Home so the target app remains running in background tasks,
+    # and preventing stale overlay from masking the post-recovery re-blocking assertion.
+    Write-Host "Dismissing blocking overlay to Home while retaining target app task in background..." -ForegroundColor DarkGray
+    adb shell "input keyevent 3" | Out-Null # Home
+    Start-Sleep -Seconds 1
 
     Write-Step "4. Querying current PID of $ServiceProcessName..."
     $initialPid = Get-DeviceProcessPid -ProcessName $ServiceProcessName
@@ -174,36 +183,15 @@ try {
     }
 
     Write-Step "7. Bringing Target App back to foreground and verifying immediate re-blocking..."
-    adb shell "am force-stop $TargetPackage" | Out-Null
-    Start-Sleep -Milliseconds 500
+    # Do NOT force-stop: bring existing background task back to foreground
     adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
 
-    $reblockSw = [System.Diagnostics.Stopwatch]::StartNew()
-    $reblocked = $false
-    $reblockFocus = ""
-
-    while ($reblockSw.Elapsed.TotalSeconds -lt 8) {
-        $focusCheck = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity|WarningActivity" -PassThru
-        $reblockFocus = $focusCheck.RawFocus
-        if ($focusCheck.Success) {
-            $reblocked = $true
-            $elapsed = [math]::Round($reblockSw.Elapsed.TotalSeconds, 1)
-            Write-Success "Immediate re-blocking confirmed after ${elapsed}s! Focus: $reblockFocus"
-            break
-        }
-        Start-Sleep -Milliseconds 500
-    }
-
-    if ($reblocked) {
-        # Verify target app does not leak in foreground
-        if ($reblockFocus -match "GuardianApprovalActivity" -or $reblockFocus -match "WarningActivity") {
-            Write-Success "Target app is completely covered; no screen leak detected."
-        } else {
-            Write-Fail "Blocking screen is not on top! Focus: $reblockFocus"
-            $passedAll = $false
-        }
+    $reblockCheck = Assert-TargetBlocked -TimeoutSeconds 8
+    if ($reblockCheck.Blocked) {
+        Write-Success "Immediate re-blocking confirmed after $($reblockCheck.ElapsedSeconds)s! Focus: $($reblockCheck.Focus)"
+        Write-Success "Target app is completely covered; no screen leak detected."
     } else {
-        Write-Fail "Target app was NOT re-blocked after service recovery! Current focus: $reblockFocus"
+        Write-Fail "Target app was NOT re-blocked after service recovery! Current focus: $($reblockCheck.Focus)"
         $passedAll = $false
     }
 
@@ -228,9 +216,8 @@ try {
     if (Test-Path $backupFile) {
         Restore-DeviceSettings -BackupPath $backupFile | Out-Null
         Write-Success "Original settings restored from backup."
-    } else {
-        Clear-TestAppRules | Out-Null
     }
+    Clear-TestAppRules | Out-Null
 
     adb shell "am force-stop $TargetPackage" | Out-Null
     adb shell "input keyevent 3" | Out-Null # HOME

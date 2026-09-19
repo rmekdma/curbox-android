@@ -300,6 +300,13 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             (Test-AccessibilityServiceBound -DumpsysOutput "" -ServiceName "AppBlockerService") | Should Be $false
         }
     }
+
+    Context "Stop-ServiceProcess" {
+        It "returns false when target PID is 0 or negative" {
+            (Stop-ServiceProcess -TargetPid 0) | Should Be $false
+            (Stop-ServiceProcess -TargetPid -1) | Should Be $false
+        }
+    }
 }
 
 
