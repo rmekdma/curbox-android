@@ -38,15 +38,15 @@ try {
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
     Write-Success "Backup saved to $backupFile"
 
-    Write-Step "1. Crafting and Injecting AppRule with 1-minute Contributor condition..."
+    $testEpochMs = [long](adb shell "date +%s%3N").Trim()
     $appRuleSnapshot = New-ContributorAppRuleConfig `
         -TargetPackage $TargetPackage `
         -ContributorPackage $ContributorPackage `
         -RequiredMinutes 1 `
-        -AllowedMinutes 1440
+        -AllowedMinutes 1440 `
+        -EffectiveFromMs $testEpochMs
 
-    $testEpochMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot -UsageGenerationStartedAtMs $testEpochMs
+    Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot
     Write-Success "Test AppRule configuration injected successfully."
 
     Write-Step "1-1. Ensuring device is awake..."

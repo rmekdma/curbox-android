@@ -291,18 +291,14 @@ function New-GuardianPinAuthConfig(
     }
 }
 
-function New-TestAppGroup(
-    [string]$GroupId,
-    [string]$GroupName,
-    [string[]]$Packages
-) {
+function New-TestAppGroup([string]$GroupId, [string]$GroupName, [string[]]$Packages, [long]$EffectiveFromMs = [long]::MinValue) {
     return [PSCustomObject]@{
         id = $GroupId
         name = $GroupName
         selectedPackages = @($Packages)
         membershipHistory = @(
             [PSCustomObject]@{
-                effectiveFromMs = [long]::MinValue
+                effectiveFromMs = $EffectiveFromMs
                 selectedPackages = @($Packages)
             }
         )
@@ -316,10 +312,11 @@ function New-ContributorAppRuleConfig(
     [long]$AllowedMinutes = 1440,
     [string]$TargetGroupId = "test-target-group-01",
     [string]$ContributorGroupId = "test-contrib-group-01",
-    [string]$RuleId = "test-rule-01"
+    [string]$RuleId = "test-rule-01",
+    [long]$EffectiveFromMs = [long]::MinValue
 ) {
     $groupTarget = New-TestAppGroup -GroupId $TargetGroupId -GroupName "테스트 타깃 앱" -Packages @($TargetPackage)
-    $groupContrib = New-TestAppGroup -GroupId $ContributorGroupId -GroupName "학습" -Packages @($ContributorPackage)
+    $groupContrib = New-TestAppGroup -GroupId $ContributorGroupId -GroupName "학습" -Packages @($ContributorPackage) -EffectiveFromMs $EffectiveFromMs
 
     $rule = [PSCustomObject]@{
         id = $RuleId
