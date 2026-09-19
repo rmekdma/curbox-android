@@ -20,6 +20,7 @@ import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.data.models.AppGroupEditMode
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleOverrideState
+import neth.iecal.curbox.data.models.AppRuleRolloverState
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.KeywordBlocker
@@ -476,6 +477,14 @@ class DataStoreManager(private val context: Context) {
             current.copy(appRuleOverrideState = state)
         }
         return updated.appRuleOverrideState == state
+    }
+
+    /** Trusted runtime settlement and in-app management use this immediate write path. */
+    suspend fun writeAppRuleRolloverState(state: AppRuleRolloverState): Boolean {
+        val updated = settingsDataStore.updateData { current ->
+            current.copy(appRuleRolloverState = state)
+        }
+        return updated.appRuleRolloverState == state
     }
 
     /** Compacts the current local approval ledger without uploading or changing credentials. */

@@ -94,4 +94,15 @@ class AppRuleRolloverSerializationTest {
 
         assertEquals(AppRuleRolloverState(), uploaded.appRuleRolloverState)
     }
+
+    @Test
+    fun appRuleRolloverStateWithPoolReplacesOrAddsPool() {
+        val initial = AppRuleRolloverState()
+        val pool1 = RuleRolloverPool(ruleId = "rule-1", accumulatedMinutes = 30L)
+        val updated = initial.withPool(pool1)
+        assertEquals(30L, updated.poolFor("rule-1").accumulatedMinutes)
+
+        val replaced = updated.withPool(pool1.copy(accumulatedMinutes = 50L))
+        assertEquals(50L, replaced.poolFor("rule-1").accumulatedMinutes)
+    }
 }

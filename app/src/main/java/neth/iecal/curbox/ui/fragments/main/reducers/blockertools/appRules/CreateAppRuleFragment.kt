@@ -386,24 +386,7 @@ class CreateAppRuleFragment : Fragment() {
         val usageConditionEnabled = binding.usageConditionSwitch.isChecked
         val earnedAllowanceEnabled = binding.earnedAllowanceSwitch.isChecked
         val firstRange = ranges.first()
-        val rule = editingRule?.copy(
-            name = name,
-            isActive = binding.activeSwitch.isChecked,
-            weekdays = weekdays,
-            startMinute = firstRange.startMinute,
-            endMinute = firstRange.endMinute,
-            appGroupId = "",
-            allowedMinutes = allowance!!,
-            scope = scope,
-            timeRanges = ranges,
-            contributorGroupIds = contributorGroupIds,
-            usageConditionEnabled = usageConditionEnabled,
-            usageConditionMinutes = totalConditionMinutes,
-            contributorGroupConditionMinutes = cleanedGroupConditionMinutes,
-            earnedAllowanceEnabled = earnedAllowanceEnabled,
-            rolloverEnabled = rolloverEnabled,
-            unlockDays = unlockDays
-        ) ?: AppRule.create(
+        val baseRule = editingRule ?: AppRule.create(
             name = name,
             weekdays = weekdays,
             startMinute = firstRange.startMinute,
@@ -411,7 +394,15 @@ class CreateAppRuleFragment : Fragment() {
             appGroupId = "",
             allowedMinutes = allowance!!,
             isActive = binding.activeSwitch.isChecked
-        ).copy(
+        )
+        val rule = baseRule.copy(
+            name = name,
+            isActive = binding.activeSwitch.isChecked,
+            weekdays = weekdays,
+            startMinute = firstRange.startMinute,
+            endMinute = firstRange.endMinute,
+            appGroupId = "",
+            allowedMinutes = allowance!!,
             scope = scope,
             timeRanges = ranges,
             contributorGroupIds = contributorGroupIds,

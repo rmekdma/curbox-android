@@ -29,9 +29,9 @@
     <string name="app_rules_thursday_short">목</string>
     <string name="app_rules_friday_short">금</string>
     <string name="app_rules_saturday_short">토</string>
-    <string name="app_rules_rollover_enabled">미소진 추가시간 이월</string>
+    <string name="app_rules_rollover_enabled">미소진 보호자 추가시간 이월</string>
     <string name="app_rules_unlock_days">해금 요일</string>
     <string name="app_rules_rollover_unlock_days_required">이월 기능을 켜려면 해금 요일을 하나 이상 선택해 주세요</string>
-    <string name="app_rules_rollover_summary_on">이월 켜짐 (%1$s)</string>
-    <string name="app_rules_rollover_summary_off">이월 꺼짐</string>
+    <string name="app_rules_rollover_summary_on">이월 보호자 추가시간 켜짐 (%1$s)</string>
+    <string name="app_rules_rollover_summary_off">이월 보호자 추가시간 꺼짐</string>
 </resources>
