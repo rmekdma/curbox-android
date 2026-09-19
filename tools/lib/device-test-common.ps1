@@ -5,6 +5,7 @@
     Provides shared helper functions across device test scripts:
     - Assert-AdbDevice: Verify connected ADB device
     - Set-DeviceAwake: Control stay-awake state (svc power stayon true/false)
+    - Get-DeviceSettings: Read settings.json from device as raw string or PSCustomObject
     - Backup-DeviceSettings: Safely back up settings.json from device
     - Restore-DeviceSettings: Restore settings.json, broadcast refreshes, and sync cache
     - Inject-TestAppRules: Inject test rules JSON via broadcast seam
@@ -68,9 +69,20 @@ function Push-TempStringToDevice([string]$Content, [string]$RemotePath) {
     Remove-Item $tempLocal -Force -ErrorAction SilentlyContinue
 }
 
-function Backup-DeviceSettings([string]$DestinationPath, [string]$PackageName = "neth.iecal.curbox.debug") {
+function Get-DeviceSettings([string]$PackageName = "neth.iecal.curbox.debug", [switch]$AsObject) {
     $rawSettings = (adb shell "run-as $PackageName cat files/datastore/settings.json" | Out-String).Trim().Trim([char]65279)
     if (-not $rawSettings -or $rawSettings -notmatch "\{") {
+        return $null
+    }
+    if ($AsObject) {
+        return ($rawSettings | ConvertFrom-Json)
+    }
+    return $rawSettings
+}
+
+function Backup-DeviceSettings([string]$DestinationPath, [string]$PackageName = "neth.iecal.curbox.debug") {
+    $rawSettings = Get-DeviceSettings -PackageName $PackageName
+    if (-not $rawSettings) {
         Write-Error "Failed to read settings.json from device!"
         return $null
     }
@@ -96,9 +108,8 @@ function Set-DeviceUsageGeneration([long]$GenerationStartedAtMs = 0, [string]$Pa
     if ($GenerationStartedAtMs -le 0) {
         $GenerationStartedAtMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     }
-    $rawSettings = (adb shell "run-as $PackageName cat files/datastore/settings.json" | Out-String).Trim().Trim([char]65279)
-    if ($rawSettings -and $rawSettings -match "\{") {
-        $settingsObj = $rawSettings | ConvertFrom-Json
+    $settingsObj = Get-DeviceSettings -PackageName $PackageName -AsObject
+    if ($settingsObj) {
         $settingsObj.useDayGenerationStartedAtMs = $GenerationStartedAtMs
 
         $jsonStr = $settingsObj | ConvertTo-Json -Depth 20 -Compress

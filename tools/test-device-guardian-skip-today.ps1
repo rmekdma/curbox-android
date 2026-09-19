@@ -13,7 +13,8 @@
 #>
 
 param(
-    [string]$TargetPackage = "com.woodenpharm.choseonggacha"
+    [string]$TargetPackage = "com.woodenpharm.choseonggacha",
+    [string]$TargetActivity = "com.woodenpharm.choseonggacha.MainActivity"
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,7 +35,10 @@ $passedAll = $true
 try {
     Write-Step "1. Backing up device settings.json..."
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
-    Write-Success "Backup saved to $backupFile"
+    Set-DeviceAwake $true
+    Write-Success "Backup saved to $backupFile and wake lock acquired."
+
+    $testStartTimeMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 
     Write-Step "2. Crafting Test AppRule configuration..."
     $targetGroupId = "test-target-group-01"
@@ -55,12 +59,9 @@ try {
     Write-Success "Injected test AppRules via broadcast seam."
 
     Write-Step "4. Launching Target App ($TargetPackage) to trigger Lock Screen..."
-    Set-DeviceAwake $true
-    adb shell "input keyevent 224" | Out-Null # WAKEUP
-    adb shell "wm dismiss-keyguard" | Out-Null
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/com.woodenpharm.choseonggacha.MainActivity" | Out-Null
+    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
 
     Write-Step "5. Verifying GuardianApprovalActivity is displayed..."
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -103,15 +104,18 @@ try {
 
     Write-Step "7. Selecting 'Skip until reset' in Radio Group Dialog..."
     $uiDialog = Wait-For-UI "guardian_skip_until_reset|Skip until the next reset|리셋 시까지" 6
-    $radioSelected = Tap-Node $uiDialog 'text="리셋 시까지"' "리셋 시까지 라디오 옵션 (Korean)" -Optional
+    $radioSelected = Tap-Node $uiDialog 'text="리셋 시까지"' "리셋 시까지 라디오 옵션 (Korean text)" -Optional
     if (-not $radioSelected) {
-        $radioSelected = Tap-Node $uiDialog 'text="다음 리셋 시까지"' "다음 리셋 시까지 라디오 옵션 (Korean)" -Optional
+        $radioSelected = Tap-Node $uiDialog 'text="다음 리셋 시까지"' "다음 리셋 시까지 라디오 옵션 (Korean text)" -Optional
     }
     if (-not $radioSelected) {
-        $radioSelected = Tap-Node $uiDialog 'text="Skip until the next reset"' "Skip until the next reset radio option (English)" -Optional
+        $radioSelected = Tap-Node $uiDialog 'text="Skip until the next reset"' "Skip until the next reset radio option (English text)" -Optional
     }
     if (-not $radioSelected) {
-        $radioSelected = Tap-Node $uiDialog 'text="[^"]*(?:리셋 시까지|next reset)[^"]*"' "리셋 시까지/next reset 라디오 옵션 (Pattern)"
+        $radioSelected = Tap-Node $uiDialog 'resource-id="android:id/text1"[^>]*text="[^"]*(?:리셋 시까지|next reset)[^"]*"' "리셋 시까지/next reset 라디오 옵션 (ID + Pattern)" -Optional
+    }
+    if (-not $radioSelected) {
+        $radioSelected = Tap-Node $uiDialog 'text="[^"]*(?:리셋 시까지|next reset)[^"]*"' "리셋 시까지/next reset 라디오 옵션 (Pattern fallback)"
     }
 
     Write-Step "8. Applying Skip for Today approval..."
@@ -153,21 +157,21 @@ try {
     }
 
     Write-Step "10. Verifying Skip Persistence in DataStore..."
-    $updatedSettings = (adb shell "run-as neth.iecal.curbox.debug cat files/datastore/settings.json" | Out-String).Trim().Trim([char]65279)
-    $updatedObj = $updatedSettings | ConvertFrom-Json
-    $hasSkip = Test-AppRuleSkip -OverrideState $updatedObj.appRuleOverrideState -RuleId $ruleId
+    $updatedObj = Get-DeviceSettings -AsObject
+    $minSkipThresholdMs = $testStartTimeMs + (31 * 60 * 1000)
+    $hasSkip = Test-AppRuleSkip -OverrideState $updatedObj.appRuleOverrideState -RuleId $ruleId -MinSkipUntilMs $minSkipThresholdMs
     if ($hasSkip) {
         $skipsJson = $updatedObj.appRuleOverrideState.skips | ConvertTo-Json -Compress
-        Write-Success "DataStore successfully recorded skip override for rule '$ruleId'! Skips: $skipsJson"
+        Write-Success "DataStore successfully recorded skip override for rule '$ruleId' valid until reset! Skips: $skipsJson"
     } else {
-        Write-Fail "Skip for rule '$ruleId' not found in DataStore settings! State: $($updatedObj.appRuleOverrideState | ConvertTo-Json -Compress)"
+        Write-Fail "Skip for rule '$ruleId' (until reset) not found in DataStore settings! State: $($updatedObj.appRuleOverrideState | ConvertTo-Json -Compress)"
         $passedAll = $false
     }
 
     Write-Step "11. Verifying Target App relaunch maintains unblocked execution..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/com.woodenpharm.choseonggacha.MainActivity" | Out-Null
+    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
 
     Start-Sleep -Seconds 2
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -207,11 +211,18 @@ try {
 
 } finally {
     Write-Step "13. Cleanup & Restoring original settings.json..."
-    Set-DeviceAwake $false
+    try {
+        Set-DeviceAwake $false
+    } catch { }
+
     if (Test-Path $backupFile) {
         Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        adb shell "am force-stop $TargetPackage" | Out-Null
-        adb shell "input keyevent 3" | Out-Null # HOME
-        Write-Success "Original settings restored, target app stopped, returned to home."
+        Write-Success "Original settings restored from backup."
+    } else {
+        Clear-TestAppRules | Out-Null
     }
+
+    adb shell "am force-stop $TargetPackage" | Out-Null
+    adb shell "input keyevent 3" | Out-Null # HOME
+    Write-Success "Target app stopped, returned to home."
 }
