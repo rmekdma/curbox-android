@@ -7,7 +7,14 @@ ADB-based End-to-End (E2E) device testing patterns and nonnegotiable invariants 
 - Harness SSOT: `tools/lib/device-test-common.ps1` is the authoritative source for all device interaction helpers. Do not inline raw adb or settings logic.
 - Pester unit tests: `tools/tests/device-test-common.Tests.ps1` validates harness helpers. Any helper added to `device-test-common.ps1` must have unit tests here.
 - Standard script flow:
-  1. Param block with `$ErrorActionPreference = "Stop"`.
+  1. Standard parameter block:
+     ```powershell
+     param(
+         [string]$TargetPackage = "com.woodenpharm.choseonggacha",
+         [string]$DeviceId = ""
+     )
+     $ErrorActionPreference = "Stop"
+     ```
   2. Dot-source common harness: `. "$PSScriptRoot/lib/device-test-common.ps1"`.
   3. Pre-flight check: `Assert-AdbDevice`.
   4. Backup settings (`Backup-DeviceSettings`) and acquire wake lock (`Set-DeviceAwake $true`) in `try` block.
@@ -26,17 +33,16 @@ ADB-based End-to-End (E2E) device testing patterns and nonnegotiable invariants 
 | **Pester 3.4.0 scope** | `BeforeAll` outside `Describe` throws `Assert-DescribeInProgress`. | Place setup in `BeforeEach` inside `Describe` or `Context` |
 | **Pester 3.4.0 arrays** | `Should Contain` checks file contents, not array elements. | `($array -contains $item) \| Should Be $true` |
 | **Error termination** | Non-terminating `Write-Error` allows execution to proceed unless stopped. | `$ErrorActionPreference = "Stop"` at top level; pair `Write-Error` with `return $null` |
-| **Dynamic UI elements** | Immediate `Dump-UI` after focus check misses uninflated views. Always poll with regex. | `Wait-For-UI -Pattern "검색\|Search" -TimeoutSeconds 10` |
-| **UI dump retry** | `could not get idle state` occurs during animations. Purge stale dump before retry. | Handled automatically by `Dump-UI` (3 retries with 500ms backoff) |
+| **Dynamic UI elements** | Immediate `Dump-UI` after focus check misses uninflated views. Always poll with regex. (`Dump-UI` internally retries 3x on `could not get idle state`). | `Wait-For-UI -Pattern "검색\|Search" -TimeoutSeconds 10` |
 | **IME input & clear** | `Ctrl+A` fails across Android software keyboards. Tap coordinates and send backspaces. | `adb shell "input tap $x $y; input keyevent 67 67 67 67 67; input text $val"` |
-| **Screen wake state** | Inactivity turns off screen and halts accessibility events. Always revert in `finally`. | `Set-DeviceAwake $true` in `try`; `Set-DeviceAwake $false` in `finally` |
 | **Accessibility service** | `am start-service` fails with `BIND_ACCESSIBILITY_SERVICE`. Enable via secure settings and check binding. | `Enable-AccessibilityService`; verify with `Test-AccessibilityServiceBound` |
-| **DataStore permissions** | Multi-process access (`main` vs `:app_blocker_service`) requires 660 permission. | `adb shell "run-as $pkg chmod 660 files/datastore/settings.json" \| Out-Null` |
+| **DataStore permissions** | Multi-process access (`main` vs `:app_blocker_service`) requires 660 permission. Harness mutation helpers enforce this automatically. | Never push raw JSON without harness: use `Restore-DeviceSettings`, `Set-DeviceUsageGeneration`, `Set-DeviceGuardianAuthConfig` |
 | **Settings access** | Never inline raw `run-as ... cat`. Use safe structured getter. | `$obj = Get-DeviceSettings -PackageName $pkg -AsObject` |
-| **Unconditional cleanup** | Gating cleanup inside `if (Test-Path $backup)` leaks test rules on backup failure. | Call `Clear-TestAppRules` unconditionally in `finally` |
+| **Rule injection** | Apply test rule snapshot and atomically initialize clean session generation epoch. | `Inject-TestAppRules -AppRuleSnapshot $snapshot -UsageGenerationStartedAtMs $testStartTimeMs` |
 | **Daily usage isolation** | Prior usage recorded today in Room leaks into tests. Reset evaluation epoch without wiping DB. | `Set-DeviceUsageGeneration -PackageName $pkg` |
 | **Guardian credentials** | PBKDF2 hash injection must set 660 permissions and broadcast refresh. | `Set-DeviceGuardianAuthConfig -GuardianAuthConfig (New-GuardianPinAuthConfig -Pin $pin)` |
 | **Override validation** | Validate recorded skips without manual JSON regex. | `Test-AppRuleSkip -Skips $skips -RuleId $id -MinSkipUntilMs $minMs` |
+| **Toast / Logcat** | Modern Android system Toasts do not render in UIAutomator XML dumps. Inspect package-scoped logcat events. | `adb logcat -c \| Out-Null; <action>; $logs = (adb logcat -d -t 200 \| Out-String); ($logs -match "Toast" -and $logs -match $pkg) \| Should Be $true` |
 
 ---
 
