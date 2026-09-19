@@ -32,6 +32,30 @@ Describe "Device Test Common Helpers" {
         }
     }
 
+    Context "Test-GuardianAuthConfig" {
+        It "returns true for configured auth config" {
+            $auth = New-GuardianPinAuthConfig -Pin "1234"
+            (Test-GuardianAuthConfig -SettingsOrAuth $auth) | Should Be $true
+        }
+
+        It "returns true for settings object containing configured guardianAuthConfig" {
+            $auth = New-GuardianPinAuthConfig -Pin "1234"
+            $settings = [PSCustomObject]@{
+                guardianAuthConfig = $auth
+            }
+            (Test-GuardianAuthConfig -SettingsOrAuth $settings) | Should Be $true
+        }
+
+        It "returns false for empty or unconfigured auth config" {
+            $emptyAuth = New-GuardianPinAuthConfig -Pin ""
+            (Test-GuardianAuthConfig -SettingsOrAuth $emptyAuth) | Should Be $false
+        }
+
+        It "returns false for null" {
+            (Test-GuardianAuthConfig -SettingsOrAuth $null) | Should Be $false
+        }
+    }
+
     Context "Get-NodeBounds" {
         It "parses node bounds correctly from xml" {
             $xml = '<node text="Confirm" bounds="[100,200][300,400]"/>'

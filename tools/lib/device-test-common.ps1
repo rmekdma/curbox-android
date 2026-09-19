@@ -24,6 +24,8 @@
     - Wait-DeviceMinute: Wait until device reaches target minute
     - Set-DeviceUsageGeneration: Reset useDay session generation to start fresh tracking epoch
     - Test-AppRuleSkip: Verify whether a rule skip override is recorded and active
+    - Test-GuardianAuthConfig: Verify whether a guardian auth config or settings object has active credentials
+    - Set-DeviceGuardianAuthConfig: Inject GuardianAuthConfig into device settings.json with proper 660 permissions and broadcast refresh
 #>
 
 function Write-Step([string]$Msg) {
@@ -496,5 +498,41 @@ function Test-AppRuleSkip($OverrideState, [string]$RuleId, [long]$MinSkipUntilMs
         }
     }
     return $false
+}
+
+function Test-GuardianAuthConfig($SettingsOrAuth) {
+    if (-not $SettingsOrAuth) {
+        return $false
+    }
+    $auth = if ($SettingsOrAuth.PSObject.Properties['guardianAuthConfig']) {
+        $SettingsOrAuth.guardianAuthConfig
+    } else {
+        $SettingsOrAuth
+    }
+    if (-not $auth) {
+        return $false
+    }
+    $hasSalt = ($auth.PSObject.Properties['passwordSalt'] -and -not [string]::IsNullOrWhiteSpace($auth.passwordSalt))
+    $hasVerifier = ($auth.PSObject.Properties['passwordVerifier'] -and -not [string]::IsNullOrWhiteSpace($auth.passwordVerifier))
+    return ($hasSalt -and $hasVerifier)
+}
+
+function Set-DeviceGuardianAuthConfig($GuardianAuthConfig, [string]$PackageName = "neth.iecal.curbox.debug") {
+    $settingsObj = Get-DeviceSettings -PackageName $PackageName -AsObject
+    if (-not $settingsObj) {
+        Write-Error "Failed to read settings.json to update guardianAuthConfig!"
+        return $false
+    }
+    $settingsObj.guardianAuthConfig = $GuardianAuthConfig
+    $jsonStr = $settingsObj | ConvertTo-Json -Depth 20 -Compress
+    Push-TempStringToDevice -Content $jsonStr -RemotePath "/data/local/tmp/settings_guardian.json"
+    adb shell "run-as $PackageName cp /data/local/tmp/settings_guardian.json files/datastore/settings.json" | Out-Null
+    adb shell "run-as $PackageName chmod 660 files/datastore/settings.json" | Out-Null
+    adb shell "rm -f /data/local/tmp/settings_guardian.json" | Out-Null
+
+    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
+    adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
+    Start-Sleep -Seconds 1
+    return $true
 }
 
