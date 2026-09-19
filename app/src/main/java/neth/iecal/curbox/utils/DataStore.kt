@@ -482,9 +482,19 @@ class DataStoreManager(private val context: Context) {
     /** Trusted runtime settlement and in-app management use this immediate write path. */
     suspend fun writeAppRuleRolloverState(state: AppRuleRolloverState): Boolean {
         val updated = settingsDataStore.updateData { current ->
-            current.copy(appRuleRolloverState = state)
+            val mergedPools = current.appRuleRolloverState.pools.toMutableMap()
+            for ((ruleId, newPool) in state.pools) {
+                val existing = mergedPools[ruleId]
+                if (existing == null || newPool.lastSettledUseDayId >= existing.lastSettledUseDayId) {
+                    mergedPools[ruleId] = newPool
+                }
+            }
+            current.copy(appRuleRolloverState = AppRuleRolloverState(mergedPools))
         }
-        return updated.appRuleRolloverState == state
+        return state.pools.all { (ruleId, pool) ->
+            val settled = updated.appRuleRolloverState.pools[ruleId]
+            settled != null && settled.lastSettledUseDayId >= pool.lastSettledUseDayId
+        }
     }
 
     /** Compacts the current local approval ledger without uploading or changing credentials. */

@@ -15,18 +15,12 @@ import neth.iecal.curbox.services.ServiceWatchdogJob
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.ServiceProtectionManager
 
+import neth.iecal.curbox.blockers.AppRuleBlocker
 import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.AppRuleRolloverCoordinator
 import kotlin.coroutines.cancellation.CancellationException
-
-/**
- * After a reboot or an app update the scheduled watchdog job and the live services are gone. This
- * re schedules the watchdog and runs one immediate repair pass so protection comes back without the
- * user opening the app.
- */
-import neth.iecal.curbox.blockers.AppRuleBlocker
 
 /**
  * After a reboot or an app update the scheduled watchdog job and the live services are gone. This

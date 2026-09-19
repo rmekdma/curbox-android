@@ -21,8 +21,8 @@ class AppRuleRolloverCoordinator(
     private val wallClockMs: () -> Long = { System.currentTimeMillis() },
     private val zone: () -> ZoneId = { ZoneId.systemDefault() },
     private val onNonFatalError: (Throwable) -> Unit = {},
-    internal var readSettings: (suspend () -> Settings)? = null,
-    internal var writeRolloverState: (suspend (AppRuleRolloverState) -> Boolean)? = null
+    internal val readSettings: (suspend () -> Settings)? = null,
+    internal val writeRolloverState: (suspend (AppRuleRolloverState) -> Boolean)? = null
 ) {
     suspend fun reconcileSettlement(nowMs: Long = wallClockMs()): RolloverCoordinatorResult {
         try {

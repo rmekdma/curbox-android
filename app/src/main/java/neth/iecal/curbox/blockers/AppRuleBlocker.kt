@@ -1981,9 +1981,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     @Suppress("UNUSED_PARAMETER")
-    internal fun onWakeFromScheduler(packageName: String, token: Long) {
+    internal fun onWakeFromScheduler(key: String, token: Long) {
         if (!isReadyForChecks()) return
-        if (packageName == SETTLEMENT_WAKE_KEY) {
+        if (key == SETTLEMENT_WAKE_KEY) {
             onSettlementWake()
         } else {
             onSchedulerWake(recheckGeneration.get())
