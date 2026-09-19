@@ -4,13 +4,14 @@
 .DESCRIPTION
     1. Backs up original settings.json from device using device-test-common.
     2. Generates PBKDF2 salt/verifier for PIN "1234" via New-GuardianPinAuthConfig and injects into settings.json.
-    3. Injects verified test AppRule configuration to block the target package.
+    3. Injects verified test AppRule configuration to block the target package with usage isolation.
     4. Launches target package and verifies GuardianApprovalActivity is displayed.
     5. Triggers PIN input mode via UIAutomator.
-    6. Inputs incorrect PIN ("9999"), verifies rejection and lock maintenance.
+    6. Inputs incorrect PIN ("9999"), verifies strict error display and lock maintenance.
     7. Inputs correct PIN ("1234"), verifies successful authentication and return to target app.
-    8. Verifies target app relaunch maintains unblocked execution.
-    9. Restores original settings.json and cleans up.
+    8. Verifies DataStore persistence of the approved override.
+    9. Verifies target app relaunch maintains unblocked execution.
+    10. Restores original settings.json and cleans up.
 #>
 
 param(
@@ -34,6 +35,87 @@ if (-not (Test-Path $tmpDir)) {
 
 $backupFile = Join-Path $tmpDir "settings_backup.json"
 $passedAll = $true
+
+function Request-GuardianSkipApproval() {
+    $ui = Wait-For-UI "approval_skip_rule|Skip this rule|Skip for today|이 규칙 건너뛰기|오늘 건너뛰기" 8
+    if (-not ($ui -match "approval_skip_rule" -or $ui -match "Skip this rule" -or $ui -match "이 규칙 건너뛰기" -or $ui -match "오늘 건너뛰기")) {
+        Write-Fail "Approval screen missing Skip Rule button."
+        return $false
+    }
+
+    # Resolution hierarchy: Resource-ID -> Primary Locale (Korean) -> Fallback Locale (English)
+    $clicked = Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/approval_skip_rule"' "이 규칙 건너뛰기 버튼 (Resource-ID)" -Optional
+    if (-not $clicked) {
+        $clicked = Tap-Node $ui 'text="이 규칙 건너뛰기"' "이 규칙 건너뛰기 텍스트 (Korean)" -Optional
+    }
+    if (-not $clicked) {
+        $clicked = Tap-Node $ui 'text="오늘 건너뛰기"' "오늘 건너뛰기 텍스트 (Korean)" -Optional
+    }
+    if (-not $clicked) {
+        $clicked = Tap-Node $ui 'text="Skip this rule"' "Skip this rule text (English)" -Optional
+    }
+    if (-not $clicked) {
+        $clicked = Tap-Node $ui 'text="Skip for today"' "Skip for today text (English)"
+    }
+
+    $uiDialog = Wait-For-UI "15분|30분|리셋 시까지|Skip for 15 minutes|Skip until the next reset" 6
+    # Resolution hierarchy: Resource-ID + Pattern -> Primary Locale (Korean) -> Fallback Locale (English)
+    $optionSelected = Tap-Node $uiDialog 'resource-id="android:id/text1"[^>]*text="[^"]*(?:15분|15 minutes)[^"]*"' "15분 건너뛰기 옵션 (ID + Pattern)" -Optional
+    if (-not $optionSelected) {
+        $optionSelected = Tap-Node $uiDialog 'text="15분 동안 건너뛰기"' "15분 건너뛰기 옵션 (Korean text)" -Optional
+    }
+    if (-not $optionSelected) {
+        $optionSelected = Tap-Node $uiDialog 'text="15분 건너뛰기"' "15분 건너뛰기 옵션 (Korean text)" -Optional
+    }
+    if (-not $optionSelected) {
+        $optionSelected = Tap-Node $uiDialog 'text="Skip for 15 minutes"' "Skip for 15 minutes option (English text)" -Optional
+    }
+    if (-not $optionSelected) {
+        $optionSelected = Tap-Node $uiDialog 'resource-id="android:id/text1"' "첫 번째 라디오 옵션 (ID fallback)"
+    }
+
+    return ($clicked -and $optionSelected)
+}
+
+function Submit-GuardianPin([string]$PinValue) {
+    $uiPinDialog = Wait-For-UI "guardian_enter_password|Enter guardian password|비밀번호 입력|Password" 6
+    if (-not ($uiPinDialog -match "Enter guardian password" -or $uiPinDialog -match "비밀번호 입력" -or $uiPinDialog -match "Password")) {
+        Write-Fail "Guardian PIN input dialog was NOT displayed."
+        return $false
+    }
+
+    $nodePin = Get-NodeBounds $uiPinDialog 'class="android.widget.EditText"'
+    if (-not $nodePin.Found) {
+        $nodePin = Get-NodeBounds $uiPinDialog 'password="true"'
+    }
+    if (-not $nodePin.Found) {
+        $nodePin = Get-NodeBounds $uiPinDialog 'text="Password"'
+    }
+
+    if (-not $nodePin.Found) {
+        Write-Fail "Could not locate PIN EditText node in UI dump."
+        return $false
+    }
+
+    adb shell "input tap $($nodePin.X) $($nodePin.Y)" | Out-Null
+    Start-Sleep -Milliseconds 500
+    # Android IME Backspace keyevent 67 repeated per tools/AGENTS.md
+    adb shell "input keyevent 67 67 67 67 67" | Out-Null
+    adb shell "input text $PinValue" | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    $uiAfterTyping = Dump-UI
+    # Resolution hierarchy: Resource-ID -> Primary Locale (Korean) -> Fallback Locale (English)
+    $continued = Tap-Node $uiAfterTyping 'resource-id="android:id/button1"' "계속/확인 버튼 (Resource-ID)" -Optional
+    if (-not $continued) {
+        $continued = Tap-Node $uiAfterTyping 'text="계속"' "계속 텍스트 버튼 (Korean)" -Optional
+    }
+    if (-not $continued) {
+        $continued = Tap-Node $uiAfterTyping 'text="Continue"' "Continue text button (English)"
+    }
+
+    return $continued
+}
 
 try {
     Write-Step "1. Backing up device settings.json..."
@@ -74,8 +156,9 @@ try {
         -RuleId $ruleId
 
     Write-Step "4. Injecting test AppRule configuration via broadcast seam..."
-    Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot
-    Write-Success "Injected test AppRules via broadcast seam."
+    # Isolate daily accumulation with UsageGenerationStartedAtMs per tools/AGENTS.md
+    Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot -UsageGenerationStartedAtMs $testStartTimeMs
+    Write-Success "Injected test AppRules via broadcast seam with usage generation isolation."
 
     Write-Step "5. Launching Target App ($TargetPackage) to trigger Lock Screen..."
     adb shell "am force-stop $TargetPackage" | Out-Null
@@ -99,80 +182,21 @@ try {
     }
 
     Write-Step "7. Triggering PIN input mode..."
-    $ui = Wait-For-UI "approval_skip_rule|Skip this rule|Skip for today|이 규칙 건너뛰기|오늘 건너뛰기" 8
-    if (-not ($ui -match "approval_skip_rule" -or $ui -match "Skip this rule" -or $ui -match "이 규칙 건너뛰기" -or $ui -match "오늘 건너뛰기")) {
-        Write-Fail "Approval screen missing Skip Rule button to request approval."
-        $passedAll = $false
-    }
-
-    $clicked = Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/approval_skip_rule"' "이 규칙 건너뛰기 버튼 (Resource-ID)" -Optional
-    if (-not $clicked) {
-        $clicked = Tap-Node $ui 'text="이 규칙 건너뛰기"' "이 규칙 건너뛰기 텍스트 (Korean)" -Optional
-    }
-    if (-not $clicked) {
-        $clicked = Tap-Node $ui 'text="오늘 건너뛰기"' "오늘 건너뛰기 텍스트 (Korean)" -Optional
-    }
-    if (-not $clicked) {
-        $clicked = Tap-Node $ui 'text="Skip this rule"' "Skip this rule text (English)" -Optional
-    }
-    if (-not $clicked) {
-        $clicked = Tap-Node $ui 'text="Skip for today"' "Skip for today text (English)"
-    }
-
-    $uiDialog = Wait-For-UI "15분|30분|리셋 시까지|Skip for 15 minutes|Skip until the next reset" 6
-    $optionSelected = Tap-Node $uiDialog 'text="15분 동안 건너뛰기"' "15분 건너뛰기 옵션 (Korean text)" -Optional
-    if (-not $optionSelected) {
-        $optionSelected = Tap-Node $uiDialog 'text="15분 건너뛰기"' "15분 건너뛰기 옵션 (Korean text)" -Optional
-    }
-    if (-not $optionSelected) {
-        $optionSelected = Tap-Node $uiDialog 'text="Skip for 15 minutes"' "Skip for 15 minutes option (English text)" -Optional
-    }
-    if (-not $optionSelected) {
-        $optionSelected = Tap-Node $uiDialog 'resource-id="android:id/text1"' "첫 번째 라디오 옵션 (ID)" -Optional
-    }
-    if (-not $optionSelected) {
-        $optionSelected = Tap-Node $uiDialog 'text="리셋 시까지"' "리셋 시까지 옵션 (Korean text)"
-    }
-
-    # Wait for PIN/Password dialog
-    $uiPinDialog = Wait-For-UI "guardian_enter_password|Enter guardian password|비밀번호 입력|Password" 6
-    if ($uiPinDialog -match "Enter guardian password" -or $uiPinDialog -match "비밀번호 입력" -or $uiPinDialog -match "Password") {
+    $skipRequested = Request-GuardianSkipApproval
+    if ($skipRequested) {
         Write-Success "Guardian PIN input dialog is displayed!"
     } else {
-        Write-Fail "Guardian PIN input dialog was NOT displayed."
+        Write-Fail "Failed to trigger Guardian PIN input dialog."
         $passedAll = $false
     }
 
     Write-Step "8. Testing Invalid PIN ($WrongPin): Verifying error and lock maintenance..."
-    # Clear logcat before wrong PIN input to reliably capture toast message
+    # Clear logcat before wrong PIN input to reliably capture error toast
     adb logcat -c | Out-Null
 
-    $nodePin = Get-NodeBounds $uiPinDialog 'class="android.widget.EditText"'
-    if (-not $nodePin.Found) {
-        $nodePin = Get-NodeBounds $uiPinDialog 'password="true"'
-    }
-    if (-not $nodePin.Found) {
-        $nodePin = Get-NodeBounds $uiPinDialog 'text="Password"'
-    }
-
-    if ($nodePin.Found) {
-        adb shell "input tap $($nodePin.X) $($nodePin.Y)" | Out-Null
-        Start-Sleep -Milliseconds 500
-        # Android IME Backspace keyevent 67 repeated
-        adb shell "input keyevent 67 67 67 67 67" | Out-Null
-        adb shell "input text $WrongPin" | Out-Null
-        Start-Sleep -Milliseconds 500
-        Write-Success "Entered invalid PIN '$WrongPin'."
-
-        $uiAfterTyping = Dump-UI
-        $continued = Tap-Node $uiAfterTyping 'resource-id="android:id/button1"' "계속/확인 버튼 (Resource-ID)" -Optional
-        if (-not $continued) {
-            $continued = Tap-Node $uiAfterTyping 'text="계속"' "계속 텍스트 버튼 (Korean)" -Optional
-        }
-        if (-not $continued) {
-            $continued = Tap-Node $uiAfterTyping 'text="Continue"' "Continue text button (English)"
-        }
-
+    $wrongSubmitted = Submit-GuardianPin -PinValue $WrongPin
+    if ($wrongSubmitted) {
+        Write-Success "Submitted invalid PIN '$WrongPin'."
         Start-Sleep -Seconds 1
 
         # Check lock maintenance: GuardianApprovalActivity must remain in foreground
@@ -184,76 +208,33 @@ try {
             $passedAll = $false
         }
 
-        # Check error indication via logcat for toast message
-        $recentLogs = (adb logcat -d -t 100 | Out-String)
-        $hasErrorIndication = ($recentLogs -match "That password is wrong" -or $recentLogs -match "guardian_wrong_password" -or $recentLogs -match "Toast")
+        # Check error indication: assert toast event for Curbox package
+        $recentLogs = (adb logcat -d -t 200 | Out-String)
+        $hasErrorIndication = (
+            ($recentLogs -match "Toast" -and $recentLogs -match "neth.iecal.curbox.debug") -or
+            ($recentLogs -match "That password is wrong" -or $recentLogs -match "guardian_wrong_password")
+        )
         if ($hasErrorIndication) {
-            Write-Success "Error feedback detected for invalid PIN submission."
+            Write-Success "Error feedback strictly verified for invalid PIN submission (Toast event for package detected)."
         } else {
-            Write-Host "Warning: Toast message not captured in logcat, but lock was successfully maintained." -ForegroundColor Yellow
+            Write-Fail "Error feedback for invalid PIN not found in logs! Expected Toast event for package."
+            $passedAll = $false
         }
     } else {
-        Write-Fail "Could not find PIN input EditText node in UI dump!"
+        Write-Fail "Failed to submit invalid PIN."
         $passedAll = $false
     }
 
     Write-Step "9. Testing Valid PIN ($Pin): Verifying authentication and app return..."
-    # Re-trigger PIN input mode
-    $ui = Wait-For-UI "approval_skip_rule|Skip this rule|Skip for today|이 규칙 건너뛰기|오늘 건너뛰기" 6
-    $clicked = Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/approval_skip_rule"' "이 규칙 건너뛰기 버튼 (Resource-ID)" -Optional
-    if (-not $clicked) {
-        $clicked = Tap-Node $ui 'text="이 규칙 건너뛰기"' "이 규칙 건너뛰기 텍스트 (Korean)" -Optional
-    }
-    if (-not $clicked) {
-        $clicked = Tap-Node $ui 'text="오늘 건너뛰기"' "오늘 건너뛰기 텍스트 (Korean)" -Optional
-    }
-    if (-not $clicked) {
-        $clicked = Tap-Node $ui 'text="Skip this rule"' "Skip this rule text (English)" -Optional
-    }
-    if (-not $clicked) {
-        $clicked = Tap-Node $ui 'text="Skip for today"' "Skip for today text (English)"
+    $skipRequestedAgain = Request-GuardianSkipApproval
+    if (-not $skipRequestedAgain) {
+        Write-Fail "Failed to re-trigger Guardian PIN input dialog for valid PIN."
+        $passedAll = $false
     }
 
-    $uiDialog = Wait-For-UI "15분|30분|리셋 시까지|Skip for 15 minutes|Skip until the next reset" 6
-    $optionSelected = Tap-Node $uiDialog 'text="15분 동안 건너뛰기"' "15분 건너뛰기 옵션 (Korean text)" -Optional
-    if (-not $optionSelected) {
-        $optionSelected = Tap-Node $uiDialog 'text="15분 건너뛰기"' "15분 건너뛰기 옵션 (Korean text)" -Optional
-    }
-    if (-not $optionSelected) {
-        $optionSelected = Tap-Node $uiDialog 'text="Skip for 15 minutes"' "Skip for 15 minutes option (English text)" -Optional
-    }
-    if (-not $optionSelected) {
-        $optionSelected = Tap-Node $uiDialog 'resource-id="android:id/text1"' "첫 번째 라디오 옵션 (ID)" -Optional
-    }
-    if (-not $optionSelected) {
-        $optionSelected = Tap-Node $uiDialog 'text="리셋 시까지"' "리셋 시까지 옵션 (Korean text)"
-    }
-
-    $uiPinDialog = Wait-For-UI "guardian_enter_password|Enter guardian password|비밀번호 입력|Password" 6
-    $nodePin = Get-NodeBounds $uiPinDialog 'class="android.widget.EditText"'
-    if (-not $nodePin.Found) {
-        $nodePin = Get-NodeBounds $uiPinDialog 'password="true"'
-    }
-    if (-not $nodePin.Found) {
-        $nodePin = Get-NodeBounds $uiPinDialog 'text="Password"'
-    }
-
-    if ($nodePin.Found) {
-        adb shell "input tap $($nodePin.X) $($nodePin.Y)" | Out-Null
-        Start-Sleep -Milliseconds 500
-        adb shell "input keyevent 67 67 67 67 67" | Out-Null
-        adb shell "input text $Pin" | Out-Null
-        Start-Sleep -Milliseconds 500
-        Write-Success "Entered valid PIN '$Pin'."
-
-        $uiAfterTyping = Dump-UI
-        $continued = Tap-Node $uiAfterTyping 'resource-id="android:id/button1"' "계속/확인 버튼 (Resource-ID)" -Optional
-        if (-not $continued) {
-            $continued = Tap-Node $uiAfterTyping 'text="계속"' "계속 텍스트 버튼 (Korean)" -Optional
-        }
-        if (-not $continued) {
-            $continued = Tap-Node $uiAfterTyping 'text="Continue"' "Continue text button (English)"
-        }
+    $validSubmitted = Submit-GuardianPin -PinValue $Pin
+    if ($validSubmitted) {
+        Write-Success "Submitted valid PIN '$Pin'."
 
         # Wait for Target App to regain focus
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -271,7 +252,7 @@ try {
             $passedAll = $false
         }
     } else {
-        Write-Fail "Could not find PIN input EditText node for valid PIN entry!"
+        Write-Fail "Failed to submit valid PIN."
         $passedAll = $false
     }
 

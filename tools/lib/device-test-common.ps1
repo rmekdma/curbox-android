@@ -525,7 +525,7 @@ function Set-DeviceGuardianAuthConfig($GuardianAuthConfig, [string]$PackageName 
     }
     $settingsObj.guardianAuthConfig = $GuardianAuthConfig
     $jsonStr = $settingsObj | ConvertTo-Json -Depth 20 -Compress
-    Push-TempStringToDevice -Content $jsonStr -RemotePath "/data/local/tmp/settings_guardian.json"
+    Push-TempStringToDevice -Content $jsonStr -RemotePath "/data/local/tmp/settings_guardian.json" | Out-Null
     adb shell "run-as $PackageName cp /data/local/tmp/settings_guardian.json files/datastore/settings.json" | Out-Null
     adb shell "run-as $PackageName chmod 660 files/datastore/settings.json" | Out-Null
     adb shell "rm -f /data/local/tmp/settings_guardian.json" | Out-Null
