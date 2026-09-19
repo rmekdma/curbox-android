@@ -102,24 +102,32 @@ class AppBlockerService : BaseBlockingService() {
         }
 
         try {
-            // AppUsageTracker.onEvent is synchronous at this seam: it checkpoints the previous
-            // foreground sessions before the rule evaluator reads them. Keep these calls ordered
-            // and independently contained so a storage failure cannot kill later events.
-            // Flush the previous session before evaluating the newly foregrounded package.
-            if (appUsageTrackerReady) appUsageTracker.onEvent(event)
+            // The app-rule worker owns the serialized session flush and decision path. Keep the
+            // legacy tracker fallback only when that worker could not be started.
+            if (appUsageTrackerReady && !appRuleBlockerReady) appUsageTracker.onEvent(event)
         } catch (t: Throwable) {
             Log.e("Usage Tracking error", t.toString())
             crashLogger.logNonFatalError(Exception(t))
         }
 
-        try {
-            // This must remain after the usage flush above. Contributor earning and target
-            // consumption both use the current-use-day raw session ledger.
-            if (appRuleBlockerReady) appRuleBlocker.doAppRuleCheck(event)
-        } catch (t: Throwable) {
-            Log.e("App rule check error", t.toString())
-            crashLogger.logNonFatalError(Exception(t))
-        }
+        // This must remain after the usage flush above. Contributor earning and target
+        // consumption both use the current-use-day raw session ledger. The worker itself still
+        // rethrows cancellation, but this callback is a synchronous service boundary: a worker
+        // cancellation must not skip the remaining accessibility event handling.
+        runAppRuleCheckAtSynchronousServiceBoundary(
+            action = { if (appRuleBlockerReady) appRuleBlocker.doAppRuleCheck(event) },
+            onCancellation = { cancellation ->
+                Log.w(
+                    "App rule check",
+                    "App rule worker cancellation was contained at the service boundary",
+                    cancellation
+                )
+            },
+            onNonFatal = { t ->
+                Log.e("App rule check error", t.toString())
+                crashLogger.logNonFatalError(Exception(t))
+            }
+        )
 
         try {
             mindfulMessage.onEvent(event)
@@ -210,6 +218,11 @@ class AppBlockerService : BaseBlockingService() {
         }
         try {
             appRuleBlocker.setup(this)
+            if (appUsageTrackerReady) {
+                appUsageTracker.handoffForegroundOwnershipToDecisionWorker(
+                    onUsageReset = appRuleBlocker::submitUsageReset
+                )
+            }
             appRuleBlockerReady = true
         } catch (t: Throwable) {
             crashLogger.logNonFatalError(Exception(t))
@@ -300,5 +313,19 @@ class AppBlockerService : BaseBlockingService() {
             }
             Log.e("AppBlockerService", "$name cleanup failed", error)
         }
+    }
+}
+
+internal fun runAppRuleCheckAtSynchronousServiceBoundary(
+    action: () -> Unit,
+    onCancellation: (CancellationException) -> Unit,
+    onNonFatal: (Throwable) -> Unit
+) {
+    try {
+        action()
+    } catch (error: CancellationException) {
+        runCatching { onCancellation(error) }
+    } catch (error: Throwable) {
+        runCatching { onNonFatal(error) }
     }
 }

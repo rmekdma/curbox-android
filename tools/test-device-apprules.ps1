@@ -2,7 +2,7 @@
 .SYNOPSIS
     Test script for Curbox App Rules (Notification & Lock Screen) via ADB.
 .DESCRIPTION
-    1. Backs up current settings.json from device.
+    1. Backs up current settings.json from device using device-test-common.
     2. Injects a test AppRule with condition shortfall onto the target package.
     3. Broadcasts REFRESH_APP_RULES to update AppBlockerService.
     4. Verifies Foreground Notification displays the condition shortfall format.
@@ -17,6 +17,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Dot-source common device testing harness
+. "$PSScriptRoot/lib/device-test-common.ps1"
+
 function Write-Step($msg) {
     Write-Host "`n====> $msg" -ForegroundColor Cyan
 }
@@ -29,10 +32,7 @@ function Write-Fail($msg) {
     Write-Host "[FAIL] $msg" -ForegroundColor Red
 }
 
-$device = (adb devices | Select-String -Pattern "device$")
-if (-not $device) {
-    Write-Error "No connected adb device found!"
-}
+Assert-AdbDevice
 
 $tmpDir = Join-Path $env:TEMP "curbox_test"
 if (-not (Test-Path $tmpDir)) {
@@ -44,11 +44,7 @@ $testSettingsFile = Join-Path $tmpDir "settings_test.json"
 
 try {
     Write-Step "1. Backing up device settings.json..."
-    $rawSettings = adb shell "run-as neth.iecal.curbox.debug cat files/datastore/settings.json" | Out-String
-    if (-not $rawSettings -or $rawSettings -notmatch "\{") {
-        Write-Error "Failed to read settings.json from device!"
-    }
-    Set-Content -Path $backupFile -Value $rawSettings -Encoding UTF8
+    $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
     Write-Success "Backup saved to $backupFile"
 
     Write-Step "2. Crafting Test AppRule configuration..."
@@ -111,24 +107,24 @@ try {
         }
     }
 
-    $settingsObj.appRuleSnapshot = [PSCustomObject]@{
+    $appRuleSnapshot = [PSCustomObject]@{
         appGroups = @($groupTarget, $groupContrib)
         appRules = @($rule)
     }
 
+    $settingsObj.appRuleSnapshot = $appRuleSnapshot
+
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     $testSettingsJson = $settingsObj | ConvertTo-Json -Depth 20 -Compress
-    Set-Content -Path $testSettingsFile -Value $testSettingsJson -Encoding UTF8
+    [System.IO.File]::WriteAllText($testSettingsFile, $testSettingsJson, $utf8NoBom)
 
     Write-Step "3. Pushing test configuration to device..."
-    adb push $testSettingsFile "/data/local/tmp/settings_test.json" | Out-Null
-    adb shell "run-as neth.iecal.curbox.debug cp /data/local/tmp/settings_test.json files/datastore/settings.json"
-    adb shell "rm /data/local/tmp/settings_test.json"
-    Write-Success "Injected test settings into DataStore."
+    Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot
+    Write-Success "Injected test AppRules via broadcast seam."
 
     Write-Step "4. Refreshing Curbox AppBlockerService..."
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p neth.iecal.curbox.debug" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p neth.iecal.curbox.debug" | Out-Null
-    Start-Sleep -Seconds 2
+    # Inject-TestAppRules already triggers refreshes; additional wait if needed
+    Start-Sleep -Seconds 1
 
     Write-Step "5. Verifying Foreground Live Notification on device..."
     $notifDump = adb shell "dumpsys notification --noredact" | Out-String
@@ -139,6 +135,7 @@ try {
     }
 
     Write-Step "6. Launching Target App ($TargetPackage) to trigger Lock Screen..."
+    Set-DeviceAwake $true
     adb shell "input keyevent 224" # WAKEUP
     adb shell "wm dismiss-keyguard"
     adb shell "am force-stop $TargetPackage" | Out-Null
@@ -147,18 +144,17 @@ try {
     Start-Sleep -Seconds 3
 
     Write-Step "7. Checking if GuardianApprovalActivity is displayed..."
-    $windowFocus = adb shell "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
-    Write-Host "Focused Window/App: $windowFocus"
+    $focusResult = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+    Write-Host "Focused Window/App: $($focusResult.RawFocus)"
 
-    $isGuardianTop = $windowFocus -match "GuardianApprovalActivity"
+    $isGuardianTop = $focusResult.Success
     if ($isGuardianTop) {
         Write-Success "GuardianApprovalActivity is on top of screen!"
     } else {
         Write-Fail "GuardianApprovalActivity is NOT on top."
     }
 
-    adb shell "uiautomator dump /sdcard/lock_dump.xml" | Out-Null
-    $uiDump = adb shell "cat /sdcard/lock_dump.xml" | Out-String
+    $uiDump = Dump-UI
 
     $hasConditionNotMet = $uiDump -match "사용 조건 미달" -or $uiDump -match "Usage condition not met"
     $hasTimeExhausted = $uiDump -match "사용 가능 시간 소진" -or $uiDump -match "Available time exhausted"
@@ -186,12 +182,9 @@ try {
 
 } finally {
     Write-Step "8. Cleanup & Restoring original settings.json..."
+    Set-DeviceAwake $false
     if (Test-Path $backupFile) {
-        adb push $backupFile "/data/local/tmp/settings_backup.json" | Out-Null
-        adb shell "run-as neth.iecal.curbox.debug cp /data/local/tmp/settings_backup.json files/datastore/settings.json"
-        adb shell "rm /data/local/tmp/settings_backup.json"
-        adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules" | Out-Null
-        adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker" | Out-Null
+        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
         adb shell "input keyevent 3" # HOME
         Write-Success "Original settings restored."
     }
