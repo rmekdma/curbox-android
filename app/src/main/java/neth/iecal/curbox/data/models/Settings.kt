@@ -43,7 +43,9 @@ data class Settings(
     /** Local guardian credential, independent from anti-uninstall protection. */
     val guardianAuthConfig: GuardianAuthConfig = GuardianAuthConfig(),
     /** Rule-scoped approvals; reset atomically by use-day id. */
-    val appRuleOverrideState: AppRuleOverrideState = AppRuleOverrideState()
+    val appRuleOverrideState: AppRuleOverrideState = AppRuleOverrideState(),
+    /** Multi-day accumulated rollover state across all app rules. */
+    val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState()
 ) {
     /** Convenient scalar form for settings UIs and deterministic tests. */
     val useDayResetTimeMinutes: Int
@@ -55,3 +57,22 @@ data class Settings(
     val guardianPasswordConfigured: Boolean
         get() = guardianAuthConfig.isConfigured
 }
+
+/** Multi-day accumulated rollover pool for a single app rule. */
+data class RuleRolloverPool(
+    val ruleId: String = "",
+    val accumulatedMinutes: Long = 0L,
+    val lastSettledUseDayId: String = ""
+)
+
+/** Multi-day accumulated rollover state across all app rules. */
+data class AppRuleRolloverState(
+    val pools: Map<String, RuleRolloverPool> = emptyMap()
+) {
+    fun poolFor(ruleId: String): RuleRolloverPool =
+        pools[ruleId] ?: RuleRolloverPool(ruleId = ruleId)
+
+    fun withPool(pool: RuleRolloverPool): AppRuleRolloverState =
+        copy(pools = pools + (pool.ruleId to pool))
+}
+

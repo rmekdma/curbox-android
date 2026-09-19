@@ -317,6 +317,10 @@ class AppRuleGroupsFragment : Fragment() {
                     )
                 )
             )
+            append("\n")
+            append(formatAppRuleRolloverSummary(rule) { resId, args ->
+                if (args.isEmpty()) getString(resId) else getString(resId, *args)
+            })
             if (missingContributorIds.isNotEmpty()) {
                 append("\n")
                 append(getString(R.string.app_rules_missing_contributor))
@@ -415,3 +419,27 @@ class AppRuleGroupsFragment : Fragment() {
 
     private fun Long.toMinutesForDisplay(): Long = this / MILLIS_PER_MINUTE
 }
+
+internal fun formatAppRuleRolloverSummary(
+    rule: AppRule,
+    stringResolver: (Int, Array<out Any>) -> String
+): String {
+    return if (rule.rolloverEnabled) {
+        val dayResIds = listOf(
+            R.string.app_rules_sunday_short,
+            R.string.app_rules_monday_short,
+            R.string.app_rules_tuesday_short,
+            R.string.app_rules_wednesday_short,
+            R.string.app_rules_thursday_short,
+            R.string.app_rules_friday_short,
+            R.string.app_rules_saturday_short
+        )
+        val unlockDaysText = rule.unlockDays.sorted().mapNotNull { dayIndex ->
+            dayResIds.getOrNull(dayIndex)?.let { stringResolver(it, emptyArray()) }
+        }.joinToString(", ")
+        stringResolver(R.string.app_rules_rollover_summary_on, arrayOf(unlockDaysText))
+    } else {
+        stringResolver(R.string.app_rules_rollover_summary_off, emptyArray())
+    }
+}
+

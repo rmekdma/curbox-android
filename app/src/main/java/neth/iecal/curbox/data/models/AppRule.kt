@@ -184,7 +184,11 @@ data class AppRule(
     /** Per contributor group condition minutes. Zero or missing indicates unconstrained. */
     val contributorGroupConditionMinutes: Map<String, Long> = emptyMap(),
     /** When enabled, contributor usage is added one to one after the condition is met. */
-    val earnedAllowanceEnabled: Boolean = false
+    val earnedAllowanceEnabled: Boolean = false,
+    /** When enabled, unused guardian extra time rolls over into the accumulated pool. */
+    val rolloverEnabled: Boolean = false,
+    /** Days of week when accumulated rollover time can be unlocked (Sunday=0..Saturday=6). */
+    val unlockDays: Set<Int> = emptySet()
 ) {
     companion object {
         fun create(
@@ -199,7 +203,9 @@ data class AppRule(
             usageConditionEnabled: Boolean = false,
             usageConditionMinutes: Long = 0L,
             contributorGroupConditionMinutes: Map<String, Long> = emptyMap(),
-            earnedAllowanceEnabled: Boolean = false
+            earnedAllowanceEnabled: Boolean = false,
+            rolloverEnabled: Boolean = false,
+            unlockDays: Set<Int> = emptySet()
         ): AppRule = AppRule(
             id = newId(),
             name = name,
@@ -213,7 +219,9 @@ data class AppRule(
             usageConditionEnabled = usageConditionEnabled,
             usageConditionMinutes = usageConditionMinutes,
             contributorGroupConditionMinutes = contributorGroupConditionMinutes,
-            earnedAllowanceEnabled = earnedAllowanceEnabled
+            earnedAllowanceEnabled = earnedAllowanceEnabled,
+            rolloverEnabled = rolloverEnabled,
+            unlockDays = unlockDays.toSet()
         )
     }
 
@@ -279,6 +287,8 @@ data class AppRuleSnapshot(
                 contributorGroupIds = rule.effectiveContributorGroupIds(),
                 usageConditionMinutes = rule.usageConditionMinutes,
                 contributorGroupConditionMinutes = rule.effectiveContributorGroupConditionMinutes(),
+                rolloverEnabled = rule.rolloverEnabled,
+                unlockDays = rule.unlockDays.filter { it in 0..6 }.toSet(),
                 timeRanges = rule.timeRanges.ifEmpty {
                     listOf(AppRuleTimeRange(rule.startMinute, rule.endMinute))
                 }
@@ -315,6 +325,12 @@ data class AppRuleSnapshot(
             }
             if (rule.weekdays.isEmpty() || rule.weekdays.any { it !in 0..6 }) {
                 errors += "App rule ${rule.id} contains an invalid weekday"
+            }
+            if (rule.rolloverEnabled && rule.unlockDays.isEmpty()) {
+                errors += "App rule ${rule.id} has rollover enabled but no unlock days"
+            }
+            if (rule.unlockDays.any { it !in 0..6 }) {
+                errors += "App rule ${rule.id} contains an invalid unlock day"
             }
             rule.effectiveTimeRanges().forEach { range ->
                 if (range.startMinute !in 0 until 24 * 60) {

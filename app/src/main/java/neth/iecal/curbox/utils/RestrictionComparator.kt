@@ -118,9 +118,25 @@ object RestrictionComparator {
         if (!appRuleScopeSameOrWider(old, new, oldGroups, newGroups)) return false
         if (new.allowedMinutes > old.allowedMinutes) return false
         if (!appRuleContributionSameOrStricter(old, new, oldGroups, newGroups)) return false
+        if (!appRuleRolloverSameOrStricter(old, new)) return false
         val oldCoverage = ruleCoverage(old)
         val newCoverage = ruleCoverage(new)
         return oldCoverage.indices.all { !oldCoverage[it] || newCoverage[it] }
+    }
+
+    /**
+     * Unused extra time rollover and unlock days comparison:
+     * Enabling rollover or adding unlock days weakens the restriction and must be held by the settings delay.
+     * Disabling rollover or removing unlock days makes the rule stricter and applies immediately.
+     */
+    fun appRuleRolloverSameOrStricter(old: AppRule, new: AppRule): Boolean {
+        if (!old.rolloverEnabled) {
+            return !new.rolloverEnabled
+        }
+        if (!new.rolloverEnabled) {
+            return true
+        }
+        return old.unlockDays.containsAll(new.unlockDays)
     }
 
     /** Public seam used by tests and settings editors to classify scope-only edits. */
