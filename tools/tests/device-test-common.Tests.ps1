@@ -307,6 +307,134 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             (Stop-ServiceProcess -TargetPid -1) | Should Be $false
         }
     }
+
+    Context "New-RolloverAppRuleConfig" {
+        It "builds a valid AppRuleSnapshot structure with rolloverEnabled and unlockDays" {
+            $snapshot = New-RolloverAppRuleConfig -TargetPackage "com.test.target" -UnlockDays @(0, 6) -AllowedMinutes 0
+            $snapshot | Should Not BeNullOrEmpty
+            $snapshot.appGroups.Count | Should Be 1
+            $snapshot.appRules.Count | Should Be 1
+
+            $rule = $snapshot.appRules[0]
+            $rule.isActive | Should Be $true
+            $rule.rolloverEnabled | Should Be $true
+            ($rule.unlockDays -contains 0) | Should Be $true
+            ($rule.unlockDays -contains 6) | Should Be $true
+            $rule.allowedMinutes | Should Be 0
+            ($rule.scope.includedGroupIds -contains $snapshot.appGroups[0].id) | Should Be $true
+        }
+    }
+
+    Context "New-RuleRolloverPool" {
+        It "creates a PSCustomObject with ruleId, accumulatedMinutes, and lastSettledUseDayId" {
+            $pool = New-RuleRolloverPool -RuleId "test-rule-01" -AccumulatedMinutes 30 -LastSettledUseDayId "2026-09-19"
+            $pool | Should Not BeNullOrEmpty
+            $pool.ruleId | Should Be "test-rule-01"
+            $pool.accumulatedMinutes | Should Be 30
+            $pool.lastSettledUseDayId | Should Be "2026-09-19"
+        }
+    }
+
+    Context "Test-AppRuleGuardianGrant" {
+        It "returns true when matching grant is found in overrideState" {
+            $overrideState = [PSCustomObject]@{
+                grants = @(
+                    [PSCustomObject]@{
+                        ruleId = "test-rule-01"
+                        useDayId = "2026-09-19"
+                        grantedMillis = [long]1800000
+                        grantedAtMs = [long]1760000000000
+                        isFromAccumulatedPool = $true
+                    }
+                )
+            }
+            (Test-AppRuleGuardianGrant -OverrideState $overrideState -RuleId "test-rule-01" -ExpectedGrantedMillis 1800000 -IsFromAccumulatedPool $true -ExpectedUseDayId "2026-09-19") | Should Be $true
+        }
+
+        It "returns false when expected useDayId does not match" {
+            $overrideState = [PSCustomObject]@{
+                grants = @(
+                    [PSCustomObject]@{
+                        ruleId = "test-rule-01"
+                        useDayId = "2026-09-18"
+                        grantedMillis = [long]1800000
+                        grantedAtMs = [long]1760000000000
+                        isFromAccumulatedPool = $true
+                    }
+                )
+            }
+            (Test-AppRuleGuardianGrant -OverrideState $overrideState -RuleId "test-rule-01" -ExpectedGrantedMillis 1800000 -IsFromAccumulatedPool $true -ExpectedUseDayId "2026-09-19") | Should Be $false
+        }
+
+        It "returns false when isFromAccumulatedPool does not match" {
+            $overrideState = [PSCustomObject]@{
+                grants = @(
+                    [PSCustomObject]@{
+                        ruleId = "test-rule-01"
+                        useDayId = "2026-09-19"
+                        grantedMillis = [long]1800000
+                        grantedAtMs = [long]1760000000000
+                        isFromAccumulatedPool = $false
+                    }
+                )
+            }
+            (Test-AppRuleGuardianGrant -OverrideState $overrideState -RuleId "test-rule-01" -ExpectedGrantedMillis 1800000 -IsFromAccumulatedPool $true) | Should Be $false
+        }
+
+        It "returns false when ruleId does not match or grants is empty" {
+            $overrideState = [PSCustomObject]@{ grants = @() }
+            (Test-AppRuleGuardianGrant -OverrideState $overrideState -RuleId "test-rule-01") | Should Be $false
+        }
+    }
+
+    Context "Get-RuleRolloverPool" {
+        It "extracts pool by ruleId from settings object" {
+            $poolObj = [PSCustomObject]@{
+                ruleId = "test-rule-01"
+                accumulatedMinutes = [long]25
+                lastSettledUseDayId = "2026-09-19"
+            }
+            $settings = [PSCustomObject]@{
+                appRuleRolloverState = [PSCustomObject]@{
+                    pools = [PSCustomObject]@{
+                        "test-rule-01" = $poolObj
+                    }
+                }
+            }
+            $result = Get-RuleRolloverPool -SettingsOrRolloverState $settings -RuleId "test-rule-01"
+            $result | Should Not BeNullOrEmpty
+            $result.accumulatedMinutes | Should Be 25
+        }
+
+        It "returns null when pool does not exist" {
+            $settings = [PSCustomObject]@{
+                appRuleRolloverState = [PSCustomObject]@{
+                    pools = [PSCustomObject]@{}
+                }
+            }
+            $result = Get-RuleRolloverPool -SettingsOrRolloverState $settings -RuleId "non-existent"
+            $result | Should Be $null
+        }
+    }
+
+    Context "Submit-GuardianPin" {
+        It "returns false when PIN dialog is not found in UI" {
+            Mock Wait-For-UI { return "<empty/>" }
+            Mock Write-Fail { }
+            $res = Submit-GuardianPin -PinValue "1234"
+            $res | Should Be $false
+        }
+    }
+
+    Context "Set-DeviceRolloverState" {
+        It "returns false when Get-DeviceSettings returns null" {
+            Mock Get-DeviceSettings { return $null }
+            Mock Write-Error { }
+            $res = Set-DeviceRolloverState -RolloverState ([PSCustomObject]@{})
+            $res | Should Be $false
+        }
+    }
 }
+
 
 
