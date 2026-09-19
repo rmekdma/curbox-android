@@ -66,4 +66,57 @@ class DataStoreGuardianWriteTest {
             )
         )
     }
+
+    @Test
+    fun accumulatedGrantWriteResultVerifiesBothPoolDeductionAndGrantWithFlag() {
+        val finalSettings = Settings(
+            appRuleRolloverState = neth.iecal.curbox.data.models.AppRuleRolloverState(
+                pools = mapOf("rule" to neth.iecal.curbox.data.models.RuleRolloverPool("rule", 15L, "day"))
+            ),
+            appRuleOverrideState = AppRuleOverrideState(
+                useDayId = "day",
+                grants = listOf(
+                    AppRuleGuardianGrant("rule", "day", 100L, 30 * 60_000L, isFromAccumulatedPool = true)
+                )
+            )
+        )
+
+        assertTrue(
+            GuardianDataStoreWriteResult.accumulatedGrantWasStored(
+                settings = finalSettings,
+                ruleId = "rule",
+                useDayId = "day",
+                grantedMillis = 30 * 60_000L,
+                grantedAtMs = 100L,
+                expectedRemainingPoolMinutes = 15L
+            )
+        )
+        assertFalse(
+            GuardianDataStoreWriteResult.accumulatedGrantWasStored(
+                settings = finalSettings,
+                ruleId = "rule",
+                useDayId = "day",
+                grantedMillis = 30 * 60_000L,
+                grantedAtMs = 100L,
+                expectedRemainingPoolMinutes = 20L
+            )
+        )
+        assertFalse(
+            GuardianDataStoreWriteResult.accumulatedGrantWasStored(
+                settings = finalSettings.copy(
+                    appRuleOverrideState = AppRuleOverrideState(
+                        useDayId = "day",
+                        grants = listOf(
+                            AppRuleGuardianGrant("rule", "day", 100L, 30 * 60_000L, isFromAccumulatedPool = false)
+                        )
+                    )
+                ),
+                ruleId = "rule",
+                useDayId = "day",
+                grantedMillis = 30 * 60_000L,
+                grantedAtMs = 100L,
+                expectedRemainingPoolMinutes = 15L
+            )
+        )
+    }
 }

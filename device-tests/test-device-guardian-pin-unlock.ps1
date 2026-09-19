@@ -99,7 +99,7 @@ function Submit-GuardianPin([string]$PinValue) {
 
     adb shell "input tap $($nodePin.X) $($nodePin.Y)" | Out-Null
     Start-Sleep -Milliseconds 500
-    # Android IME Backspace keyevent 67 repeated per tools/AGENTS.md
+    # Android IME Backspace keyevent 67 repeated per device-tests/AGENTS.md
     adb shell "input keyevent 67 67 67 67 67" | Out-Null
     adb shell "input text $PinValue" | Out-Null
     Start-Sleep -Milliseconds 500
@@ -156,7 +156,7 @@ try {
         -RuleId $ruleId
 
     Write-Step "4. Injecting test AppRule configuration via broadcast seam..."
-    # Isolate daily accumulation with UsageGenerationStartedAtMs per tools/AGENTS.md
+    # Isolate daily accumulation with UsageGenerationStartedAtMs per device-tests/AGENTS.md
     Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot -UsageGenerationStartedAtMs $testStartTimeMs
     Write-Success "Injected test AppRules via broadcast seam with usage generation isolation."
 

@@ -5,6 +5,7 @@ object SettingsSyncBoundary {
     fun forUpload(settings: Settings): Settings = settings.copy(
         useDayGenerationStartedAtMs = 0L,
         guardianAuthConfig = GuardianAuthConfig(),
-        appRuleOverrideState = AppRuleOverrideState()
+        appRuleOverrideState = AppRuleOverrideState(),
+        appRuleRolloverState = AppRuleRolloverState()
     )
 }

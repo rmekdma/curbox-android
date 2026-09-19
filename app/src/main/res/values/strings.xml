@@ -1424,9 +1424,13 @@
     <string name="guardian_denial_row">%1$s
 %2$s</string>
     <string name="guardian_add_time">Change extra time</string>
+    <string name="guardian_use_accumulated_time">Use accumulated time (%1$d min available)</string>
+    <string name="guardian_use_accumulated_time_title">Use accumulated time</string>
+    <string name="guardian_accumulated_available_desc">Available accumulated time: %1$d min</string>
     <string name="guardian_skip_rule">Skip this rule</string>
     <string name="guardian_minutes_hint">Minutes</string>
     <string name="guardian_invalid_minutes">Enter a positive number of minutes.</string>
+    <string name="guardian_exceeds_accumulated_minutes">Cannot exceed available accumulated minutes.</string>
     <string name="guardian_extra_minutes">Extra time</string>
     <string name="guardian_total_extra_minutes">Total extra time</string>
     <string name="guardian_current_total">Current total extra time: %1$d minutes</string>
@@ -1458,6 +1462,21 @@
     <string name="app_rules_thursday">Thursday</string>
     <string name="app_rules_friday">Friday</string>
     <string name="app_rules_saturday">Saturday</string>
+    <string name="app_rules_sunday_short">Sun</string>
+    <string name="app_rules_monday_short">Mon</string>
+    <string name="app_rules_tuesday_short">Tue</string>
+    <string name="app_rules_wednesday_short">Wed</string>
+    <string name="app_rules_thursday_short">Thu</string>
+    <string name="app_rules_friday_short">Fri</string>
+    <string name="app_rules_saturday_short">Sat</string>
+    <string name="app_rules_rollover_enabled">Roll over unused extra time</string>
+    <string name="app_rules_unlock_days">Unlock days</string>
+    <string name="app_rules_rollover_unlock_days_required">Choose at least one unlock day to roll over extra time</string>
+    <string name="app_rules_rollover_summary_on">Rollover on (%1$s)</string>
+    <string name="app_rules_rollover_summary_off">Rollover off</string>
+    <string name="app_rules_accumulated_time_summary">Accumulated extra time this week: %1$d minutes</string>
+    <string name="app_rules_change_accumulated_time">Change accumulated time</string>
+    <string name="app_rules_invalid_accumulated_minutes">Enter a valid number of minutes (0 or more).</string>
     <string name="app_rules_include_all_apps">Include all launchable apps</string>
     <string name="app_rules_include_groups">Include app groups</string>
     <string name="app_rules_exclude_groups">Exclude app groups</string>

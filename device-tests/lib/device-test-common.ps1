@@ -30,6 +30,12 @@
     - Test-AccessibilityServiceBound: Verify whether accessibility service is bound
     - Stop-ServiceProcess: Terminate or induce crash on target process PID
     - Enable-AccessibilityService: Ensure accessibility service is enabled in secure settings
+    - New-RolloverAppRuleConfig: Generate AppRuleSnapshot with rolloverEnabled and unlockDays
+    - New-RuleRolloverPool: Generate RuleRolloverPool PSCustomObject
+    - Test-AppRuleGuardianGrant: Verify whether an AppRuleGuardianGrant is recorded in override state
+    - Get-RuleRolloverPool: Query RuleRolloverPool object from Settings or AppRuleRolloverState
+    - Set-DeviceRolloverState: Inject AppRuleRolloverState into device settings.json with 660 permissions and broadcast refresh
+    - Submit-GuardianPin: Enter and submit guardian PIN in password dialog via UIAutomator
 #>
 
 function Write-Step([string]$Msg) {
@@ -131,12 +137,21 @@ function Set-DeviceUsageGeneration([long]$GenerationStartedAtMs = 0, [string]$Pa
     return $GenerationStartedAtMs
 }
 
-function Inject-TestAppRules($AppRuleSnapshot, [string]$PackageName = "neth.iecal.curbox.debug", [long]$UsageGenerationStartedAtMs = 0) {
+function Inject-TestAppRules(
+    $AppRuleSnapshot,
+    [string]$PackageName = "neth.iecal.curbox.debug",
+    [long]$UsageGenerationStartedAtMs = 0,
+    $AppRuleRolloverState = $null
+) {
     adb shell "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName" | Out-Null
     Start-Sleep -Milliseconds 500
 
     if ($UsageGenerationStartedAtMs -gt 0) {
         Set-DeviceUsageGeneration -GenerationStartedAtMs $UsageGenerationStartedAtMs -PackageName $PackageName | Out-Null
+    }
+
+    if ($AppRuleRolloverState) {
+        Set-DeviceRolloverState -RolloverState $AppRuleRolloverState -PackageName $PackageName | Out-Null
     }
 
     $rulesSnapshotJson = if ($AppRuleSnapshot -is [string]) {
@@ -612,4 +627,176 @@ function Enable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.d
     }
     return $true
 }
+
+function New-RolloverAppRuleConfig(
+    [string]$TargetPackage,
+    [int[]]$UnlockDays = @(0, 6),
+    [long]$AllowedMinutes = 0,
+    [string]$TargetGroupId = "test-target-group-01",
+    [string]$RuleId = "test-rule-rollover-01"
+) {
+    $groupTarget = New-TestAppGroup -GroupId $TargetGroupId -GroupName "테스트 타깃 앱" -Packages @($TargetPackage)
+
+    $rule = [PSCustomObject]@{
+        id = $RuleId
+        name = "이월 보호자 추가시간 테스트"
+        isActive = $true
+        weekdays = @(0, 1, 2, 3, 4, 5, 6)
+        startMinute = 0
+        endMinute = 0
+        appGroupId = $TargetGroupId
+        allowedMinutes = $AllowedMinutes
+        usageConditionEnabled = $false
+        usageConditionMinutes = 0
+        contributorGroupConditionMinutes = [PSCustomObject]@{}
+        contributorGroupIds = @()
+        earnedAllowanceEnabled = $false
+        rolloverEnabled = $true
+        unlockDays = @($UnlockDays)
+        timeRanges = @(
+            [PSCustomObject]@{
+                startMinute = 0
+                endMinute = 0
+            }
+        )
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($TargetGroupId)
+            excludedGroupIds = @()
+        }
+    }
+
+    return [PSCustomObject]@{
+        appGroups = @($groupTarget)
+        appRules = @($rule)
+    }
+}
+
+function New-RuleRolloverPool(
+    [string]$RuleId,
+    [long]$AccumulatedMinutes = 0,
+    [string]$LastSettledUseDayId = ""
+) {
+    return [PSCustomObject]@{
+        ruleId = $RuleId
+        accumulatedMinutes = $AccumulatedMinutes
+        lastSettledUseDayId = $LastSettledUseDayId
+    }
+}
+
+function Test-AppRuleGuardianGrant(
+    $OverrideState,
+    [string]$RuleId,
+    [long]$ExpectedGrantedMillis = 0,
+    [bool]$IsFromAccumulatedPool = $false,
+    [string]$ExpectedUseDayId = ""
+) {
+    if (-not $OverrideState -or -not $RuleId) {
+        return $false
+    }
+    $grants = if ($OverrideState.PSObject.Properties['grants']) {
+        $OverrideState.grants
+    } elseif ($OverrideState -is [System.Collections.IEnumerable] -and $OverrideState -isnot [string]) {
+        $OverrideState
+    } else {
+        $null
+    }
+    if (-not $grants) {
+        return $false
+    }
+    foreach ($grant in $grants) {
+        if ($grant.ruleId -eq $RuleId) {
+            $millisMatch = ($ExpectedGrantedMillis -le 0 -or [long]$grant.grantedMillis -eq $ExpectedGrantedMillis)
+            $fromPool = if ($grant.PSObject.Properties['isFromAccumulatedPool']) { [bool]$grant.isFromAccumulatedPool } else { $false }
+            $poolMatch = ($fromPool -eq $IsFromAccumulatedPool)
+            $useDayMatch = ([string]::IsNullOrEmpty($ExpectedUseDayId) -or $grant.useDayId -eq $ExpectedUseDayId)
+            if ($millisMatch -and $poolMatch -and $useDayMatch) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Submit-GuardianPin([string]$PinValue) {
+    $uiPinDialog = Wait-For-UI "guardian_enter_password|Enter guardian password|비밀번호 입력|Password" 6
+    if (-not ($uiPinDialog -match "Enter guardian password" -or $uiPinDialog -match "비밀번호 입력" -or $uiPinDialog -match "Password")) {
+        Write-Fail "Guardian PIN input dialog was NOT displayed."
+        return $false
+    }
+
+    $nodePin = Get-NodeBounds $uiPinDialog 'class="android.widget.EditText"'
+    if (-not $nodePin.Found) {
+        $nodePin = Get-NodeBounds $uiPinDialog 'password="true"'
+    }
+    if (-not $nodePin.Found) {
+        $nodePin = Get-NodeBounds $uiPinDialog 'text="Password"'
+    }
+
+    if (-not $nodePin.Found) {
+        Write-Fail "Could not locate PIN EditText node in UI dump."
+        return $false
+    }
+
+    adb shell "input tap $($nodePin.X) $($nodePin.Y)" | Out-Null
+    Start-Sleep -Milliseconds 500
+    # Android IME Backspace keyevent 67 repeated per device-tests/AGENTS.md
+    adb shell "input keyevent 67 67 67 67 67" | Out-Null
+    adb shell "input text $PinValue" | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    $uiAfterTyping = Dump-UI
+    # Resolution hierarchy: Resource-ID -> Primary Locale (Korean) -> Fallback Locale (English)
+    $continued = Tap-Node $uiAfterTyping 'resource-id="android:id/button1"' "계속/확인 버튼 (Resource-ID)" -Optional
+    if (-not $continued) {
+        $continued = Tap-Node $uiAfterTyping 'text="계속"' "계속 텍스트 버튼 (Korean)" -Optional
+    }
+    if (-not $continued) {
+        $continued = Tap-Node $uiAfterTyping 'text="Continue"' "Continue text button (English)"
+    }
+
+    return $continued
+}
+
+function Get-RuleRolloverPool(
+    $SettingsOrRolloverState,
+    [string]$RuleId
+) {
+    if (-not $SettingsOrRolloverState -or -not $RuleId) {
+        return $null
+    }
+    $rolloverState = if ($SettingsOrRolloverState.PSObject.Properties['appRuleRolloverState']) {
+        $SettingsOrRolloverState.appRuleRolloverState
+    } else {
+        $SettingsOrRolloverState
+    }
+    if (-not $rolloverState -or -not $rolloverState.PSObject.Properties['pools']) {
+        return $null
+    }
+    $pools = $rolloverState.pools
+    if ($pools.PSObject.Properties[$RuleId]) {
+        return $pools.$RuleId
+    }
+    return $null
+}
+
+function Set-DeviceRolloverState($RolloverState, [string]$PackageName = "neth.iecal.curbox.debug") {
+    $settingsObj = Get-DeviceSettings -PackageName $PackageName -AsObject
+    if (-not $settingsObj) {
+        Write-Error "Failed to read settings.json to update appRuleRolloverState!"
+        return $false
+    }
+    $settingsObj.appRuleRolloverState = $RolloverState
+    $jsonStr = $settingsObj | ConvertTo-Json -Depth 20 -Compress
+    Push-TempStringToDevice -Content $jsonStr -RemotePath "/data/local/tmp/settings_rollover.json" | Out-Null
+    adb shell "run-as $PackageName cp /data/local/tmp/settings_rollover.json files/datastore/settings.json" | Out-Null
+    adb shell "run-as $PackageName chmod 660 files/datastore/settings.json" | Out-Null
+    adb shell "rm -f /data/local/tmp/settings_rollover.json" | Out-Null
+
+    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
+    adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
+    Start-Sleep -Seconds 1
+    return $true
+}
+
 

@@ -230,6 +230,70 @@
             android:checked="true"
             android:text="@string/app_rules_saturday" />
 
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/rollover_switch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/app_rules_rollover_enabled" />
+
+        <LinearLayout
+            android:id="@+id/unlock_days_section"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_rules_unlock_days"
+                android:textStyle="bold" />
+
+            <CheckBox
+                android:id="@+id/unlock_day_sunday"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_rules_sunday" />
+
+            <CheckBox
+                android:id="@+id/unlock_day_monday"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_rules_monday" />
+
+            <CheckBox
+                android:id="@+id/unlock_day_tuesday"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_rules_tuesday" />
+
+            <CheckBox
+                android:id="@+id/unlock_day_wednesday"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_rules_wednesday" />
+
+            <CheckBox
+                android:id="@+id/unlock_day_thursday"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_rules_thursday" />
+
+            <CheckBox
+                android:id="@+id/unlock_day_friday"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_rules_friday" />
+
+            <CheckBox
+                android:id="@+id/unlock_day_saturday"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_rules_saturday" />
+        </LinearLayout>
+
         <com.google.android.material.button.MaterialButton
             android:id="@+id/save_rule_button"
             android:layout_width="match_parent"

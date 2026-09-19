@@ -71,6 +71,9 @@ class CreateAppRuleFragment : Fragment() {
         binding.usageConditionSwitch.setOnCheckedChangeListener { _, isChecked ->
             updateUsageConditionState(isChecked)
         }
+        binding.rolloverSwitch.setOnCheckedChangeListener { _, isChecked ->
+            updateRolloverState(isChecked)
+        }
         binding.selectIncludedGroupsButton.setOnClickListener {
             showGroupSelectionDialog(
                 titleRes = R.string.app_rules_include_groups,
@@ -107,6 +110,7 @@ class CreateAppRuleFragment : Fragment() {
             }
             updateIncludeAllAppsState(binding.includeAllAppsSwitch.isChecked)
             updateUsageConditionState(binding.usageConditionSwitch.isChecked)
+            updateRolloverState(binding.rolloverSwitch.isChecked)
             updateButtonLabels()
             renderContributorGroupConditionInputs()
             binding.deleteRuleButton.visibility = if (editingRule == null) View.GONE else View.VISIBLE
@@ -123,6 +127,16 @@ class CreateAppRuleFragment : Fragment() {
         binding.weekdaySaturday
     )
 
+    private fun unlockDayChecks(): List<CheckBox> = listOf(
+        binding.unlockDaySunday,
+        binding.unlockDayMonday,
+        binding.unlockDayTuesday,
+        binding.unlockDayWednesday,
+        binding.unlockDayThursday,
+        binding.unlockDayFriday,
+        binding.unlockDaySaturday
+    )
+
     private fun populate(rule: AppRule) {
         binding.nameInput.setText(rule.name)
         binding.allowanceInput.setText(rule.allowedMinutes.toString())
@@ -137,6 +151,8 @@ class CreateAppRuleFragment : Fragment() {
         binding.earnedAllowanceSwitch.isChecked = rule.earnedAllowanceEnabled
         binding.activeSwitch.isChecked = rule.isActive
         weekdayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.weekdays }
+        binding.rolloverSwitch.isChecked = rule.rolloverEnabled
+        unlockDayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.unlockDays }
         val scope = rule.effectiveScope()
         binding.includeAllAppsSwitch.isChecked = scope.includeAllApps
         selectedIncludedGroupIds.clear()
@@ -147,6 +163,7 @@ class CreateAppRuleFragment : Fragment() {
         selectedContributorGroupIds.addAll(rule.effectiveContributorGroupIds())
         updateIncludeAllAppsState(scope.includeAllApps)
         updateUsageConditionState(rule.usageConditionEnabled)
+        updateRolloverState(rule.rolloverEnabled)
         updateButtonLabels()
         renderContributorGroupConditionInputs()
 
@@ -161,6 +178,10 @@ class CreateAppRuleFragment : Fragment() {
 
     private fun updateUsageConditionState(enabled: Boolean) {
         binding.usageConditionSection.visibility = if (enabled) View.VISIBLE else View.GONE
+    }
+
+    private fun updateRolloverState(enabled: Boolean) {
+        binding.unlockDaysSection.visibility = if (enabled) View.VISIBLE else View.GONE
     }
 
     private fun renderContributorGroupConditionInputs() {
@@ -327,12 +348,32 @@ class CreateAppRuleFragment : Fragment() {
         val ranges = rangeEditors.map { editor ->
             AppRuleTimeRange(editor.startMinute, editor.endMinute)
         }
-        if (name.isEmpty() || allowance == null || allowance < 0 || totalConditionMinutes < 0L ||
-            weekdays.isEmpty() || ranges.isEmpty()
-        ) {
-            Toast.makeText(requireContext(), R.string.app_rules_complete_fields, Toast.LENGTH_SHORT).show()
-            return
+        val rolloverEnabled = binding.rolloverSwitch.isChecked
+        val unlockDays = unlockDayChecks().mapIndexedNotNull { index, check ->
+            index.takeIf { check.isChecked }
+        }.toSet()
+
+        val validationError = validateRuleEditorInputs(
+            name = name,
+            allowance = allowance,
+            totalConditionMinutes = totalConditionMinutes,
+            weekdays = weekdays,
+            ranges = ranges,
+            rolloverEnabled = rolloverEnabled,
+            unlockDays = unlockDays
+        )
+        when (validationError) {
+            RuleEditorValidationError.MISSING_FIELDS -> {
+                Toast.makeText(requireContext(), R.string.app_rules_complete_fields, Toast.LENGTH_SHORT).show()
+                return
+            }
+            RuleEditorValidationError.ROLLOVER_UNLOCK_DAYS_REQUIRED -> {
+                Toast.makeText(requireContext(), R.string.app_rules_rollover_unlock_days_required, Toast.LENGTH_SHORT).show()
+                return
+            }
+            null -> Unit
         }
+
         val scope = AppRuleScope(
             includeAllApps = binding.includeAllAppsSwitch.isChecked,
             includedGroupIds = if (binding.includeAllAppsSwitch.isChecked) emptySet() else selectedIncludedGroupIds.toSet(),
@@ -345,37 +386,32 @@ class CreateAppRuleFragment : Fragment() {
         val usageConditionEnabled = binding.usageConditionSwitch.isChecked
         val earnedAllowanceEnabled = binding.earnedAllowanceSwitch.isChecked
         val firstRange = ranges.first()
-        val rule = editingRule?.copy(
+        val baseRule = editingRule ?: AppRule.create(
+            name = name,
+            weekdays = weekdays,
+            startMinute = firstRange.startMinute,
+            endMinute = firstRange.endMinute,
+            appGroupId = "",
+            allowedMinutes = allowance!!,
+            isActive = binding.activeSwitch.isChecked
+        )
+        val rule = baseRule.copy(
             name = name,
             isActive = binding.activeSwitch.isChecked,
             weekdays = weekdays,
             startMinute = firstRange.startMinute,
             endMinute = firstRange.endMinute,
             appGroupId = "",
-            allowedMinutes = allowance,
+            allowedMinutes = allowance!!,
             scope = scope,
             timeRanges = ranges,
             contributorGroupIds = contributorGroupIds,
             usageConditionEnabled = usageConditionEnabled,
             usageConditionMinutes = totalConditionMinutes,
             contributorGroupConditionMinutes = cleanedGroupConditionMinutes,
-            earnedAllowanceEnabled = earnedAllowanceEnabled
-        ) ?: AppRule.create(
-            name = name,
-            weekdays = weekdays,
-            startMinute = firstRange.startMinute,
-            endMinute = firstRange.endMinute,
-            appGroupId = "",
-            allowedMinutes = allowance,
-            isActive = binding.activeSwitch.isChecked
-        ).copy(
-            scope = scope,
-            timeRanges = ranges,
-            contributorGroupIds = contributorGroupIds,
-            usageConditionEnabled = usageConditionEnabled,
-            usageConditionMinutes = totalConditionMinutes,
-            contributorGroupConditionMinutes = cleanedGroupConditionMinutes,
-            earnedAllowanceEnabled = earnedAllowanceEnabled
+            earnedAllowanceEnabled = earnedAllowanceEnabled,
+            rolloverEnabled = rolloverEnabled,
+            unlockDays = unlockDays
         )
         viewLifecycleOwner.lifecycleScope.launch {
             val current = dataStore.settingsForEditing.first().appRuleSnapshot
@@ -420,3 +456,28 @@ internal fun parseGroupConditionInputs(
     .filterKeys { it in selectedGroupIds }
     .mapValues { it.value.trim().toLongOrNull() ?: 0L }
     .filterValues { it > 0L }
+
+enum class RuleEditorValidationError {
+    MISSING_FIELDS,
+    ROLLOVER_UNLOCK_DAYS_REQUIRED
+}
+
+internal fun validateRuleEditorInputs(
+    name: String,
+    allowance: Long?,
+    totalConditionMinutes: Long,
+    weekdays: Set<Int>,
+    ranges: List<AppRuleTimeRange>,
+    rolloverEnabled: Boolean,
+    unlockDays: Set<Int>
+): RuleEditorValidationError? {
+    if (name.isEmpty() || allowance == null || allowance < 0 || totalConditionMinutes < 0L ||
+        weekdays.isEmpty() || ranges.isEmpty()
+    ) {
+        return RuleEditorValidationError.MISSING_FIELDS
+    }
+    if (rolloverEnabled && unlockDays.isEmpty()) {
+        return RuleEditorValidationError.ROLLOVER_UNLOCK_DAYS_REQUIRED
+    }
+    return null
+}

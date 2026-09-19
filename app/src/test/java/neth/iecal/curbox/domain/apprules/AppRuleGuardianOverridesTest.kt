@@ -2,6 +2,7 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.ForegroundSession
@@ -322,6 +323,32 @@ class AppRuleGuardianOverridesTest {
 
         assertTrue(result.isAllowed)
         assertEquals(listOf(5 * MINUTE, 5 * MINUTE), result.evaluations.map { it.guardianRemainingMillis })
+    }
+
+    @Test
+    fun grantMillisForRuleCanExcludeAccumulatedGrants() {
+        val useDayId = "2026-08-17"
+        val regularGrant = AppRuleGuardianGrant("rule", useDayId, now - 1000L, 10 * MINUTE, isFromAccumulatedPool = false)
+        val accumulatedGrant = AppRuleGuardianGrant("rule", useDayId, now - 500L, 25 * MINUTE, isFromAccumulatedPool = true)
+        val state = AppRuleOverrideState(useDayId = useDayId, grants = listOf(regularGrant, accumulatedGrant))
+
+        val totalWithAccumulated = AppRuleGuardianOverrides.grantMillisForRule(
+            state = state,
+            ruleId = "rule",
+            useDayId = useDayId,
+            nowMs = now,
+            includeAccumulatedGrants = true
+        )
+        val totalWithoutAccumulated = AppRuleGuardianOverrides.grantMillisForRule(
+            state = state,
+            ruleId = "rule",
+            useDayId = useDayId,
+            nowMs = now,
+            includeAccumulatedGrants = false
+        )
+
+        assertEquals(35 * MINUTE, totalWithAccumulated)
+        assertEquals(10 * MINUTE, totalWithoutAccumulated)
     }
 
     private fun evaluate(state: AppRuleOverrideState) = AppRuleEvaluator.evaluate(

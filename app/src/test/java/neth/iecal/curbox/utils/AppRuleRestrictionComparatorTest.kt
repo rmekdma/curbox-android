@@ -251,4 +251,75 @@ class AppRuleRestrictionComparatorTest {
 
         assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
     }
+
+    @Test
+    fun enablingRolloverIsDelayedBecauseItWeakensRestriction() {
+        val oldRule = rule.copy(rolloverEnabled = false, unlockDays = emptySet())
+        val proposedRule = rule.copy(rolloverEnabled = true, unlockDays = setOf(0, 6))
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(oldRule)))
+        val proposed = old.copy(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(proposedRule)))
+
+        assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun disablingRolloverIsSameOrStricter() {
+        val oldRule = rule.copy(rolloverEnabled = true, unlockDays = setOf(0, 6))
+        val proposedRule = rule.copy(rolloverEnabled = false, unlockDays = emptySet())
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(oldRule)))
+        val proposed = old.copy(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(proposedRule)))
+
+        assertTrue(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun addingUnlockDaysIsDelayedBecauseItWeakensRestriction() {
+        val oldRule = rule.copy(rolloverEnabled = true, unlockDays = setOf(6))
+        val proposedRule = rule.copy(rolloverEnabled = true, unlockDays = setOf(0, 6))
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(oldRule)))
+        val proposed = old.copy(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(proposedRule)))
+
+        assertFalse(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun removingUnlockDaysIsSameOrStricter() {
+        val oldRule = rule.copy(rolloverEnabled = true, unlockDays = setOf(0, 6))
+        val proposedRule = rule.copy(rolloverEnabled = true, unlockDays = setOf(6))
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(oldRule)))
+        val proposed = old.copy(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(proposedRule)))
+
+        assertTrue(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun keepingSameRolloverAndUnlockDaysIsSameOrStricter() {
+        val oldRule = rule.copy(rolloverEnabled = true, unlockDays = setOf(0, 6))
+        val proposedRule = rule.copy(rolloverEnabled = true, unlockDays = setOf(0, 6))
+        val old = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(oldRule)))
+        val proposed = old.copy(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(proposedRule)))
+
+        assertTrue(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun appRuleRolloverSameOrStricterPublicSeam() {
+        val off = rule.copy(rolloverEnabled = false, unlockDays = emptySet())
+        val onSat = rule.copy(rolloverEnabled = true, unlockDays = setOf(6))
+        val onWeekend = rule.copy(rolloverEnabled = true, unlockDays = setOf(0, 6))
+
+        // Off to on -> delayed
+        assertFalse(RestrictionComparator.appRuleRolloverSameOrStricter(off, onSat))
+        // On to off -> stricter
+        assertTrue(RestrictionComparator.appRuleRolloverSameOrStricter(onSat, off))
+        // Adding unlock day -> delayed
+        assertFalse(RestrictionComparator.appRuleRolloverSameOrStricter(onSat, onWeekend))
+        // Removing unlock day -> stricter
+        assertTrue(RestrictionComparator.appRuleRolloverSameOrStricter(onWeekend, onSat))
+        // Both off -> same or stricter
+        assertTrue(RestrictionComparator.appRuleRolloverSameOrStricter(off, off))
+        // Same unlock days -> same or stricter
+        assertTrue(RestrictionComparator.appRuleRolloverSameOrStricter(onWeekend, onWeekend))
+    }
 }
+

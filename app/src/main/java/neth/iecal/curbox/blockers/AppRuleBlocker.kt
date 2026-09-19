@@ -81,6 +81,8 @@ import neth.iecal.curbox.domain.apprules.RecheckPlanUpdate
 import neth.iecal.curbox.domain.apprules.RuleRuntimeSnapshot
 import neth.iecal.curbox.domain.apprules.RuntimePublication
 import neth.iecal.curbox.domain.apprules.RuntimeRevision
+import neth.iecal.curbox.domain.apprules.AppRuleRolloverCoordinator
+import neth.iecal.curbox.domain.apprules.SettlementRequest
 import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
 import neth.iecal.curbox.domain.apprules.SignalFact
 import neth.iecal.curbox.domain.apprules.SubmissionResult
@@ -119,6 +121,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         private const val EXTERNAL_EFFECT_RUNNING = 3
         private const val EXTERNAL_EFFECT_FINISHED = 4
         private const val OBSERVATION_RECHECK_KEY = "\u0000foreground-observation"
+        const val SETTLEMENT_WAKE_KEY = "\u0000app-rule-rollover-settlement"
         private const val SCHEDULER_WAKE_ACTION =
             "neth.iecal.curbox.blockers.APP_RULE_SCHEDULER_WAKE"
         private const val EXTRA_SCHEDULER_PACKAGE =
@@ -143,6 +146,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private lateinit var crashLogger: CrashLogger
     private lateinit var sessionRepository: CurrentUseDaySessionRepository
     private lateinit var usageResetRepository: RoomUsageResetRepository
+    internal var rolloverCoordinator: AppRuleRolloverCoordinator? = null
+
     private lateinit var enforcement: AppRuleEnforcement
     private val snapshot = AppRuleSnapshotCoordinator()
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -172,6 +177,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     @Volatile private var resetTime = UseDayResetTime()
     @Volatile private var useDayGenerationStartedAtMs = 0L
     @Volatile private var overrideState = AppRuleOverrideState()
+    @Volatile private var rolloverState = neth.iecal.curbox.data.models.AppRuleRolloverState()
     @Volatile
     private var usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(
         statisticsTrackingEnabled = true,
@@ -447,7 +453,14 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         )
         usageResetRepository = RoomUsageResetRepository(database)
         enforcement = AppRuleEnforcement(sessionRepository)
+        rolloverCoordinator = AppRuleRolloverCoordinator(
+            dataStoreManager = service.dataStoreManager,
+            sessionRepository = sessionRepository,
+            wallClockMs = { observationWallClockMs() },
+            onNonFatalError = ::logNonFatal
+        )
         packageScopeReader = AppRulePackageScopeReader.fromContext(service)
+
         refreshPackageScope()
         try {
             val initialSettings = runBlocking(Dispatchers.IO) {
@@ -510,7 +523,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         // Reconnection does not guarantee a new WINDOW_STATE_CHANGED event. Reconcile what is
         // already visible while the service is alive.
         postVisibleApplicationCheck(connectionGeneration = connectionGeneration)
+        scheduleNextSettlementAlarm()
     }
+
 
     fun setupReceivers() {
         if (!setupReady) return
@@ -676,6 +691,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                                     outcome.succeeded
                                 )
                             }
+                            is DecisionOutcome.SettlementFinished -> {
+                                onSettlementFinished(workerInstanceToken, outcome)
+                            }
                         }
                     }
                 },
@@ -686,8 +704,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 },
                 usageResetRepository = usageResetRepository,
                 enforcement = enforcement,
-                elapsedRealtimeMs = { observationElapsedRealtimeMs() }
+                elapsedRealtimeMs = { observationElapsedRealtimeMs() },
+                coordinator = rolloverCoordinator
             ).also {
+
                 currentWorkerInstanceToken = workerInstanceToken
             }
         }
@@ -762,6 +782,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 sourceOrderIdentity = sourceOrderIdentity,
                 runtimeRevision = runtimeRevision
             )
+            scheduleNextSettlementAlarm()
         }
         return accepted
     }
@@ -1960,9 +1981,62 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     @Suppress("UNUSED_PARAMETER")
-    internal fun onWakeFromScheduler(packageName: String, token: Long) {
+    internal fun onWakeFromScheduler(key: String, token: Long) {
         if (!isReadyForChecks()) return
-        onSchedulerWake(recheckGeneration.get())
+        if (key == SETTLEMENT_WAKE_KEY) {
+            onSettlementWake()
+        } else {
+            onSchedulerWake(recheckGeneration.get())
+        }
+    }
+
+    internal fun onSettlementWake() {
+        if (!isReadyForChecks()) return
+        triggerSettlementCatchup()
+    }
+
+    internal fun triggerSettlementCatchup(wallClockMs: Long = observationWallClockMs()) {
+        val request = SettlementRequest(wallClockMs = wallClockMs)
+        val worker = synchronized(decisionWorkerLock) { decisionWorker }
+        val result = worker?.submitSettlement(request)
+        if (result == SubmissionResult.ACCEPTED) {
+            return
+        }
+        val coordinator = rolloverCoordinator ?: return
+        scope.launch {
+            try {
+                coordinator.reconcileSettlement(wallClockMs)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                logNonFatal(e)
+            } finally {
+                scheduleNextSettlementAlarm()
+                postVisibleApplicationCheck(observationKind = ObservationKind.REFRESH)
+            }
+        }
+    }
+
+    private fun onSettlementFinished(
+        workerInstanceToken: AppRuleWorkerInstanceToken,
+        @Suppress("UNUSED_PARAMETER") outcome: DecisionOutcome.SettlementFinished
+    ) {
+        synchronized(runtimeLock) {
+            if (!isReadyForChecks() || !workerInstanceMatchesLocked(workerInstanceToken)) {
+                return
+            }
+        }
+        scheduleNextSettlementAlarm()
+        postVisibleApplicationCheck(observationKind = ObservationKind.REFRESH)
+    }
+
+    internal fun scheduleNextSettlementAlarm() {
+        if (!isReadyForChecks()) return
+        val runtime = captureRuleRuntime()
+        val nowMs = observationWallClockMs()
+        val nextBoundaryMs = ConfigurableUseDayCalculator(resetTime = runtime.resetTime).nextResetBoundaryAfter(nowMs)
+        val token = schedulerTokenSequence.incrementAndGet()
+        wakeScheduler?.schedule(SETTLEMENT_WAKE_KEY, nextBoundaryMs, token)
     }
 
     private val schedulerWakeReceiver = object : BroadcastReceiver() {
@@ -2066,6 +2140,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             packageName
         }
         cancelScheduledRechecks()
+        scheduleNextSettlementAlarm()
         submitForegroundDecision(
             event = null,
             kind = ObservationKind.SCREEN_OFF,
@@ -2221,6 +2296,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 nextReset != resetTime ||
                 settings.useDayGenerationStartedAtMs != useDayGenerationStartedAtMs ||
                 settings.appRuleOverrideState != overrideState ||
+                settings.appRuleRolloverState != rolloverState ||
                 nextUsageTrackingDecision != usageTrackingDecision
             if (!changed) return@synchronized false
 
@@ -2230,12 +2306,16 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             resetTime = nextReset
             useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
             overrideState = settings.appRuleOverrideState
+            rolloverState = settings.appRuleRolloverState
             usageTrackingDecision = nextUsageTrackingDecision
             if (candidate != null) snapshot.accept(candidate)
             recheckGeneration.incrementAndGet()
             true
         }
-        if (changed) cancelScheduledRechecks()
+        if (changed) {
+            cancelScheduledRechecks()
+            scheduleNextSettlementAlarm()
+        }
         return changed
     }
 

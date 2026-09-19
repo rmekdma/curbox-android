@@ -11,18 +11,27 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.core.content.ContextCompat
+import android.text.Editable
+import android.text.TextWatcher
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
+import neth.iecal.curbox.data.models.RuleRolloverPool
+import neth.iecal.curbox.databinding.DialogGuardianAccumulatedTimeBinding
+import neth.iecal.curbox.domain.apprules.InAppAccumulatedTimeFormState
+import neth.iecal.curbox.domain.apprules.InAppAccumulatedTimeSubmission
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.models.AppRule
@@ -172,15 +181,16 @@ class AppRuleGroupsFragment : Fragment() {
             null
         }
         if (isAdded) {
-            render(settings.appRuleSnapshot, usage, usage != null)
+            render(settings, usage, usage != null)
         }
     }
 
     private fun render(
-        snapshot: AppRuleSnapshot,
+        settings: Settings,
         evaluations: Map<String, AppRuleEvaluation>?,
         usageAvailable: Boolean
     ) {
+        val snapshot = settings.appRuleSnapshot
         binding.groupsContainer.removeAllViews()
         binding.rulesContainer.removeAllViews()
         val errors = snapshot.validate()
@@ -195,7 +205,13 @@ class AppRuleGroupsFragment : Fragment() {
         binding.addRuleButton.isEnabled = errors.isEmpty()
         snapshot.appGroups.forEach(::addGroup)
         snapshot.appRules.forEach { rule ->
-            addRule(rule, snapshot, evaluations?.get(rule.id), usageAvailable)
+            addRule(
+                rule = rule,
+                snapshot = snapshot,
+                evaluation = evaluations?.get(rule.id),
+                usageAvailable = usageAvailable,
+                rolloverPool = settings.appRuleRolloverState.pools[rule.id]
+            )
         }
     }
 
@@ -256,7 +272,8 @@ class AppRuleGroupsFragment : Fragment() {
         rule: AppRule,
         snapshot: AppRuleSnapshot,
         evaluation: AppRuleEvaluation?,
-        usageAvailable: Boolean
+        usageAvailable: Boolean,
+        rolloverPool: RuleRolloverPool?
     ) {
         val scope = rule.effectiveScope()
         val groupNames = scope.includedGroupIds.mapNotNull { id ->
@@ -271,6 +288,8 @@ class AppRuleGroupsFragment : Fragment() {
         }
         val contributorNames = scopeContributorNames(rule, snapshot)
         val missingContributorIds = snapshot.missingContributorGroupIds(rule)
+        val poolMinutes = rolloverPool?.accumulatedMinutes ?: 0L
+        val hasRolloverInfo = rule.rolloverEnabled || poolMinutes > 0L
         val status = buildString {
             append(
                 getString(
@@ -317,6 +336,16 @@ class AppRuleGroupsFragment : Fragment() {
                     )
                 )
             )
+            append("\n")
+            append(formatAppRuleRolloverSummary(rule) { resId, args ->
+                if (args.isEmpty()) getString(resId) else getString(resId, *args)
+            })
+            if (hasRolloverInfo) {
+                append("\n")
+                append(formatAppRuleAccumulatedSummary(poolMinutes) { resId, args ->
+                    if (args.isEmpty()) getString(resId) else getString(resId, *args)
+                })
+            }
             if (missingContributorIds.isNotEmpty()) {
                 append("\n")
                 append(getString(R.string.app_rules_missing_contributor))
@@ -373,16 +402,101 @@ class AppRuleGroupsFragment : Fragment() {
                 }
             }
         }
-        binding.rulesContainer.addView(MaterialCardView(requireContext()).apply {
-            setContentPadding(16.dp(), 12.dp(), 16.dp(), 12.dp())
+        val cardLayout = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
             addView(TextView(context).apply {
                 text = status
                 textSize = 15f
             })
+            if (hasRolloverInfo) {
+                addView(MaterialButton(
+                    context,
+                    null,
+                    com.google.android.material.R.attr.materialButtonOutlinedStyle
+                ).apply {
+                    text = getString(R.string.app_rules_change_accumulated_time)
+                    setOnClickListener {
+                        showChangeAccumulatedTimeDialog(rule, poolMinutes)
+                    }
+                }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = 8.dp()
+                })
+            }
+        }
+        binding.rulesContainer.addView(MaterialCardView(requireContext()).apply {
+            setContentPadding(16.dp(), 12.dp(), 16.dp(), 12.dp())
+            addView(cardLayout)
             setOnClickListener { open(CreateAppRuleFragment.FRAGMENT_ID, rule.id) }
         }, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 8.dp()
         })
+    }
+
+    private fun showChangeAccumulatedTimeDialog(rule: AppRule, currentMinutes: Long) {
+        val dialogBinding = DialogGuardianAccumulatedTimeBinding.inflate(layoutInflater)
+        dialogBinding.accumulatedTotalDesc.text = getString(
+            R.string.app_rules_accumulated_time_summary,
+            currentMinutes
+        )
+        val formState = InAppAccumulatedTimeFormState.initial(currentMinutes)
+        dialogBinding.accumulatedMinutesInput.setText(formState.accumulatedMinutesText)
+        dialogBinding.accumulatedMinutesInput.setSelectAllOnFocus(true)
+        var currentFormState = formState
+
+        dialogBinding.accumulatedMinutesInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(editable: Editable?) {
+                currentFormState = currentFormState.editMinutes(editable?.toString().orEmpty())
+                dialogBinding.accumulatedMinutesLayout.error = null
+            }
+        })
+
+        val dialog = MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.app_rules_change_accumulated_time)
+            .setView(dialogBinding.root)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNegativeButton(R.string.cancel, null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialogBinding.accumulatedMinutesInput.requestFocus()
+            dialogBinding.accumulatedMinutesInput.selectAll()
+
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+                when (val submission = currentFormState.submit()) {
+                    is InAppAccumulatedTimeSubmission.Invalid -> {
+                        dialogBinding.accumulatedMinutesLayout.error = getString(
+                            R.string.app_rules_invalid_accumulated_minutes
+                        )
+                    }
+                    is InAppAccumulatedTimeSubmission.Valid -> {
+                        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                            val currentSettings = dataStore.settings.first()
+                            val existingPool = currentSettings.appRuleRolloverState.pools[rule.id]
+                            val updatedPool = (existingPool ?: RuleRolloverPool(ruleId = rule.id))
+                                .copy(accumulatedMinutes = submission.minutes)
+                            val newState = currentSettings.appRuleRolloverState.withPool(updatedPool)
+                            val success = dataStore.writeAppRuleRolloverState(newState)
+                            withContext(Dispatchers.Main) {
+                                if (isAdded && success) {
+                                    dialog.dismiss()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        GuardianOwnedDialog.show(dialog)
     }
 
     private fun scopeContributorNames(
@@ -415,3 +529,37 @@ class AppRuleGroupsFragment : Fragment() {
 
     private fun Long.toMinutesForDisplay(): Long = this / MILLIS_PER_MINUTE
 }
+
+internal fun formatAppRuleRolloverSummary(
+    rule: AppRule,
+    stringResolver: (Int, Array<out Any>) -> String
+): String {
+    return if (rule.rolloverEnabled) {
+        val dayResIds = listOf(
+            R.string.app_rules_sunday_short,
+            R.string.app_rules_monday_short,
+            R.string.app_rules_tuesday_short,
+            R.string.app_rules_wednesday_short,
+            R.string.app_rules_thursday_short,
+            R.string.app_rules_friday_short,
+            R.string.app_rules_saturday_short
+        )
+        val unlockDaysText = rule.unlockDays.sorted().mapNotNull { dayIndex ->
+            dayResIds.getOrNull(dayIndex)?.let { stringResolver(it, emptyArray()) }
+        }.joinToString(", ")
+        stringResolver(R.string.app_rules_rollover_summary_on, arrayOf(unlockDaysText))
+    } else {
+        stringResolver(R.string.app_rules_rollover_summary_off, emptyArray())
+    }
+}
+
+internal fun formatAppRuleAccumulatedSummary(
+    accumulatedMinutes: Long,
+    stringResolver: (Int, Array<out Any>) -> String
+): String {
+    return stringResolver(
+        R.string.app_rules_accumulated_time_summary,
+        arrayOf(accumulatedMinutes)
+    )
+}
+

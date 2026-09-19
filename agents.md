@@ -6,14 +6,14 @@ This file applies to the whole repository. Preserve more specific instructions i
 
 ## Start here
 
-- Modules: `:app` and `:apitester`. The latter is a sample client for the Curbox API.
+- Modules: `:app` and `:apitester` (sample client for Curbox AIDL API).
 - Language and UI: Kotlin, classic Views, Fragments, and ViewBinding.
 - Do not add Jetpack Compose or the Navigation component.
 - JVM target: 17.
 - Package root: `app/src/main/java/neth/iecal/curbox`.
 - Prefer the smallest change that follows the nearest existing implementation.
 - Readability is more important than cleverness. Follow the style of each file you touch.
-- Ask before making an architectural change. Explain the user impact before changing the Room schema because migrations are destructive.
+- Ask before making an architectural change or updating Room entities (migrations are destructive).
 - Preserve unrelated work in the repository. Do not rewrite nearby code unless the task requires it.
 - Add comments only when they explain behavior the code itself cannot express.
 
@@ -54,46 +54,32 @@ The app runs in three processes:
 | `:app_blocker_service` | `AppBlockerService` |
 | `:crash_handler` | `CrashLogActivity` |
 
-This has concrete consequences:
+Consequences:
 
-- Access Room only through `AppDatabase.getInstance()`. It enables multi instance invalidation.
-- Access settings only through `DataStoreManager` in `utils/DataStore.kt`.
-- Never create a second DataStore for the same file. `DataStoreManager` owns the `MultiProcessDataStoreFactory` singleton.
-- Do not assume initialization guarded by `Curbox.isMainProcess()` also ran in the service process.
-- Sync initializes only in the main process.
+- Access Room only through `AppDatabase.getInstance()` (enables multi-instance invalidation).
+- Access settings only through `DataStoreManager` in `utils/DataStore.kt` (`MultiProcessDataStoreFactory` singleton owner). Never create a second DataStore for the same file.
+- Do not assume initialization guarded by `Curbox.isMainProcess()` ran in the service process.
 - UI to service configuration updates use broadcasts unless that feature already collects the settings flow. Follow the feature's existing pattern.
 
 ### Settings compatibility and delay
 
 `data/models/Settings.kt` is serialized as JSON with Gson.
 
-- Every field must have a default value so older stored JSON still loads.
-- Do not rename a field casually. A rename silently discards its stored value.
+- Every field must have a default value so older stored JSON still loads. Do not rename fields casually.
 - Add a setting through `Settings`, an `updateX()` method in `DataStoreManager`, the UI, and the feature's refresh path.
-
-Restriction settings are gated by the settings change delay. A change that weakens a restriction is stored as a `PendingSettingsChange`; a stricter change applies immediately and removes the pending value for that field. `RestrictionComparator` is conservative: a change it cannot prove stricter counts as weaker.
-
-For every new gated field, update all of these:
-
-1. `GatedSettingsField`
-2. The `withFieldValue` branch
-3. `utils/RestrictionComparator.kt`
-4. The label in `ui/fragments/main/reducers/advanced/SettingsChangeDelayFragment.kt`
-
-Due pending changes are applied by the service heartbeat, app startup, and the delay screen. Preserve all three paths.
+- Restriction settings are gated by the settings change delay (`PendingSettingsChange`). Weakening a restriction is delayed; stricter changes apply immediately. For every new gated field, update all of:
+  1. `GatedSettingsField`
+  2. The `withFieldValue` branch
+  3. `utils/RestrictionComparator.kt`
+  4. The label in `ui/fragments/main/reducers/advanced/SettingsChangeDelayFragment.kt`
 
 ### Room data
 
-Room uses `fallbackToDestructiveMigration()`.
-
-- Any entity change requires a database version bump in `data/db/AppDatabase.kt`.
-- A version bump wipes local user data on upgrade.
-- Tell the user about that tradeoff and get direction before implementing a schema change.
-- Store large or growing records in Room. Store configuration in DataStore.
+Room uses `fallbackToDestructiveMigration()`. Any entity change requires a database version bump in `data/db/AppDatabase.kt` and wipes local user data on upgrade. Get direction before implementing a schema change.
 
 ### Build variants
 
-Gate optional behavior at every entry point, including UI, service setup and cleanup, manifests, and API responses.
+Gate optional behavior at every entry point (UI, service lifecycle, manifests, API responses).
 
 | Flavor | Sync | UI hider | Anti uninstall | Internet |
 | --- | --- | --- | --- | --- |
@@ -101,99 +87,20 @@ Gate optional behavior at every entry point, including UI, service setup and cle
 | `playstore` | Yes | No | No | Yes |
 | `fdroid` | No | Yes | Yes | No |
 
-Relevant flags in `app/build.gradle.kts`:
-
-- `SUPPORTS_UI_HIDER`
-- `SUPPORTS_ANTI_UNINSTALL`
-- `SUPPORTS_WRITE_SECURE_SETTINGS`
-- `FDROID_VARIANT`
-- `SYNC_USE_FCM`
-
-The Play Store manifest removes `AdminReceiver` and `NodePickerService`. Do not expose those features through another route.
-
-Real sync code lives in `app/src/sync/java`, which is compiled only by `full` and `playstore`. Interfaces and `SyncGateway` live in main. The F-Droid stub in `app/src/fdroid/java` returns `NoopSyncProvider`. Any sync change must leave `fdroid` compilable without sync only classes, Firebase, Supabase, or the INTERNET permission.
-
-Sync is currently free in both sync flavors. `SyncEntitlement` is a free stub, and no flavor compiles Play Billing. Preserve that behavior unless the task explicitly restores billing. `SUPPORTS_WRITE_SECURE_SETTINGS` is false in `playstore`; keep grayscale and related UI consistent with that capability. `SYNC_USE_FCM` controls the FCM push migration in sync flavors.
-
-## Architecture map
-
-### Accessibility host
-
-`services/AppBlockerService.kt` hosts all blockers, trackers, and anti-stimulants. It extends `services/BaseBlockingService.kt`, which owns the foreground notification, service protection heartbeat, global actions, and `isDelayOver()`.
-
-A typical feature is a plain class with this lifecycle:
-
-1. Instantiate it as a service field.
-2. Call its setup method in `onServiceConnected()`.
-3. Register its receivers after setup.
-4. Call its cheap event check inline or its node walking check in the background worker.
-5. Remove receivers and release resources in `onDestroy()`.
-
-Feature broadcasts use companion constants such as `AppBlocker.INTENT_ACTION_REFRESH_APP_BLOCKER`. Settings screens write through `DataStoreManager` before sending the refresh broadcast.
-
-### Feature locations
-
-- `blockers/AppBlocker.kt`: schedules and usage limits. A package can belong to several groups and blocks when any group requires it.
-- `blockers/ReelBlocker.kt`: Instagram reels, YouTube shorts, and Facebook reels. Runs in the background worker.
-- `blockers/KeywordBlocker.kt`: reacts to website observations written by `WebsiteUsageTracker`; it does not scan visible screen text. Its unsupported browser check runs in the background worker.
-- `blockers/FocusModeBlocker.kt`: temporary app and keyword blocking.
-- `blockers/BrowserBlocker.kt` and `blockers/AntiUninstallBlocker.kt`: browser and device admin protection.
-- `blockers/uihider/`: overlay based UI hiding and its scripting language. Node picking uses `services/NodePickerService`.
-- `trackers/`: app usage, website usage, and short video counts. `WebsiteUsageTracker` has a 15 second heartbeat for browsers that omit URL change events.
-- `anti_stimulants/`: `AutoDnd`, `GrayScaleFilter`, and `MindfulMessage`. Combine DND requests through `AppBlockerService.syncDndState()`.
-- `hardcoded/`: all per app view IDs and configuration. Do not inline these values in feature code.
-- `api/`: the exported AIDL service, user approval flow, and auth store. Keep responses consistent with flavor flags. See `CURBOX_API.md` and the `:apitester` client.
-
-User facing blocking screens go through `ui/activity/WarningActivity` with the appropriate `Constants.WARNING_SCREEN_MODE_*` value. App rule guardian approvals are the exception: `AppRuleBlocker` opens the internal `GuardianApprovalActivity` directly so one denial produces only one lock activity.
-
-### Service protection
-
-`ServiceWatchdogJob`, `utils/ServiceProtectionManager`, `receivers/BootReceiver`, and the `BaseBlockingService` heartbeat keep the accessibility service alive and detect stops. Anti uninstall UI lives under `ui/fragments/main/reducers/advanced/`.
-
-### Sync and cleanup
-
-- End to end encryption uses `CryptoBox` and is covered by unit tests.
-- `SupabaseRest` uses OkHttp directly. There is no Supabase Android SDK.
-- Firebase is initialized manually from `FcmConfig`; there is no Google Services Gradle plugin or `google-services.json`.
-- Remote usage is merged through `remoteAppUsage()` and `remoteWebsiteUsage()`; synced websites use `SYNCED_WEB_PACKAGE`.
-- `utils/UsageStatsCleaner.kt` purges old local data.
-- Backend cleanup SQL lives in `supabase/migrations/` and is applied separately, not by the Android build.
+Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_SECURE_SETTINGS`, `FDROID_VARIANT`, `SYNC_USE_FCM`. The Play Store manifest removes `AdminReceiver` and `NodePickerService`.
 
 ## UI and product copy
 
 - Use ViewBinding and existing Fragment transactions.
 - Use Material defaults and dynamic colors. Keep the visual style calm, minimal, and easy to scan.
-- Prefer smooth transitions when views appear, disappear, or resize.
 - Coolvetica is for strong onboarding typography. Inter is the normal app font.
-- Put all user facing text in `app/src/main/res/values/strings.xml`. Follow the existing localization pattern for translations.
-- Write for a nontechnical reader at about a sixth grade level.
-- Keep sentences short and concrete. Use a real world example when an idea is difficult.
-- Do not use hyphens, en dashes, or em dashes in user facing copy. This restriction applies to displayed text, not code, resource names, or developer documentation.
-
-## Common change recipes
-
-### Add a blocker or tracker
-
-1. Add a plain class in `blockers/` or `trackers/` based on the closest feature.
-2. Declare refresh actions as companion constants.
-3. Wire the full lifecycle in `AppBlockerService`.
-4. Keep node traversal in the background worker.
-5. Add defaulted configuration to `Settings` and an updater to `DataStoreManager`.
-6. Add delay gating when the setting controls restriction strength.
-7. Wire UI and refresh behavior.
-8. Apply every relevant flavor flag.
-
-### Add a browser or app mod
-
-Edit `hardcoded/BrowserUrlBarIds.kt` or `hardcoded/ReelAppConfig.kt`. Copy the closest entry and change only the package specific values. See `CONTRIBUTING.md`.
-
-### Change the database
-
-Update the entity and DAO, register them in `AppDatabase`, and bump the database version only after the destructive migration tradeoff is accepted.
+- All user-facing text belongs in `app/src/main/res/values/strings.xml`. Follow the existing localization pattern.
+- Write for a nontechnical reader at about a sixth grade level. Short, concrete sentences.
+- Do not use hyphens, en dashes, or em dashes in user-facing copy.
 
 ## Build and verification
 
-Use the check that matches the change. Documentation only changes do not need a Gradle build.
+Use the check that matches the change. Documentation-only changes do not need a Gradle build.
 
 ```bash
 ./gradlew testFullDebugUnitTest
@@ -203,16 +110,14 @@ Use the check that matches the change. Documentation only changes do not need a 
 ./gradlew installAndGrantAccessibilityFullDebug
 ```
 
-- `testFullDebugUnitTest` includes `CryptoBoxTest` and UI hider `ScriptLanguageTest`.
 - Build all three flavors after changing shared source, source sets, manifests, BuildConfig gates, or optional feature wiring.
-- Use the install task only when an emulator or device is available. It installs, grants accessibility through adb, and launches Debug Curbox.
-- Lint does not abort builds, so inspect relevant warnings rather than treating a successful build as proof that lint is clean.
+- `testFullDebugUnitTest` includes `CryptoBoxTest` and UI hider `ScriptLanguageTest`.
+- Use the install task only when an emulator or device is available (installs, grants accessibility through adb, and launches Debug Curbox).
+- Lint does not abort builds; inspect relevant warnings rather than treating a successful build as proof that lint is clean.
 - Debug builds use the `.debug` application ID suffix and the name `Debug Curbox`.
 - If a relevant check cannot run, say why in the handoff.
 
-### Windows build environment
-
-Set the JBR for the current PowerShell process before running Gradle:
+### Windows and PowerShell environment
 
 ```powershell
 $env:JAVA_HOME = 'C:\Users\DELL\.jdks\jbr-21.0.11'
@@ -220,24 +125,22 @@ $env:JAVA_HOME = 'C:\Users\DELL\.jdks\jbr-21.0.11'
 .\gradlew.bat testFullDebugUnitTest
 ```
 
-Release APK commands and outputs:
+- Run commands directly in the shell. Do not wrap commands in `powershell -Command "<command>"`.
+- If a path contains whitespace, quote the path and invoke it with `&` (e.g. `& "$env:JAVA_HOME\bin\java.exe" -version`).
+- On Windows PowerShell, execute Gradle tasks using `.\gradlew.bat <task>`.
 
-| Variant | Command | Unsigned output |
-| --- | --- | --- |
-| Full | `.\gradlew.bat assembleFullRelease` | `app/build/outputs/apk/full/release/app-full-release-unsigned.apk` |
-| Play Store | `.\gradlew.bat assemblePlaystoreRelease` | `app/build/outputs/apk/playstore/release/app-playstore-release-unsigned.apk` |
-| F-Droid | `.\gradlew.bat assembleFdroidRelease` | `app/build/outputs/apk/fdroid/release/app-fdroid-universal-release-unsigned.apk` |
+## Context-specific guides
 
-- Upload only the Full Release APK. Do not upload Play Store or F-Droid APKs.
-- Use a semver version name in the form `v<major>.<minor>.<patch>` and name the uploaded APK `curbox-<version>-full.apk` (for example, `curbox-v4.0.4-full.apk`).
-- Upload the APK file directly to GitHub. Do not use CI for APK uploads.
-- Treat only `*Release` tasks as release artifacts. Debug APKs use the `.debug` application ID suffix, the `Debug Curbox` label, and `application-debuggable`; never publish one as a release APK.
-- Release tasks currently produce unsigned APKs. Verify signing before describing an APK as installable or publishing it without an `unsigned` warning.
-- Before publishing a Full APK, inspect `app/build/outputs/apk/full/release/output-metadata.json`. It must report `variantName` as `fullRelease` and a version name matching `v<major>.<minor>.<patch>`.
-- File size alone does not identify a flavor. The v4.0.1 GitHub assets were debug builds and are larger than equivalent release builds.
+Consult these targeted guides when working in corresponding areas:
 
-## Reference docs
-
-- `CONTRIBUTING.md`: contributor workflows
-- `CURBOX_API.md`: API contract and integration guide
-- `Readme.md`: product overview
+| Situation | Guide |
+| --- | --- |
+| Adding a blocker/tracker, adding app or browser mod support, or updating the database | [`docs/recipes.md`](docs/recipes.md) |
+| Navigating feature subsystems, service protection, or warning/approval screens | [`docs/architecture/features.md`](docs/architecture/features.md) |
+| App rule evaluation, enforcement pipelines, or domain specifications | [`docs/architecture/app-rule-enforcement.md`](docs/architecture/app-rule-enforcement.md) and [`docs/spec/`](docs/spec/) |
+| Understanding system design choices, trade-offs, or historical rationale | [`docs/adr/`](docs/adr/) |
+| Working on multi-device sync, encryption, Supabase REST, Firebase/FCM, or cleanup | [`docs/sync.md`](docs/sync.md) |
+| Building release APKs, verifying signatures, or publishing artifacts to GitHub | [`docs/release.md`](docs/release.md) |
+| Running or authoring ADB-based device automation and Pester tests | [`device-tests/AGENTS.md`](device-tests/AGENTS.md) |
+| Integrating with or modifying the exported AIDL service | [`docs/CURBOX_API.md`](docs/CURBOX_API.md) |
+| Contributor workflows, translations, and repository conventions | [`CONTRIBUTING.md`](CONTRIBUTING.md) |

@@ -438,6 +438,263 @@ class AppRuleEvaluatorTest {
         assertFalse(result.isAllowed)
     }
 
+    @Test
+    fun computeUnusedGuardianMinutesReturnsZeroWhenRolloverDisabled() {
+        val rule = rule(allowedMinutes = 30).copy(rolloverEnabled = false)
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+        val grant = AppRuleGuardianGrant(rule.id, "2026-08-17", now - 3600_000L, 20 * 60_000L)
+        val overrides = AppRuleOverrideState(grants = listOf(grant))
+
+        val unused = AppRuleEvaluator.computeUnusedGuardianMinutes(
+            rule = rule,
+            snapshot = snapshot,
+            useDayId = "2026-08-17",
+            sessions = emptyList(),
+            overrides = overrides,
+            zone = zone
+        )
+
+        assertEquals(0L, unused)
+    }
+
+    @Test
+    fun computeUnusedGuardianMinutesReturnsRemainingWhenUsageConsumesBaseAllowanceFirst() {
+        val rule = rule(allowedMinutes = 30).copy(rolloverEnabled = true)
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+        val grantTime = now - 60 * 60_000L
+        val grant = AppRuleGuardianGrant(rule.id, "2026-08-17", grantTime, 20 * 60_000L)
+        val overrides = AppRuleOverrideState(useDayId = "2026-08-17", grants = listOf(grant))
+
+        val s = ForegroundSession(
+            useDayId = "2026-08-17",
+            packageName = "com.example.reader",
+            startedAtMs = grantTime + 1000L,
+            endedAtMs = grantTime + 1000L + 35 * 60_000L
+        )
+
+        val unused = AppRuleEvaluator.computeUnusedGuardianMinutes(
+            rule = rule,
+            snapshot = snapshot,
+            useDayId = "2026-08-17",
+            sessions = listOf(s),
+            overrides = overrides,
+            zone = zone
+        )
+
+        assertEquals(15L, unused)
+    }
+
+    @Test
+    fun computeUnusedGuardianMinutesMatchesAllAppsRuleAgainstAvailablePackages() {
+        val allAppsRule = rule(allowedMinutes = 30).copy(
+            rolloverEnabled = true,
+            scope = neth.iecal.curbox.data.models.AppRuleScope(includeAllApps = true)
+        )
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(allAppsRule))
+        val grantTime = now - 60 * 60_000L
+        val grant = AppRuleGuardianGrant(allAppsRule.id, "2026-08-17", grantTime, 20 * 60_000L)
+        val overrides = AppRuleOverrideState(useDayId = "2026-08-17", grants = listOf(grant))
+
+        val s = ForegroundSession(
+            useDayId = "2026-08-17",
+            packageName = "com.other.unlisted.app",
+            startedAtMs = grantTime + 1000L,
+            endedAtMs = grantTime + 1000L + 35 * 60_000L
+        )
+
+        val unused = AppRuleEvaluator.computeUnusedGuardianMinutes(
+            rule = allAppsRule,
+            snapshot = snapshot,
+            useDayId = "2026-08-17",
+            sessions = listOf(s),
+            overrides = overrides,
+            zone = zone,
+            availablePackages = setOf("com.other.unlisted.app")
+        )
+
+        assertEquals(15L, unused)
+    }
+
+    @Test
+    fun unapprovedAccumulatedPoolDoesNotCountAsAllowanceOnUnlockDay() {
+        // Saturday (unlock day: 6), base allowance 30 minutes
+        val saturdayNow = Instant.parse("2026-08-22T12:00:00Z").toEpochMilli()
+        val rule = rule(
+            id = "game",
+            weekdays = setOf(6),
+            startMinute = 9 * 60,
+            endMinute = 21 * 60,
+            allowedMinutes = 30
+        ).copy(rolloverEnabled = true, unlockDays = setOf(6))
+
+        // Kid used all 30 minutes of base allowance
+        val sessions = listOf(
+            ForegroundSession(
+                useDayId = "2026-08-22",
+                packageName = "com.example.reader",
+                startedAtMs = saturdayNow - 30 * 60_000L,
+                endedAtMs = saturdayNow
+            )
+        )
+
+        // Without an approved grant in overrides, unapproved pool is never added to allowance
+        val result = AppRuleEvaluator.evaluate(
+            snapshot = AppRuleSnapshot(listOf(group), listOf(rule)),
+            packageName = "com.example.reader",
+            useDayId = "2026-08-22",
+            sessions = sessions,
+            nowMs = saturdayNow,
+            zone = zone
+        )
+
+        assertFalse(result.isAllowed)
+        assertEquals(0L, result.evaluations.single().remainingMillis)
+        assertTrue(result.evaluations.single().isAllowanceExhausted)
+    }
+
+    @Test
+    fun approvedAccumulatedTimeUnlocksAppForApprovedDuration() {
+        val saturdayNow = Instant.parse("2026-08-22T12:00:00Z").toEpochMilli()
+        val rule = rule(
+            id = "game",
+            weekdays = setOf(6),
+            startMinute = 9 * 60,
+            endMinute = 21 * 60,
+            allowedMinutes = 30
+        ).copy(rolloverEnabled = true, unlockDays = setOf(6))
+
+        val baseSession = ForegroundSession(
+            useDayId = "2026-08-22",
+            packageName = "com.example.reader",
+            startedAtMs = saturdayNow - 30 * 60_000L,
+            endedAtMs = saturdayNow
+        )
+
+        // Guardian approves 15 minutes of accumulated time
+        val grantTime = saturdayNow + 60_000L
+        val accumulatedGrant = AppRuleGuardianGrant(
+            ruleId = "game",
+            useDayId = "2026-08-22",
+            grantedAtMs = grantTime,
+            grantedMillis = 15 * 60_000L,
+            isFromAccumulatedPool = true
+        )
+        val overrides = AppRuleOverrideState(
+            useDayId = "2026-08-22",
+            grants = listOf(accumulatedGrant)
+        )
+
+        // Right after grant: unlocked with 15 minutes remaining
+        val evalAfterGrant = AppRuleEvaluator.evaluate(
+            snapshot = AppRuleSnapshot(listOf(group), listOf(rule)),
+            packageName = "com.example.reader",
+            useDayId = "2026-08-22",
+            sessions = listOf(baseSession),
+            nowMs = grantTime + 1000L,
+            zone = zone,
+            overrides = overrides
+        )
+        assertTrue(evalAfterGrant.isAllowed)
+        assertEquals(15 * 60_000L, evalAfterGrant.evaluations.single().remainingMillis)
+        assertEquals(15 * 60_000L, evalAfterGrant.evaluations.single().guardianRemainingMillis)
+
+        // After consuming 15 minutes: locked again
+        val extraSession = ForegroundSession(
+            useDayId = "2026-08-22",
+            packageName = "com.example.reader",
+            startedAtMs = grantTime + 1000L,
+            endedAtMs = grantTime + 1000L + 15 * 60_000L
+        )
+        val evalAfterConsumed = AppRuleEvaluator.evaluate(
+            snapshot = AppRuleSnapshot(listOf(group), listOf(rule)),
+            packageName = "com.example.reader",
+            useDayId = "2026-08-22",
+            sessions = listOf(baseSession, extraSession),
+            nowMs = grantTime + 1000L + 15 * 60_000L,
+            zone = zone,
+            overrides = overrides
+        )
+        assertFalse(evalAfterConsumed.isAllowed)
+        assertEquals(0L, evalAfterConsumed.evaluations.single().remainingMillis)
+    }
+
+    @Test
+    fun strictTimeRangeCutoffBlocksAppRegardlessOfApprovedAccumulatedTime() {
+        val saturdayEvening = Instant.parse("2026-08-22T21:55:00Z").toEpochMilli() // 21:55 UTC
+        val gameRule = rule(
+            id = "game",
+            weekdays = setOf(6),
+            startMinute = 9 * 60,
+            endMinute = 24 * 60, // Game rule itself allows up to midnight
+            allowedMinutes = 30
+        ).copy(rolloverEnabled = true, unlockDays = setOf(6))
+
+        // Bedtime rule: 22:00 to 07:00 lockdown (0 allowance) for all apps
+        val bedtimeRule = AppRule(
+            id = "bedtime-lockdown",
+            name = "Bedtime Lockdown",
+            weekdays = (0..6).toSet(),
+            startMinute = 22 * 60,
+            endMinute = 7 * 60,
+            scope = AppRuleScope(includeAllApps = true),
+            allowedMinutes = 0L
+        )
+
+        // Kid has 30 minutes approved accumulated time granted at 21:50
+        val grant = AppRuleGuardianGrant(
+            ruleId = "game",
+            useDayId = "2026-08-22",
+            grantedAtMs = saturdayEvening - 5 * 60_000L,
+            grantedMillis = 30 * 60_000L,
+            isFromAccumulatedPool = true
+        )
+        val overrides = AppRuleOverrideState(
+            useDayId = "2026-08-22",
+            grants = listOf(grant)
+        )
+
+        val snapshot = AppRuleSnapshot(
+            appGroups = listOf(group),
+            appRules = listOf(gameRule, bedtimeRule)
+        )
+
+        // At 21:55: bedtime rule is inactive; game rule allows usage
+        val evalBeforeBedtime = AppRuleEvaluator.evaluate(
+            snapshot = snapshot,
+            packageName = "com.example.reader",
+            useDayId = "2026-08-22",
+            sessions = emptyList(),
+            nowMs = saturdayEvening,
+            zone = zone,
+            overrides = overrides,
+            availablePackages = setOf("com.example.reader")
+        )
+        assertTrue(evalBeforeBedtime.isAllowed)
+
+        // At 22:01: bedtime rule becomes active and strictly denies, despite 24m extra time left on game rule
+        val pastBedtime = Instant.parse("2026-08-22T22:01:00Z").toEpochMilli()
+        val sessionBeforeBedtime = ForegroundSession(
+            useDayId = "2026-08-22",
+            packageName = "com.example.reader",
+            startedAtMs = saturdayEvening,
+            endedAtMs = pastBedtime
+        )
+        val evalAtBedtime = AppRuleEvaluator.evaluate(
+            snapshot = snapshot,
+            packageName = "com.example.reader",
+            useDayId = "2026-08-22",
+            sessions = listOf(sessionBeforeBedtime),
+            nowMs = pastBedtime,
+            zone = zone,
+            overrides = overrides,
+            availablePackages = setOf("com.example.reader")
+        )
+        assertFalse(evalAtBedtime.isAllowed)
+        assertEquals(listOf("bedtime-lockdown"), evalAtBedtime.denyingRules.map { it.ruleId })
+    }
+
+
+
     private fun evaluate(
         rule: AppRule,
         sessions: List<ForegroundSession> = emptyList(),
