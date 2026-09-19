@@ -110,6 +110,21 @@ Windows systems run PowerShell 5.1 with bundled Pester 3.4.0 by default. Modern 
 - Problem: In PowerShell, `$PID` is a reserved, read-only automatic variable holding the process ID of the host PowerShell process. Declaring parameters named `[int]$PID` or assigning to `$PID` produces parser errors or runtime failures.
 - Rule: Always use explicit domain parameter names such as `[int]$TargetPid` or `[int]$ServicePid` instead of `$PID`.
 
+### Path whitespace quoting and the 'C:\Program' error
+- Problem: `C:\Program : The term 'C:\Program' is not recognized as the name of a cmdlet, function, script file, or operable program.`
+- Cause: PowerShell splits unquoted string tokens on spaces. When invoking commands located under paths containing spaces (e.g. `C:\Program Files\...`, `C:\Program Files (x86)\...`) or expanding environment variables (e.g. `$env:JAVA_HOME`, `$env:ANDROID_HOME`), PowerShell interprets `C:\Program` as the command name and the remainder as unrecognized arguments.
+- Rules:
+  1. Always quote paths containing spaces with double quotes (`"..."`) or single quotes (`'...'`).
+  2. Always use the call operator (`&`) when executing a path represented by a variable or quoted string:
+     ```powershell
+     # Correct:
+     & "$env:JAVA_HOME\bin\java.exe" -version
+     # Incorrect (triggers 'C:\Program' error or outputs string without executing):
+     $env:JAVA_HOME\bin\java.exe -version
+     "$env:JAVA_HOME\bin\java.exe" -version
+     ```
+  3. When passing paths or commands to child processes (such as `adb shell` or script parameters), use discrete array arguments or properly escaped quotation to avoid whitespace splitting.
+
 ### Error handling semantics
 - Non-terminating `Write-Error` allows execution to proceed unless `$ErrorActionPreference = "Stop"`.
 - Rule: Set `$ErrorActionPreference = "Stop"` at script top level. In shared helpers, combine `Write-Error` with explicit `return $null` or terminate directly.
@@ -161,11 +176,13 @@ Windows systems run PowerShell 5.1 with bundled Pester 3.4.0 by default. Modern 
     ```
 
 ### Usage accumulation lower-bound verification
-- Problem: In usage-limit exhaustion tests (e.g. 1-minute daily allowance limit), if interception occurs after only a few seconds, the test passed on a false positive caused by leaked prior usage rather than genuine accumulation.
-- Rule: Always assert a lower-bound elapsed time before declaring success:
+- Problem: In usage-limit exhaustion tests (e.g. testing an $N$-minute allowance limit), if interception occurs after only a few seconds, the test passed on a false positive caused by leaked prior usage rather than genuine accumulation.
+- Rule: Always calculate a lower-bound threshold allowing a minor tolerance ($\Delta = 5\sim 10$ seconds) and assert elapsed time before declaring success:
+  $$\text{MinRequiredSeconds} = (N \times 60) - \Delta$$
   ```powershell
-  if ($elapsed -lt 55) {
-      Write-Fail "Interception occurred prematurely after only ${elapsed}s (< 55s). Stale usage leaked."
+  $minRequiredSeconds = [math]::Max(5, ($TargetAllowanceMinutes * 60) - 5)
+  if ($elapsed -lt $minRequiredSeconds) {
+      Write-Fail "Interception occurred prematurely after only ${elapsed}s (< ${minRequiredSeconds}s threshold). Stale usage leaked."
       $passedAll = $false
   }
   ```
@@ -229,7 +246,7 @@ Windows systems run PowerShell 5.1 with bundled Pester 3.4.0 by default. Modern 
 ### PBKDF2 credential injection and validation
 - For guardian PIN authentication tests, generate PBKDF2 credentials via `New-GuardianPinAuthConfig` and inject them via `Set-DeviceGuardianAuthConfig`:
   ```powershell
-  $authConfig = New-GuardianPinAuthConfig -Pin "1234" -Iterations 120000
+  $authConfig = New-GuardianPinAuthConfig -Pin $TestPin -Iterations 120000
   Set-DeviceGuardianAuthConfig -GuardianAuthConfig $authConfig
   ```
   This helper automatically applies `chmod 660` and sends settings refresh broadcasts.
