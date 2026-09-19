@@ -1,8 +1,6 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
-import neth.iecal.curbox.data.models.AppRuleRolloverState
-import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.RuleRolloverPool
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -394,40 +392,5 @@ class AppRuleRolloverPolicyTest {
         assertEquals(50L, result.pool.accumulatedMinutes)
         assertEquals("2026-09-19", result.pool.lastSettledUseDayId)
         assertTrue(result.transitions.isEmpty())
-    }
-
-    @Test
-    fun reconcileAllRulesUpdatesEachRuleAccordingToItsRolloverSettings() {
-        val ruleA = AppRule(id = "rule-a", rolloverEnabled = true, unlockDays = setOf(0, 6))
-        val ruleB = AppRule(id = "rule-b", rolloverEnabled = false, unlockDays = setOf(0, 6))
-        val snapshot = AppRuleSnapshot(appRules = listOf(ruleA, ruleB))
-
-        val initialState = AppRuleRolloverState(
-            pools = mapOf(
-                "rule-a" to RuleRolloverPool("rule-a", accumulatedMinutes = 0L, lastSettledUseDayId = "2026-09-18"),
-                "rule-b" to RuleRolloverPool("rule-b", accumulatedMinutes = 100L, lastSettledUseDayId = "2026-09-18")
-            )
-        )
-
-        // Friday to Saturday: Rule A had 25m unused on Friday
-        val unusedMinutesByRuleAndDay = mapOf(
-            Pair("rule-a", "2026-09-18") to 25L,
-            Pair("rule-b", "2026-09-18") to 30L
-        )
-
-        val updatedState = AppRuleRolloverPolicy.reconcileAllRules(
-            state = initialState,
-            snapshot = snapshot,
-            currentUseDayId = "2026-09-19",
-            unusedMinutesByRuleAndDay = unusedMinutesByRuleAndDay
-        )
-
-        // Rule A accumulated 25m into Saturday
-        assertEquals(25L, updatedState.poolFor("rule-a").accumulatedMinutes)
-        assertEquals("2026-09-19", updatedState.poolFor("rule-a").lastSettledUseDayId)
-
-        // Rule B preserved its 100m without accumulating
-        assertEquals(100L, updatedState.poolFor("rule-b").accumulatedMinutes)
-        assertEquals("2026-09-19", updatedState.poolFor("rule-b").lastSettledUseDayId)
     }
 }

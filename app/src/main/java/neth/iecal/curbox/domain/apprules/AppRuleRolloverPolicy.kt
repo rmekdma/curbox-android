@@ -3,17 +3,13 @@ package neth.iecal.curbox.domain.apprules
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import neth.iecal.curbox.data.models.AppRule
-import neth.iecal.curbox.data.models.AppRuleRolloverState
-import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.RuleRolloverPool
 
-/** Role of a use-day for an app rule with rollover enabled. */
 enum class AppRuleDayRole {
     ACCRUAL,
     UNLOCK
 }
 
-/** Result of a single day transition settlement for an app rule rollover pool. */
 data class RolloverSettlementResult(
     val previousPoolMinutes: Long,
     val accumulatedMinutes: Long,
@@ -23,7 +19,6 @@ data class RolloverSettlementResult(
     val nextDayRole: AppRuleDayRole
 )
 
-/** Result of catch-up reconciliation across one or more use-day boundaries. */
 data class RolloverReconciliationResult(
     val pool: RuleRolloverPool,
     val transitions: List<RolloverSettlementResult>
@@ -31,25 +26,14 @@ data class RolloverReconciliationResult(
 
 /**
  * Pure domain engine for guardian extra time rollover settlement and catch-up.
- *
- * This object has no Android framework or database dependencies.
  */
 object AppRuleRolloverPolicy {
 
     private val ID_FORMAT = DateTimeFormatter.ISO_LOCAL_DATE
 
     /**
-     * Determines whether rollover settlement should occur between [lastSettledUseDayId] and [currentUseDayId].
-     *
-     * Returns true ONLY when [lastSettledUseDayId] and [currentUseDayId] represent valid, distinct
-     * calendar dates where [lastSettledUseDayId] < [currentUseDayId].
-     *
-     * In particular, returns false when:
-     * - [lastSettledUseDayId] is blank (initial uninitialized pool)
-     * - [currentUseDayId] is blank
-     * - [lastSettledUseDayId] == [currentUseDayId] (defends against premature settlement when restore time
-     *   or use-day generation changes midday without an actual calendar boundary transition)
-     * - [lastSettledUseDayId] > [currentUseDayId] (system clock backwards jump)
+     * Prevents settlement when restore time or generation updates midday without crossing
+     * a calendar date boundary, or when the system clock jumps backwards.
      */
     fun shouldSettle(lastSettledUseDayId: String, currentUseDayId: String): Boolean {
         if (lastSettledUseDayId.isBlank() || currentUseDayId.isBlank()) return false
@@ -74,48 +58,29 @@ object AppRuleRolloverPolicy {
         val previous = currentPoolMinutes.coerceAtLeast(0L)
         val unused = unusedGrantMinutes.coerceAtLeast(0L)
 
-        return when (endingDayRole) {
-            AppRuleDayRole.ACCRUAL -> {
-                val nextPool = safeAdd(previous, unused)
-                RolloverSettlementResult(
-                    previousPoolMinutes = previous,
-                    accumulatedMinutes = nextPool,
-                    addedMinutes = unused,
-                    expiredMinutes = 0L,
-                    endingDayRole = endingDayRole,
-                    nextDayRole = nextDayRole
-                )
-            }
-            AppRuleDayRole.UNLOCK -> {
-                if (nextDayRole == AppRuleDayRole.UNLOCK) {
-                    val nextPool = safeAdd(previous, unused)
-                    RolloverSettlementResult(
-                        previousPoolMinutes = previous,
-                        accumulatedMinutes = nextPool,
-                        addedMinutes = unused,
-                        expiredMinutes = 0L,
-                        endingDayRole = endingDayRole,
-                        nextDayRole = nextDayRole
-                    )
-                } else {
-                    val expired = safeAdd(previous, unused)
-                    RolloverSettlementResult(
-                        previousPoolMinutes = previous,
-                        accumulatedMinutes = 0L,
-                        addedMinutes = 0L,
-                        expiredMinutes = expired,
-                        endingDayRole = endingDayRole,
-                        nextDayRole = nextDayRole
-                    )
-                }
-            }
+        return if (endingDayRole == AppRuleDayRole.UNLOCK && nextDayRole == AppRuleDayRole.ACCRUAL) {
+            val expired = safeAdd(previous, unused)
+            RolloverSettlementResult(
+                previousPoolMinutes = previous,
+                accumulatedMinutes = 0L,
+                addedMinutes = 0L,
+                expiredMinutes = expired,
+                endingDayRole = endingDayRole,
+                nextDayRole = nextDayRole
+            )
+        } else {
+            val nextPool = safeAdd(previous, unused)
+            RolloverSettlementResult(
+                previousPoolMinutes = previous,
+                accumulatedMinutes = nextPool,
+                addedMinutes = unused,
+                expiredMinutes = 0L,
+                endingDayRole = endingDayRole,
+                nextDayRole = nextDayRole
+            )
         }
     }
 
-    /**
-     * Convenience overload that settles a transition for a [RuleRolloverPool] and advances its
-     * [RuleRolloverPool.lastSettledUseDayId] to [nextUseDayId].
-     */
     fun settleDayTransition(
         pool: RuleRolloverPool,
         endingDayRole: AppRuleDayRole,
@@ -139,33 +104,20 @@ object AppRuleRolloverPolicy {
     internal fun safeAdd(left: Long, right: Long): Long =
         if (Long.MAX_VALUE - left < right) Long.MAX_VALUE else left + right
 
-    /**
-     * Resolves the [AppRuleDayRole] for a given [weekday] index (Sunday=0, Monday=1, ..., Saturday=6).
-     */
     fun dayRoleFor(weekday: Int, unlockDays: Set<Int>): AppRuleDayRole {
         return if (weekday in unlockDays) AppRuleDayRole.UNLOCK else AppRuleDayRole.ACCRUAL
     }
 
-    /**
-     * Resolves the [AppRuleDayRole] for a given [date].
-     * Curbox convention maps Sunday to 0 (DayOfWeek.SUNDAY.value % 7 == 0).
-     */
     fun dayRoleFor(date: LocalDate, unlockDays: Set<Int>): AppRuleDayRole {
         val weekday = date.dayOfWeek.value % 7
         return dayRoleFor(weekday, unlockDays)
     }
 
-    /**
-     * Resolves the [AppRuleDayRole] for a given [useDayId] string (format YYYY-MM-DD).
-     */
     fun dayRoleFor(useDayId: String, unlockDays: Set<Int>): AppRuleDayRole {
         val date = LocalDate.parse(useDayId, ID_FORMAT)
         return dayRoleFor(date, unlockDays)
     }
 
-    /**
-     * Resolves the [AppRuleDayRole] for a given [useDayId] and [rule].
-     */
     fun dayRoleFor(useDayId: String, rule: AppRule): AppRuleDayRole {
         return dayRoleFor(useDayId, rule.unlockDays)
     }
@@ -173,11 +125,8 @@ object AppRuleRolloverPolicy {
     /**
      * Reconciles rollover settlement sequentially from [pool.lastSettledUseDayId] to [currentUseDayId].
      *
-     * Intermediate days where the device was powered off or in deep sleep are simulated with 0 unused minutes,
-     * correctly advancing and expiring the pool according to weekday role transitions.
-     *
-     * When rollover is disabled on the rule, the existing pool balance is safely preserved without
-     * accumulation or expiration (User Story 27).
+     * Intermediate days where the device was off are simulated with 0 unused minutes.
+     * When rollover is disabled on the rule, the existing pool balance is preserved.
      */
     fun reconcileSettlement(
         pool: RuleRolloverPool,
@@ -186,72 +135,38 @@ object AppRuleRolloverPolicy {
         lastSettledDayUnusedMinutes: Long = 0L,
         unusedMinutesByDay: Map<String, Long> = emptyMap()
     ): RolloverReconciliationResult {
-        return reconcileSettlement(
-            currentPoolMinutes = pool.accumulatedMinutes,
-            lastSettledUseDayId = pool.lastSettledUseDayId,
-            currentUseDayId = currentUseDayId,
-            unlockDays = rule.unlockDays,
-            rolloverEnabled = rule.rolloverEnabled,
-            ruleId = pool.ruleId.ifBlank { rule.id },
-            lastSettledDayUnusedMinutes = lastSettledDayUnusedMinutes,
-            unusedMinutesByDay = unusedMinutesByDay
-        )
-    }
-
-    /**
-     * Reconciles rollover settlement sequentially from [lastSettledUseDayId] to [currentUseDayId].
-     */
-    fun reconcileSettlement(
-        currentPoolMinutes: Long,
-        lastSettledUseDayId: String,
-        currentUseDayId: String,
-        unlockDays: Set<Int>,
-        rolloverEnabled: Boolean = true,
-        ruleId: String = "",
-        lastSettledDayUnusedMinutes: Long = 0L,
-        unusedMinutesByDay: Map<String, Long> = emptyMap()
-    ): RolloverReconciliationResult {
-        val initialPool = RuleRolloverPool(
-            ruleId = ruleId,
-            accumulatedMinutes = currentPoolMinutes.coerceAtLeast(0L),
-            lastSettledUseDayId = lastSettledUseDayId
-        )
-
-        // When rollover is disabled, safely preserve the current pool balance (User Story 27)
-        if (!rolloverEnabled) {
+        if (!rule.rolloverEnabled) {
             return RolloverReconciliationResult(
-                pool = initialPool.copy(lastSettledUseDayId = currentUseDayId.ifBlank { lastSettledUseDayId }),
+                pool = pool.copy(lastSettledUseDayId = currentUseDayId.ifBlank { pool.lastSettledUseDayId }),
                 transitions = emptyList()
             )
         }
 
-        // First initialization: no previous day to settle, advance lastSettledUseDayId to current
-        if (lastSettledUseDayId.isBlank()) {
+        if (pool.lastSettledUseDayId.isBlank()) {
             return RolloverReconciliationResult(
-                pool = initialPool.copy(lastSettledUseDayId = currentUseDayId),
+                pool = pool.copy(lastSettledUseDayId = currentUseDayId),
                 transitions = emptyList()
             )
         }
 
-        // Defend against premature settlement if no calendar boundary was crossed
-        if (!shouldSettle(lastSettledUseDayId, currentUseDayId)) {
+        if (!shouldSettle(pool.lastSettledUseDayId, currentUseDayId)) {
             return RolloverReconciliationResult(
-                pool = initialPool,
+                pool = pool,
                 transitions = emptyList()
             )
         }
 
-        val startDate = LocalDate.parse(lastSettledUseDayId, ID_FORMAT)
+        val startDate = LocalDate.parse(pool.lastSettledUseDayId, ID_FORMAT)
         val endDate = LocalDate.parse(currentUseDayId, ID_FORMAT)
 
         var date = startDate
-        var currentMinutes = initialPool.accumulatedMinutes
+        var currentMinutes = pool.accumulatedMinutes.coerceAtLeast(0L)
         val transitions = mutableListOf<RolloverSettlementResult>()
 
         while (date < endDate) {
             val nextDate = date.plusDays(1)
-            val endingDayRole = dayRoleFor(date, unlockDays)
-            val nextDayRole = dayRoleFor(nextDate, unlockDays)
+            val endingDayRole = dayRoleFor(date, rule.unlockDays)
+            val nextDayRole = dayRoleFor(nextDate, rule.unlockDays)
             val dayId = date.format(ID_FORMAT)
             val unusedMinutes = unusedMinutesByDay[dayId]
                 ?: if (date == startDate) lastSettledDayUnusedMinutes else 0L
@@ -268,7 +183,7 @@ object AppRuleRolloverPolicy {
         }
 
         return RolloverReconciliationResult(
-            pool = initialPool.copy(
+            pool = pool.copy(
                 accumulatedMinutes = currentMinutes,
                 lastSettledUseDayId = currentUseDayId
             ),
@@ -276,34 +191,32 @@ object AppRuleRolloverPolicy {
         )
     }
 
-    /**
-     * Reconciles all rules in [snapshot] against [state] up to [currentUseDayId].
-     *
-     * Rules with rollover disabled or unconfigured will safely preserve their existing pool balances.
-     * Existing pools for rules not present in [snapshot] are preserved.
-     */
-    fun reconcileAllRules(
-        state: AppRuleRolloverState,
-        snapshot: AppRuleSnapshot,
+    fun reconcileSettlement(
+        currentPoolMinutes: Long,
+        lastSettledUseDayId: String,
         currentUseDayId: String,
-        unusedMinutesByRuleAndDay: Map<Pair<String, String>, Long> = emptyMap()
-    ): AppRuleRolloverState {
-        var updatedState = state
-        snapshot.appRules.forEach { rule ->
-            val currentPool = updatedState.poolFor(rule.id)
-            val ruleUnusedMinutesByDay = unusedMinutesByRuleAndDay
-                .filterKeys { it.first == rule.id }
-                .mapKeys { it.key.second }
-
-            val reconciliation = reconcileSettlement(
-                pool = currentPool,
-                rule = rule,
-                currentUseDayId = currentUseDayId,
-                lastSettledDayUnusedMinutes = 0L,
-                unusedMinutesByDay = ruleUnusedMinutesByDay
-            )
-            updatedState = updatedState.withPool(reconciliation.pool)
-        }
-        return updatedState
+        unlockDays: Set<Int>,
+        rolloverEnabled: Boolean = true,
+        ruleId: String = "",
+        lastSettledDayUnusedMinutes: Long = 0L,
+        unusedMinutesByDay: Map<String, Long> = emptyMap()
+    ): RolloverReconciliationResult {
+        val pool = RuleRolloverPool(
+            ruleId = ruleId,
+            accumulatedMinutes = currentPoolMinutes.coerceAtLeast(0L),
+            lastSettledUseDayId = lastSettledUseDayId
+        )
+        val dummyRule = AppRule(
+            id = ruleId,
+            rolloverEnabled = rolloverEnabled,
+            unlockDays = unlockDays
+        )
+        return reconcileSettlement(
+            pool = pool,
+            rule = dummyRule,
+            currentUseDayId = currentUseDayId,
+            lastSettledDayUnusedMinutes = lastSettledDayUnusedMinutes,
+            unusedMinutesByDay = unusedMinutesByDay
+        )
     }
 }
