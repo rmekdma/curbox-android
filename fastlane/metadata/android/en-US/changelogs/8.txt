@@ -1,0 +1,5 @@
+FEATURES & IMPROVEMENTS:
+• Support rollover guardian extra time for app rules.
+• Support condition shortfall and dynamic foreground notification ordering.
+• Enforce app rules across time boundaries.
+• General stability and test harness improvements.
