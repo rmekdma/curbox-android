@@ -38,4 +38,7 @@
     <string name="app_rules_rollover_unlock_days_required">이월 기능을 켜려면 해금 요일을 하나 이상 선택해 주세요</string>
     <string name="app_rules_rollover_summary_on">이월 보호자 추가시간 켜짐 (%1$s)</string>
     <string name="app_rules_rollover_summary_off">이월 보호자 추가시간 꺼짐</string>
+    <string name="app_rules_accumulated_time_summary">이번 주 누적 추가시간: %1$d분</string>
+    <string name="app_rules_change_accumulated_time">누적 시간 변경</string>
+    <string name="app_rules_invalid_accumulated_minutes">0분 이상의 유효한 숫자를 입력해 주세요.</string>
 </resources>

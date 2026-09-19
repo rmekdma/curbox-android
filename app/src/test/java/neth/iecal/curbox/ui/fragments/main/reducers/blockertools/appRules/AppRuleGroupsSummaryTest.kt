@@ -18,6 +18,7 @@ class AppRuleGroupsSummaryTest {
             R.string.app_rules_saturday_short -> "Sat"
             R.string.app_rules_rollover_summary_on -> "Rollover on (${args[0]})"
             R.string.app_rules_rollover_summary_off -> "Rollover off"
+            R.string.app_rules_accumulated_time_summary -> "Accumulated extra time this week: ${args[0]} minutes"
             else -> ""
         }
     }
@@ -37,5 +38,11 @@ class AppRuleGroupsSummaryTest {
         )
         val summary = formatAppRuleRolloverSummary(rule, fakeStringResolver)
         assertEquals("Rollover on (Sun, Sat)", summary)
+    }
+
+    @Test
+    fun formatAppRuleAccumulatedSummary_showsMinutes() {
+        val summary = formatAppRuleAccumulatedSummary(35L, fakeStringResolver)
+        assertEquals("Accumulated extra time this week: 35 minutes", summary)
     }
 }

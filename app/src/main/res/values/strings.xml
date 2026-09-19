@@ -1474,6 +1474,9 @@
     <string name="app_rules_rollover_unlock_days_required">Choose at least one unlock day to roll over extra time</string>
     <string name="app_rules_rollover_summary_on">Rollover on (%1$s)</string>
     <string name="app_rules_rollover_summary_off">Rollover off</string>
+    <string name="app_rules_accumulated_time_summary">Accumulated extra time this week: %1$d minutes</string>
+    <string name="app_rules_change_accumulated_time">Change accumulated time</string>
+    <string name="app_rules_invalid_accumulated_minutes">Enter a valid number of minutes (0 or more).</string>
     <string name="app_rules_include_all_apps">Include all launchable apps</string>
     <string name="app_rules_include_groups">Include app groups</string>
     <string name="app_rules_exclude_groups">Exclude app groups</string>

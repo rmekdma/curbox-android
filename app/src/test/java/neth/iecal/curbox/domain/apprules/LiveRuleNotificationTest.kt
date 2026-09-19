@@ -773,5 +773,75 @@ class LiveRuleNotificationTest {
         assertFalse(titleKo.contains("–"))
         assertFalse(titleKo.contains("—"))
     }
+
+    @Test
+    fun computeNotificationItemsIncludesApprovedAccumulatedTimeInTotalAndExtraMinutes() {
+        val group = AppRuleAppGroup.create("Games", listOf("com.game.app"))
+        val saturdayNow = Instant.parse("2026-08-22T10:00:00Z").toEpochMilli()
+        val saturdayUseDayId = "2026-08-22"
+
+        val rule = AppRule(
+            id = "rule-game",
+            name = "Games",
+            weekdays = setOf(6), // Saturday
+            startMinute = 0,
+            endMinute = 24 * 60,
+            scope = AppRuleScope.forGroup(group.id),
+            allowedMinutes = 30L,
+            rolloverEnabled = true,
+            unlockDays = setOf(6)
+        )
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+
+        // Kid used 30 minutes base allowance
+        val sessions = listOf(
+            ForegroundSession(
+                useDayId = saturdayUseDayId,
+                packageName = "com.game.app",
+                startedAtMs = saturdayNow - 30 * 60_000L,
+                endedAtMs = saturdayNow
+            )
+        )
+
+        // Guardian approved 25 minutes from accumulated pool
+        val overrides = AppRuleOverrideState(
+            useDayId = saturdayUseDayId,
+            grants = listOf(
+                AppRuleGuardianGrant(
+                    ruleId = "rule-game",
+                    useDayId = saturdayUseDayId,
+                    grantedAtMs = saturdayNow - 5 * 60_000L,
+                    grantedMillis = 25 * 60_000L,
+                    isFromAccumulatedPool = true
+                )
+            )
+        )
+
+        val items = LiveRuleNotificationStateCalculator.computeNotificationItems(
+            snapshot = snapshot,
+            sessions = sessions,
+            useDayId = saturdayUseDayId,
+            nowMs = saturdayNow,
+            zone = zone,
+            overrides = overrides
+        )
+
+        assertEquals(1, items.size)
+        val item = items.single()
+        assertEquals("rule-game", item.ruleId)
+        assertEquals(30L, item.usedMinutes)
+        assertEquals(55L, item.totalAllowedMinutes) // 30 base + 25 approved accumulated
+        assertEquals(25L, item.guardianExtraMinutes)
+        assertTrue(item.isAllowed)
+        assertFalse(item.isAllowanceExhausted)
+
+        val formattedKo = formatNotificationItemKorean(item)
+        assertEquals("[Games] 30분 사용 / 55분 허용 (추가 25분 포함)", formattedKo)
+
+        val itemEn = item.copy(ruleName = "Games")
+        val formattedEn = LiveRuleNotificationFormatter.formatNotificationItem(itemEn)
+        assertEquals("[Games] 30 min used / 55 min allowed (includes 25 min extra)", formattedEn)
+    }
 }
+
 
