@@ -289,6 +289,7 @@ class AppRuleGroupsFragment : Fragment() {
         val contributorNames = scopeContributorNames(rule, snapshot)
         val missingContributorIds = snapshot.missingContributorGroupIds(rule)
         val poolMinutes = rolloverPool?.accumulatedMinutes ?: 0L
+        val hasRolloverInfo = rule.rolloverEnabled || poolMinutes > 0L
         val status = buildString {
             append(
                 getString(
@@ -339,7 +340,7 @@ class AppRuleGroupsFragment : Fragment() {
             append(formatAppRuleRolloverSummary(rule) { resId, args ->
                 if (args.isEmpty()) getString(resId) else getString(resId, *args)
             })
-            if (rule.rolloverEnabled || poolMinutes > 0L) {
+            if (hasRolloverInfo) {
                 append("\n")
                 append(formatAppRuleAccumulatedSummary(poolMinutes) { resId, args ->
                     if (args.isEmpty()) getString(resId) else getString(resId, *args)
@@ -411,7 +412,7 @@ class AppRuleGroupsFragment : Fragment() {
                 text = status
                 textSize = 15f
             })
-            if (rule.rolloverEnabled || poolMinutes > 0L) {
+            if (hasRolloverInfo) {
                 addView(MaterialButton(
                     context,
                     null,
