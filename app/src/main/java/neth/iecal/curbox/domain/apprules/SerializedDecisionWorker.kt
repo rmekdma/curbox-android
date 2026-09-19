@@ -124,7 +124,19 @@ sealed class DecisionOutcome {
         val request: UsageResetRequest,
         val succeeded: Boolean
     ) : DecisionOutcome()
+
+    data class SettlementFinished(
+        val request: SettlementRequest,
+        val succeeded: Boolean,
+        val result: RolloverCoordinatorResult? = null
+    ) : DecisionOutcome()
 }
+
+data class SettlementRequest(
+    val wallClockMs: Long,
+    val requestId: String = java.util.UUID.randomUUID().toString()
+)
+
 
 /** Worker-owned boundary derivation handed to the scheduler adapter as immutable values. */
 data class RecheckPlanUpdate(
@@ -226,7 +238,8 @@ class SerializedDecisionWorker internal constructor(
     },
     private val onNonFatalError: (Throwable) -> Unit = {},
     private val onRequestCancellation: ((CancellationException) -> Unit)? = null,
-    private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository)
+    private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository),
+    private val coordinator: AppRuleRolloverCoordinator? = null
 ) {
     private sealed interface Work {
         data class Decision(val request: DecisionRequest) : Work
@@ -234,6 +247,10 @@ class SerializedDecisionWorker internal constructor(
         data class UsageReset(
             val request: UsageResetRequest,
             val resetAtElapsedMs: Long
+        ) : Work
+
+        data class Settlement(
+            val request: SettlementRequest
         ) : Work
     }
 
@@ -261,6 +278,7 @@ class SerializedDecisionWorker internal constructor(
                     when (work) {
                         is Work.Decision -> process(work.request)
                         is Work.UsageReset -> processUsageReset(work)
+                        is Work.Settlement -> processSettlement(work)
                     }
                 } catch (error: CancellationException) {
                     accepting.set(false)
@@ -332,6 +350,24 @@ class SerializedDecisionWorker internal constructor(
             SubmissionResult.REJECTED_NOT_READY
         }
     }
+
+    /** Enqueues a day rollover settlement behind earlier foreground work owned by this worker. */
+    internal fun submitSettlement(
+        request: SettlementRequest
+    ): SubmissionResult = synchronized(stateLock) {
+        if (!accepting.get() || !workerJob.isActive) {
+            accepting.set(false)
+            return@synchronized SubmissionResult.REJECTED_NOT_READY
+        }
+        queuedWorkCount.incrementAndGet()
+        if (requests.trySend(Work.Settlement(request)).isSuccess) {
+            SubmissionResult.ACCEPTED
+        } else {
+            queuedWorkCount.decrementAndGet()
+            SubmissionResult.REJECTED_NOT_READY
+        }
+    }
+
 
     /**
      * Installs a new connection generation. The lifecycle owner supplies both typed values; the
@@ -829,6 +865,38 @@ class SerializedDecisionWorker internal constructor(
             reportNonFatal(error)
         }
     }
+
+    private suspend fun processSettlement(work: Work.Settlement) {
+        try {
+            val result = coordinator?.reconcileSettlement(work.request.wallClockMs)
+            val succeeded = result?.committed == true
+            publishSettlementComplete(work.request, succeeded, result)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+            publishSettlementComplete(work.request, succeeded = false, result = null)
+        }
+    }
+
+    private suspend fun publishSettlementComplete(
+        request: SettlementRequest,
+        succeeded: Boolean,
+        result: RolloverCoordinatorResult?
+    ) {
+        try {
+            runInterruptible {
+                outcomeSink.publish(
+                    DecisionOutcome.SettlementFinished(request, succeeded, result)
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+        }
+    }
+
 
     private fun acceptRuntimePublication(request: DecisionRequest): AcceptedRuleRuntimeSnapshot? =
         synchronized(stateLock) {

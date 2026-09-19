@@ -48,4 +48,57 @@ class BootReceiverTest {
         val json = Gson().toJson(invalidSnapshot)
         assertNull(BootReceiver.parseTestAppRules(json))
     }
+
+    @Test
+    fun triggerSettlementCatchupAsyncExecutesCoordinatorReconcileSettlement() {
+        val dummyContext = android.content.ContextWrapper(null)
+        val reconciled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val latch = java.util.concurrent.CountDownLatch(1)
+
+        try {
+            BootSettlementCatchupRunner.catchupAction = {
+                reconciled.set(true)
+                latch.countDown()
+            }
+            BootSettlementCatchupRunner.crashLoggerProvider = { {} }
+
+            val testScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+            BootSettlementCatchupRunner.runAsync(dummyContext, scope = testScope)
+
+            assertTrue(latch.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(reconciled.get())
+        } finally {
+            BootSettlementCatchupRunner.catchupAction = null
+            BootSettlementCatchupRunner.crashLoggerProvider = null
+        }
+    }
+
+    @Test
+    fun triggerSettlementCatchupAsyncCatchesAndLogsNonFatalError() {
+        val dummyContext = android.content.ContextWrapper(null)
+        val loggedError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val latch = java.util.concurrent.CountDownLatch(1)
+
+        try {
+            BootSettlementCatchupRunner.catchupAction = {
+                throw IllegalStateException("Test settlement failure")
+            }
+            BootSettlementCatchupRunner.crashLoggerProvider = {
+                { error ->
+                    loggedError.set(error)
+                    latch.countDown()
+                }
+            }
+
+            val testScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+            BootSettlementCatchupRunner.runAsync(dummyContext, scope = testScope)
+
+            assertTrue(latch.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            assertNotNull(loggedError.get())
+            assertTrue(loggedError.get() is IllegalStateException)
+        } finally {
+            BootSettlementCatchupRunner.catchupAction = null
+            BootSettlementCatchupRunner.crashLoggerProvider = null
+        }
+    }
 }

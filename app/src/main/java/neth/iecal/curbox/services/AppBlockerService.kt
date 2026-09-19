@@ -240,6 +240,14 @@ class AppBlockerService : BaseBlockingService() {
             crashLogger.logNonFatalError(Exception(t))
             Log.e("AppRuleBlocker", "Receiver setup failed", t)
         }
+        try {
+            if (appRuleBlockerReady) {
+                appRuleBlocker.triggerSettlementCatchup()
+            }
+        } catch (t: Throwable) {
+            crashLogger.logNonFatalError(Exception(t))
+            Log.e("AppRuleBlocker", "Settlement catchup failed", t)
+        }
         reelBlocker.setupReceivers()
         keywordBlocker.setupReceivers()
         grayScaleFilter.setupReceivers()

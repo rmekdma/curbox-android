@@ -438,6 +438,84 @@ class AppRuleEvaluatorTest {
         assertFalse(result.isAllowed)
     }
 
+    @Test
+    fun computeUnusedGuardianMinutesReturnsZeroWhenRolloverDisabled() {
+        val rule = rule(allowedMinutes = 30).copy(rolloverEnabled = false)
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+        val grant = AppRuleGuardianGrant(rule.id, "2026-08-17", now - 3600_000L, 20 * 60_000L)
+        val overrides = AppRuleOverrideState(grants = listOf(grant))
+
+        val unused = AppRuleEvaluator.computeUnusedGuardianMinutes(
+            rule = rule,
+            snapshot = snapshot,
+            useDayId = "2026-08-17",
+            sessions = emptyList(),
+            overrides = overrides,
+            zone = zone
+        )
+
+        assertEquals(0L, unused)
+    }
+
+    @Test
+    fun computeUnusedGuardianMinutesReturnsRemainingWhenUsageConsumesBaseAllowanceFirst() {
+        val rule = rule(allowedMinutes = 30).copy(rolloverEnabled = true)
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+        val grantTime = now - 60 * 60_000L
+        val grant = AppRuleGuardianGrant(rule.id, "2026-08-17", grantTime, 20 * 60_000L)
+        val overrides = AppRuleOverrideState(useDayId = "2026-08-17", grants = listOf(grant))
+
+        val s = ForegroundSession(
+            useDayId = "2026-08-17",
+            packageName = "com.example.reader",
+            startedAtMs = grantTime + 1000L,
+            endedAtMs = grantTime + 1000L + 35 * 60_000L
+        )
+
+        val unused = AppRuleEvaluator.computeUnusedGuardianMinutes(
+            rule = rule,
+            snapshot = snapshot,
+            useDayId = "2026-08-17",
+            sessions = listOf(s),
+            overrides = overrides,
+            zone = zone
+        )
+
+        assertEquals(15L, unused)
+    }
+
+    @Test
+    fun computeUnusedGuardianMinutesMatchesAllAppsRuleAgainstAvailablePackages() {
+        val allAppsRule = rule(allowedMinutes = 30).copy(
+            rolloverEnabled = true,
+            scope = neth.iecal.curbox.data.models.AppRuleScope(includeAllApps = true)
+        )
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(allAppsRule))
+        val grantTime = now - 60 * 60_000L
+        val grant = AppRuleGuardianGrant(allAppsRule.id, "2026-08-17", grantTime, 20 * 60_000L)
+        val overrides = AppRuleOverrideState(useDayId = "2026-08-17", grants = listOf(grant))
+
+        val s = ForegroundSession(
+            useDayId = "2026-08-17",
+            packageName = "com.other.unlisted.app",
+            startedAtMs = grantTime + 1000L,
+            endedAtMs = grantTime + 1000L + 35 * 60_000L
+        )
+
+        val unused = AppRuleEvaluator.computeUnusedGuardianMinutes(
+            rule = allAppsRule,
+            snapshot = snapshot,
+            useDayId = "2026-08-17",
+            sessions = listOf(s),
+            overrides = overrides,
+            zone = zone,
+            availablePackages = setOf("com.other.unlisted.app")
+        )
+
+        assertEquals(15L, unused)
+    }
+
+
     private fun evaluate(
         rule: AppRule,
         sessions: List<ForegroundSession> = emptyList(),

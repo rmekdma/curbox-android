@@ -4,6 +4,7 @@ import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleConditionProgress
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
+import neth.iecal.curbox.data.models.AppRuleGuardianSkip
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
@@ -393,17 +394,13 @@ object AppRuleEvaluator {
                 }
             }
         }.sortedBy { it.start }
-        val effectiveUsageIntervals = usageIntervals.flatMap { interval ->
-            subtractIntervals(interval, skipIntervals.map { skip ->
-                SessionInterval("guardian-skip", skip.skipFromMs, skip.skipUntilMs)
-            })
-        }
-        val usedMillis = effectiveUsageIntervals.sumOf { it.end - it.start }
-        val allocation = allocateAllowance(
-            usageIntervals = effectiveUsageIntervals,
+        val (effectiveUsageIntervals, allocation) = allocateWithSkips(
+            usageIntervals = usageIntervals,
+            skipIntervals = skipIntervals,
             baseAllowanceMillis = allowanceMillis,
             grants = grants
         )
+        val usedMillis = effectiveUsageIntervals.sumOf { it.end - it.start }
         val remainingMillis = safeAdd(allocation.baseRemainingMillis, allocation.guardianRemainingMillis)
         val potentialAllowanceMillis = if (hasMissingContributor) {
             0L
@@ -724,8 +721,131 @@ object AppRuleEvaluator {
         return AllowanceAllocation(baseRemaining, guardianUsed, guardianRemaining)
     }
 
+    fun computeUnusedGuardianMinutes(
+        rule: AppRule,
+        snapshot: AppRuleSnapshot,
+        useDayId: String,
+        sessions: Iterable<ForegroundSession>,
+        overrides: AppRuleOverrideState,
+        zone: ZoneId = ZoneId.systemDefault(),
+        resetTime: UseDayResetTime = UseDayResetTime(),
+        useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet()
+    ): Long {
+        if (!rule.rolloverEnabled) return 0L
+        val activeOverrides = AppRuleGuardianOverrides.normalize(
+            overrides,
+            useDayId,
+            nowMs = Long.MAX_VALUE,
+            useDayGenerationStartedAtMs
+        )
+        val grants = AppRuleGuardianOverrides.grantsForRule(
+            activeOverrides,
+            rule.id,
+            useDayId,
+            nowMs = Long.MAX_VALUE,
+            useDayGenerationStartedAtMs
+        )
+        if (grants.isEmpty()) return 0L
+
+        val membershipResolver = AppRuleMembershipResolver(snapshot)
+        val targetPackages = membershipResolver.targetPackagesAt(
+            rule = rule,
+            atMs = Long.MAX_VALUE,
+            launchablePackages = availablePackages,
+            essentialExcludedPackages = essentialExcludedPackages
+        )
+        val contributorResolution = resolveContributors(snapshot, rule)
+        if (contributorResolution.missingGroupIds.isNotEmpty()) return 0L
+
+        val sessionList = sessions.toList()
+        val conditionRequiredMillis = rule.usageConditionMinutes
+            .coerceAtLeast(0L)
+            .coerceAtMost(Long.MAX_VALUE / MILLIS_PER_MINUTE) * MILLIS_PER_MINUTE
+        val contributorUsageMillis = usageMillisForPackages(
+            sessions = sessionList,
+            packageNames = contributorResolution.packages,
+            useDayId = useDayId,
+            nowMs = Long.MAX_VALUE,
+            zone = zone,
+            useDayCalculator = ConfigurableUseDayCalculator(zone, resetTime),
+            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs
+        )
+        val isConditionMet = !rule.usageConditionEnabled || contributorUsageMillis >= conditionRequiredMillis
+
+        val directAllowanceMillis = rule.allowedMinutes
+            .coerceAtLeast(0L)
+            .coerceAtMost(Long.MAX_VALUE / MILLIS_PER_MINUTE) * MILLIS_PER_MINUTE
+        val earnedAllowanceMillis = if (rule.earnedAllowanceEnabled) {
+            contributorUsageMillis.coerceAtLeast(0L)
+        } else 0L
+        val baseAllowanceMillis = if (rule.usageConditionEnabled && !isConditionMet) 0L else safeAdd(directAllowanceMillis, earnedAllowanceMillis)
+
+        val usageWindows = AppRuleSchedule.usageWindowsForUseDay(rule, useDayId, zone, resetTime)
+        val intervalsByPackage = sessionIntervals(
+            sessions = sessionList,
+            useDayId = useDayId,
+            nowMs = Long.MAX_VALUE,
+            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+            candidatePackages = targetPackages,
+            membershipPredicate = { packageName: String, atMs: Long ->
+                packageName in membershipResolver.targetPackagesAt(
+                    rule,
+                    atMs,
+                    launchablePackages = availablePackages,
+                    essentialExcludedPackages = essentialExcludedPackages
+                )
+            },
+            membershipBoundaries = membershipResolver.targetAndContributorBoundaries(rule)
+        )
+        val usageIntervals = intervalsByPackage.values.flatMap { intervals ->
+            mergeIntervals(intervals).flatMap { interval ->
+                usageWindows.mapNotNull { window ->
+                    val start = maxOf(interval.start, window.startMs)
+                    val end = minOf(interval.end, window.endMs)
+                    if (start < end) SessionInterval(interval.packageName, start, end) else null
+                }
+            }
+        }.sortedBy { it.start }
+        val skipIntervals = AppRuleGuardianOverrides.skipsForRule(
+            activeOverrides,
+            rule.id,
+            useDayId,
+            nowMs = Long.MAX_VALUE,
+            useDayGenerationStartedAtMs
+        )
+        val (_, allocation) = allocateWithSkips(
+            usageIntervals = usageIntervals,
+            skipIntervals = skipIntervals,
+            baseAllowanceMillis = baseAllowanceMillis,
+            grants = grants
+        )
+        return allocation.guardianRemainingMillis / MILLIS_PER_MINUTE
+    }
+
+    private fun allocateWithSkips(
+        usageIntervals: List<SessionInterval>,
+        skipIntervals: List<AppRuleGuardianSkip>,
+        baseAllowanceMillis: Long,
+        grants: List<AppRuleGuardianGrant>
+    ): Pair<List<SessionInterval>, AllowanceAllocation> {
+        val effectiveUsageIntervals = usageIntervals.flatMap { interval ->
+            subtractIntervals(interval, skipIntervals.map { skip ->
+                SessionInterval("guardian-skip", skip.skipFromMs, skip.skipUntilMs)
+            })
+        }
+        val allocation = allocateAllowance(
+            usageIntervals = effectiveUsageIntervals,
+            baseAllowanceMillis = baseAllowanceMillis,
+            grants = grants
+        )
+        return effectiveUsageIntervals to allocation
+    }
+
     internal fun safeAdd(left: Long, right: Long): Long =
         if (Long.MAX_VALUE - left < right) Long.MAX_VALUE else left + right
 
     private const val MILLIS_PER_MINUTE = 60_000L
 }
+
