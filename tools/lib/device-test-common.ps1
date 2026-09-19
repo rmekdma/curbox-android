@@ -26,6 +26,9 @@
     - Test-AppRuleSkip: Verify whether a rule skip override is recorded and active
     - Test-GuardianAuthConfig: Verify whether a guardian auth config or settings object has active credentials
     - Set-DeviceGuardianAuthConfig: Inject GuardianAuthConfig into device settings.json with proper 660 permissions and broadcast refresh
+    - Get-DeviceProcessPid: Query running process PID from ps/ps -ef
+    - Test-AccessibilityServiceBound: Verify whether accessibility service is bound
+    - Stop-ServiceProcess: Terminate or induce crash on target process PID
 #>
 
 function Write-Step([string]$Msg) {
@@ -533,6 +536,71 @@ function Set-DeviceGuardianAuthConfig($GuardianAuthConfig, [string]$PackageName 
     adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
     adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
     Start-Sleep -Seconds 1
+    return $true
+}
+
+function Get-DeviceProcessPid([string]$ProcessOutput = "", [string]$ProcessName = ":app_blocker_service") {
+    if (-not $PSBoundParameters.ContainsKey('ProcessOutput')) {
+        $ProcessOutput = (adb shell "ps -ef" | Out-String)
+        if (-not $ProcessOutput -or $ProcessOutput -notmatch [regex]::Escape($ProcessName)) {
+            $ProcessOutput = (adb shell "ps" | Out-String)
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($ProcessOutput)) {
+        return $null
+    }
+    foreach ($line in ($ProcessOutput -split "`r?`n")) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        $tokens = -split $trimmed
+        if ($tokens[0] -eq "UID" -or $tokens[0] -eq "USER") { continue }
+        if ($tokens[-1] -eq "grep" -or $tokens[-1] -eq "sh" -or ($tokens -contains "grep")) { continue }
+
+        if ($tokens.Count -ge 2 -and $tokens[1] -match '^\d+$') {
+            $cmd = $tokens[-1]
+            if ($cmd -eq $ProcessName -or $cmd.EndsWith($ProcessName)) {
+                return [int]$tokens[1]
+            }
+        }
+    }
+    return $null
+}
+
+function Test-AccessibilityServiceBound([string]$DumpsysOutput = "", [string]$ServiceName = "AppBlockerService") {
+    if (-not $PSBoundParameters.ContainsKey('DumpsysOutput')) {
+        $DumpsysOutput = (adb shell "dumpsys accessibility" | Out-String)
+    }
+    if ([string]::IsNullOrWhiteSpace($DumpsysOutput)) {
+        return $false
+    }
+
+    if ($DumpsysOutput -match "Crashed services:\{([^}]*)\}") {
+        $crashedContent = $matches[1]
+        if ($crashedContent -match $ServiceName -or $crashedContent -match "Curbox App Blocker") {
+            return $false
+        }
+    }
+
+    if ($DumpsysOutput -match "Bound services:\{([^}]*)\}") {
+        $boundContent = $matches[1]
+        if ($boundContent -match $ServiceName -or $boundContent -match "Curbox App Blocker") {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = ":app_blocker_service") {
+    if ($TargetPid -le 0) {
+        return $false
+    }
+    adb shell "kill -9 $TargetPid 2>/dev/null || su 0 kill -9 $TargetPid 2>/dev/null" | Out-Null
+    Start-Sleep -Milliseconds 300
+    $currentPid = Get-DeviceProcessPid -ProcessName $ProcessName
+    if ($currentPid -eq $TargetPid) {
+        adb shell "am crash $TargetPid" | Out-Null
+    }
     return $true
 }
 

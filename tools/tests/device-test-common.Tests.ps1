@@ -216,6 +216,90 @@ Describe "Device Test Common Helpers" {
             (Test-AppRuleSkip -OverrideState $overrideState -RuleId "test-rule-01" -MinSkipUntilMs 1765000000000) | Should Be $false
         }
     }
+
+    Context "Get-DeviceProcessPid" {
+        It "extracts PID from ps -ef format output" {
+            $psEf = @"
+UID            PID  PPID C STIME TTY          TIME CMD
+root             1     0 0 10:00 ?        00:00:02 init
+u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
+u0_a1351     13837   964 0 20:00 ?        00:03:11 neth.iecal.curbox.debug:app_blocker_service
+shell        10788 10785 1 10:28 ?        00:00:00 ps -ef
+"@
+            $pidFound = Get-DeviceProcessPid -ProcessOutput $psEf -ProcessName ":app_blocker_service"
+            $pidFound | Should Be 13837
+        }
+
+        It "extracts PID from standard ps format output" {
+            $psStd = @"
+USER           PID   PPID     VSZ    RSS WCHAN            ADDR S NAME
+root             1      0   24480   3120 0                   0 S init
+u0_a1351      6271    964 17063660 220392 do_epoll_wait      0 S neth.iecal.curbox.debug
+u0_a1351     13837    964 16799000 116600 do_epoll_wait      0 S neth.iecal.curbox.debug:app_blocker_service
+"@
+            $pidFound = Get-DeviceProcessPid -ProcessOutput $psStd -ProcessName ":app_blocker_service"
+            $pidFound | Should Be 13837
+        }
+
+        It "matches exact full package:process name" {
+            $psEf = @"
+UID            PID  PPID C STIME TTY          TIME CMD
+u0_a1351     25432   964 0 20:00 ?        00:03:11 neth.iecal.curbox.debug:app_blocker_service
+"@
+            $pidFound = Get-DeviceProcessPid -ProcessOutput $psEf -ProcessName "neth.iecal.curbox.debug:app_blocker_service"
+            $pidFound | Should Be 25432
+        }
+
+        It "returns null when process name is not found" {
+            $psEf = @"
+UID            PID  PPID C STIME TTY          TIME CMD
+u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
+"@
+            $pidFound = Get-DeviceProcessPid -ProcessOutput $psEf -ProcessName ":app_blocker_service"
+            $pidFound | Should Be $null
+        }
+
+        It "returns null for empty or whitespace output" {
+            $pidFound = Get-DeviceProcessPid -ProcessOutput "" -ProcessName ":app_blocker_service"
+            $pidFound | Should Be $null
+        }
+    }
+
+    Context "Test-AccessibilityServiceBound" {
+        It "returns true when service is listed in Bound services" {
+            $dump = @"
+  Bound services:{Service[label=Curbox App Blocker, feedbackType[FEEDBACK_GENERIC], capabilities=1, eventTypes=TYPES_ALL_MASK, notificationTimeout=0, requestA11yBtn=false]}
+  Enabled services:{{neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService}}
+  Binding services:{}
+  Crashed services:{}
+"@
+            (Test-AccessibilityServiceBound -DumpsysOutput $dump -ServiceName "AppBlockerService") | Should Be $true
+        }
+
+        It "returns false when service is listed in Crashed services" {
+            $dump = @"
+  Bound services:{}
+  Enabled services:{{neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService}}
+  Binding services:{}
+  Crashed services:{Service[label=Curbox App Blocker]}
+"@
+            (Test-AccessibilityServiceBound -DumpsysOutput $dump -ServiceName "AppBlockerService") | Should Be $false
+        }
+
+        It "returns false when Bound services does not contain the service" {
+            $dump = @"
+  Bound services:{}
+  Enabled services:{{neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService}}
+  Binding services:{}
+  Crashed services:{}
+"@
+            (Test-AccessibilityServiceBound -DumpsysOutput $dump -ServiceName "AppBlockerService") | Should Be $false
+        }
+
+        It "returns false for null or empty dumpsys output" {
+            (Test-AccessibilityServiceBound -DumpsysOutput "" -ServiceName "AppBlockerService") | Should Be $false
+        }
+    }
 }
 
 
