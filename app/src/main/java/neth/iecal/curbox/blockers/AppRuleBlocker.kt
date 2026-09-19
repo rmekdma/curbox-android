@@ -2732,6 +2732,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             logNonFatal(error)
         } finally {
             try {
+                @Suppress("DEPRECATION")
                 event.recycle()
             } catch (error: CancellationException) {
                 throw error

@@ -612,8 +612,8 @@ object AppRuleEvaluator {
                     .forEach(::add)
                 add(end)
             }.distinct().sorted()
-            points.zipWithNext().forEach { (pieceStart, pieceEnd) ->
-                if (pieceEnd <= pieceStart) return@forEach
+            points.zipWithNext().forEach pieceLoop@{ (pieceStart, pieceEnd) ->
+                if (pieceEnd <= pieceStart) return@pieceLoop
                 val belongs = if (membershipPredicate == null) {
                     session.packageName in candidatePackages
                 } else {

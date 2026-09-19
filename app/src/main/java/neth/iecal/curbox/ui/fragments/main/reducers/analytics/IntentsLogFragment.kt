@@ -42,7 +42,7 @@ class IntentsLogFragment : Fragment() {
         binding.recyclerView.adapter = adapter
 
         binding.btnBack.setOnClickListener {
-            requireActivity().onBackPressed()
+            requireActivity().onBackPressedDispatcher.onBackPressed()
         }
 
         binding.btnFilterDate.setOnClickListener {

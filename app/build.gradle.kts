@@ -55,7 +55,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 8
-        versionName = "4.0.5"
+        versionName = "4.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resValue("string", "app_name", "Curbox")
 

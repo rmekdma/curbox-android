@@ -331,7 +331,6 @@ class OnboardingPermissionsFragment : Fragment() {
         val hasOverlay = Settings.canDrawOverlays(requireContext())
         val hasNotif = neth.iecal.curbox.utils.PermissionUtils.isNotificationPermissionGiven(requireContext())
         val hasBlocker = neth.iecal.curbox.utils.PermissionUtils.isAccessibilityServiceEnabled(requireContext(), AppBlockerService::class.java)
-        val hasShizuku = neth.iecal.curbox.utils.PermissionUtils.hasShizukuPermission()
 
         val isNonSession = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {

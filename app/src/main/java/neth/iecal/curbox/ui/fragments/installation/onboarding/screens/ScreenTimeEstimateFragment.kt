@@ -51,7 +51,6 @@ class ScreenTimeEstimateFragment : Fragment() {
         // Let's use days instead to make it simpler and sound scarier: (hours * 365) / 24
         val totalHoursPerYear = hours * 365
         val daysPerYear = totalHoursPerYear / 24
-        val remainingHours = totalHoursPerYear % 24
         
         val weeks = daysPerYear / 7
         

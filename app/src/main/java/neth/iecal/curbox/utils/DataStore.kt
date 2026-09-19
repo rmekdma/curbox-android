@@ -1035,7 +1035,6 @@ class DataStoreManager(private val context: Context) {
                 RestrictionComparator.isSameOrStricter(field, current, proposed)
             ) {
                 tamperGated = false
-                val proposedDelayConfig = proposed.settingsChangeDelayConfig2
                 val effective = if (field == GatedSettingsField.APP_RULES &&
                     pendingGroupModes.isNotEmpty()
                 ) {

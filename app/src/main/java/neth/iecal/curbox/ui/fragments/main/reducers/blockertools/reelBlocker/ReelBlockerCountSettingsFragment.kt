@@ -110,6 +110,7 @@ class ReelBlockerCountSettingsFragment : GuardianOwnedBottomSheet() {
         viewModel.saveReelCountConfig(newConfig)
     }
 
+    @Suppress("DEPRECATION")
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         val dialog = super.onCreateDialog(savedInstanceState)
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)

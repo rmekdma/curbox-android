@@ -72,7 +72,7 @@ object LegacyAppRuleMigration {
         val allowedMinutes: Long
     )
 
-    @Suppress("DEPRECATION")
+    @Suppress("DEPRECATION", "USELESS_ELVIS")
     internal fun sanitizeForMigration(groups: List<AppGroup>): List<AppGroup> =
         groups.mapIndexedNotNull { index, group ->
             runCatching {
@@ -98,7 +98,7 @@ object LegacyAppRuleMigration {
             }.getOrNull()
         }
 
-    @Suppress("DEPRECATION")
+    @Suppress("DEPRECATION", "USELESS_ELVIS")
     private fun importGroup(group: AppGroup, index: Int, nowMs: Long = 0L): ImportedGroup? {
         val sourceId = group.id.orEmpty().trim().ifBlank { "index-$index" }
         val groupId = neutralGroupId(sourceId)

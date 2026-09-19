@@ -60,7 +60,6 @@ class CreateGrayscaleGroupFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         var isEditing = false
-        var existingGroup: GrayscaleGroup? = null
         val groupId = requireActivity().intent.getStringExtra("group_id") ?: arguments?.getString("group_id")
         val prefillPackage = requireActivity().intent.getStringExtra("prefill_package")
 
@@ -85,7 +84,6 @@ class CreateGrayscaleGroupFragment : Fragment() {
                     val group = groups.find { it.groupId == groupId }
                     if (group != null && !isEditing) {
                         isEditing = true
-                        existingGroup = group
                         binding.textView.text = getString(R.string.grayscale_group_edit_title)
                         binding.etGroupName.setText(group.groupName)
                         selectedApps = ArrayList(group.packages.toList())

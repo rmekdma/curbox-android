@@ -9,6 +9,7 @@ import android.util.Log
 object AppSuspendHelper {
 
     // Todo: Sometimes user start focus mode, apps get suspended but in midst of that, they turn off shizuku. This creates a forever suspend bug
+    @Suppress("UNUSED_PARAMETER")
     fun suspendApps(packages: List<String>) {
 //        executePmCommand(packages, "suspend")
     }

@@ -40,6 +40,7 @@ class WebsiteUsageFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         val factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 return WebsiteUsageViewModel(requireActivity().application, targetPackageName) as T
             }

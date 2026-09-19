@@ -90,7 +90,7 @@ class FocusSetupBottomSheet : GuardianOwnedBottomSheet() {
             }
         }
 
-        binding.groupDropdown.setOnItemClickListener { parent, view, position, id ->
+        binding.groupDropdown.setOnItemClickListener { parent, _, position, _ ->
             val clickedItem = parent.getItemAtPosition(position)
             val selectedGroup = clickedItem as ManualFocusGroup
             viewModel.selectedGroup = selectedGroup
@@ -150,7 +150,7 @@ class FocusSetupBottomSheet : GuardianOwnedBottomSheet() {
             showAddWebsitesDialog()
         }
 
-        binding.autoTurnOnDnd.setOnCheckedChangeListener { buttonView, isChecked ->
+        binding.autoTurnOnDnd.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked && !neth.iecal.curbox.utils.DndHelper.ensureDndAccess(requireContext())) {
                 binding.autoTurnOnDnd.isChecked = false
             }
@@ -332,6 +332,7 @@ class FocusSetupBottomSheet : GuardianOwnedBottomSheet() {
         }
     }
 
+    @Suppress("DEPRECATION")
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         return super.onCreateDialog(savedInstanceState).apply {
             window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)

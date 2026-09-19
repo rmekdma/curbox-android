@@ -47,6 +47,7 @@ abstract class BaseUsageSettingsFragment : GuardianOwnedBottomSheet() {
         super.onDismiss(dialog)
     }
 
+    @Suppress("DEPRECATION")
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         return super.onCreateDialog(savedInstanceState).also {
             it.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)

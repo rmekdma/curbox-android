@@ -116,6 +116,7 @@ class AndroidForegroundObservationSource internal constructor(
      * Captures a callback event without handing a framework object across the value seam. The
      * incoming callback event remains owned by its host; the adapter always recycles its copy.
      */
+    @Suppress("DEPRECATION")
     internal fun captureEvent(
         event: AccessibilityEvent?,
         trigger: ObservationTrigger
@@ -215,6 +216,7 @@ private fun safeClockRead(
     fallback.coerceAtLeast(0L)
 }
 
+@Suppress("DEPRECATION")
 private fun readActiveRoot(
     service: AccessibilityService,
     onNonFatalError: (Throwable) -> Unit
@@ -259,6 +261,7 @@ private fun readActiveRoot(
     )
 }
 
+@Suppress("DEPRECATION")
 private fun readApplicationWindows(
     service: AccessibilityService,
     onNonFatalError: (Throwable) -> Unit

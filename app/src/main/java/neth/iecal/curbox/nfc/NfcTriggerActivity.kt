@@ -53,6 +53,7 @@ class NfcTriggerActivity : Activity() {
     }
 
     /** Pulls the URI from either a plain view intent or an NDEF-discovered NFC intent. */
+    @Suppress("DEPRECATION")
     private fun extractUri(intent: Intent?): Uri? {
         if (intent == null) return null
         intent.data?.let { return it }
