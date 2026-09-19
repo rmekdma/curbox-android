@@ -1,6 +1,8 @@
 package neth.iecal.curbox.domain.apprules
 
+import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
+import neth.iecal.curbox.data.models.RuleRolloverPool
 
 /** Pure selection seam for the warning surface's one-rule-at-a-time approval contract. */
 object GuardianApprovalSelection {
@@ -15,8 +17,8 @@ object GuardianApprovalSelection {
     )
 
     fun resolveAccumulatedButtonState(
-        rule: neth.iecal.curbox.data.models.AppRule?,
-        pool: neth.iecal.curbox.data.models.RuleRolloverPool?,
+        rule: AppRule?,
+        pool: RuleRolloverPool?,
         useDayId: String
     ): AccumulatedTimeButtonState {
         if (rule == null || !rule.rolloverEnabled) {

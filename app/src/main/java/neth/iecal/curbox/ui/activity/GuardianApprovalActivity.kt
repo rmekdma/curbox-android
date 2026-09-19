@@ -186,15 +186,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             return
         }
         lifecycleScope.launch {
-            val settings = dataStore.settings.first()
-            if (selectedRuleId != ruleId) return@launch
-            val now = System.currentTimeMillis()
-            val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
-            val useDayId = calculator.idAt(now)
-            val rule = settings.appRuleSnapshot.appRules.find { it.id == ruleId }
-            val pool = settings.appRuleRolloverState.pools[ruleId]
-            val state = GuardianApprovalSelection.resolveAccumulatedButtonState(rule, pool, useDayId)
-
+            val state = resolveAccumulatedState(ruleId)
             if (selectedRuleId != ruleId) return@launch
 
             if (state.isVisible) {
@@ -207,6 +199,18 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 binding.approvalUseAccumulatedTime.visibility = View.GONE
             }
         }
+    }
+
+    private suspend fun resolveAccumulatedState(
+        ruleId: String
+    ): GuardianApprovalSelection.AccumulatedTimeButtonState {
+        val settings = dataStore.settings.first()
+        val now = System.currentTimeMillis()
+        val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
+        val useDayId = calculator.idAt(now)
+        val rule = settings.appRuleSnapshot.appRules.find { it.id == ruleId }
+        val pool = settings.appRuleRolloverState.pools[ruleId]
+        return GuardianApprovalSelection.resolveAccumulatedButtonState(rule, pool, useDayId)
     }
 
     private fun requestGrant() {
@@ -357,13 +361,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         if (grantInProgress) return
         val ruleId = selectedRuleId ?: return
         lifecycleScope.launch {
-            val settings = dataStore.settings.first()
-            val now = System.currentTimeMillis()
-            val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
-            val useDayId = calculator.idAt(now)
-            val rule = settings.appRuleSnapshot.appRules.find { it.id == ruleId }
-            val pool = settings.appRuleRolloverState.pools[ruleId]
-            val state = GuardianApprovalSelection.resolveAccumulatedButtonState(rule, pool, useDayId)
+            val state = resolveAccumulatedState(ruleId)
 
             if (!state.isVisible || state.accumulatedMinutes <= 0L) {
                 updateAccumulatedButton(selectedRuleId)
@@ -374,23 +372,23 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 requestAccumulatedGrant()
                 return@launch
             }
-            showAccumulatedGrantDialog(ruleId, state.accumulatedMinutes, useDayId)
+            showAccumulatedGrantDialog(ruleId, state.accumulatedMinutes)
         }
     }
 
     private fun showAccumulatedGrantDialog(
         ruleId: String,
-        totalAccumulatedMinutes: Long,
-        useDayId: String
+        totalAccumulatedMinutes: Long
     ) {
         val dialogBinding = DialogGuardianAccumulatedTimeBinding.inflate(layoutInflater)
         dialogBinding.accumulatedTotalDesc.text = getString(
             R.string.guardian_accumulated_available_desc,
             totalAccumulatedMinutes
         )
-        dialogBinding.accumulatedMinutesInput.setText(totalAccumulatedMinutes.toString())
+        val formState = GuardianAccumulatedTimeFormState.initial(totalAccumulatedMinutes)
+        dialogBinding.accumulatedMinutesInput.setText(formState.accumulatedMinutesText)
         dialogBinding.accumulatedMinutesInput.setSelectAllOnFocus(true)
-        var formState = GuardianAccumulatedTimeFormState.initial(totalAccumulatedMinutes)
+        var currentFormState = formState
 
         dialogBinding.accumulatedMinutesInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -398,7 +396,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
 
             override fun afterTextChanged(editable: Editable?) {
-                formState = formState.editMinutes(editable?.toString().orEmpty())
+                currentFormState = currentFormState.editMinutes(editable?.toString().orEmpty())
                 dialogBinding.accumulatedMinutesLayout.error = null
             }
         })
@@ -416,7 +414,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
             dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
                 if (grantInProgress) return@setOnClickListener
-                when (val submission = formState.submit()) {
+                when (val submission = currentFormState.submit()) {
                     is GuardianAccumulatedTimeSubmission.Invalid -> {
                         dialogBinding.accumulatedMinutesLayout.error = getString(
                             when (submission.error) {
@@ -441,7 +439,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
                                 writeAccumulatedGrant(
                                     ruleId = capturedRuleId,
                                     password = password,
-                                    useDayId = useDayId,
                                     minutes = submission.approvedMinutes
                                 )
                             }
@@ -532,12 +529,14 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private fun writeAccumulatedGrant(
         ruleId: String,
         password: String,
-        useDayId: String,
         minutes: Long
     ) {
         lifecycleScope.launch(Dispatchers.IO) {
             val success = try {
+                val settings = dataStore.settings.first()
                 val now = System.currentTimeMillis()
+                val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
+                val useDayId = calculator.idAt(now)
                 dataStore.approveAccumulatedTime(
                     password = password,
                     ruleId = ruleId,
