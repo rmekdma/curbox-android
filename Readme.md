@@ -111,7 +111,7 @@ Define what happens when you try to open an app after its scheduled usage is fin
 
 
 #### For Developers
-- **[Curbox API](CURBOX_API.md):** Let your apps directly interact with curbox and start focus modes, change settings, get usage stats, etc. Requires user permission
+- **[Curbox API](docs/CURBOX_API.md):** Let your apps directly interact with curbox and start focus modes, change settings, get usage stats, etc. Requires user permission
 
 ### Contributing
 

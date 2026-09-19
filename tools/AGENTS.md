@@ -27,7 +27,6 @@ ADB-based End-to-End (E2E) device testing patterns and nonnegotiable invariants 
 
 | Category | Rule & Pitfall | Correct Pattern |
 |---|---|---|
-| **Path whitespace** | Unquoted spaces cause `'C:\Program' is not recognized`. Always quote paths and invoke via `&`. | `& "$env:JAVA_HOME\bin\java.exe" -version` |
 | **Pipeline leaks** | Pipeline outputs pollute return values into arrays (`$true, $result`). Pipe all commands to `Out-Null`. | `adb push ... \| Out-Null; Push-TempStringToDevice ... \| Out-Null` |
 | **PowerShell variables** | `$PID` is a reserved read-only variable (PowerShell host PID). Parameter naming causes runtime errors. | Use `[int]$TargetPid` or `[int]$ServicePid` |
 | **Pester 3.4.0 scope** | `BeforeAll` outside `Describe` throws `Assert-DescribeInProgress`. | Place setup in `BeforeEach` inside `Describe` or `Context` |
