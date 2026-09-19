@@ -128,5 +128,24 @@ Describe "Device Test Common Helpers" {
             ($rule.scope.includedGroupIds -contains $targetGroup.id) | Should Be $true
         }
     }
+
+    Context "New-DailyLimitAppRuleConfig" {
+        It "builds a valid AppRuleSnapshot structure with daily limit allowance" {
+            $snapshot = New-DailyLimitAppRuleConfig -TargetPackage "com.test.target" -AllowedMinutes 1 -RuleName "일일 허용량 제한"
+            $snapshot | Should Not BeNullOrEmpty
+            $snapshot.appGroups.Count | Should Be 1
+            $snapshot.appRules.Count | Should Be 1
+
+            $targetGroup = $snapshot.appGroups[0]
+            ($targetGroup.selectedPackages -contains "com.test.target") | Should Be $true
+
+            $rule = $snapshot.appRules[0]
+            $rule.isActive | Should Be $true
+            $rule.allowedMinutes | Should Be 1
+            $rule.name | Should Be "일일 허용량 제한"
+            $rule.usageConditionEnabled | Should Be $false
+            ($rule.scope.includedGroupIds -contains $targetGroup.id) | Should Be $true
+        }
+    }
 }
 

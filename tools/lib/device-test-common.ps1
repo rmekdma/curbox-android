@@ -18,6 +18,7 @@
     - New-TestAppGroup: Generate AppRuleAppGroup object with default membership history
     - New-ContributorAppRuleConfig: Generate AppRuleSnapshot with contributor condition rule
     - New-TimeRangeAppRuleConfig: Generate AppRuleSnapshot with timeRanges schedule rule
+    - New-DailyLimitAppRuleConfig: Generate AppRuleSnapshot with daily allowance limit rule
     - Get-DeviceTimeInfo: Query and calculate device local time in minutes and seconds
     - Wait-DeviceMinute: Wait until device reaches target minute
     - Set-DeviceUsageGeneration: Reset useDay session generation to start fresh tracking epoch
@@ -418,5 +419,44 @@ function New-TimeRangeAppRuleConfig(
     }
 }
 
+function New-DailyLimitAppRuleConfig(
+    [string]$TargetPackage,
+    [long]$AllowedMinutes = 1,
+    [string]$RuleName = "일일 허용량 제한",
+    [string]$TargetGroupId = "test-target-group-01",
+    [string]$RuleId = "test-rule-dailylimit-01"
+) {
+    $groupTarget = New-TestAppGroup -GroupId $TargetGroupId -GroupName "테스트 타깃 앱" -Packages @($TargetPackage)
 
+    $rule = [PSCustomObject]@{
+        id = $RuleId
+        name = $RuleName
+        isActive = $true
+        weekdays = @(0, 1, 2, 3, 4, 5, 6)
+        startMinute = 0
+        endMinute = 0
+        appGroupId = $TargetGroupId
+        allowedMinutes = $AllowedMinutes
+        usageConditionEnabled = $false
+        usageConditionMinutes = 0
+        contributorGroupConditionMinutes = [PSCustomObject]@{}
+        contributorGroupIds = @()
+        earnedAllowanceEnabled = $false
+        timeRanges = @(
+            [PSCustomObject]@{
+                startMinute = 0
+                endMinute = 0
+            }
+        )
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($TargetGroupId)
+            excludedGroupIds = @()
+        }
+    }
 
+    return [PSCustomObject]@{
+        appGroups = @($groupTarget)
+        appRules = @($rule)
+    }
+}
