@@ -740,7 +740,7 @@ function Submit-GuardianPin([string]$PinValue) {
 
     adb shell "input tap $($nodePin.X) $($nodePin.Y)" | Out-Null
     Start-Sleep -Milliseconds 500
-    # Android IME Backspace keyevent 67 repeated per tools/AGENTS.md
+    # Android IME Backspace keyevent 67 repeated per device-tests/AGENTS.md
     adb shell "input keyevent 67 67 67 67 67" | Out-Null
     adb shell "input text $PinValue" | Out-Null
     Start-Sleep -Milliseconds 500

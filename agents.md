@@ -141,6 +141,6 @@ Consult these targeted guides when working in corresponding areas:
 | Understanding system design choices, trade-offs, or historical rationale | [`docs/adr/`](docs/adr/) |
 | Working on multi-device sync, encryption, Supabase REST, Firebase/FCM, or cleanup | [`docs/sync.md`](docs/sync.md) |
 | Building release APKs, verifying signatures, or publishing artifacts to GitHub | [`docs/release.md`](docs/release.md) |
-| Running or authoring ADB-based device automation and Pester tests | [`tools/AGENTS.md`](tools/AGENTS.md) |
+| Running or authoring ADB-based device automation and Pester tests | [`device-tests/AGENTS.md`](device-tests/AGENTS.md) |
 | Integrating with or modifying the exported AIDL service | [`docs/CURBOX_API.md`](docs/CURBOX_API.md) |
 | Contributor workflows, translations, and repository conventions | [`CONTRIBUTING.md`](CONTRIBUTING.md) |

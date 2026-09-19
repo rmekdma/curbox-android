@@ -1,11 +1,11 @@
-# Curbox device test automation guide (`tools/`)
+# Curbox device test automation guide (`device-tests/`)
 
-ADB-based End-to-End (E2E) device testing patterns and nonnegotiable invariants for `tools/`.
+ADB-based End-to-End (E2E) device testing patterns and nonnegotiable invariants for `device-tests/`.
 
 ## Architecture & test script anatomy
 
-- Harness SSOT: `tools/lib/device-test-common.ps1` is the authoritative source for all device interaction helpers. Do not inline raw adb or settings logic.
-- Pester unit tests: `tools/tests/device-test-common.Tests.ps1` validates harness helpers. Any helper added to `device-test-common.ps1` must have unit tests here.
+- Harness SSOT: `device-tests/lib/device-test-common.ps1` is the authoritative source for all device interaction helpers. Do not inline raw adb or settings logic.
+- Pester unit tests: `device-tests/tests/device-test-common.Tests.ps1` validates harness helpers. Any helper added to `device-test-common.ps1` must have unit tests here.
 - Standard script flow:
   1. Standard parameter block:
      ```powershell
@@ -97,16 +97,17 @@ On Android 14+ or non-root devices, executing `kill -9 <PID>` under the adb `she
 
 ```powershell
 # 1. Harness Pester unit tests
-Invoke-Pester tools/tests/device-test-common.Tests.ps1
+Invoke-Pester device-tests/tests/device-test-common.Tests.ps1
 
 # 2. Target device test execution
-powershell -File tools/test-device-guardian-dialog-ui.ps1
-powershell -File tools/test-device-contributor-flow.ps1
-powershell -File tools/test-device-timerange-interception.ps1
-powershell -File tools/test-device-limit-exhaustion.ps1
-powershell -File tools/test-device-guardian-skip-today.ps1
-powershell -File tools/test-device-guardian-pin-unlock.ps1
-powershell -File tools/test-device-service-recovery.ps1
+powershell -File device-tests/test-device-guardian-dialog-ui.ps1
+powershell -File device-tests/test-device-contributor-flow.ps1
+powershell -File device-tests/test-device-timerange-interception.ps1
+powershell -File device-tests/test-device-limit-exhaustion.ps1
+powershell -File device-tests/test-device-guardian-skip-today.ps1
+powershell -File device-tests/test-device-guardian-pin-unlock.ps1
+powershell -File device-tests/test-device-service-recovery.ps1
+powershell -File device-tests/test-device-rollover-guardian-extra-time.ps1
 
 # 3. Android codebase unit tests
 $env:JAVA_HOME = 'C:\Users\DELL\.jdks\jbr-21.0.11'
