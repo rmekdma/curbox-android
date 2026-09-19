@@ -38,8 +38,6 @@ $passedAll = $true
 try {
     Write-Step "0. Ensuring device is awake..."
     Set-DeviceAwake $true
-    adb shell "input keyevent 224" | Out-Null
-    adb shell "wm dismiss-keyguard" | Out-Null
     Start-Sleep -Seconds 1
 
     Write-Step "1. Backing up device settings.json..."
@@ -93,7 +91,21 @@ try {
             $intercepted = $true
             $elapsed = [math]::Round($pollSw.Elapsed.TotalSeconds, 1)
             Write-Success "GuardianApprovalActivity successfully intercepted screen after ${elapsed}s! Focus: $lastFocus"
+
+            # Verify that usage accumulation was sustained for at least 55 seconds (lower bound)
+            if ($elapsed -lt 55) {
+                Write-Fail "Interception occurred prematurely after only ${elapsed}s (< 55s lower bound). Stale usage may have leaked."
+                $passedAll = $false
+            } else {
+                Write-Success "Usage accumulation time verified: ${elapsed}s satisfies >= 55s threshold for 1-minute allowance."
+            }
             break
+        }
+
+        # Check that target package maintains active foreground while waiting for limit exhaustion
+        $targetCheck = Assert-WindowFocus -ExpectedActivity $TargetPackage -PassThru
+        if (-not $targetCheck.Success) {
+            Write-Host "Warning: Target app ($TargetPackage) temporarily lost top focus. Current: $($targetCheck.RawFocus)" -ForegroundColor Yellow
         }
 
         $currentElapsed = [int]$pollSw.Elapsed.TotalSeconds
@@ -105,20 +117,11 @@ try {
 
     if ($intercepted) {
         Write-Step "5. Verifying lock reason on GuardianApprovalActivity UI..."
-        $uiDump = Dump-UI
-        $hasExhaustedReason = ($uiDump -match "사용 가능 시간 소진" -or `
-                               $uiDump -match "Available time exhausted" -or `
-                               $uiDump -match "시간 소진" -or `
-                               $uiDump -match "시간 초과" -or `
-                               $uiDump -match "일일 허용량")
-        $hasAllowanceProgress = ($uiDump -match "1분/1분" -or `
-                                 $uiDump -match "1m/1m" -or `
-                                 $uiDump -match "1분" -or `
-                                 $uiDump -match "1m")
-
-        if ($hasExhaustedReason -or $hasAllowanceProgress) {
-            Write-Success "Lock screen correctly displays '허용 시간 초과' (time exhausted) reason in UI dump!"
+        $lockReasonFound = Wait-For-UI -Pattern "사용 가능 시간 소진|Available time exhausted" -TimeoutSeconds 10
+        if ($lockReasonFound) {
+            Write-Success "Lock screen correctly displays '허용 시간 초과' ('사용 가능 시간 소진' / 'Available time exhausted') reason!"
         } else {
+            $uiDump = Dump-UI
             Write-Fail "Lock screen does not display expected limit exhaustion reason. UI dump preview: $($uiDump.Substring(0, [math]::Min(500, $uiDump.Length)))"
             $passedAll = $false
         }
@@ -144,13 +147,12 @@ try {
     }
 
 } finally {
-    Write-Step "Cleanup: Restoring original settings and resetting awake state..."
+    Write-Step "Cleanup: Restoring original settings, stopping app, and resetting awake state..."
     Set-DeviceAwake $false
     if (Test-Path $backupFile) {
         Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        Clear-TestAppRules | Out-Null
-        adb shell "am force-stop $TargetPackage" | Out-Null
-        adb shell "input keyevent 3" | Out-Null
-        Write-Success "Original settings restored, target app stopped, returned to home."
     }
+    adb shell "am force-stop $TargetPackage" | Out-Null
+    adb shell "input keyevent 3" | Out-Null
+    Write-Success "Cleanup completed: original settings restored, target app stopped, returned to home."
 }
