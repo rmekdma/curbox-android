@@ -4,26 +4,33 @@ This guide defines patterns, nonnegotiable invariants, and troubleshooting solut
 
 ## Architecture & conventions
 
-- Harness module: `tools/lib/device-test-common.ps1` is the single source of truth for all device interaction helpers. Do not inline duplicate ADB/settings helpers in test scripts.
-- Unit tests: `tools/tests/device-test-common.Tests.ps1` tests harness helper functions using Pester.
+- Single Source of Truth (SSOT): `tools/lib/device-test-common.ps1` is the authoritative source for all device interaction helpers. Do not inline raw ADB commands for reading settings, waking devices, toggling accessibility services, or parsing process lists in test scripts.
+- Unit tests: `tools/tests/device-test-common.Tests.ps1` validates harness helpers using Pester. Any new or modified helper function added to `device-test-common.ps1` must be accompanied by corresponding Pester unit tests.
 - Script structure: Every test script must adhere to this flow:
   1. Parameter declaration (`TargetPackage`, timeouts, etc.) with `$ErrorActionPreference = "Stop"`.
   2. Dot-source common harness: `. "$PSScriptRoot/lib/device-test-common.ps1"`.
   3. Pre-flight ADB check: `Assert-AdbDevice`.
-  4. Backup settings and acquire wake lock in `try` block.
-  5. Test execution steps with distinct logging (`Write-Step`, `Write-Success`, `Write-Fail`).
-  6. Teardown in `finally` block: restore original `settings.json`, clear test overrides, stop target packages, press Home, and revert wake lock (`Set-DeviceAwake $false`).
+  4. Backup settings (`Backup-DeviceSettings`) and acquire wake lock (`Set-DeviceAwake $true`) in `try` block.
+  5. Test execution steps with structured logging (`Write-Step`, `Write-Success`, `Write-Fail`).
+  6. Teardown in `finally` block:
+     - Always revert wake lock: `Set-DeviceAwake $false`.
+     - Restore original settings if backup exists: `Restore-DeviceSettings -BackupPath $backupFile`.
+     - **Unconditional cleanup**: Regardless of backup restore outcome, always execute `Clear-TestAppRules`, force-stop the target package, and return to Home (`adb shell "input keyevent 3"`). Gating cleanup inside `if (Test-Path $backupFile)` leaks active test rule overrides when a backup fails or is missing.
 
 ---
 
 ## 1. UIAutomator and UI exploration
 
 ### `could not get idle state` mitigation
-- Cause: `uiautomator dump` fails when background UI animations, video/reels playback, or rapid window transitions prevent accessibility framework from detecting an idle state.
+- Cause: `uiautomator dump` fails when background UI animations, video/reels playback, or rapid window transitions prevent the accessibility framework from detecting an idle state.
 - Solution:
   - Always purge stale dump artifacts before invoking dump (`rm -f /sdcard/curbox_dump.xml`).
   - Use `Dump-UI` from `device-test-common.ps1`, which implements a 3-attempt retry loop with 500ms backoff before fallback.
   - When waiting for dynamic UI elements, use `Wait-For-UI -Pattern <regex> -TimeoutSeconds <sec>` rather than a single dump call.
+
+### Dynamic element rendering vs immediate dump
+- Problem: Calling a single `Dump-UI` immediately after detecting window focus often fails because Android Views take a few hundred milliseconds to inflate layouts and populate localized text or buttons.
+- Solution: Always use `Wait-For-UI -Pattern <regex> -TimeoutSeconds <sec>` with polling. Avoid bare single `Dump-UI` calls on screens that render dynamic or asynchronous content.
 
 ### XML attribute ordering and node bounds parsing
 - Problem: Node attributes in XML dumps (`text`, `resource-id`, `content-desc`, `bounds`) have no guaranteed ordering across Android versions or OEM builds. Hardcoded sequential regexes such as `text="X"[^>]*resource-id="Y"` fail unpredictably.
@@ -42,6 +49,13 @@ This guide defines patterns, nonnegotiable invariants, and troubleshooting solut
         $clicked = Tap-Node $ui 'text="OK"' "OK text button"
     }
     ```
+
+### Stale overlay and window masking prevention
+- Problem: When testing service recovery, setting re-evaluation, or unblock transitions, an existing blocking activity (`GuardianApprovalActivity` or `WarningActivity`) sitting on top of the task stack masks subsequent behavior. Asserting that a blocking activity is on top may succeed simply because the previous overlay was never dismissed (False Positive / Stale Window Masking).
+- Solution:
+  - After verifying an initial block, explicitly dismiss the overlay to Home via `adb shell "input keyevent 3"` while retaining the target app task in the background.
+  - When testing re-interception, bring the target app back to the foreground with `am start` (do NOT `force-stop`).
+  - Verify that the active service genuinely intercepts the foreground transition and displays a fresh blocking screen.
 
 ### Android IME text input and field clearing
 - Problem: Sending select-all shortcuts (`Ctrl+A` via key combinations) fails or produces unpredictable characters across different soft keyboards (Gboard, Samsung Keyboard, AOSP IME).
@@ -91,6 +105,10 @@ Windows systems run PowerShell 5.1 with bundled Pester 3.4.0 by default. Modern 
   adb shell "run-as $PackageName chmod 660 files/datastore/settings.json" | Out-Null
   Push-TempStringToDevice -Content $json -RemotePath $path | Out-Null
   ```
+
+### Automatic / reserved variable collisions (`$PID`)
+- Problem: In PowerShell, `$PID` is a reserved, read-only automatic variable holding the process ID of the host PowerShell process. Declaring parameters named `[int]$PID` or assigning to `$PID` produces parser errors or runtime failures.
+- Rule: Always use explicit domain parameter names such as `[int]$TargetPid` or `[int]$ServicePid` instead of `$PID`.
 
 ### Error handling semantics
 - Non-terminating `Write-Error` allows execution to proceed unless `$ErrorActionPreference = "Stop"`.
@@ -142,20 +160,40 @@ Windows systems run PowerShell 5.1 with bundled Pester 3.4.0 by default. Modern 
     Start-Sleep -Seconds 2
     ```
 
+### Usage accumulation lower-bound verification
+- Problem: In usage-limit exhaustion tests (e.g. 1-minute daily allowance limit), if interception occurs after only a few seconds, the test passed on a false positive caused by leaked prior usage rather than genuine accumulation.
+- Rule: Always assert a lower-bound elapsed time before declaring success:
+  ```powershell
+  if ($elapsed -lt 55) {
+      Write-Fail "Interception occurred prematurely after only ${elapsed}s (< 55s). Stale usage leaked."
+      $passedAll = $false
+  }
+  ```
+
 ### Screen stay-awake management
 - Inactivity turns off device screens, which freezes accessibility node events and causes UI dump failures.
 - Rule:
   - At test start, call `Set-DeviceAwake $true`, which enables `svc power stayon true`, checks screen power state, sends `keyevent 224` (WAKEUP), and dismisses the keyguard.
   - In `finally`, ALWAYS call `Set-DeviceAwake $false` to restore normal power management.
 
+### Process control and SELinux / non-root resilience
+- Security constraint: On Android 14+ or non-root devices, executing `kill -9 <PID>` under the adb `shell` user (UID 2000) against an app process running under another UID (`u0_a...`) fails with `kill: <PID>: Operation not permitted` due to SELinux restrictions. `su 0` is also unavailable on unrooted production devices.
+- Rule: Use `Stop-ServiceProcess`, which attempts `kill -9` first, and if the process remains alive after 300ms, falls back to `adb shell "am crash $TargetPid"`. The `ActivityManager` `am crash` command has system-level permissions to terminate any app process cleanly without requiring root:
+  ```powershell
+  Stop-ServiceProcess -TargetPid $servicePid -ProcessName ":app_blocker_service"
+  ```
+
+### Process PID query resilience
+- Problem: Different Android versions format process tables differently (standard `ps` vs `ps -ef`). Hardcoded token indices fail.
+- Solution: Use `Get-DeviceProcessPid -ProcessName <name>`, which inspects `ps -ef` and falls back to `ps`, filtering out `grep`/`sh` and matching the process suffix name.
+
 ### Accessibility service binding lifecycle
 - Security constraint: Calling `am start-service neth.iecal.curbox.debug/...AppBlockerService` fails with `Requires permission android.permission.BIND_ACCESSIBILITY_SERVICE`.
-- Rule: To enable or restart the service, write to secure settings:
+- Rule: Use `Enable-AccessibilityService` to enable the service in secure settings:
   ```powershell
-  adb shell "settings put secure enabled_accessibility_services neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
-  adb shell "settings put secure accessibility_enabled 1"
+  Enable-AccessibilityService | Out-Null
   ```
-  Allow 1 to 2 seconds for service binding and warmup before dispatching broadcasts.
+- Verification: Process presence alone does not guarantee accessibility event handling. Verify binding state using `Test-AccessibilityServiceBound`, which inspects `dumpsys accessibility` for `Bound services` vs `Crashed services`.
 
 ---
 
@@ -175,9 +213,28 @@ Windows systems run PowerShell 5.1 with bundled Pester 3.4.0 by default. Modern 
   adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
   ```
 
+### Reading device settings safely
+- Avoid inlining raw `run-as $PackageName cat files/datastore/settings.json`. Use `Get-DeviceSettings`:
+  ```powershell
+  # Raw JSON string
+  $rawSettings = Get-DeviceSettings -PackageName $PackageName
+  # Parsed PSCustomObject
+  $settingsObj = Get-DeviceSettings -PackageName $PackageName -AsObject
+  ```
+
 ### Rule override seam and cleanup
 - Test rules are applied via the broadcast seam `neth.iecal.curbox.action.APPLY_TEST_APP_RULES`.
 - Rule: Always broadcast `neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES` before applying new test rules and inside `finally` cleanup to prevent test rule leakage between runs.
+
+### PBKDF2 credential injection and validation
+- For guardian PIN authentication tests, generate PBKDF2 credentials via `New-GuardianPinAuthConfig` and inject them via `Set-DeviceGuardianAuthConfig`:
+  ```powershell
+  $authConfig = New-GuardianPinAuthConfig -Pin "1234" -Iterations 120000
+  Set-DeviceGuardianAuthConfig -GuardianAuthConfig $authConfig
+  ```
+  This helper automatically applies `chmod 660` and sends settings refresh broadcasts.
+- Verify active credentials using `Test-GuardianAuthConfig -SettingsObj $settingsObj`.
+- Verify recorded skip overrides using `Test-AppRuleSkip -Skips $settingsObj.appRuleOverrideState.skips -RuleId $ruleId -MinSkipUntilMs $minMs`.
 
 ### `useDayGenerationStartedAtMs` and daily accumulation isolation
 - Problem: If contributor or target apps were used earlier today on the test device, Room database contains existing session records for the calendar day. A test expecting a clean 0-minute baseline will see pre-existing usage and prematurely unblock.
@@ -204,6 +261,9 @@ powershell -File tools/test-device-guardian-dialog-ui.ps1
 powershell -File tools/test-device-contributor-flow.ps1
 powershell -File tools/test-device-timerange-interception.ps1
 powershell -File tools/test-device-limit-exhaustion.ps1
+powershell -File tools/test-device-guardian-skip-today.ps1
+powershell -File tools/test-device-guardian-pin-unlock.ps1
+powershell -File tools/test-device-service-recovery.ps1
 
 # 3. Android codebase unit tests
 $env:JAVA_HOME = 'C:\Users\DELL\.jdks\jbr-21.0.11'
