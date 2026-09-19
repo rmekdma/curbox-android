@@ -83,7 +83,8 @@ object AppRuleGuardianOverrides {
         useDayId: String,
         grantedMillis: Long,
         grantedAtMs: Long,
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        isFromAccumulatedPool: Boolean = false
     ): AppRuleOverrideState {
         require(ruleId.isNotBlank()) { "rule id must not be blank" }
         require(useDayId.isNotBlank()) { "use day id must not be blank" }
@@ -94,7 +95,8 @@ object AppRuleGuardianOverrides {
                 ruleId = ruleId,
                 useDayId = useDayId,
                 grantedAtMs = grantedAtMs.coerceAtLeast(0L),
-                grantedMillis = grantedMillis
+                grantedMillis = grantedMillis,
+                isFromAccumulatedPool = isFromAccumulatedPool
             )
         )
     }
@@ -130,8 +132,9 @@ object AppRuleGuardianOverrides {
         ruleId: String,
         useDayId: String,
         nowMs: Long,
-        useDayGenerationStartedAtMs: Long = 0L
-    ): Long = grantsForRule(state, ruleId, useDayId, nowMs, useDayGenerationStartedAtMs)
+        useDayGenerationStartedAtMs: Long = 0L,
+        includeAccumulatedGrants: Boolean = true
+    ): Long = grantsForRule(state, ruleId, useDayId, nowMs, useDayGenerationStartedAtMs, includeAccumulatedGrants)
         .fold(0L) { total, grant ->
             if (Long.MAX_VALUE - total < grant.grantedMillis) Long.MAX_VALUE
             else total + grant.grantedMillis
@@ -142,13 +145,18 @@ object AppRuleGuardianOverrides {
         ruleId: String,
         useDayId: String,
         nowMs: Long,
-        useDayGenerationStartedAtMs: Long = 0L
+        useDayGenerationStartedAtMs: Long = 0L,
+        includeAccumulatedGrants: Boolean = true
     ): List<AppRuleGuardianGrant> = normalize(
         state,
         useDayId,
         nowMs,
         useDayGenerationStartedAtMs
-    ).grants.filter { it.ruleId == ruleId && it.grantedAtMs <= nowMs }
+    ).grants.filter {
+        it.ruleId == ruleId &&
+            it.grantedAtMs <= nowMs &&
+            (includeAccumulatedGrants || !it.isFromAccumulatedPool)
+    }
 
     fun skipsForRule(
         state: AppRuleOverrideState,

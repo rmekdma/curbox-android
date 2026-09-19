@@ -15,6 +15,9 @@
     <string name="app_rules_notification_time_exhausted">[%1$s] 시간 소진: %2$d분/%3$d분</string>
     <string name="app_rules_notification_title">Curbox • %1$s</string>
     <string name="guardian_add_time">추가 시간 변경</string>
+    <string name="guardian_use_accumulated_time">누적 시간 사용 (%1$d분 사용 가능)</string>
+    <string name="guardian_use_accumulated_time_title">누적 시간 사용</string>
+    <string name="guardian_accumulated_available_desc">사용 가능한 누적 시간 %1$d분</string>
     <string name="guardian_extra_minutes">추가 시간</string>
     <string name="guardian_total_extra_minutes">총 추가 시간</string>
     <string name="guardian_current_total">현재 총 추가 시간 %1$d분</string>
@@ -22,6 +25,7 @@
     <string name="guardian_total_not_greater">총 추가 시간은 현재 값보다 커야 해요.</string>
     <string name="guardian_minutes_hint">분</string>
     <string name="guardian_invalid_minutes">양수인 분을 입력해 주세요.</string>
+    <string name="guardian_exceeds_accumulated_minutes">사용 가능한 누적 분을 초과할 수 없어요.</string>
     <string name="app_rules_sunday_short">일</string>
     <string name="app_rules_monday_short">월</string>
     <string name="app_rules_tuesday_short">화</string>

@@ -428,6 +428,64 @@ class DataStoreManager(private val context: Context) {
         )
     }
 
+    /**
+     * Atomically deducts accumulated minutes from the rule's pool and issues an
+     * AppRuleGuardianGrant with isFromAccumulatedPool = true in a single DataStore transaction.
+     */
+    suspend fun approveAccumulatedTime(
+        password: String,
+        ruleId: String,
+        useDayId: String,
+        approvedMinutes: Long,
+        grantedAtMs: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (approvedMinutes <= 0L ||
+            approvedMinutes > Long.MAX_VALUE / 60_000L ||
+            ruleId.isBlank() ||
+            useDayId.isBlank()
+        ) return false
+        val grantedMillis = approvedMinutes * 60_000L
+        var expectedRemainingPool = 0L
+        val updated = settingsDataStore.updateData { current ->
+            if (current.guardianAuthConfig.isConfigured &&
+                !GuardianPassword.verify(password, current.guardianAuthConfig)
+            ) return@updateData current
+
+            val pool = current.appRuleRolloverState.pools[ruleId] ?: return@updateData current
+            if (pool.accumulatedMinutes < approvedMinutes) return@updateData current
+
+            val nextPool = pool.copy(accumulatedMinutes = pool.accumulatedMinutes - approvedMinutes)
+            expectedRemainingPool = nextPool.accumulatedMinutes
+            val nextRolloverState = current.appRuleRolloverState.withPool(nextPool)
+
+            val nextOverrides = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
+                neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
+                    current.appRuleOverrideState,
+                    useDayId,
+                    current.useDayGenerationStartedAtMs
+                ),
+                ruleId = ruleId,
+                useDayId = useDayId,
+                grantedMillis = grantedMillis,
+                grantedAtMs = grantedAtMs,
+                useDayGenerationStartedAtMs = current.useDayGenerationStartedAtMs,
+                isFromAccumulatedPool = true
+            )
+            current.copy(
+                appRuleRolloverState = nextRolloverState,
+                appRuleOverrideState = nextOverrides
+            )
+        }
+        return GuardianDataStoreWriteResult.accumulatedGrantWasStored(
+            settings = updated,
+            ruleId = ruleId,
+            useDayId = useDayId,
+            grantedMillis = grantedMillis,
+            grantedAtMs = grantedAtMs.coerceAtLeast(0L),
+            expectedRemainingPoolMinutes = expectedRemainingPool
+        )
+    }
+
     suspend fun skipAppRuleUntil(
         password: String,
         ruleId: String,
@@ -1281,5 +1339,25 @@ internal object GuardianDataStoreWriteResult {
             it.skipFromMs == skipFromMs &&
             it.skipUntilMs == skipUntilMs &&
             it.skipUntilMs > it.skipFromMs
+    }
+
+    fun accumulatedGrantWasStored(
+        settings: Settings,
+        ruleId: String,
+        useDayId: String,
+        grantedMillis: Long,
+        grantedAtMs: Long,
+        expectedRemainingPoolMinutes: Long
+    ): Boolean {
+        val pool = settings.appRuleRolloverState.pools[ruleId]
+        val poolMatches = pool != null && pool.accumulatedMinutes == expectedRemainingPoolMinutes
+        val grantMatches = settings.appRuleOverrideState.grants.any {
+            it.ruleId == ruleId &&
+                it.useDayId == useDayId &&
+                it.grantedMillis == grantedMillis &&
+                it.grantedAtMs == grantedAtMs &&
+                it.isFromAccumulatedPool
+        }
+        return poolMatches && grantMatches
     }
 }

@@ -105,4 +105,29 @@ class AppRuleRolloverSerializationTest {
         val replaced = updated.withPool(pool1.copy(accumulatedMinutes = 50L))
         assertEquals(50L, replaced.poolFor("rule-1").accumulatedMinutes)
     }
+
+    @Test
+    fun appRuleGuardianGrantDefaultsIsFromAccumulatedPoolToFalse() {
+        val oldGrantJson = """
+            {
+                "ruleId": "rule-1",
+                "useDayId": "2026-09-19",
+                "grantedAtMs": 1000,
+                "grantedMillis": 600000
+            }
+        """.trimIndent()
+        val grant = gson.fromJson(oldGrantJson, AppRuleGuardianGrant::class.java)
+        assertFalse(grant.isFromAccumulatedPool)
+
+        val grantFromPool = AppRuleGuardianGrant(
+            ruleId = "rule-1",
+            useDayId = "2026-09-19",
+            grantedAtMs = 1000,
+            grantedMillis = 600000,
+            isFromAccumulatedPool = true
+        )
+        val json = gson.toJson(grantFromPool)
+        val restored = gson.fromJson(json, AppRuleGuardianGrant::class.java)
+        assertTrue(restored.isFromAccumulatedPool)
+    }
 }

@@ -19,7 +19,8 @@ data class AppRuleGuardianGrant(
     val ruleId: String = "",
     val useDayId: String = "",
     val grantedAtMs: Long = 0L,
-    val grantedMillis: Long = 0L
+    val grantedMillis: Long = 0L,
+    val isFromAccumulatedPool: Boolean = false
 )
 
 /** A single rule's temporary skip.  The end is always capped by the use-day reset. */

@@ -61,6 +61,15 @@
                     android:text="@string/guardian_add_time" />
 
                 <com.google.android.material.button.MaterialButton
+                    android:id="@+id/approval_use_accumulated_time"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:visibility="gone"
+                    android:text="@string/guardian_use_accumulated_time" />
+
+                <com.google.android.material.button.MaterialButton
                     android:id="@+id/approval_skip_rule"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="match_parent"
