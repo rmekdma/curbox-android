@@ -147,5 +147,51 @@ Describe "Device Test Common Helpers" {
             ($rule.scope.includedGroupIds -contains $targetGroup.id) | Should Be $true
         }
     }
+
+    Context "Test-AppRuleSkip" {
+        It "returns true when skips contains matching ruleId and valid skipUntilMs" {
+            $overrideState = [PSCustomObject]@{
+                skips = @(
+                    [PSCustomObject]@{
+                        ruleId = "test-rule-01"
+                        useDayId = "2026-09-19"
+                        skipUntilMs = [long]1770000000000
+                        skipFromMs = [long]1760000000000
+                    }
+                )
+            }
+            (Test-AppRuleSkip -OverrideState $overrideState -RuleId "test-rule-01" -MinSkipUntilMs 1765000000000) | Should Be $true
+        }
+
+        It "returns false when skips is empty or does not contain ruleId" {
+            $overrideState = [PSCustomObject]@{
+                skips = @()
+            }
+            (Test-AppRuleSkip -OverrideState $overrideState -RuleId "test-rule-01") | Should Be $false
+
+            $overrideState2 = [PSCustomObject]@{
+                skips = @(
+                    [PSCustomObject]@{
+                        ruleId = "other-rule"
+                        skipUntilMs = [long]1770000000000
+                    }
+                )
+            }
+            (Test-AppRuleSkip -OverrideState $overrideState2 -RuleId "test-rule-01") | Should Be $false
+        }
+
+        It "returns false when skipUntilMs is less than or equal to MinSkipUntilMs" {
+            $overrideState = [PSCustomObject]@{
+                skips = @(
+                    [PSCustomObject]@{
+                        ruleId = "test-rule-01"
+                        skipUntilMs = [long]1760000000000
+                    }
+                )
+            }
+            (Test-AppRuleSkip -OverrideState $overrideState -RuleId "test-rule-01" -MinSkipUntilMs 1765000000000) | Should Be $false
+        }
+    }
 }
+
 

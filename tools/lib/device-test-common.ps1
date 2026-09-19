@@ -22,6 +22,7 @@
     - Get-DeviceTimeInfo: Query and calculate device local time in minutes and seconds
     - Wait-DeviceMinute: Wait until device reaches target minute
     - Set-DeviceUsageGeneration: Reset useDay session generation to start fresh tracking epoch
+    - Test-AppRuleSkip: Verify whether a rule skip override is recorded and active
 #>
 
 function Write-Step([string]$Msg) {
@@ -460,3 +461,29 @@ function New-DailyLimitAppRuleConfig(
         appRules = @($rule)
     }
 }
+
+function Test-AppRuleSkip($OverrideState, [string]$RuleId, [long]$MinSkipUntilMs = 0) {
+    if (-not $OverrideState -or -not $RuleId) {
+        return $false
+    }
+    $skips = if ($OverrideState.PSObject.Properties['skips']) {
+        $OverrideState.skips
+    } elseif ($OverrideState -is [System.Collections.IEnumerable] -and $OverrideState -isnot [string]) {
+        $OverrideState
+    } else {
+        $null
+    }
+    if (-not $skips) {
+        return $false
+    }
+    foreach ($skip in $skips) {
+        if ($skip.ruleId -eq $RuleId) {
+            $until = [long]$skip.skipUntilMs
+            if ($until -gt $MinSkipUntilMs) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
