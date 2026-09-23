@@ -168,6 +168,15 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private var notificationTickJob: kotlinx.coroutines.Job? = null
     private var liveNotificationJob: kotlinx.coroutines.Job? = null
     private var lastShownAt = 0L
+    @Volatile private var pendingGrantedPackage: String? = null
+    @Volatile private var pendingGrantedPackageTimestampMs = 0L
+
+    private fun isPendingGrantedPackage(packageName: String): Boolean {
+        val pending = pendingGrantedPackage ?: return false
+        if (pending != packageName) return false
+        val elapsed = observationElapsedRealtimeMs()
+        return (elapsed - pendingGrantedPackageTimestampMs) in 0..5_000L
+    }
     @Volatile private var launchablePackages: Set<String> = emptySet()
     @Volatile private var essentialPackages: Set<String> = emptySet()
     private var packageScopeReader: AppRulePackageScopeReader? = null
@@ -776,6 +785,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         )
         val accepted = isAcceptedRuntimeRevision(runtimeRevision)
         if (accepted) {
+            pendingGrantedPackage = null
+            pendingGrantedPackageTimestampMs = 0L
             runtimePublicationBeforeWorkerHandoff?.invoke(runtimeRevision)
             submitRuntimePublication(
                 connectionGeneration = connectionGeneration,
@@ -871,13 +882,15 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                         pendingWorkerEvaluations.remove(outcome.sourceOrderIdentity)
                             ?.get(denied.packageName)
                     }
+                    if (isPendingGrantedPackage(denied.packageName)) {
+                        return@post
+                    }
                     if (evaluated != null) {
                         val now = observationWallClockMs()
                         val bypassThrottle = reevaluationGate.consumeIfApplicable(
                             evaluated.evaluations.isNotEmpty()
                         )
                         if (bypassThrottle || now - lastShownAt >= 1_000L) {
-                            lastShownAt = now
                             showWarning(
                                 packageName = denied.packageName,
                                 evaluation = evaluated,
@@ -913,6 +926,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         workerInstanceToken: AppRuleWorkerInstanceToken
     ) {
         if (!isCurrentWorkerOutcome(outcome, workerInstanceToken)) return
+        if (isPendingGrantedPackage(decision.packageName)) return
         if (!service.isDelayOver(1_000)) return
         val evaluatedSnapshot = synchronized(runtimeLock) {
             if (!isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken) ||
@@ -962,6 +976,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 return
             }
             service.startActivity(createGuardianApprovalIntent(service, decision.packageName, denials))
+            lastShownAt = observationWallClockMs()
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -1655,6 +1670,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 service.startActivity(
                     createGuardianApprovalIntent(service, packageName, denialRows)
                 )
+                lastShownAt = observationWallClockMs()
             } finally {
                 completeExternalEffectCall(permit)
                 finishExternalEffect(permit)
@@ -1719,6 +1735,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             currentForegroundPackage = null
             lastNonessentialForegroundPackage = null
             activeGuardianPackage = null
+            pendingGrantedPackage = null
+            pendingGrantedPackageTimestampMs = 0L
             currentForegroundEvidenceAtElapsedMs = 0L
             suspendedForegroundPackage = null
             foregroundEvidenceSuspended = true
@@ -2100,9 +2118,35 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE
             )?.trim().orEmpty()
             if (packageName.isBlank()) return
+            val closeReason = intent.getStringExtra(
+                GuardianApprovalActivity.EXTRA_CLOSE_REASON
+            ) ?: GuardianApprovalActivity.REASON_INTERRUPTED
+
+            var checkDelayMs: Long? = null
             synchronized(runtimeLock) {
                 if (!isReadyForChecks()) return
                 applyGuardianLifecycleTransition(action, packageName)
+                if (action == GuardianApprovalActivity.INTENT_ACTION_CLOSED) {
+                    when (closeReason) {
+                        GuardianApprovalActivity.REASON_GRANTED -> {
+                            pendingGrantedPackage = packageName
+                            pendingGrantedPackageTimestampMs = observationElapsedRealtimeMs()
+                        }
+                        GuardianApprovalActivity.REASON_CANCELLED -> {
+                            checkDelayMs = 300L
+                        }
+                        else -> {
+                            lastShownAt = 0L
+                            checkDelayMs = 50L
+                        }
+                    }
+                }
+            }
+            checkDelayMs?.let { delay ->
+                postVisibleApplicationCheck(
+                    delayMillis = delay,
+                    observationKind = ObservationKind.REFRESH
+                )
             }
         }
     }
