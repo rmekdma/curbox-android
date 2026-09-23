@@ -899,6 +899,104 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun guardianClosedWithInterruptedReasonResetsThrottleAndPostsRecheck() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val postedDelays = mutableListOf<Long>()
+        val blocker = AppRuleBlocker().apply {
+            visibleApplicationCheckPostDelayed = { _, delayMs ->
+                postedDelays.add(delayMs)
+                true
+            }
+        }
+        setField(blocker, "service", service)
+        setField(blocker, "setupReady", true)
+        setField(blocker, "activeGuardianPackage", PACKAGE)
+        setField(blocker, "lastShownAt", 5000L)
+
+        val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+        receiver.onReceive(
+            service,
+            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
+                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+                .putExtra(
+                    GuardianApprovalActivity.EXTRA_CLOSE_REASON,
+                    GuardianApprovalActivity.REASON_INTERRUPTED
+                )
+        )
+
+        assertEquals(null, getField(blocker, "activeGuardianPackage"))
+        assertEquals(0L, getField(blocker, "lastShownAt"))
+        assertEquals(listOf(50L), postedDelays)
+        assertEquals(null, getField(blocker, "pendingGrantedPackage"))
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun guardianClosedWithGrantedReasonSuppressesWarningWithoutImmediateRecheck() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val postedDelays = mutableListOf<Long>()
+        val blocker = AppRuleBlocker().apply {
+            visibleApplicationCheckPostDelayed = { _, delayMs ->
+                postedDelays.add(delayMs)
+                true
+            }
+        }
+        setField(blocker, "service", service)
+        setField(blocker, "setupReady", true)
+        setField(blocker, "activeGuardianPackage", PACKAGE)
+        setField(blocker, "lastShownAt", 5000L)
+
+        val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+        receiver.onReceive(
+            service,
+            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
+                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+                .putExtra(
+                    GuardianApprovalActivity.EXTRA_CLOSE_REASON,
+                    GuardianApprovalActivity.REASON_GRANTED
+                )
+        )
+
+        assertEquals(null, getField(blocker, "activeGuardianPackage"))
+        assertEquals(PACKAGE, getField(blocker, "pendingGrantedPackage"))
+        assertTrue(postedDelays.isEmpty())
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun guardianClosedWithCancelledReasonPostsDelayedRecheckWithoutSuppressing() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val postedDelays = mutableListOf<Long>()
+        val blocker = AppRuleBlocker().apply {
+            visibleApplicationCheckPostDelayed = { _, delayMs ->
+                postedDelays.add(delayMs)
+                true
+            }
+        }
+        setField(blocker, "service", service)
+        setField(blocker, "setupReady", true)
+        setField(blocker, "activeGuardianPackage", PACKAGE)
+        setField(blocker, "lastShownAt", 5000L)
+
+        val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+        receiver.onReceive(
+            service,
+            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
+                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+                .putExtra(
+                    GuardianApprovalActivity.EXTRA_CLOSE_REASON,
+                    GuardianApprovalActivity.REASON_CANCELLED
+                )
+        )
+
+        assertEquals(null, getField(blocker, "activeGuardianPackage"))
+        assertEquals(5000L, getField(blocker, "lastShownAt"))
+        assertEquals(listOf(300L), postedDelays)
+        assertEquals(null, getField(blocker, "pendingGrantedPackage"))
+        blocker.onDestroy()
+    }
+
+    @Test
     fun suspendedEvidenceResumesFromModuleVisibleOutcomeUnderEssentialRoot() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         var evaluations = 0

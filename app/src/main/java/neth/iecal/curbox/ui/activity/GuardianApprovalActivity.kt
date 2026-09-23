@@ -61,6 +61,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var grantInProgress = false
     private var guardianClosedBroadcastSent = false
     private var guardianStateReceiverRegistered = false
+    private var closeReason: String = REASON_INTERRUPTED
 
     private val guardianStateRequestReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -614,10 +615,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
             Intent(INTENT_ACTION_CLOSED)
                 .setPackage(this.packageName)
                 .putExtra(EXTRA_GUARDIAN_PACKAGE, packageName)
+                .putExtra(EXTRA_CLOSE_REASON, closeReason)
         )
     }
 
     private fun navigateHomeAndFinish() {
+        closeReason = REASON_CANCELLED
         val intent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_HOME)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -627,6 +630,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun finishAndLaunch() {
+        closeReason = REASON_GRANTED
         intent.getStringExtra(EXTRA_PACKAGE)?.let { packageName ->
             packageManager.getLaunchIntentForPackage(packageName)?.let(::startActivity)
         }
@@ -643,5 +647,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
         const val INTENT_ACTION_OPENED = "neth.iecal.curbox.guardian.approval.opened"
         const val INTENT_ACTION_STATE_REQUEST = "neth.iecal.curbox.guardian.approval.state_request"
         const val EXTRA_GUARDIAN_PACKAGE = "guardian_package"
+        const val EXTRA_CLOSE_REASON = "guardian_close_reason"
+        const val REASON_GRANTED = "granted"
+        const val REASON_CANCELLED = "cancelled"
+        const val REASON_INTERRUPTED = "interrupted"
     }
 }
