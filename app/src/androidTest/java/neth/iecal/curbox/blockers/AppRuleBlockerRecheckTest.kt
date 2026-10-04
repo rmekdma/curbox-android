@@ -452,14 +452,25 @@ class AppRuleBlockerRecheckTest {
     fun scheduledRecheckReevaluatesGlobalDenialAfterTargetUsageAndGuardianExtra() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L
-        val fakeScheduler = FakeWakeScheduler()
+        val zone = ZoneId.systemDefault()
+        val activeBoundary = ZonedDateTime.now(zone)
+            .plusDays(1)
+            .withHour(11)
+            .withMinute(0)
+            .withSecond(0)
+            .withNano(0)
+        val now = activeBoundary.minusMinutes(1).toInstant().toEpochMilli()
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = now,
+            initialElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        )
         val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler)
-        val schedulerHandler = android.os.Handler(android.os.Looper.getMainLooper())
-        blocker.recheckPostDelayed = { runnable, delayMillis ->
-            schedulerHandler.postDelayed(runnable, delayMillis)
-            true
-        }
-        blocker.recheckRemoveCallback = schedulerHandler::removeCallbacks
+        blocker.wallClockMsProvider = { fakeScheduler.currentWallClockMs }
+        blocker.elapsedRealtimeMsProvider = { fakeScheduler.currentElapsedRealtimeMs }
+        blocker.screenInteractiveProvider = { true }
+        blocker.keyguardLockedProvider = { false }
+        val observedOutcomes = CopyOnWriteArrayList<DecisionOutcome>()
+        blocker.decisionOutcomeSinkObserver = { observedOutcomes += it }
         var windowSnapshotReads = 0
         blocker.applicationWindowSnapshotProvider = {
             windowSnapshotReads++
@@ -472,8 +483,7 @@ class AppRuleBlockerRecheckTest {
         blocker.activeWindowSnapshotProvider = {
             AppRuleBlocker.ActiveWindowSnapshot(packageName = null)
         }
-        val now = System.currentTimeMillis()
-        val useDayId = ConfigurableUseDayCalculator().idAt(now)
+        val useDayId = ConfigurableUseDayCalculator(zone = zone).idAt(now)
         val repository = EmptySessionRepository(
             sessions = listOf(
                 ForegroundSession(
@@ -490,9 +500,9 @@ class AppRuleBlockerRecheckTest {
             AppRuleOverrideState(useDayId),
             "target",
             useDayId,
-            // Keep a short but real guardian remainder so the initial target rule is allowed and
-            // the scheduled callback later reevaluates the newly active global denial.
-            grantedMillis = 2_000L,
+            // Keep a guardian remainder that expires at the test boundary. The fake clock makes
+            // this full minute deterministic without waiting in real time.
+            grantedMillis = 60_000L,
             grantedAtMs = now
         )
         val packageReader = AppRulePackageScopeReader(
@@ -510,8 +520,8 @@ class AppRuleBlockerRecheckTest {
         coordinator.accept(snapshotWithSpentTargetAllowance())
 
         // The target rule has consumed its direct allowance, but its guardian remainder keeps the
-        // app open. A global rule is added while the same app remains visible and no new window
-        // event is delivered. The handler callback must perform the real re-evaluation.
+        // app open. A global rule becomes active at the grant's scheduled expiry, while the app
+        // remains visible and no new window event is delivered.
         sendWindowEvent(blocker)
         assertTrue("the target rule's guardian remainder must keep the app open", service.startedActivities.isEmpty())
         assertTrue(
@@ -521,10 +531,75 @@ class AppRuleBlockerRecheckTest {
                 scheduledKeys(blocker).isNotEmpty()
             }
         )
-        coordinator.accept(snapshotWithTargetAndGlobalDeny())
+        val globalStartMinute = activeBoundary.hour * 60 + activeBoundary.minute
+        val snapshotWithFutureGlobalDeny = snapshotWithTargetAndGlobalDeny().let { snapshot ->
+            snapshot.copy(
+                appRules = snapshot.appRules.map { rule ->
+                    if (rule.id == "global") {
+                        rule.copy(
+                            timeRanges = listOf(
+                                AppRuleTimeRange(
+                                    startMinute = globalStartMinute,
+                                    endMinute = globalStartMinute + 60
+                                )
+                            )
+                        )
+                    } else {
+                        rule
+                    }
+                }
+            )
+        }
+        coordinator.accept(snapshotWithFutureGlobalDeny)
         setField(blocker, "lifecycleGeneration", java.util.concurrent.atomic.AtomicLong(1L))
         invokePrivate(blocker, "submitRuntimePublication", 0L)
-        SystemClock.sleep(5_000L)
+        val publishedRuntimeRevision = RuntimeRevision(
+            (getField(blocker, "latestRuntimeRevision") as Number).toLong()
+        )
+        assertTrue(
+            "runtime publication should finish before the scheduled boundary",
+            awaitCondition {
+                observedOutcomes.filterIsInstance<DecisionOutcome.EnforcementOutcome>().any {
+                    it.acceptedRuntimeRevision == publishedRuntimeRevision
+                }
+            }
+        )
+        val publicationOutcomes = observedOutcomes
+            .filterIsInstance<DecisionOutcome.EnforcementOutcome>()
+            .filter { it.acceptedRuntimeRevision == publishedRuntimeRevision }
+        assertTrue(
+            "the future global rule must remain inactive during runtime publication: $publicationOutcomes",
+            publicationOutcomes.none { outcome ->
+                outcome.packageDecisions.any { decision ->
+                    !decision.isAllowed && "global" in decision.denyingRuleIds
+                }
+            }
+        )
+        assertTrue("runtime publication alone must not open approval", service.startedActivities.isEmpty())
+
+        val scheduledWake = checkNotNull(fakeScheduler.getScheduled(PACKAGE)) {
+            "the guardian expiry must remain scheduled after runtime publication"
+        }
+        assertTrue(
+            "the scheduled wake must land on or after the future global rule boundary " +
+                "(wake=${scheduledWake.dueAtWallClockMs}, boundary=${activeBoundary.toInstant().toEpochMilli()})",
+            scheduledWake.dueAtWallClockMs >= activeBoundary.toInstant().toEpochMilli()
+        )
+        fakeScheduler.advanceTimeTo(
+            wallClockMs = scheduledWake.dueAtWallClockMs,
+            elapsedRealtimeMs = scheduledWake.effectiveDueElapsedMs
+        )
+
+        assertTrue(
+            "a scheduler-driven synthetic recheck must deny through the now-active global rule",
+            awaitCondition {
+                observedOutcomes.filterIsInstance<DecisionOutcome.EvaluationReady>().any { outcome ->
+                    outcome.request.reason == ObservationKind.SYNTHETIC_RECHECK &&
+                        !outcome.evaluation.isAllowed &&
+                        outcome.evaluation.denyingRules.any { it.ruleId == "global" }
+                }
+            }
+        )
 
         assertTrue(
             "the scheduled recheck must open approval for the newly active global denial " +
@@ -536,7 +611,10 @@ class AppRuleBlockerRecheckTest {
         val intent = service.startedActivities.last()
         val denials = intent.getStringExtra(GuardianApprovalActivity.EXTRA_DENIALS).orEmpty()
         assertTrue("unexpected denial payload: $denials", denials.contains("global"))
-        assertTrue(windowSnapshotReads >= 2)
+        assertTrue(
+            "scheduled visibility recheck should reread windows (reads=$windowSnapshotReads)",
+            windowSnapshotReads >= 2
+        )
         blocker.onDestroy()
     }
 
