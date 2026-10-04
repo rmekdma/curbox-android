@@ -18,6 +18,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleRecheckPlan
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
+import neth.iecal.curbox.domain.apprules.DecisionOutcome
 import neth.iecal.curbox.domain.apprules.FakeWakeScheduler
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.LifecycleGeneration
@@ -160,10 +161,12 @@ class AppRuleBlockerRecheckTest {
 
         sendWindowEvent(blocker, PACKAGE)
         org.junit.Assert.assertTrue(
-            "decisionOutcomeSinkObserver must observe outcome at publish entry",
-            awaitCondition { observedOutcomes.isNotEmpty() }
+            "decisionOutcomeSinkObserver must observe an enforcement outcome at publish entry",
+            awaitCondition {
+                observedOutcomes.any { it is DecisionOutcome.EnforcementOutcome }
+            }
         )
-        val outcome = observedOutcomes.first()
+        val outcome = observedOutcomes.filterIsInstance<DecisionOutcome.EnforcementOutcome>().first()
         org.junit.Assert.assertEquals(1, outcome.packageDecisions.size)
         org.junit.Assert.assertEquals(PACKAGE, outcome.packageDecisions[0].packageName)
         blocker.onDestroy()
