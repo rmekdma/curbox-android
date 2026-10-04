@@ -15,8 +15,6 @@ import android.text.TextWatcher
 import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.Toast
-import android.widget.ArrayAdapter
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -31,16 +29,11 @@ import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.databinding.ActivityGuardianApprovalBinding
 import neth.iecal.curbox.databinding.DialogGuardianAccumulatedTimeBinding
-import neth.iecal.curbox.databinding.DialogGuardianExtraTimeBinding
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeFormState
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeSubmission
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeValidationError
-import neth.iecal.curbox.domain.apprules.GuardianExtraTimeInputSource
-import neth.iecal.curbox.domain.apprules.GuardianExtraTimeSubmission
-import neth.iecal.curbox.domain.apprules.GuardianExtraTimeValidationError
 import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
-import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantFormState
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeRulePicker
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
@@ -59,14 +52,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
         val packageName: String,
         val denials: List<AppRuleGuardianDenial>
     )
-
-    private data class GuardianGrantRuleOption(
-        val rule: AppRule,
-        val basis: GuardianExtraTimeGrantBasis
-    ) {
-        val label: String
-            get() = rule.name.takeIf(String::isNotBlank) ?: rule.id
-    }
 
     private lateinit var binding: ActivityGuardianApprovalBinding
     private val dataStore by lazy { DataStoreManager(applicationContext) }
@@ -274,7 +259,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
     private suspend fun readCurrentGrantCandidates(
         packageName: String
-    ): List<GuardianGrantRuleOption> {
+    ): List<GuardianExtraTimeGrantOption> {
         val settings = dataStore.settings.first()
         val now = System.currentTimeMillis()
         val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
@@ -295,7 +280,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         )
         return candidates.mapNotNull { rule ->
             GuardianExtraTimeGrantBasis.capture(settings, rule.id, now)?.let { basis ->
-                GuardianGrantRuleOption(rule, basis)
+                GuardianExtraTimeGrantOption(rule, basis)
             }
         }
     }
@@ -310,219 +295,28 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun showGrantDialog(
-        options: List<GuardianGrantRuleOption>,
+        options: List<GuardianExtraTimeGrantOption>,
         selectedIndex: Int
     ) {
-        val dialogBinding = DialogGuardianExtraTimeBinding.inflate(layoutInflater)
-        var currentOptions = options
-        var grantFormState = GuardianExtraTimeGrantFormState.initial(options[selectedIndex].basis)
-        var positiveButton: android.widget.Button? = null
-        var grantDialog: AlertDialog? = null
-        val ruleAdapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_list_item_1,
-            currentOptions.map(GuardianGrantRuleOption::label)
-        )
-        dialogBinding.rulePicker.setAdapter(ruleAdapter)
-        dialogBinding.rulePicker.setText(currentOptions[selectedIndex].label, false)
-        dialogBinding.currentTotal.text = getString(
-            R.string.guardian_current_total,
-            grantFormState.input.currentTotalMinutes
-        )
-        dialogBinding.totalMinutesLayout.placeholderText =
-            grantFormState.input.currentTotalMinutes.toString()
-        dialogBinding.additionalMinutesInput.setSelectAllOnFocus(true)
-        dialogBinding.totalMinutesInput.setSelectAllOnFocus(true)
-        var updatingDerivedValue = false
-
-        fun renderGrantForm() {
-            val basis = grantFormState.basis
-            val currentTotalMinutes = grantFormState.input.currentTotalMinutes
-            dialogBinding.currentTotal.text = getString(
-                R.string.guardian_current_total,
-                currentTotalMinutes
-            )
-            dialogBinding.totalMinutesLayout.placeholderText =
-                currentTotalMinutes.toString()
-            dialogBinding.additionalMinutesLayout.error = null
-            dialogBinding.totalMinutesLayout.error = null
-            positiveButton?.isEnabled = basis != null
-        }
-
-        fun resetGrantForm(basis: GuardianExtraTimeGrantBasis?) {
-            if (basis == null) {
-                grantFormState = grantFormState.clearInputs()
-            } else {
-                if (basis.ruleId != grantFormState.selectedRuleId) {
-                    grantFormState = grantFormState.selectRule(basis.ruleId)
+        GuardianExtraTimeGrantFormDialog(
+            context = this,
+            inflater = layoutInflater,
+            scope = lifecycleScope,
+            readCurrentBasis = ::readGrantBasis,
+            readCurrentCandidates = { readCurrentGrantCandidates(targetPackageName) },
+            onSubmit = { basis, minutes ->
+                if (!grantInProgress) {
+                    grantInProgress = true
+                    authenticateThen(
+                        ruleId = basis.ruleId,
+                        onCancelled = { grantInProgress = false },
+                        onAuthenticated = { _, password -> writeGrant(basis, password, minutes) }
+                    )
                 }
-                grantFormState = grantFormState.receiveBasis(
-                    grantFormState.selectionRevision,
-                    basis
-                )
-            }
-            updatingDerivedValue = true
-            dialogBinding.additionalMinutesInput.setText("")
-            dialogBinding.totalMinutesInput.setText("")
-            updatingDerivedValue = false
-            renderGrantForm()
-        }
-
-        dialogBinding.additionalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) return@setOnFocusChangeListener
-            if (!updatingDerivedValue) {
-                grantFormState = grantFormState.editAdditionalMinutes(
-                    dialogBinding.additionalMinutesInput.text?.toString().orEmpty()
-                )
-            }
-        }
-        dialogBinding.totalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) return@setOnFocusChangeListener
-            if (!updatingDerivedValue) {
-                grantFormState = grantFormState.editTotalMinutes(
-                    dialogBinding.totalMinutesInput.text?.toString().orEmpty()
-                )
-            }
-        }
-
-        dialogBinding.additionalMinutesInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-
-            override fun afterTextChanged(editable: Editable?) {
-                if (updatingDerivedValue) return
-                grantFormState = grantFormState.editAdditionalMinutes(editable?.toString().orEmpty())
-                dialogBinding.additionalMinutesLayout.error = null
-                dialogBinding.totalMinutesLayout.error = null
-                updatingDerivedValue = true
-                dialogBinding.totalMinutesInput.setText(grantFormState.input.totalMinutesText)
-                updatingDerivedValue = false
-            }
-        })
-        dialogBinding.totalMinutesInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-
-            override fun afterTextChanged(editable: Editable?) {
-                if (updatingDerivedValue) return
-                grantFormState = grantFormState.editTotalMinutes(editable?.toString().orEmpty())
-                dialogBinding.additionalMinutesLayout.error = null
-                dialogBinding.totalMinutesLayout.error = null
-                updatingDerivedValue = true
-                dialogBinding.additionalMinutesInput.setText(
-                    grantFormState.input.additionalMinutesText
-                )
-                updatingDerivedValue = false
-            }
-        })
-
-        dialogBinding.rulePicker.setOnItemClickListener { _, _, position, _ ->
-            val option = currentOptions.getOrNull(position) ?: return@setOnItemClickListener
-            if (option.rule.id == grantFormState.selectedRuleId) return@setOnItemClickListener
-
-            grantFormState = grantFormState.selectRule(option.rule.id)
-            val revision = grantFormState.selectionRevision
-            resetGrantForm(null)
-            lifecycleScope.launch {
-                val currentBasis = try {
-                    withContext(Dispatchers.IO) { readGrantBasis(option.rule.id) }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Exception) {
-                    null
-                }
-                if (revision != grantFormState.selectionRevision) return@launch
-                if (currentBasis != null) {
-                    grantFormState = grantFormState.receiveBasis(revision, currentBasis)
-                    renderGrantForm()
-                    return@launch
-                }
-
-                val refreshedOptions = try {
-                    withContext(Dispatchers.IO) {
-                        readCurrentGrantCandidates(targetPackageName)
-                    }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Exception) {
-                    emptyList()
-                }
-                if (revision != grantFormState.selectionRevision) return@launch
-                if (refreshedOptions.isEmpty()) {
-                    grantDialog?.dismiss()
-                    toast(R.string.guardian_no_extra_time_rules)
-                    return@launch
-                }
-
-                currentOptions = refreshedOptions
-                ruleAdapter.clear()
-                ruleAdapter.addAll(currentOptions.map(GuardianGrantRuleOption::label))
-                ruleAdapter.notifyDataSetChanged()
-                val refreshedIndex = currentOptions.indexOfFirst {
-                    it.rule.id == option.rule.id
-                }.takeIf { it >= 0 } ?: 0
-                dialogBinding.rulePicker.setText(currentOptions[refreshedIndex].label, false)
-                resetGrantForm(currentOptions[refreshedIndex].basis)
-            }
-        }
-
-        val dialog = MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.guardian_add_time)
-            .setView(dialogBinding.root)
-            .setPositiveButton(R.string.guardian_apply, null)
-            .setNegativeButton(R.string.cancel, null)
-            .create()
-        grantDialog = dialog
-        dialog.setOnDismissListener { grantDialogOpen = false }
-        dialog.setOnShowListener {
-            positiveButton = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
-            positiveButton?.isEnabled = grantFormState.basis != null
-            positiveButton?.setOnClickListener {
-                if (grantInProgress) return@setOnClickListener
-                val basis = grantFormState.basis ?: return@setOnClickListener
-                when (val submission = grantFormState.input.submit()) {
-                    is GuardianExtraTimeSubmission.Invalid -> {
-                        val errorLayout = if (
-                            grantFormState.input.activeSource == GuardianExtraTimeInputSource.TOTAL_MINUTES
-                        ) {
-                            dialogBinding.totalMinutesLayout
-                        } else {
-                            dialogBinding.additionalMinutesLayout
-                        }
-                        errorLayout.error = getString(
-                            when (submission.error) {
-                                GuardianExtraTimeValidationError.TOTAL_NOT_GREATER ->
-                                    R.string.guardian_total_not_greater
-                                GuardianExtraTimeValidationError.INVALID_MINUTES,
-                                GuardianExtraTimeValidationError.DURATION_OVERFLOW,
-                                GuardianExtraTimeValidationError.TOTAL_OVERFLOW ->
-                                    R.string.guardian_invalid_minutes
-                            }
-                        )
-                    }
-
-                    is GuardianExtraTimeSubmission.Valid -> {
-                        grantInProgress = true
-                        dialog.getButton(
-                            android.content.DialogInterface.BUTTON_POSITIVE
-                        ).isEnabled = false
-                        dialog.dismiss()
-                        authenticateThen(
-                            ruleId = basis.ruleId,
-                            onCancelled = { grantInProgress = false },
-                            onAuthenticated = { _, password ->
-                                writeGrant(basis, password, submission.additionalMinutes)
-                            }
-                        )
-                    }
-                }
-            }
-        }
-        GuardianOwnedDialog.show(dialog)
+            },
+            onDismiss = { grantDialogOpen = false }
+        ).show(options, selectedIndex)
     }
-
     private fun requestAccumulatedGrant() {
         if (grantInProgress) return
         val ruleId = selectedRuleId ?: return

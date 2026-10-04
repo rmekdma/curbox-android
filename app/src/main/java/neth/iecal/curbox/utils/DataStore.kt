@@ -470,6 +470,38 @@ class DataStoreManager(private val context: Context) {
         )
     }
 
+    /** Stores a direct grant authorized by the app's current guardian management session. */
+    internal suspend fun grantAppRuleTimeFromAuthenticatedSession(
+        basis: GuardianExtraTimeGrantBasis,
+        durationMinutes: Long
+    ): GuardianExtraTimeGrantWrite.Result {
+        if (durationMinutes <= 0L ||
+            durationMinutes > Long.MAX_VALUE / 60_000L ||
+            basis.ruleId.isBlank() || basis.useDayId.isBlank()
+        ) return GuardianExtraTimeGrantWrite.Result.Rejected
+
+        val grantedAtMs = GuardianExtraTimeGrantWrite.nextGrantTimestamp()
+        val updated = settingsDataStore.updateData { current ->
+            GuardianExtraTimeGrantWrite.nextSettingsFromAuthenticatedSession(
+                current = current,
+                basis = basis,
+                durationMinutes = durationMinutes,
+                grantedAtMs = grantedAtMs,
+                transactionNowMs = System.currentTimeMillis(),
+                sessionAuthenticated = GuardianSessionRegistry.session.isAuthenticated(
+                    current.guardianAuthConfig.isConfigured
+                )
+            )
+        }
+        return GuardianExtraTimeGrantWrite.resultFor(
+            settings = updated,
+            basis = basis,
+            durationMinutes = durationMinutes,
+            grantedAtMs = grantedAtMs,
+            currentTimeMs = System.currentTimeMillis()
+        )
+    }
+
     /**
      * Atomically deducts accumulated minutes from the rule's pool and issues an
      * AppRuleGuardianGrant with isFromAccumulatedPool = true in a single DataStore transaction.
@@ -1524,6 +1556,43 @@ internal object GuardianExtraTimeGrantWrite {
         grantedAtMs: Long,
         transactionNowMs: Long = grantedAtMs
     ): Settings {
+        if (current.guardianAuthConfig.isConfigured &&
+            !GuardianPassword.verify(password, current.guardianAuthConfig)
+        ) return current
+        return nextSettingsAfterAuthorization(
+            current = current,
+            basis = basis,
+            durationMinutes = durationMinutes,
+            grantedAtMs = grantedAtMs,
+            transactionNowMs = transactionNowMs
+        )
+    }
+
+    fun nextSettingsFromAuthenticatedSession(
+        current: Settings,
+        basis: GuardianExtraTimeGrantBasis,
+        durationMinutes: Long,
+        grantedAtMs: Long,
+        sessionAuthenticated: Boolean,
+        transactionNowMs: Long = grantedAtMs
+    ): Settings {
+        if (current.guardianAuthConfig.isConfigured && !sessionAuthenticated) return current
+        return nextSettingsAfterAuthorization(
+            current = current,
+            basis = basis,
+            durationMinutes = durationMinutes,
+            grantedAtMs = grantedAtMs,
+            transactionNowMs = transactionNowMs
+        )
+    }
+
+    private fun nextSettingsAfterAuthorization(
+        current: Settings,
+        basis: GuardianExtraTimeGrantBasis,
+        durationMinutes: Long,
+        grantedAtMs: Long,
+        transactionNowMs: Long
+    ): Settings {
         if (durationMinutes <= 0L ||
             durationMinutes > Long.MAX_VALUE / 60_000L ||
             basis.ruleId.isBlank() ||
@@ -1531,9 +1600,6 @@ internal object GuardianExtraTimeGrantWrite {
         ) return current
         val grantedMillis = durationMinutes * 60_000L
         if (basis.currentTotalMillis > Long.MAX_VALUE - grantedMillis) return current
-        if (current.guardianAuthConfig.isConfigured &&
-            !GuardianPassword.verify(password, current.guardianAuthConfig)
-        ) return current
 
         val latestBasis = GuardianExtraTimeGrantBasis.capture(
             settings = current,

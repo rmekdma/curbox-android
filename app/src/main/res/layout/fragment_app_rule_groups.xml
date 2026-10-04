@@ -28,6 +28,13 @@
             android:layout_height="wrap_content"
             android:text="@string/app_rules_add_rule" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/change_extra_time_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/guardian_add_time"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/configuration_status"
             android:layout_width="match_parent"

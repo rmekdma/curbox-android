@@ -42,10 +42,15 @@ import neth.iecal.curbox.databinding.FragmentAppRuleGroupsBinding
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeRulePicker
 import neth.iecal.curbox.domain.apprules.UsageResetUiPolicy
 import neth.iecal.curbox.ui.activity.FragmentActivity
+import neth.iecal.curbox.ui.activity.GuardianExtraTimeGrantFormDialog
+import neth.iecal.curbox.ui.activity.GuardianExtraTimeGrantOption
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.UsageResetManager
 import neth.iecal.curbox.utils.UsageResetStatus
@@ -70,6 +75,8 @@ class AppRuleGroupsFragment : Fragment() {
         AppRulePackageScopeReader.fromContext(requireContext().applicationContext)
     }
     private var latestSettings: Settings? = null
+    private var grantPickerLoading = false
+    private var grantInProgress = false
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -84,6 +91,7 @@ class AppRuleGroupsFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         binding.addGroupButton.setOnClickListener { open(CreateAppRuleGroupFragment.FRAGMENT_ID) }
         binding.addRuleButton.setOnClickListener { open(CreateAppRuleFragment.FRAGMENT_ID) }
+        binding.changeExtraTimeButton.setOnClickListener { requestGuardianExtraTimeGrant() }
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
@@ -148,33 +156,7 @@ class AppRuleGroupsFragment : Fragment() {
 
     private suspend fun refresh(settings: Settings) {
         val usage = try {
-            withContext(Dispatchers.IO) {
-                val now = System.currentTimeMillis()
-                val zone = ZoneId.systemDefault()
-                val calculator = ConfigurableUseDayCalculator(zone, settings.useDayResetTime)
-                val useDayId = calculator.idAt(now)
-                val sessions = sessionRepository.sessionsForUseDay(
-                    useDayId,
-                    settings.useDayGenerationStartedAtMs
-                )
-                val availablePackages = packageScopeReader.readLaunchablePackages()
-                val essentialPackages = packageScopeReader.readEssentialPackages()
-                settings.appRuleSnapshot.appRules.associate { rule ->
-                    rule.id to AppRuleEvaluator.evaluateRuleForSnapshot(
-                        snapshot = settings.appRuleSnapshot,
-                        rule = rule,
-                        useDayId = useDayId,
-                        sessions = sessions,
-                        nowMs = now,
-                        zone = zone,
-                        useDayCalculator = calculator,
-                        useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
-                        availablePackages = availablePackages,
-                        essentialExcludedPackages = essentialPackages,
-                        overrides = settings.appRuleOverrideState
-                    )
-                }
-            }
+            readAppRuleEvaluations(settings)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -193,6 +175,10 @@ class AppRuleGroupsFragment : Fragment() {
         val snapshot = settings.appRuleSnapshot
         binding.groupsContainer.removeAllViews()
         binding.rulesContainer.removeAllViews()
+        binding.changeExtraTimeButton.visibility = if (snapshot.appRules.any {
+                it.isActive && it.guardianExtraTimeAllowed
+            }
+        ) View.VISIBLE else View.GONE
         val errors = snapshot.validate()
         val hasMissingContributors = snapshot.appRules.any {
             snapshot.missingContributorGroupIds(it).isNotEmpty()
@@ -213,6 +199,149 @@ class AppRuleGroupsFragment : Fragment() {
                 rolloverPool = settings.appRuleRolloverState.pools[rule.id],
                 basedOnSettings = settings
             )
+        }
+    }
+
+    private suspend fun readAppRuleEvaluations(
+        settings: Settings,
+        nowMs: Long = System.currentTimeMillis()
+    ): Map<String, AppRuleEvaluation> = withContext(Dispatchers.IO) {
+        val now = nowMs
+        val zone = ZoneId.systemDefault()
+        val calculator = ConfigurableUseDayCalculator(zone, settings.useDayResetTime)
+        val useDayId = calculator.idAt(now)
+        val sessions = sessionRepository.sessionsForUseDay(
+            useDayId,
+            settings.useDayGenerationStartedAtMs
+        )
+        val availablePackages = packageScopeReader.readLaunchablePackages()
+        val essentialPackages = packageScopeReader.readEssentialPackages()
+        settings.appRuleSnapshot.appRules.associate { rule ->
+            rule.id to AppRuleEvaluator.evaluateRuleForSnapshot(
+                snapshot = settings.appRuleSnapshot,
+                rule = rule,
+                useDayId = useDayId,
+                sessions = sessions,
+                nowMs = now,
+                zone = zone,
+                useDayCalculator = calculator,
+                useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
+                availablePackages = availablePackages,
+                essentialExcludedPackages = essentialPackages,
+                overrides = settings.appRuleOverrideState
+            )
+        }
+    }
+
+    private fun requestGuardianExtraTimeGrant(preferredRuleId: String? = null) {
+        if (grantInProgress || grantPickerLoading) return
+        grantPickerLoading = true
+        viewLifecycleOwner.lifecycleScope.launch {
+            var failed = false
+            val options = try {
+                withContext(Dispatchers.IO) { readCurrentGrantCandidates() }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                failed = true
+                emptyList()
+            }
+            grantPickerLoading = false
+            if (!isAdded) return@launch
+            if (options.isEmpty()) {
+                Toast.makeText(
+                    requireContext(),
+                    if (failed) R.string.guardian_write_failed else R.string.guardian_no_extra_time_rules,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@launch
+            }
+
+            val selectedIndex = options.indexOfFirst { it.rule.id == preferredRuleId }
+                .takeIf { it >= 0 } ?: 0
+            GuardianExtraTimeGrantFormDialog(
+                context = requireContext(),
+                inflater = layoutInflater,
+                scope = viewLifecycleOwner.lifecycleScope,
+                readCurrentBasis = ::readCurrentGrantBasis,
+                readCurrentCandidates = ::readCurrentGrantCandidates,
+                onSubmit = ::submitGuardianExtraTimeGrant
+            ).show(options, selectedIndex)
+        }
+    }
+
+    private suspend fun readCurrentGrantCandidates(): List<GuardianExtraTimeGrantOption> {
+        val settings = dataStore.settings.first()
+        val now = System.currentTimeMillis()
+        val evaluations = readAppRuleEvaluations(settings, now)
+        return GuardianExtraTimeRulePicker.candidates(
+            snapshot = settings.appRuleSnapshot.normalized(),
+            evaluations = evaluations.values
+        ).mapNotNull { rule ->
+            GuardianExtraTimeGrantBasis.capture(settings, rule.id, now)?.let { basis ->
+                GuardianExtraTimeGrantOption(rule, basis)
+            }
+        }
+    }
+
+    private suspend fun readCurrentGrantBasis(ruleId: String): GuardianExtraTimeGrantBasis? {
+        val settings = dataStore.settings.first()
+        return GuardianExtraTimeGrantBasis.capture(
+            settings = settings,
+            ruleId = ruleId,
+            nowMs = System.currentTimeMillis()
+        )
+    }
+
+    private fun submitGuardianExtraTimeGrant(
+        basis: GuardianExtraTimeGrantBasis,
+        minutes: Long
+    ) {
+        if (grantInProgress || !isAdded) return
+        GuardianOwnedDialog.launchCommit(
+            requireContext(),
+            viewLifecycleOwner.lifecycleScope
+        ) {
+            grantInProgress = true
+            viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                val result = try {
+                    dataStore.grantAppRuleTimeFromAuthenticatedSession(basis, minutes)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    GuardianExtraTimeGrantWrite.Result.Rejected
+                }
+                withContext(Dispatchers.Main) {
+                    grantInProgress = false
+                    if (!isAdded) return@withContext
+                    when (result) {
+                        GuardianExtraTimeGrantWrite.Result.Stored -> Unit
+                        is GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation -> {
+                            Toast.makeText(
+                                requireContext(),
+                                R.string.guardian_grant_basis_changed,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            requestGuardianExtraTimeGrant(preferredRuleId = basis.ruleId)
+                        }
+                        GuardianExtraTimeGrantWrite.Result.Unavailable -> {
+                            Toast.makeText(
+                                requireContext(),
+                                R.string.guardian_grant_rule_changed,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            requestGuardianExtraTimeGrant()
+                        }
+                        GuardianExtraTimeGrantWrite.Result.Rejected -> {
+                            Toast.makeText(
+                                requireContext(),
+                                R.string.guardian_write_failed,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+            }
         }
     }
 

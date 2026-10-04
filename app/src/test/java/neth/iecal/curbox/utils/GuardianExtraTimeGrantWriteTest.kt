@@ -5,6 +5,7 @@ import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.Settings
@@ -304,6 +305,135 @@ class GuardianExtraTimeGrantWriteTest {
             GuardianExtraTimeGrantWrite.Result.Stored,
             GuardianExtraTimeGrantWrite.resultFor(accepted, basis, 10L, nowMs + 2L)
         )
+    }
+
+    @Test
+    fun authenticatedManagementSessionCanGrantWithoutResubmittingPassword() {
+        val current = settingsWithRuleAndGrants().copy(
+            guardianAuthConfig = GuardianPassword.createCredential("guardian secret")
+        )
+        val basis = GuardianExtraTimeGrantBasis.capture(current, "rule", nowMs)!!
+
+        val updated = GuardianExtraTimeGrantWrite.nextSettingsFromAuthenticatedSession(
+            current = current,
+            basis = basis,
+            durationMinutes = 10L,
+            grantedAtMs = nowMs + 1L,
+            sessionAuthenticated = true
+        )
+        val lockScreenWriteWithoutPassword = GuardianExtraTimeGrantWrite.nextSettings(
+            current = current,
+            password = "",
+            basis = basis,
+            durationMinutes = 10L,
+            grantedAtMs = nowMs + 1L
+        )
+
+        assertEquals(
+            listOf(AppRuleGuardianGrant("rule", basis.useDayId, nowMs + 1L, 10 * MINUTE)),
+            updated.appRuleOverrideState.grants
+        )
+        assertEquals(current, lockScreenWriteWithoutPassword)
+    }
+
+    @Test
+    fun directGrantFromManagementSessionRejectsAnUnauthenticatedCall() {
+        val current = settingsWithRuleAndGrants().copy(
+            guardianAuthConfig = GuardianPassword.createCredential("guardian secret")
+        )
+        val basis = GuardianExtraTimeGrantBasis.capture(current, "rule", nowMs)!!
+
+        val updated = GuardianExtraTimeGrantWrite.nextSettingsFromAuthenticatedSession(
+            current = current,
+            basis = basis,
+            durationMinutes = 10L,
+            grantedAtMs = nowMs + 1L,
+            sessionAuthenticated = false
+        )
+
+        assertEquals(current, updated)
+    }
+
+    @Test
+    fun lockScreenAndMainAppCandidateOrderAndDirectGrantResultStayAligned() {
+        val weekday = Instant.ofEpochMilli(nowMs).atZone(ZoneId.systemDefault())
+            .dayOfWeek.value % 7
+        val snapshot = AppRuleSnapshot(
+            appRules = listOf(
+                AppRule(
+                    id = "allowed-but-blocking",
+                    allowedMinutes = 0L,
+                    scope = AppRuleScope.allApps()
+                ),
+                AppRule(
+                    id = "allowed-later",
+                    allowedMinutes = 30L,
+                    scope = AppRuleScope.allApps()
+                ),
+                AppRule(
+                    id = "inactive-window",
+                    weekdays = setOf((weekday + 1) % 7),
+                    scope = AppRuleScope.allApps()
+                ),
+                AppRule(id = "inactive", isActive = false),
+                AppRule(id = "disallowed", guardianExtraTimeAllowed = false)
+            )
+        ).normalized()
+        val current = settingsWithRuleAndGrants().copy(
+            appRuleSnapshot = snapshot,
+            guardianAuthConfig = GuardianAuthConfig()
+        )
+        val lockScreenCandidates = GuardianExtraTimeRulePicker.candidates(
+            snapshot = snapshot,
+            packageName = "example.target",
+            useDayId = useDayId,
+            sessions = emptyList(),
+            nowMs = nowMs,
+            resetTime = UseDayResetTime()
+        )
+        val mainAppEvaluations = snapshot.appRules.map { rule ->
+            AppRuleEvaluator.evaluateRuleForSnapshot(
+                snapshot = snapshot,
+                rule = rule,
+                useDayId = useDayId,
+                sessions = emptyList(),
+                nowMs = nowMs,
+                zone = ZoneId.systemDefault(),
+                useDayGenerationStartedAtMs = current.useDayGenerationStartedAtMs,
+                overrides = current.appRuleOverrideState
+            )
+        }
+        val mainAppCandidates = GuardianExtraTimeRulePicker.candidates(snapshot, mainAppEvaluations)
+
+        assertEquals(
+            listOf("allowed-but-blocking", "allowed-later", "inactive-window"),
+            lockScreenCandidates.map(AppRule::id)
+        )
+        assertEquals(lockScreenCandidates, mainAppCandidates)
+        assertEquals("allowed-but-blocking", mainAppCandidates.first().id)
+
+        val basis = GuardianExtraTimeGrantBasis.capture(
+            current,
+            mainAppCandidates.first().id,
+            nowMs
+        )!!
+        val grantAtMs = nowMs + 5L
+        val lockScreenWrite = GuardianExtraTimeGrantWrite.nextSettings(
+            current = current,
+            password = "",
+            basis = basis,
+            durationMinutes = 10L,
+            grantedAtMs = grantAtMs
+        )
+        val mainAppWrite = GuardianExtraTimeGrantWrite.nextSettingsFromAuthenticatedSession(
+            current = current,
+            basis = basis,
+            durationMinutes = 10L,
+            grantedAtMs = grantAtMs,
+            sessionAuthenticated = true
+        )
+
+        assertEquals(lockScreenWrite.appRuleOverrideState, mainAppWrite.appRuleOverrideState)
     }
 
     @Test

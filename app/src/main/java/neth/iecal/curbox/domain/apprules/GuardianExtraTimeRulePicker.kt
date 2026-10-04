@@ -34,10 +34,7 @@ object GuardianExtraTimeRulePicker {
             overrides = overrides
         )
         // The evaluator also reports some inactive-window failures; those do not block now.
-        val currentlyDenyingRuleIds = evaluation.denyingRules
-            .filter { it.isApplicable && it.isActive && !it.isAllowed }
-            .mapTo(mutableSetOf()) { it.ruleId }
-        return candidates(normalizedSnapshot, currentlyDenyingRuleIds)
+        return candidates(normalizedSnapshot, evaluation.denyingRules)
     }
 
     fun candidates(
@@ -49,5 +46,16 @@ object GuardianExtraTimeRulePicker {
         }
         return eligible.filter { it.id in currentlyDenyingRuleIds } +
             eligible.filterNot { it.id in currentlyDenyingRuleIds }
+    }
+
+    /** Orders the full rule list using the screen's existing per-rule evaluations. */
+    fun candidates(
+        snapshot: AppRuleSnapshot,
+        evaluations: Iterable<AppRuleEvaluation>
+    ): List<AppRule> {
+        val currentlyDenyingRuleIds = evaluations
+            .filter { it.isApplicable && it.isActive && !it.isAllowed }
+            .mapTo(mutableSetOf()) { it.ruleId }
+        return candidates(snapshot, currentlyDenyingRuleIds)
     }
 }
