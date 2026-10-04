@@ -448,6 +448,8 @@ class DataStoreManager(private val context: Context) {
             basis.ruleId.isBlank() || basis.useDayId.isBlank()
         ) return GuardianExtraTimeGrantWrite.Result.Rejected
 
+        // Keep a stable identity for this write across DataStore transform retries. The current
+        // time used to validate the form must be sampled inside the transform on every attempt.
         val grantedAtMs = GuardianExtraTimeGrantWrite.nextGrantTimestamp()
         val updated = settingsDataStore.updateData { current ->
             GuardianExtraTimeGrantWrite.nextSettings(
@@ -455,14 +457,16 @@ class DataStoreManager(private val context: Context) {
                 password = password,
                 basis = basis,
                 durationMinutes = durationMinutes,
-                grantedAtMs = grantedAtMs
+                grantedAtMs = grantedAtMs,
+                transactionNowMs = System.currentTimeMillis()
             )
         }
         return GuardianExtraTimeGrantWrite.resultFor(
             settings = updated,
             basis = basis,
             durationMinutes = durationMinutes,
-            grantedAtMs = grantedAtMs
+            grantedAtMs = grantedAtMs,
+            currentTimeMs = System.currentTimeMillis()
         )
     }
 
@@ -1517,7 +1521,8 @@ internal object GuardianExtraTimeGrantWrite {
         password: String,
         basis: GuardianExtraTimeGrantBasis,
         durationMinutes: Long,
-        grantedAtMs: Long
+        grantedAtMs: Long,
+        transactionNowMs: Long = grantedAtMs
     ): Settings {
         if (durationMinutes <= 0L ||
             durationMinutes > Long.MAX_VALUE / 60_000L ||
@@ -1533,7 +1538,7 @@ internal object GuardianExtraTimeGrantWrite {
         val latestBasis = GuardianExtraTimeGrantBasis.capture(
             settings = current,
             ruleId = basis.ruleId,
-            nowMs = grantedAtMs
+            nowMs = transactionNowMs
         ) ?: return current
         if (latestBasis != basis) return current
 
@@ -1557,23 +1562,13 @@ internal object GuardianExtraTimeGrantWrite {
         settings: Settings,
         basis: GuardianExtraTimeGrantBasis,
         durationMinutes: Long,
-        grantedAtMs: Long
+        grantedAtMs: Long,
+        currentTimeMs: Long = grantedAtMs
     ): Result {
         if (durationMinutes <= 0L || durationMinutes > Long.MAX_VALUE / 60_000L) {
             return Result.Rejected
         }
-        val latestBasis = GuardianExtraTimeGrantBasis.capture(
-            settings = settings,
-            ruleId = basis.ruleId,
-            nowMs = grantedAtMs
-        ) ?: return Result.Unavailable
-
         val grantedMillis = durationMinutes * 60_000L
-        val expectedTotal = if (basis.currentTotalMillis <= Long.MAX_VALUE - grantedMillis) {
-            basis.currentTotalMillis + grantedMillis
-        } else {
-            return Result.Rejected
-        }
         val matchingGrantExists = settings.appRuleOverrideState.grants.any {
             it.ruleId == basis.ruleId &&
                 it.useDayId == basis.useDayId &&
@@ -1581,9 +1576,15 @@ internal object GuardianExtraTimeGrantWrite {
                 it.grantedMillis == grantedMillis &&
                 !it.isFromAccumulatedPool
         }
-        if (matchingGrantExists &&
-            latestBasis == basis.copy(currentTotalMillis = expectedTotal)
-        ) return Result.Stored
+        // The stable grant timestamp identifies this updateData result even if the use day rolls
+        // over between the commit and this check.
+        if (matchingGrantExists) return Result.Stored
+
+        val latestBasis = GuardianExtraTimeGrantBasis.capture(
+            settings = settings,
+            ruleId = basis.ruleId,
+            nowMs = currentTimeMs
+        ) ?: return Result.Unavailable
 
         return if (latestBasis != basis) {
             Result.NeedsReconfirmation(latestBasis)
