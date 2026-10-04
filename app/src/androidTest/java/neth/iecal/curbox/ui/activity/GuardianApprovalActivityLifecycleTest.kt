@@ -32,11 +32,14 @@ import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.GatedSettingsField
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -249,9 +252,10 @@ class GuardianApprovalActivityLifecycleTest {
         val grantRuleId = "dialog-reopen-${java.util.UUID.randomUUID()}"
         val originalSnapshot = seedEligibleGrantRule(context, grantRuleId, "Dialog test rule")
         try {
-            ActivityScenario.launch<GuardianApprovalActivity>(
+            val scenario = ActivityScenario.launch<GuardianApprovalActivity>(
                 approvalIntent(ruleId = grantRuleId, ruleName = "Dialog test rule")
-            ).use {
+            )
+            try {
                 awaitDisplayed(R.id.approval_add_time)
                 onView(withId(R.id.approval_add_time)).perform(click())
                 awaitDisplayed(R.id.rule_picker, inDialog = true)
@@ -263,7 +267,63 @@ class GuardianApprovalActivityLifecycleTest {
                 awaitDisplayed(R.id.approval_add_time)
                 onView(withId(R.id.approval_add_time)).perform(click())
                 awaitDisplayed(R.id.rule_picker, inDialog = true)
+                assertTrue(
+                    "The open grant form should own the guardian session",
+                    GuardianSessionRegistry.isOwnedDialogActive()
+                )
+            } finally {
+                scenario.close()
             }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            assertFalse(
+                "An open grant form must release its guardian session when the activity is destroyed",
+                GuardianSessionRegistry.isOwnedDialogActive()
+            )
+        } finally {
+            restoreAppRuleSnapshot(context, originalSnapshot)
+        }
+    }
+
+    @Test
+    fun completedGrantPickerCannotShowDialogAfterActivityIsDestroyed() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val grantRuleId = "dialog-destroyed-${java.util.UUID.randomUUID()}"
+        val originalSnapshot = seedEligibleGrantRule(context, grantRuleId, "Dialog test rule")
+        try {
+            val scenario = ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(ruleId = grantRuleId, ruleName = "Dialog test rule")
+            )
+            lateinit var destroyedActivity: GuardianApprovalActivity
+            scenario.onActivity { destroyedActivity = it }
+            scenario.close()
+
+            val settings = runBlocking { DataStoreManager(context).settings.first() }
+            val rule = settings.appRuleSnapshot.appRules.first { it.id == grantRuleId }
+            val basis = GuardianExtraTimeGrantBasis.capture(
+                settings = settings,
+                ruleId = grantRuleId,
+                nowMs = System.currentTimeMillis()
+            ) ?: error("The seeded guardian grant rule must produce a grant basis")
+            val completion = GuardianApprovalActivity::class.java.getDeclaredMethod(
+                "showGrantDialog",
+                List::class.java,
+                Int::class.javaPrimitiveType
+            ).apply { isAccessible = true }
+
+            instrumentation.runOnMainSync {
+                completion.invoke(
+                    destroyedActivity,
+                    listOf(GuardianExtraTimeGrantOption(rule, basis)),
+                    0
+                )
+            }
+            instrumentation.waitForIdleSync()
+
+            assertFalse(
+                "a completed picker must not show a grant form for a destroyed activity",
+                GuardianSessionRegistry.isOwnedDialogActive()
+            )
         } finally {
             restoreAppRuleSnapshot(context, originalSnapshot)
         }

@@ -15,6 +15,7 @@ import android.text.TextWatcher
 import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -67,6 +68,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var grantInProgress = false
     private var grantPickerLoading = false
     private var grantDialogOpen = false
+    private var grantFormDialog: AlertDialog? = null
+    private val ownedDialogs = mutableSetOf<AlertDialog>()
+    private var isDestroying = false
     private var guardianClosedBroadcastSent = false
     private var guardianStateReceiverRegistered = false
     private var closeReason: String = REASON_INTERRUPTED
@@ -198,6 +202,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             val allowed = dataStore.settings.first().appRuleSnapshot.appRules.any {
                 it.isActive && it.guardianExtraTimeAllowed
             }
+            if (!canHandleCallbacks()) return@launch
             binding.approvalAddTime.visibility = if (allowed) View.VISIBLE else View.GONE
         }
     }
@@ -209,6 +214,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         lifecycleScope.launch {
             val state = resolveAccumulatedState(ruleId)
+            if (!canHandleCallbacks()) return@launch
             if (selectedRuleId != ruleId) return@launch
 
             if (state.isVisible) {
@@ -236,7 +242,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun requestGrant(preferredRuleId: String? = null) {
-        if (grantInProgress || grantPickerLoading || grantDialogOpen) return
+        if (!canHandleCallbacks() || grantInProgress || grantPickerLoading ||
+            grantDialogOpen || grantFormDialog?.isShowing == true
+        ) return
         if (targetPackageName.isBlank()) return
         grantPickerLoading = true
         lifecycleScope.launch {
@@ -246,10 +254,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 throw error
             } catch (_: Exception) {
                 grantPickerLoading = false
-                toast(R.string.guardian_write_failed)
+                if (canHandleCallbacks()) toast(R.string.guardian_write_failed)
                 return@launch
             }
             grantPickerLoading = false
+            if (!canHandleCallbacks()) return@launch
             if (options.isEmpty()) {
                 toast(R.string.guardian_no_extra_time_rules)
                 return@launch
@@ -308,14 +317,18 @@ class GuardianApprovalActivity : AppCompatActivity() {
         options: List<GuardianExtraTimeGrantOption>,
         selectedIndex: Int
     ) {
-        GuardianExtraTimeGrantFormDialog(
+        if (!canHandleCallbacks()) {
+            grantDialogOpen = false
+            return
+        }
+        val dialog = GuardianExtraTimeGrantFormDialog(
             context = this,
             inflater = layoutInflater,
             scope = lifecycleScope,
             readCurrentBasis = ::readGrantBasis,
             readCurrentCandidates = ::readCurrentGrantCandidates,
             onSubmit = { basis, minutes ->
-                if (!grantInProgress) {
+                if (canHandleCallbacks() && !grantInProgress) {
                     grantInProgress = true
                     authenticateThen(
                         ruleId = basis.ruleId,
@@ -324,14 +337,26 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     )
                 }
             },
-            onDismiss = { grantDialogOpen = false }
+            onDismiss = { dismissedDialog ->
+                grantDialogOpen = false
+                ownedDialogs.remove(dismissedDialog)
+                if (grantFormDialog === dismissedDialog) grantFormDialog = null
+            }
         ).show(options, selectedIndex)
+        grantFormDialog = dialog
+        if (dialog != null) {
+            ownedDialogs += dialog
+        } else {
+            grantDialogOpen = false
+        }
     }
+
     private fun requestAccumulatedGrant() {
-        if (grantInProgress) return
+        if (!canHandleCallbacks() || grantInProgress) return
         val ruleId = selectedRuleId ?: return
         lifecycleScope.launch {
             val state = resolveAccumulatedState(ruleId)
+            if (!canHandleCallbacks()) return@launch
 
             if (!state.isVisible || state.accumulatedMinutes <= 0L) {
                 updateAccumulatedButton(selectedRuleId)
@@ -350,6 +375,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         ruleId: String,
         totalAccumulatedMinutes: Long
     ) {
+        if (!canHandleCallbacks()) return
         val dialogBinding = DialogGuardianAccumulatedTimeBinding.inflate(layoutInflater)
         dialogBinding.accumulatedTotalDesc.text = getString(
             R.string.guardian_accumulated_available_desc,
@@ -417,10 +443,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 }
             }
         }
-        GuardianOwnedDialog.show(dialog)
+        showOwnedDialog(dialog)
     }
 
     private fun requestSkip() {
+        if (!canHandleCallbacks() || grantInProgress) return
         val ruleId = selectedRuleId ?: return
         val labels = arrayOf(
             getString(R.string.guardian_skip_15_minutes),
@@ -430,14 +457,17 @@ class GuardianApprovalActivity : AppCompatActivity() {
         val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.guardian_skip_rule)
             .setSingleChoiceItems(labels, 0) { dialog, which ->
+                if (!canHandleCallbacks() || grantInProgress) return@setSingleChoiceItems
+                grantInProgress = true
                 dialog.dismiss()
-                authenticateThen(ruleId) { capturedRuleId, password ->
-                    writeSkip(capturedRuleId, password, which)
-                }
+                authenticateThen(
+                    ruleId = ruleId,
+                    onCancelled = { grantInProgress = false }
+                ) { capturedRuleId, password -> writeSkip(capturedRuleId, password, which) }
             }
             .setNegativeButton(R.string.cancel, null)
             .create()
-        GuardianOwnedDialog.show(dialog)
+        showOwnedDialog(dialog)
     }
 
     private fun authenticateThen(
@@ -445,8 +475,21 @@ class GuardianApprovalActivity : AppCompatActivity() {
         onCancelled: () -> Unit = {},
         onAuthenticated: (ruleId: String, password: String) -> Unit
     ) {
+        if (!canHandleCallbacks()) return
+        var completed = false
+        fun cancelAuthentication() {
+            if (completed) return
+            completed = true
+            onCancelled()
+        }
+        fun completeAuthentication(password: String) {
+            if (completed || !canHandleCallbacks()) return
+            completed = true
+            onAuthenticated(ruleId, password)
+        }
+
         if (!hasPassword) {
-            onAuthenticated(ruleId, "")
+            completeAuthentication("")
             return
         }
         val input = EditText(this).apply {
@@ -459,17 +502,20 @@ class GuardianApprovalActivity : AppCompatActivity() {
             .setPositiveButton(R.string.common_continue) { _, _ ->
                 lifecycleScope.launch {
                     val password = input.text.toString()
-                    if (dataStore.guardianPasswordIsValid(password)) {
-                        onAuthenticated(ruleId, password)
+                    if (completed || !canHandleCallbacks()) return@launch
+                    val isValid = dataStore.guardianPasswordIsValid(password)
+                    if (completed || !canHandleCallbacks()) return@launch
+                    if (isValid) {
+                        completeAuthentication(password)
                     } else {
-                        onCancelled()
+                        cancelAuthentication()
                         toast(R.string.guardian_wrong_password)
                     }
                 }
             }
-            .setNegativeButton(R.string.cancel) { _, _ -> onCancelled() }
+            .setNegativeButton(R.string.cancel) { _, _ -> cancelAuthentication() }
             .create()
-        GuardianOwnedDialog.show(dialog, onCancel = onCancelled)
+        showOwnedDialog(dialog, onCancel = ::cancelAuthentication)
     }
 
     private fun writeGrant(
@@ -486,6 +532,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 GuardianExtraTimeGrantWrite.Result.Rejected
             }
             withContext(Dispatchers.Main) {
+                if (!canHandleCallbacks()) return@withContext
                 when (result) {
                     GuardianExtraTimeGrantWrite.Result.Stored -> finishAndLaunch()
                     is GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation -> {
@@ -531,6 +578,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 false
             }
             withContext(Dispatchers.Main) {
+                if (!canHandleCallbacks()) return@withContext
                 if (success) {
                     finishAndLaunch()
                 } else {
@@ -563,7 +611,13 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 false
             }
             withContext(Dispatchers.Main) {
-                if (success) finishAndLaunch() else toast(R.string.guardian_write_failed)
+                if (!canHandleCallbacks()) return@withContext
+                if (success) {
+                    finishAndLaunch()
+                } else {
+                    grantInProgress = false
+                    toast(R.string.guardian_write_failed)
+                }
             }
         }
     }
@@ -577,12 +631,34 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        isDestroying = true
+        (ownedDialogs + listOfNotNull(grantFormDialog)).toList().forEach { dialog ->
+            runCatching { dialog.dismiss() }
+        }
+        ownedDialogs.clear()
+        grantFormDialog = null
+        grantDialogOpen = false
         if (guardianStateReceiverRegistered) {
             runCatching { unregisterReceiver(guardianStateRequestReceiver) }
             guardianStateReceiverRegistered = false
         }
         super.onDestroy()
     }
+
+    private fun showOwnedDialog(
+        dialog: AlertDialog,
+        onCancel: (() -> Unit)? = null,
+        onDismiss: (() -> Unit)? = null
+    ) {
+        ownedDialogs += dialog
+        GuardianOwnedDialog.show(dialog, onCancel = onCancel) {
+            ownedDialogs.remove(dialog)
+            onDismiss?.invoke()
+        }
+    }
+
+    private fun canHandleCallbacks(): Boolean =
+        !isDestroying && !isFinishing && !isDestroyed
 
     private fun notifyGuardianClosed() {
         if (guardianClosedBroadcastSent) return
@@ -610,6 +686,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun finishAndLaunch() {
+        if (!canHandleCallbacks()) return
         closeReason = REASON_GRANTED
         intent.getStringExtra(EXTRA_PACKAGE)?.let { packageName ->
             packageManager.getLaunchIntentForPackage(packageName)?.let(::startActivity)
@@ -617,8 +694,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
         finish()
     }
 
-    private fun toast(message: Int) =
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    private fun toast(message: Int) {
+        if (canHandleCallbacks()) {
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        }
+    }
 
     companion object {
         const val EXTRA_DENIALS = "app_rule_denials_json"

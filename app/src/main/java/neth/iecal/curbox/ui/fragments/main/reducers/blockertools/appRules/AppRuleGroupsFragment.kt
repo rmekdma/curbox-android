@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import android.widget.Toast
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.core.content.ContextCompat
 import android.text.Editable
@@ -76,6 +77,8 @@ class AppRuleGroupsFragment : Fragment() {
     private var latestSettings: Settings? = null
     private var grantPickerLoading = false
     private var grantInProgress = false
+    private var grantFormDialog: AlertDialog? = null
+    private val ownedDialogs = mutableSetOf<AlertDialog>()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -230,7 +233,7 @@ class AppRuleGroupsFragment : Fragment() {
     }
 
     private fun requestGuardianExtraTimeGrant(preferredRuleId: String? = null) {
-        if (grantInProgress || grantPickerLoading) return
+        if (grantInProgress || grantPickerLoading || grantFormDialog?.isShowing == true) return
         grantPickerLoading = true
         viewLifecycleOwner.lifecycleScope.launch {
             var failed = false
@@ -241,9 +244,10 @@ class AppRuleGroupsFragment : Fragment() {
             } catch (_: Exception) {
                 failed = true
                 emptyList()
+            } finally {
+                grantPickerLoading = false
             }
-            grantPickerLoading = false
-            if (!isAdded) return@launch
+            if (!isAdded || _binding == null) return@launch
             if (options.isEmpty()) {
                 Toast.makeText(
                     requireContext(),
@@ -255,14 +259,19 @@ class AppRuleGroupsFragment : Fragment() {
 
             val selectedIndex = options.indexOfFirst { it.rule.id == preferredRuleId }
                 .takeIf { it >= 0 } ?: 0
-            GuardianExtraTimeGrantFormDialog(
+            grantFormDialog = GuardianExtraTimeGrantFormDialog(
                 context = requireContext(),
                 inflater = layoutInflater,
                 scope = viewLifecycleOwner.lifecycleScope,
                 readCurrentBasis = ::readCurrentGrantBasis,
                 readCurrentCandidates = ::readCurrentGrantCandidates,
-                onSubmit = ::submitGuardianExtraTimeGrant
+                onSubmit = ::submitGuardianExtraTimeGrant,
+                onDismiss = { dismissedDialog ->
+                    ownedDialogs.remove(dismissedDialog)
+                    if (grantFormDialog === dismissedDialog) grantFormDialog = null
+                }
             ).show(options, selectedIndex)
+            grantFormDialog?.let(ownedDialogs::add)
         }
     }
 
@@ -293,11 +302,12 @@ class AppRuleGroupsFragment : Fragment() {
         basis: GuardianExtraTimeGrantBasis,
         minutes: Long
     ) {
-        if (grantInProgress || !isAdded) return
+        if (grantInProgress || !isAdded || _binding == null) return
         GuardianOwnedDialog.launchCommit(
             requireContext(),
             viewLifecycleOwner.lifecycleScope
         ) {
+            if (!isAdded || _binding == null || grantInProgress) return@launchCommit
             grantInProgress = true
             viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                 val result = try {
@@ -309,7 +319,7 @@ class AppRuleGroupsFragment : Fragment() {
                 }
                 withContext(Dispatchers.Main) {
                     grantInProgress = false
-                    if (!isAdded) return@withContext
+                    if (!isAdded || _binding == null) return@withContext
                     when (result) {
                         GuardianExtraTimeGrantWrite.Result.Stored -> Unit
                         is GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation -> {
@@ -369,7 +379,7 @@ class AppRuleGroupsFragment : Fragment() {
             .setNegativeButton(R.string.cancel, null)
             .setPositiveButton(R.string.usage_reset_confirm) { _, _ -> resetGroupUsage(group.id) }
             .create()
-        GuardianOwnedDialog.show(dialog)
+        showOwnedDialog(dialog)
     }
 
     private fun resetGroupUsage(groupId: String) {
@@ -633,7 +643,7 @@ class AppRuleGroupsFragment : Fragment() {
             }
         }
 
-        GuardianOwnedDialog.show(dialog)
+        showOwnedDialog(dialog)
     }
 
     private fun scopeContributorNames(
@@ -657,7 +667,17 @@ class AppRuleGroupsFragment : Fragment() {
         startActivity(intent)
     }
 
+    private fun showOwnedDialog(dialog: AlertDialog) {
+        ownedDialogs += dialog
+        GuardianOwnedDialog.show(dialog, onDismiss = { ownedDialogs.remove(dialog) })
+    }
+
     override fun onDestroyView() {
+        (ownedDialogs + listOfNotNull(grantFormDialog)).toList().forEach { dialog ->
+            runCatching { dialog.dismiss() }
+        }
+        ownedDialogs.clear()
+        grantFormDialog = null
         super.onDestroyView()
         _binding = null
     }

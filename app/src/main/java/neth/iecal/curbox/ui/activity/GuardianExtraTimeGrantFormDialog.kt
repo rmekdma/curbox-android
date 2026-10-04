@@ -39,7 +39,7 @@ class GuardianExtraTimeGrantFormDialog(
     private val readCurrentBasis: suspend (String) -> GuardianExtraTimeGrantBasis?,
     private val readCurrentCandidates: suspend () -> List<GuardianExtraTimeGrantOption>,
     private val onSubmit: (GuardianExtraTimeGrantBasis, Long) -> Unit,
-    private val onDismiss: () -> Unit = {}
+    private val onDismiss: (AlertDialog) -> Unit = {}
 ) {
     fun show(
         options: List<GuardianExtraTimeGrantOption>,
@@ -215,7 +215,7 @@ class GuardianExtraTimeGrantFormDialog(
                 }
             }
         }
-        GuardianOwnedDialog.show(grantDialog, onDismiss = onDismiss)
+        GuardianOwnedDialog.show(grantDialog, onDismiss = { onDismiss(grantDialog) })
         return grantDialog
     }
 
