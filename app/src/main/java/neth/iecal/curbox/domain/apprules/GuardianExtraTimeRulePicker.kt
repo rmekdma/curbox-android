@@ -4,37 +4,43 @@ import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.ForegroundSession
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDayResetTime
 import java.time.ZoneId
 
 /** Shared selection rules for the direct guardian extra-time grant flows. */
 object GuardianExtraTimeRulePicker {
-    /** Evaluates the supplied target package and orders eligible rules from that result. */
-    fun candidates(
+    /** Evaluates every rule in its own scope, as the main rule screen does. */
+    fun evaluateRules(
         snapshot: AppRuleSnapshot,
-        packageName: String,
         useDayId: String,
         sessions: Iterable<ForegroundSession>,
         nowMs: Long,
         resetTime: UseDayResetTime = UseDayResetTime(),
         zone: ZoneId = ZoneId.systemDefault(),
         useDayGenerationStartedAtMs: Long = 0L,
+        availablePackages: Set<String> = emptySet(),
+        essentialExcludedPackages: Set<String> = emptySet(),
         overrides: AppRuleOverrideState = AppRuleOverrideState()
-    ): List<AppRule> {
+    ): Map<String, AppRuleEvaluation> {
         val normalizedSnapshot = snapshot.normalized()
-        val evaluation = AppRuleEvaluator.evaluate(
-            snapshot = normalizedSnapshot,
-            packageName = packageName,
-            useDayId = useDayId,
-            sessions = sessions,
-            nowMs = nowMs,
-            resetTime = resetTime,
-            zone = zone,
-            useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
-            overrides = overrides
-        )
-        // The evaluator also reports some inactive-window failures; those do not block now.
-        return candidates(normalizedSnapshot, evaluation.denyingRules)
+        val calculator = ConfigurableUseDayCalculator(zone, resetTime)
+        val sessionList = sessions.toList()
+        return normalizedSnapshot.appRules.associate { rule ->
+            rule.id to AppRuleEvaluator.evaluateRuleForSnapshot(
+                snapshot = normalizedSnapshot,
+                rule = rule,
+                useDayId = useDayId,
+                sessions = sessionList,
+                nowMs = nowMs,
+                zone = zone,
+                useDayCalculator = calculator,
+                useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+                availablePackages = availablePackages,
+                essentialExcludedPackages = essentialExcludedPackages,
+                overrides = overrides
+            )
+        }
     }
 
     fun candidates(

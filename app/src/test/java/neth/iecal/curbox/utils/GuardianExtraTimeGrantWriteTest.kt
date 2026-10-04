@@ -201,16 +201,17 @@ class GuardianExtraTimeGrantWriteTest {
             appRuleSnapshot = snapshot,
             appRuleOverrideState = AppRuleOverrideState(useDayId = useDayId)
         )
-        val candidates = GuardianExtraTimeRulePicker.candidates(
+        val evaluations = GuardianExtraTimeRulePicker.evaluateRules(
             snapshot = snapshot,
-            packageName = "example.target",
             useDayId = useDayId,
             sessions = emptyList(),
             nowMs = nowMs,
             resetTime = UseDayResetTime(),
             zone = ZoneId.of("UTC"),
+            availablePackages = setOf("example.target", "example.other"),
             overrides = current.appRuleOverrideState
         )
+        val candidates = GuardianExtraTimeRulePicker.candidates(snapshot, evaluations.values)
         val evaluation = AppRuleEvaluator.evaluate(
             snapshot = snapshot,
             packageName = "example.target",
@@ -383,13 +384,17 @@ class GuardianExtraTimeGrantWriteTest {
             appRuleSnapshot = snapshot,
             guardianAuthConfig = GuardianAuthConfig()
         )
-        val lockScreenCandidates = GuardianExtraTimeRulePicker.candidates(
+        val lockScreenEvaluations = GuardianExtraTimeRulePicker.evaluateRules(
             snapshot = snapshot,
-            packageName = "example.target",
             useDayId = useDayId,
             sessions = emptyList(),
             nowMs = nowMs,
-            resetTime = UseDayResetTime()
+            resetTime = UseDayResetTime(),
+            availablePackages = setOf("example.target")
+        )
+        val lockScreenCandidates = GuardianExtraTimeRulePicker.candidates(
+            snapshot,
+            lockScreenEvaluations.values
         )
         val mainAppEvaluations = snapshot.appRules.map { rule ->
             AppRuleEvaluator.evaluateRuleForSnapshot(
@@ -469,14 +474,15 @@ class GuardianExtraTimeGrantWriteTest {
         val updated = GuardianExtraTimeGrantWrite.nextSettings(
             current, "", basis, 10L, nowMs + 1L
         )
-        val candidates = GuardianExtraTimeRulePicker.candidates(
+        val evaluations = GuardianExtraTimeRulePicker.evaluateRules(
             snapshot = snapshot,
-            packageName = "example.target",
             useDayId = useDayId,
             sessions = emptyList(),
             nowMs = nowMs,
-            resetTime = UseDayResetTime()
+            resetTime = UseDayResetTime(),
+            availablePackages = setOf("example.target")
         )
+        val candidates = GuardianExtraTimeRulePicker.candidates(snapshot, evaluations.values)
         val evaluation = AppRuleEvaluator.evaluate(
             snapshot = snapshot,
             packageName = "example.target",

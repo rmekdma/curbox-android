@@ -14,6 +14,7 @@ import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom
 import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
@@ -213,6 +214,29 @@ class GuardianApprovalActivityLifecycleTest {
                 val state = awaitOverrideState(context) { it.grants.isNotEmpty() }
                 assertEquals(listOf("rule_a"), state.grants.map { it.ruleId })
                 assertTrue(state.skips.isEmpty())
+            }
+        } finally {
+            resetGuardianOverrides(context)
+        }
+    }
+
+    @Test
+    fun dismissingAddTimeFormAllowsItToBeOpenedAgain() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        resetGuardianOverrides(context)
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(ruleId = "rule_a", ruleName = "Rule A")
+            ).use {
+                onView(withId(R.id.approval_add_time)).perform(click())
+                onView(withText(R.string.cancel))
+                    .inRoot(isDialog())
+                    .perform(click())
+
+                onView(withId(R.id.approval_add_time)).perform(click())
+                onView(withId(R.id.rule_picker))
+                    .inRoot(isDialog())
+                    .check(matches(isDisplayed()))
             }
         } finally {
             resetGuardianOverrides(context)

@@ -35,6 +35,7 @@ import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeValidationError
 import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeRulePicker
+import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
@@ -45,6 +46,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.ZoneId
 
 /** Internal approval surface. It has no exported intent or broadcast write path. */
 class GuardianApprovalActivity : AppCompatActivity() {
@@ -55,6 +57,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityGuardianApprovalBinding
     private val dataStore by lazy { DataStoreManager(applicationContext) }
+    private val packageScopeReader by lazy {
+        AppRulePackageScopeReader.fromContext(applicationContext)
+    }
     private var denials: List<AppRuleGuardianDenial> = emptyList()
     private var targetPackageName: String = ""
     private var selectedRuleId: String? = null
@@ -232,11 +237,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
     private fun requestGrant(preferredRuleId: String? = null) {
         if (grantInProgress || grantPickerLoading || grantDialogOpen) return
-        val packageName = targetPackageName.takeIf(String::isNotBlank) ?: return
+        if (targetPackageName.isBlank()) return
         grantPickerLoading = true
         lifecycleScope.launch {
             val options = try {
-                withContext(Dispatchers.IO) { readCurrentGrantCandidates(packageName) }
+                withContext(Dispatchers.IO) { readCurrentGrantCandidates() }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -257,26 +262,31 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun readCurrentGrantCandidates(
-        packageName: String
-    ): List<GuardianExtraTimeGrantOption> {
+    private suspend fun readCurrentGrantCandidates(): List<GuardianExtraTimeGrantOption> {
         val settings = dataStore.settings.first()
         val now = System.currentTimeMillis()
-        val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
+        val zone = ZoneId.systemDefault()
+        val calculator = ConfigurableUseDayCalculator(zone, settings.useDayResetTime)
         val useDayId = calculator.idAt(now)
         val database = AppDatabase.getInstance(applicationContext)
         val sessions = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
             .sessionsForUseDay(useDayId, settings.useDayGenerationStartedAtMs)
         val ruleSnapshot = settings.appRuleSnapshot.normalized()
-        val candidates = GuardianExtraTimeRulePicker.candidates(
+        val evaluations = GuardianExtraTimeRulePicker.evaluateRules(
             snapshot = ruleSnapshot,
-            packageName = packageName,
             useDayId = useDayId,
             sessions = sessions,
             nowMs = now,
             resetTime = settings.useDayResetTime,
+            zone = zone,
             useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
+            availablePackages = packageScopeReader.readLaunchablePackages(),
+            essentialExcludedPackages = packageScopeReader.readEssentialPackages(),
             overrides = settings.appRuleOverrideState
+        )
+        val candidates = GuardianExtraTimeRulePicker.candidates(
+            snapshot = ruleSnapshot,
+            evaluations = evaluations.values
         )
         return candidates.mapNotNull { rule ->
             GuardianExtraTimeGrantBasis.capture(settings, rule.id, now)?.let { basis ->
@@ -303,7 +313,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             inflater = layoutInflater,
             scope = lifecycleScope,
             readCurrentBasis = ::readGrantBasis,
-            readCurrentCandidates = { readCurrentGrantCandidates(targetPackageName) },
+            readCurrentCandidates = ::readCurrentGrantCandidates,
             onSubmit = { basis, minutes ->
                 if (!grantInProgress) {
                     grantInProgress = true

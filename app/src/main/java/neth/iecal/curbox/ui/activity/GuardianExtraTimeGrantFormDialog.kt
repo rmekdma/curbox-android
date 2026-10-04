@@ -185,7 +185,6 @@ class GuardianExtraTimeGrantFormDialog(
             .setNegativeButton(R.string.cancel, null)
             .create()
         dialog = grantDialog
-        grantDialog.setOnDismissListener { onDismiss() }
         grantDialog.setOnShowListener {
             positiveButton = grantDialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
             positiveButton?.isEnabled = state.basis != null
@@ -216,7 +215,7 @@ class GuardianExtraTimeGrantFormDialog(
                 }
             }
         }
-        GuardianOwnedDialog.show(grantDialog)
+        GuardianOwnedDialog.show(grantDialog, onDismiss = onDismiss)
         return grantDialog
     }
 

@@ -77,7 +77,7 @@ class GuardianExtraTimeRulePickerTest {
     }
 
     @Test
-    fun existingEvaluationPrioritizesCurrentDenialsWithoutAForegroundSession() {
+    fun lockScreenAndMainPickerShareGlobalScopedRulePriority() {
         val nowMs = Instant.parse("2026-10-04T12:00:00Z").toEpochMilli()
         val useDay = ConfigurableUseDayCalculator().idAt(nowMs)
         val weekday = java.time.Instant.ofEpochMilli(nowMs)
@@ -88,58 +88,72 @@ class GuardianExtraTimeRulePickerTest {
             name = "Target apps",
             selectedPackages = listOf("example.target")
         )
-        val otherGroup = AppRuleAppGroup(
-            id = "other",
-            name = "Other apps",
+        val laterGroup = AppRuleAppGroup(
+            id = "later",
+            name = "Later apps",
+            selectedPackages = listOf("example.later")
+        )
+        val inactiveGroup = AppRuleAppGroup(
+            id = "inactive",
+            name = "Inactive apps",
             selectedPackages = listOf("example.other")
         )
         val snapshot = AppRuleSnapshot(
-            appGroups = listOf(targetGroup, otherGroup),
+            appGroups = listOf(targetGroup, laterGroup, inactiveGroup),
             appRules = listOf(
                 AppRule(
-                    id = "night",
-                    name = "Night rule",
+                    id = "first-allowed",
+                    name = "First allowed rule",
                     appGroupId = targetGroup.id,
+                    allowedMinutes = 20L
+                ),
+                AppRule(
+                    id = "later-denial",
+                    name = "Later denial",
+                    appGroupId = laterGroup.id,
                     allowedMinutes = 0L
                 ),
                 AppRule(
-                    id = "later",
-                    name = "Later rule",
-                    appGroupId = targetGroup.id,
+                    id = "inactive-window",
+                    name = "Inactive window",
+                    appGroupId = inactiveGroup.id,
                     weekdays = setOf((weekday + 1) % 7),
                     usageConditionEnabled = true,
                     usageConditionMinutes = 1L,
                     contributorGroupIds = setOf("missing-contributor"),
                     allowedMinutes = 0L
-                ),
-                AppRule(
-                    id = "unrelated",
-                    name = "Unrelated rule",
-                    appGroupId = otherGroup.id,
-                    allowedMinutes = 0L
                 )
             )
         ).normalized()
-        val evaluation = AppRuleEvaluator.evaluate(
+        val sessions = emptyList<neth.iecal.curbox.data.models.ForegroundSession>()
+        val evaluations = snapshot.appRules.map { rule ->
+            AppRuleEvaluator.evaluateRuleForSnapshot(
+                snapshot = snapshot,
+                rule = rule,
+                useDayId = useDay,
+                sessions = sessions,
+                nowMs = nowMs,
+                useDayCalculator = ConfigurableUseDayCalculator(resetTime = UseDayResetTime())
+            )
+        }
+        val mainCandidates = GuardianExtraTimeRulePicker.candidates(snapshot, evaluations)
+
+        val lockScreenEvaluations = GuardianExtraTimeRulePicker.evaluateRules(
             snapshot = snapshot,
-            packageName = "example.target",
             useDayId = useDay,
-            sessions = emptyList(),
+            sessions = sessions,
             nowMs = nowMs,
             resetTime = UseDayResetTime()
         )
-
-        val candidates = GuardianExtraTimeRulePicker.candidates(
-            snapshot = snapshot,
-            packageName = "example.target",
-            useDayId = useDay,
-            sessions = emptyList(),
-            nowMs = nowMs,
-            resetTime = UseDayResetTime()
+        val lockScreenCandidates = GuardianExtraTimeRulePicker.candidates(
+            snapshot,
+            lockScreenEvaluations.values
         )
 
-        assertEquals(listOf("night", "later", "unrelated"), candidates.map(AppRule::id))
-        assertEquals(listOf("night", "later"), evaluation.denyingRules.map { it.ruleId })
-        assertEquals(listOf(true, false), evaluation.denyingRules.map { it.isActive })
+        assertEquals(
+            listOf("later-denial", "first-allowed", "inactive-window"),
+            mainCandidates.map(AppRule::id)
+        )
+        assertEquals(mainCandidates, lockScreenCandidates)
     }
 }

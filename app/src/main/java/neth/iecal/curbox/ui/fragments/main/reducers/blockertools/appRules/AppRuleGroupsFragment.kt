@@ -40,7 +40,6 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.databinding.FragmentAppRuleGroupsBinding
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
-import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeRulePicker
@@ -216,21 +215,18 @@ class AppRuleGroupsFragment : Fragment() {
         )
         val availablePackages = packageScopeReader.readLaunchablePackages()
         val essentialPackages = packageScopeReader.readEssentialPackages()
-        settings.appRuleSnapshot.appRules.associate { rule ->
-            rule.id to AppRuleEvaluator.evaluateRuleForSnapshot(
-                snapshot = settings.appRuleSnapshot,
-                rule = rule,
-                useDayId = useDayId,
-                sessions = sessions,
-                nowMs = now,
-                zone = zone,
-                useDayCalculator = calculator,
-                useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
-                availablePackages = availablePackages,
-                essentialExcludedPackages = essentialPackages,
-                overrides = settings.appRuleOverrideState
-            )
-        }
+        GuardianExtraTimeRulePicker.evaluateRules(
+            snapshot = settings.appRuleSnapshot,
+            useDayId = useDayId,
+            sessions = sessions,
+            nowMs = now,
+            resetTime = settings.useDayResetTime,
+            zone = zone,
+            useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
+            availablePackages = availablePackages,
+            essentialExcludedPackages = essentialPackages,
+            overrides = settings.appRuleOverrideState
+        )
     }
 
     private fun requestGuardianExtraTimeGrant(preferredRuleId: String? = null) {
