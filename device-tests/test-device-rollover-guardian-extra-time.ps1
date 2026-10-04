@@ -17,7 +17,7 @@
 
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
-    [string]$TargetActivity = "com.woodenpharm.choseonggacha.MainActivity",
+    [string]$TargetActivity = "",
     [string]$Pin = "1234",
     [string]$DeviceId = ""
 )
@@ -28,6 +28,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_rollover_test"
 if (-not (Test-Path $tmpDir)) {
@@ -37,6 +38,133 @@ if (-not (Test-Path $tmpDir)) {
 $backupFile = Join-Path $tmpDir "settings_backup.json"
 $passedAll = $true
 
+function Write-RolloverBoundaryDiagnostics([string]$Phase) {
+    $clockRaw = (Get-TestDeviceShellOutput -Command "date +'%Y-%m-%d %H %M %S'").Trim()
+    $settings = Get-DeviceSettings -AsObject
+    $pool = Get-RuleRolloverPool -SettingsOrRolloverState $settings -RuleId "test-rule-rollover-01"
+    $rule = @($settings.appRuleSnapshot.appRules | Where-Object { $_.id -eq "test-rule-rollover-01" }) | Select-Object -First 1
+    $currentUseDayId = "unavailable"
+    if ($settings -and $clockRaw -match '^(\d{4}-\d{2}-\d{2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})$') {
+        $clockDate = [System.DateTime]::ParseExact($matches[1], "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+        $clockMinute = ([int]$matches[2] * 60) + [int]$matches[3]
+        $resetMinute = ([int]$settings.useDayResetHour * 60) + [int]$settings.useDayResetMinute
+        if ($clockMinute -lt $resetMinute) { $clockDate = $clockDate.AddDays(-1) }
+        $currentUseDayId = $clockDate.ToString("yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+
+    $ruleSummary = if ($rule) {
+        "id=$($rule.id) rollover=$($rule.rolloverEnabled) guardianExtraTime=$($rule.guardianExtraTimeAllowed) unlockDays=$(@($rule.unlockDays) -join ',')"
+    } else {
+        "missing"
+    }
+    $poolSummary = if ($pool) {
+        "minutes=$($pool.accumulatedMinutes) lastSettled=$($pool.lastSettledUseDayId)"
+    } else {
+        "missing"
+    }
+    Write-Host "[DIAGNOSTIC][$Phase] deviceClock='$clockRaw' currentUseDay='$currentUseDayId' reset=$($settings.useDayResetHour):$($settings.useDayResetMinute) generation=$($settings.useDayGenerationStartedAtMs) ruleCount=$(@($settings.appRuleSnapshot.appRules).Count) testRule=[$ruleSummary] pool=[$poolSummary]" -ForegroundColor DarkGray
+
+    $alarmDump = Get-TestDeviceShellOutput -Command "dumpsys alarm"
+    $alarmLines = @($alarmDump -split "`r?`n")
+    $alarmStatsIndex = [Array]::FindIndex([string[]]$alarmLines, [Predicate[string]]{ param($line) $line -match '^\s*Alarm Stats:' })
+    if ($alarmStatsIndex -lt 0) { $alarmStatsIndex = $alarmLines.Count }
+    $activeWakeIndexes = @(
+        for ($i = 0; $i -lt $alarmStatsIndex; $i++) {
+            if ($alarmLines[$i] -match 'ACTION_APP_RULE_WAKE') { $i }
+        }
+    )
+    Write-Host "[DIAGNOSTIC][$Phase] active wake alarm blocks:" -ForegroundColor DarkGray
+    if ($activeWakeIndexes.Count -eq 0) {
+        Write-Host "  none" -ForegroundColor DarkGray
+    } else {
+        foreach ($index in $activeWakeIndexes) {
+            $start = [Math]::Max(0, $index - 1)
+            $end = [Math]::Min($alarmStatsIndex - 1, $index + 5)
+            $timerLine = @($alarmLines[$start..$end] | Where-Object { $_ -match 'type=.*origWhen=' } | Select-Object -First 1)
+            $operationLine = @($alarmLines[$start..$end] | Where-Object { $_ -match '^\s*operation=' } | Select-Object -First 1)
+            $timerSummary = if ($timerLine.Count -gt 0) { $timerLine[0].Trim() } else { "requested time unavailable" }
+            $operationSummary = if ($operationLine.Count -gt 0) { $operationLine[0].Trim() } else { "operation unavailable" }
+            Write-Host "  $($alarmLines[$index].Trim()); $timerSummary; $operationSummary" -ForegroundColor DarkGray
+        }
+    }
+    $wakeHistory = @($alarmLines | Where-Object { $_ -match 'ACTION_APP_RULE_WAKE' } | Select-Object -Unique | Select-Object -Last 6)
+    Write-Host "[DIAGNOSTIC][$Phase] recent wake alarm history:" -ForegroundColor DarkGray
+    foreach ($line in $wakeHistory) { Write-Host "  $($line.Trim())" -ForegroundColor DarkGray }
+
+    $serviceDump = Get-TestDeviceShellOutput -Command "dumpsys activity services neth.iecal.curbox.debug"
+    $serviceLines = @($serviceDump -split "`r?`n" | Where-Object {
+        $_ -match 'ServiceRecord|ProcessRecord|isForeground|startRequested|lastActivity|app=' -and
+        $_ -match 'AppBlockerService|app_blocker_service|neth\.iecal\.curbox\.debug'
+    } | Select-Object -First 12)
+    Write-Host "[DIAGNOSTIC][$Phase] app service state:" -ForegroundColor DarkGray
+    if ($serviceLines.Count -eq 0) { Write-Host "  no matching service record" -ForegroundColor DarkGray }
+    foreach ($line in $serviceLines) { Write-Host "  $($line.Trim())" -ForegroundColor DarkGray }
+
+    $recentLogs = Get-TestDeviceShellOutput -Command "logcat -d -v time -t 2000"
+    $settlementLogLines = @($recentLogs -split "`r?`n" | Where-Object {
+        $_ -match 'AppRuleBlocker|SerializedDecisionWorker|AndroidAppRuleWakeScheduler|AppRuleRollover|BootReceiver|CrashLogger|DataStore' -and
+        $_ -notmatch 'settings\.json|pin|password|token='
+    } | Select-Object -Last 25)
+    Write-Host "[DIAGNOSTIC][$Phase] relevant app log lines:" -ForegroundColor DarkGray
+    foreach ($line in $settlementLogLines) { Write-Host "  $line" -ForegroundColor DarkGray }
+}
+
+function Stop-RolloverMainProcessAndWait([int]$TimeoutSeconds = 10) {
+    $processName = "neth.iecal.curbox.debug"
+    $initialPid = Get-DeviceProcessPid -ProcessName $processName
+    if (-not $initialPid) {
+        return [PSCustomObject]@{ Stopped = $true; ProcessId = $null }
+    }
+
+    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $processName | Out-Null
+    $wait = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $currentPid = Get-DeviceProcessPid -ProcessName $processName
+        if (-not $currentPid -or $currentPid -ne $initialPid) {
+            return [PSCustomObject]@{ Stopped = $true; ProcessId = $currentPid }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return [PSCustomObject]@{ Stopped = $false; ProcessId = $initialPid }
+}
+
+function Test-RolloverBoundaryWakeScheduled([System.DateTime]$TargetResetAt, [int]$ToleranceSeconds = 20) {
+    $clockRaw = (Get-TestDeviceShellOutput -Command "date +'%Y-%m-%d %H %M %S'").Trim()
+    if ($clockRaw -notmatch '^(\d{4}-\d{2}-\d{2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})$') {
+        return $false
+    }
+    $currentClock = [System.DateTime]::ParseExact(
+        ("{0} {1:D2} {2:D2} {3:D2}" -f
+            $matches[1], [int]$matches[2], [int]$matches[3], [int]$matches[4]),
+        "yyyy-MM-dd HH mm ss",
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    $expectedDelaySeconds = ($TargetResetAt - $currentClock).TotalSeconds
+    if ($expectedDelaySeconds -le 0) { return $false }
+
+    $alarmDump = Get-TestDeviceShellOutput -Command "dumpsys alarm"
+    $alarmLines = @($alarmDump -split "`r?`n")
+    $alarmStatsIndex = [Array]::FindIndex([string[]]$alarmLines, [Predicate[string]]{ param($line) $line -match '^\s*Alarm Stats:' })
+    if ($alarmStatsIndex -lt 0) { $alarmStatsIndex = $alarmLines.Count }
+    for ($index = 0; $index -lt $alarmStatsIndex; $index++) {
+        if ($alarmLines[$index] -notmatch 'ACTION_APP_RULE_WAKE') { continue }
+        $start = [Math]::Max(0, $index - 1)
+        $end = [Math]::Min($alarmStatsIndex - 1, $index + 4)
+        for ($lineIndex = $start; $lineIndex -le $end; $lineIndex++) {
+            if ($alarmLines[$lineIndex] -notmatch 'origWhen=\+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?(?:(\d+)ms)?') { continue }
+            $hours = if ($matches[1]) { [double]$matches[1] } else { 0 }
+            $minutes = if ($matches[2]) { [double]$matches[2] } else { 0 }
+            $seconds = if ($matches[3]) { [double]$matches[3] } else { 0 }
+            $milliseconds = if ($matches[4]) { [double]$matches[4] } else { 0 }
+            $scheduledDelaySeconds = ($hours * 3600) + ($minutes * 60) + $seconds + ($milliseconds / 1000)
+            if ([Math]::Abs($scheduledDelaySeconds - $expectedDelaySeconds) -le $ToleranceSeconds) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
 try {
     Write-Step "1. Backing up device settings.json and acquiring wake lock..."
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
@@ -45,24 +173,44 @@ try {
 
     $testStartTimeMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 
-    Write-Step "2. Determining device local date and weekday..."
+    Write-Step "2. Determining the active use day from device time and reset settings..."
     $dateRaw = (adb shell "date +'%Y-%m-%d %w'" | Out-String).Trim()
     if ($dateRaw -match '^(\d{4}-\d{2}-\d{2})\s+(\d)$') {
-        $todayUseDayId = $matches[1]
-        $todayWeekday = [int]$matches[2]
+        $deviceCalendarDate = [System.DateTime]::ParseExact(
+            $matches[1],
+            "yyyy-MM-dd",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
     } else {
-        $now = [System.DateTime]::UtcNow
-        $todayUseDayId = $now.ToString("yyyy-MM-dd")
-        $todayWeekday = [int]$now.DayOfWeek
+        throw "Could not parse the device calendar date: '$dateRaw'."
     }
 
-    $parsedDate = [System.DateTime]::ParseExact($todayUseDayId, "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
-    $yesterdayDate = $parsedDate.AddDays(-1)
-    $yesterdayUseDayId = $yesterdayDate.ToString("yyyy-MM-dd")
-    $yesterdayWeekday = [int]$yesterdayDate.DayOfWeek
+    $timeInfo = Get-DeviceTimeInfo
+    $settingsForDay = Get-DeviceSettings -AsObject
+    if (-not $timeInfo -or -not $settingsForDay) {
+        throw "Could not read the device clock and use-day reset settings."
+    }
+    $resetHour = [int]$settingsForDay.useDayResetHour
+    $resetMinute = [int]$settingsForDay.useDayResetMinute
+    if ($resetHour -lt 0 -or $resetHour -gt 23 -or $resetMinute -lt 0 -or $resetMinute -gt 59) {
+        throw "Device use-day reset clock is invalid: ${resetHour}:$resetMinute."
+    }
 
-    Write-Host "Device Today: $todayUseDayId (Weekday: $todayWeekday)" -ForegroundColor Cyan
-    Write-Host "Device Yesterday: $yesterdayUseDayId (Weekday: $yesterdayWeekday)" -ForegroundColor Cyan
+    $resetMinutesSinceMidnight = ($resetHour * 60) + $resetMinute
+    $todayUseDayDate = if ($timeInfo.CurrentMinute -lt $resetMinutesSinceMidnight) {
+        $deviceCalendarDate.AddDays(-1)
+    } else {
+        $deviceCalendarDate
+    }
+    $todayUseDayId = $todayUseDayDate.ToString("yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+    $todayWeekday = [int]$todayUseDayDate.DayOfWeek
+    $yesterdayUseDayDate = $todayUseDayDate.AddDays(-1)
+    $yesterdayUseDayId = $yesterdayUseDayDate.ToString("yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+    $yesterdayWeekday = [int]$yesterdayUseDayDate.DayOfWeek
+
+    Write-Host ("Device use-day reset: {0:D2}:{1:D2}" -f $resetHour, $resetMinute) -ForegroundColor Cyan
+    Write-Host "Current use day: $todayUseDayId (Weekday: $todayWeekday)" -ForegroundColor Cyan
+    Write-Host "Previous use day: $yesterdayUseDayId (Weekday: $yesterdayWeekday)" -ForegroundColor Cyan
 
     Write-Step "3. Generating and injecting Guardian PIN auth config (PIN: $Pin)..."
     $guardianAuth = New-GuardianPinAuthConfig -Pin $Pin
@@ -110,7 +258,7 @@ try {
     Write-Step "6. Launching Target App ($TargetPackage) to trigger GuardianApprovalActivity..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $focusResult = $null
@@ -231,88 +379,192 @@ try {
         $passedAll = $false
     }
 
-    Write-Step "14. Verifying boundary transition (Unlock Day -> Accrual Day): Pool reset to 0..."
-    # Craft transition state:
-    # Rule unlockDays was only yesterday ($yesterdayWeekday); today ($todayWeekday) is an ACCRUAL day.
-    # Prior pool was settled yesterday on an unlock day with 25 accumulated minutes.
+    Write-Step "14. Verifying settlement across a real use-day reset boundary..."
+    $boundaryClockRaw = (adb shell "date +'%Y-%m-%d %H %M %S'" | Out-String).Trim()
+    $boundaryClockMatch = [regex]::Match($boundaryClockRaw, '^(\d{4}-\d{2}-\d{2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})$')
+    if (-not $boundaryClockMatch.Success) {
+        throw "Could not parse the device clock for the rollover boundary test: '$boundaryClockRaw'."
+    }
+    $boundaryNow = [System.DateTime]::ParseExact(
+        ("{0} {1:D2} {2:D2} {3:D2}" -f
+            $boundaryClockMatch.Groups[1].Value,
+            [int]$boundaryClockMatch.Groups[2].Value,
+            [int]$boundaryClockMatch.Groups[3].Value,
+            [int]$boundaryClockMatch.Groups[4].Value),
+        "yyyy-MM-dd HH mm ss",
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    $targetResetAt = $boundaryNow.AddMinutes(3)
+    $targetResetAt = $targetResetAt.AddSeconds(-$targetResetAt.Second)
+    $transitionUseDayDate = $targetResetAt.Date.AddDays(-1)
+    $transitionUseDayId = $transitionUseDayDate.ToString("yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+    $transitionUseDayWeekday = [int]$transitionUseDayDate.DayOfWeek
+    $nextUseDayId = $targetResetAt.Date.ToString("yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+
+    # Before the configured reset, the active use day is the previous date. At the reset
+    # boundary it advances to targetResetAt.Date, which is deliberately an accrual day.
     $transitionRule = New-RolloverAppRuleConfig `
         -TargetPackage $TargetPackage `
-        -UnlockDays @($yesterdayWeekday) `
+        -UnlockDays @($transitionUseDayWeekday) `
         -AllowedMinutes 0 `
         -TargetGroupId $targetGroupId `
         -RuleId $ruleId
 
-    Inject-TestAppRules -AppRuleSnapshot $transitionRule -UsageGenerationStartedAtMs $testStartTimeMs | Out-Null
-
     $preTransitionMinutes = 25
-    $transitionPool = New-RuleRolloverPool -RuleId $ruleId -AccumulatedMinutes $preTransitionMinutes -LastSettledUseDayId $yesterdayUseDayId
+    $transitionPool = New-RuleRolloverPool `
+        -RuleId $ruleId `
+        -AccumulatedMinutes $preTransitionMinutes `
+        -LastSettledUseDayId $transitionUseDayId
     $transitionRolloverState = [PSCustomObject]@{
         pools = [PSCustomObject]@{
             $ruleId = $transitionPool
         }
     }
-    Set-DeviceRolloverState -RolloverState $transitionRolloverState | Out-Null
-    Write-Host "Injected pre-transition pool ($preTransitionMinutes minutes on unlock day '$yesterdayUseDayId'). Current day is accrual day '$todayUseDayId'." -ForegroundColor Cyan
+    if (-not (Set-DeviceUseDayResetTime -Hour $targetResetAt.Hour -Minute $targetResetAt.Minute)) {
+        throw "Could not set the temporary reset time for the rollover boundary test."
+    }
+    Clear-TestAppRules | Out-Null
+    $transitionGenerationMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Set-DeviceUsageGeneration -GenerationStartedAtMs $transitionGenerationMs | Out-Null
+    if (-not (Set-DeviceRolloverState -RolloverState $transitionRolloverState)) {
+        throw "Could not persist the transition rollover state."
+    }
+    if (-not (Set-DeviceAppRuleSnapshot -AppRuleSnapshot $transitionRule)) {
+        throw "Could not persist the transition rollover rule snapshot."
+    }
 
-    # Trigger settlement catch-up on device
-    # BootReceiver processes MY_PACKAGE_REPLACED and reconciles settlement via AppRuleRolloverCoordinator
-    adb shell "am broadcast -a android.intent.action.MY_PACKAGE_REPLACED -p neth.iecal.curbox.debug" | Out-Null
+    $transitionSettings = Get-DeviceSettings -AsObject
+    $transitionPoolReadback = Get-RuleRolloverPool -SettingsOrRolloverState $transitionSettings -RuleId $ruleId
+    $transitionRuleReadback = @($transitionSettings.appRuleSnapshot.appRules | Where-Object { $_.id -eq $ruleId })
+    if ([int]$transitionSettings.useDayResetHour -ne $targetResetAt.Hour -or
+        [int]$transitionSettings.useDayResetMinute -ne $targetResetAt.Minute -or
+        -not $transitionPoolReadback -or
+        [long]$transitionPoolReadback.accumulatedMinutes -ne $preTransitionMinutes -or
+        [string]$transitionPoolReadback.lastSettledUseDayId -ne $transitionUseDayId -or
+        $transitionRuleReadback.Count -ne 1 -or
+        -not $transitionRuleReadback[0].rolloverEnabled -or
+        @($transitionRuleReadback[0].unlockDays).Count -ne 1 -or
+        [int]$transitionRuleReadback[0].unlockDays[0] -ne $transitionUseDayWeekday) {
+        throw "Temporary reset boundary fixture did not persist the expected settings and pool."
+    }
+    if (-not (Test-AccessibilityServiceBound)) {
+        throw "Curbox AppBlockerService is not bound before the rollover reset boundary."
+    }
+    Write-Host "Injected $preTransitionMinutes minutes on unlock use day '$transitionUseDayId'; accrual use day '$nextUseDayId' begins at $($targetResetAt.ToString('yyyy-MM-dd HH:mm:ss'))." -ForegroundColor Cyan
+
+    Write-Step "14a. Reloading persisted rollover settings into a fresh app blocker process..."
+    $freshMainProcess = Stop-RolloverMainProcessAndWait
+    if (-not $freshMainProcess.Stopped) {
+        throw "The main Curbox process did not retire after the persisted rollover settings were written."
+    }
+    $freshServiceResult = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings $accessibilityBackup
+    if ($freshServiceResult.Skipped -or -not $freshServiceResult.ProcessId) {
+        throw "AppBlockerService did not rebind to a fresh process from the persisted rollover settings."
+    }
     Start-Sleep -Seconds 2
+    $freshServicePid = $freshServiceResult.ProcessId
+    Write-Success "AppBlockerService re-bound as PID $freshServicePid after the fixture settings were persisted."
+    if (-not (Test-RolloverBoundaryWakeScheduled -TargetResetAt $targetResetAt)) {
+        Write-RolloverBoundaryDiagnostics -Phase "fresh service schedule verification"
+        throw "Fresh AppBlockerService did not schedule a wake for the configured use-day reset boundary."
+    }
+    Write-Success "Fresh AppBlockerService scheduled a wake for the configured use-day reset boundary."
 
-    # Also signal app blocker refresh
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p neth.iecal.curbox.debug" | Out-Null
-    Start-Sleep -Seconds 1
+    $boundaryWait = [System.Diagnostics.Stopwatch]::StartNew()
+    $boundaryReached = $false
+    $settlementRefreshPosted = $false
+    while ($boundaryWait.Elapsed.TotalSeconds -lt 240) {
+        $currentClockRaw = (adb shell "date +'%Y-%m-%d %H %M %S'" | Out-String).Trim()
+        if ($currentClockRaw -match '^(\d{4}-\d{2}-\d{2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})$') {
+            $currentClock = [System.DateTime]::ParseExact(
+                ("{0} {1:D2} {2:D2} {3:D2}" -f
+                    $matches[1],
+                    [int]$matches[2],
+                    [int]$matches[3],
+                    [int]$matches[4]),
+                "yyyy-MM-dd HH mm ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+            $secondsUntilBoundary = ($targetResetAt - $currentClock).TotalSeconds
+            if (-not $settlementRefreshPosted -and $secondsUntilBoundary -gt 0 -and $secondsUntilBoundary -le 15) {
+                Write-Host "Refreshing the active app-rule schedule $([int][Math]::Ceiling($secondsUntilBoundary)) seconds before settlement so the handler fallback can cover an inexact alarm." -ForegroundColor Cyan
+                $refreshReceipt = Get-TestDeviceShellOutput -Command "am broadcast -W -a neth.iecal.curbox.refresh.app_rules -p neth.iecal.curbox.debug"
+                Write-Host "[DIAGNOSTIC] refresh broadcast receipt: $refreshReceipt" -ForegroundColor DarkGray
+                Start-Sleep -Milliseconds 500
+                $settlementRefreshPosted = $true
+            }
+            if ($currentClock -ge $targetResetAt) {
+                $boundaryReached = $true
+                break
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
 
-    $postTransitionSettings = Get-DeviceSettings -AsObject
-    $postTransitionPool = Get-RuleRolloverPool -SettingsOrRolloverState $postTransitionSettings -RuleId $ruleId
-
-    if ($postTransitionPool -and $postTransitionPool.accumulatedMinutes -eq 0) {
-        Write-Success "Boundary transition successfully expired pool to 0 minutes! (Unlock day $yesterdayUseDayId -> Accrual day $todayUseDayId)"
+    if (-not $boundaryReached) {
+        Write-Fail "The device did not reach the temporary use-day reset boundary within 240 seconds."
+        $passedAll = $false
     } else {
-        # Check if restarting service triggers catchup if receiver hasn't run yet
-        $servicePid = Get-DeviceProcessPid -ProcessName ":app_blocker_service"
-        if ($servicePid) {
-            Stop-ServiceProcess -TargetPid $servicePid | Out-Null
-            Start-Sleep -Seconds 3
+        Write-Success "Device reached the use-day reset boundary; waiting for rollover settlement."
+        if (-not $settlementRefreshPosted) {
+            Write-Host "[DIAGNOSTIC] No final near-boundary schedule refresh was posted before the reset." -ForegroundColor DarkYellow
+        }
+        $settlementWait = [System.Diagnostics.Stopwatch]::StartNew()
+        $settled = $false
+        $postTransitionPool = $null
+        while ($settlementWait.Elapsed.TotalSeconds -lt 20) {
             $postTransitionSettings = Get-DeviceSettings -AsObject
             $postTransitionPool = Get-RuleRolloverPool -SettingsOrRolloverState $postTransitionSettings -RuleId $ruleId
+            if ($postTransitionPool -and
+                [long]$postTransitionPool.accumulatedMinutes -eq 0 -and
+                [string]$postTransitionPool.lastSettledUseDayId -eq $nextUseDayId) {
+                $settled = $true
+                break
+            }
+            Start-Sleep -Seconds 1
         }
-
-        if ($postTransitionPool -and $postTransitionPool.accumulatedMinutes -eq 0) {
-            Write-Success "Boundary transition successfully expired pool to 0 minutes after service settlement catch-up!"
+        if ($settled) {
+            Write-Success "Boundary settlement reset the accumulated pool to 0 ($transitionUseDayId unlock day -> $nextUseDayId accrual day)."
         } else {
             $poolMinutes = if ($postTransitionPool) { $postTransitionPool.accumulatedMinutes } else { "null" }
-            Write-Fail "Pool was NOT reset to 0 after boundary transition! Observed minutes: $poolMinutes"
+            $lastSettledDayId = if ($postTransitionPool) { $postTransitionPool.lastSettledUseDayId } else { "null" }
+            Write-Fail "Boundary settlement did not reset the pool. Minutes: $poolMinutes; last settled use day: $lastSettledDayId."
+            Write-RolloverBoundaryDiagnostics -Phase "after boundary failure"
             $passedAll = $false
         }
     }
 
-    Write-Step "15. Final Result Summary"
-    if ($passedAll) {
-        Write-Host "`n=========================================================================================" -ForegroundColor Green
-        Write-Host ">>> [TOTAL ROLLOVER GUARDIAN EXTRA TIME RESULT: PASS] All requirements verified! <<<" -ForegroundColor Green
-        Write-Host "=========================================================================================`n" -ForegroundColor Green
-    } else {
-        Write-Host "`n=========================================================================================" -ForegroundColor Red
-        Write-Host ">>> [TOTAL ROLLOVER GUARDIAN EXTRA TIME RESULT: FAIL] Some checks failed. Inspect logs. <<<" -ForegroundColor Red
-        Write-Host "=========================================================================================`n" -ForegroundColor Red
-        exit 1
-    }
-
 } finally {
     Write-Step "16. Cleanup & Restoring original settings..."
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
     try {
-        Set-DeviceAwake $false
-    } catch { }
-
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        Write-Success "Original settings restored from backup."
+        $restoredMainProcess = Stop-RolloverMainProcessAndWait
+        if (-not $restoredMainProcess.Stopped) {
+            throw "The main Curbox process did not retire after the saved user settings were restored."
+        }
+        $restoredServiceResult = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings $accessibilityBackup
+        if ($restoredServiceResult.Skipped) {
+            Write-Host "Accessibility was disabled in the saved baseline; the app blocker service restart was skipped." -ForegroundColor DarkGray
+        } elseif ($restoredServiceResult.ProcessId) {
+            Write-Success "AppBlockerService re-bound as PID $($restoredServiceResult.ProcessId) with the restored user settings."
+        } else {
+            throw "AppBlockerService did not rebind from the restored user settings."
+        }
+    } catch {
+        $passedAll = $false
+        Write-Fail "Could not reload restored settings into AppBlockerService: $($_.Exception.Message)"
     }
-
-    Clear-TestAppRules | Out-Null
-
-    adb shell "am force-stop $TargetPackage" | Out-Null
-    adb shell "input keyevent 3" | Out-Null # HOME
     Write-Success "Target app stopped and device returned to home."
+}
+
+Write-Step "15. Final Result Summary"
+if ($passedAll) {
+    Write-Host "`n=========================================================================================" -ForegroundColor Green
+    Write-Host ">>> [TOTAL ROLLOVER GUARDIAN EXTRA TIME RESULT: PASS] All requirements verified! <<<" -ForegroundColor Green
+    Write-Host "=========================================================================================`n" -ForegroundColor Green
+} else {
+    Write-Host "`n=========================================================================================" -ForegroundColor Red
+    Write-Host ">>> [TOTAL ROLLOVER GUARDIAN EXTRA TIME RESULT: FAIL] Some checks failed. Inspect logs. <<<" -ForegroundColor Red
+    Write-Host "=========================================================================================`n" -ForegroundColor Red
+    exit 1
 }

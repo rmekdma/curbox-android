@@ -19,12 +19,15 @@
 
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
+    [string]$TargetActivity = "",
     [int]$SleepDurationMinutes = 15,
     [switch]$SkipDeviceCheck = $false,
     [string]$EvidenceOutputDir = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+. "$PSScriptRoot/lib/device-test-common.ps1"
 
 function Write-Step($msg) {
     Write-Host "`n====> $msg" -ForegroundColor Cyan
@@ -42,10 +45,18 @@ function Write-Warn($msg) {
     Write-Host "[WARN] $msg" -ForegroundColor Yellow
 }
 
-$device = (adb devices | Select-String -Pattern "device$")
-if (-not $device) {
-    Write-Error "No connected adb device found!"
+Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
+
+$tmpDir = Join-Path $env:TEMP "curbox_deep_sleep_test"
+if (-not (Test-Path $tmpDir)) {
+    New-Item -ItemType Directory -Path $tmpDir | Out-Null
 }
+$backupFile = Join-Path $tmpDir "settings_backup.json"
+$testSettingsFile = Join-Path $tmpDir "settings_test.json"
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+try {
 
 # 1. Environment & Preflight checks
 Write-Step "1. Preflight: Capturing device identity..."
@@ -65,13 +76,15 @@ Write-Host "  Fingerprint: $fingerprint"
 Write-Host "  Channel:     $channel"
 
 $enabledServices = (adb shell "settings get secure enabled_accessibility_services").Trim()
-if ($enabledServices -notmatch "neth\.iecal\.curbox/\.services\.AppBlockerService") {
+$accessibilityComponent = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
+if ($enabledServices -notmatch [regex]::Escape($accessibilityComponent)) {
     Write-Host "Enabling Curbox AppBlockerService in settings..." -ForegroundColor Yellow
-    adb shell "settings put secure enabled_accessibility_services neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService" | Out-Null
+    $serviceList = @($enabledServices -split ":" | Where-Object { $_ }) + $accessibilityComponent
+    adb shell "settings put secure enabled_accessibility_services $($serviceList -join ':')" | Out-Null
     adb shell "settings put secure accessibility_enabled 1" | Out-Null
 }
 # Start app main activity or send intent to ensure AppBlockerService process is running
-adb shell "am start -n neth.iecal.curbox.debug/neth.iecal.curbox.ui.activity.FragmentActivity" | Out-Null
+Start-TestApp -PackageName "neth.iecal.curbox.debug" -ActivityName "neth.iecal.curbox.ui.activity.FragmentActivity"
 Start-Sleep -Seconds 2
 adb shell "input keyevent 3" # Home key
 Start-Sleep -Seconds 1
@@ -95,14 +108,6 @@ if (-not $isTargetModel -or -not $isTargetAndroid) {
 }
 
 # Prepare directories
-$tmpDir = Join-Path $env:TEMP "curbox_deep_sleep_test"
-if (-not (Test-Path $tmpDir)) {
-    New-Item -ItemType Directory -Path $tmpDir | Out-Null
-}
-$backupFile = Join-Path $tmpDir "settings_backup.json"
-$testSettingsFile = Join-Path $tmpDir "settings_test.json"
-$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-
 if (-not $EvidenceOutputDir) {
     $EvidenceOutputDir = Join-Path $PSScriptRoot "..\.scratch\app-rule-enforcement\evidence\ticket29"
 }
@@ -110,14 +115,9 @@ if (-not (Test-Path $EvidenceOutputDir)) {
     New-Item -ItemType Directory -Path $EvidenceOutputDir -Force | Out-Null
 }
 
-try {
     # 2. Backup current settings
     Write-Step "2. Backing up device settings.json..."
-    $rawSettings = (adb shell "run-as neth.iecal.curbox.debug cat files/datastore/settings.json" | Out-String).Trim().Trim([char]65279)
-    if (-not $rawSettings -or $rawSettings -notmatch "\{") {
-        Write-Error "Failed to read settings.json from device!"
-    }
-    [System.IO.File]::WriteAllText($backupFile, $rawSettings, $utf8NoBom)
+    $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
     Write-Success "Backup saved to $backupFile"
 
     # 3. Inject Test AppRule configuration for Deep-Sleep / AR004
@@ -154,6 +154,7 @@ try {
         }
         contributorGroupIds = @($targetGroupId)
         earnedAllowanceEnabled = $false
+        guardianExtraTimeAllowed = $true
         earnedAllowancePackageConditions = [PSCustomObject]@{}
         earnedAllowancePackageBonusMinutes = [PSCustomObject]@{}
         earnedAllowanceAppGroupConditions = [PSCustomObject]@{}
@@ -188,10 +189,7 @@ try {
     adb shell "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p neth.iecal.curbox.debug" | Out-Null
     Start-Sleep -Milliseconds 500
 
-    $rulesSnapshotJson = ($settingsObj.appRuleSnapshot | ConvertTo-Json -Depth 20 -Compress).Replace('"', '\"')
-    adb shell "am broadcast -a neth.iecal.curbox.action.APPLY_TEST_APP_RULES -p neth.iecal.curbox.debug --es extra_app_rules_json '$rulesSnapshotJson'" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p neth.iecal.curbox.debug" | Out-Null
-    Start-Sleep -Seconds 2
+    Inject-TestAppRules -AppRuleSnapshot $settingsObj.appRuleSnapshot | Out-Null
     Write-Success "Test AppRule active via broadcast seam."
 
     # 4. Pre-sleep diagnostics snapshot
@@ -277,7 +275,7 @@ try {
     adb shell "wm dismiss-keyguard"
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/com.woodenpharm.choseonggacha.MainActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
     Start-Sleep -Seconds 3
 
     $currentFocus = adb shell "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
@@ -305,13 +303,6 @@ try {
 } finally {
     # 9. Clean up and restore original settings
     Write-Step "9. Restoring original settings and cleaning up..."
-    if (Test-Path $backupFile) {
-        adb push $backupFile "/data/local/tmp/settings.json" | Out-Null
-        adb shell "run-as neth.iecal.curbox.debug cp /data/local/tmp/settings.json files/datastore/settings.json" | Out-Null
-        adb shell "run-as neth.iecal.curbox.debug chmod 660 files/datastore/settings.json" | Out-Null
-        adb shell "am broadcast -a neth.iecal.curbox.REFRESH_APP_RULES -p neth.iecal.curbox.debug" | Out-Null
-        Write-Success "Original settings restored."
-    }
-    adb shell "am force-stop $TargetPackage" | Out-Null
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
     Write-Success "Cleanup complete."
 }

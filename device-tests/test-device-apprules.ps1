@@ -12,7 +12,9 @@
 #>
 
 param(
-    [string]$TargetPackage = "com.woodenpharm.choseonggacha"
+    [string]$TargetPackage = "com.woodenpharm.choseonggacha",
+    [string]$TargetActivity = "",
+    [string]$ContributorPackage = "com.initialcoms.ridi"
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +35,7 @@ function Write-Fail($msg) {
 }
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_test"
 if (-not (Test-Path $tmpDir)) {
@@ -69,11 +72,11 @@ try {
     $groupContrib = [PSCustomObject]@{
         id = $contributorGroupId
         name = "학습"
-        selectedPackages = @("com.initialcoms.ridi")
+        selectedPackages = @($ContributorPackage)
         membershipHistory = @(
             [PSCustomObject]@{
                 effectiveFromMs = [long]-9223372036854775808
-                selectedPackages = @("com.initialcoms.ridi")
+                selectedPackages = @($ContributorPackage)
             }
         )
     }
@@ -94,6 +97,7 @@ try {
         }
         contributorGroupIds = @($contributorGroupId)
         earnedAllowanceEnabled = $false
+        guardianExtraTimeAllowed = $true
         timeRanges = @(
             [PSCustomObject]@{
                 startMinute = 0
@@ -140,7 +144,7 @@ try {
     adb shell "wm dismiss-keyguard"
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/com.woodenpharm.choseonggacha.MainActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
     Start-Sleep -Seconds 3
 
     Write-Step "7. Checking if GuardianApprovalActivity is displayed..."
@@ -178,14 +182,10 @@ try {
         Write-Host "`n>>> [TOTAL TEST RESULT: PASS] Lock screen & App rule enforcement verified successfully! <<<`n" -ForegroundColor Green
     } else {
         Write-Host "`n>>> [TOTAL TEST RESULT: FAIL] Verification failed! <<<`n" -ForegroundColor Red
+        exit 1
     }
 
 } finally {
     Write-Step "8. Cleanup & Restoring original settings.json..."
-    Set-DeviceAwake $false
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        adb shell "input keyevent 3" # HOME
-        Write-Success "Original settings restored."
-    }
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
 }

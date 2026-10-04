@@ -14,7 +14,8 @@
 
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
-    [string]$TargetActivity = "com.woodenpharm.choseonggacha.MainActivity"
+    [string]$TargetActivity = "",
+    [string]$ContributorPackage = "com.initialcoms.ridi"
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_skip_today_test"
 if (-not (Test-Path $tmpDir)) {
@@ -47,7 +49,7 @@ try {
 
     $appRuleSnapshot = New-ContributorAppRuleConfig `
         -TargetPackage $TargetPackage `
-        -ContributorPackage "com.initialcoms.ridi" `
+        -ContributorPackage $ContributorPackage `
         -RequiredMinutes 15 `
         -AllowedMinutes 30 `
         -TargetGroupId $targetGroupId `
@@ -61,7 +63,7 @@ try {
     Write-Step "4. Launching Target App ($TargetPackage) to trigger Lock Screen..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     Write-Step "5. Verifying GuardianApprovalActivity is displayed..."
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -171,7 +173,7 @@ try {
     Write-Step "11. Verifying Target App relaunch maintains unblocked execution..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     Start-Sleep -Seconds 2
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -211,18 +213,6 @@ try {
 
 } finally {
     Write-Step "13. Cleanup & Restoring original settings.json..."
-    try {
-        Set-DeviceAwake $false
-    } catch { }
-
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        Write-Success "Original settings restored from backup."
-    } else {
-        Clear-TestAppRules | Out-Null
-    }
-
-    adb shell "am force-stop $TargetPackage" | Out-Null
-    adb shell "input keyevent 3" | Out-Null # HOME
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
     Write-Success "Target app stopped, returned to home."
 }

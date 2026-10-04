@@ -17,7 +17,8 @@
 
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
-    [string]$TargetActivity = "com.woodenpharm.choseonggacha.MainActivity",
+    [string]$TargetActivity = "",
+    [string]$ContributorPackage = "com.initialcoms.ridi",
     [string]$ServiceProcessName = ":app_blocker_service",
     [int]$MaxRecoveryWaitSeconds = 30,
     [int]$WarmupWaitSeconds = 2
@@ -29,6 +30,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_service_recovery_test"
 if (-not (Test-Path $tmpDir)) {
@@ -68,7 +70,7 @@ try {
     $isBoundInitial = Test-AccessibilityServiceBound
     if (-not $isBoundInitial) {
         Write-Host "Service not yet bound; waking service via launcher..." -ForegroundColor Yellow
-        adb shell "am start -n neth.iecal.curbox.debug/neth.iecal.curbox.ui.activity.FragmentActivity" | Out-Null
+        Start-TestApp -PackageName "neth.iecal.curbox.debug" -ActivityName "neth.iecal.curbox.ui.activity.FragmentActivity"
         Start-Sleep -Seconds 2
         adb shell "input keyevent 3" | Out-Null # Home
         Start-Sleep -Seconds 1
@@ -92,7 +94,7 @@ try {
 
     $appRuleSnapshot = New-ContributorAppRuleConfig `
         -TargetPackage $TargetPackage `
-        -ContributorPackage "com.initialcoms.ridi" `
+        -ContributorPackage $ContributorPackage `
         -RequiredMinutes 15 `
         -AllowedMinutes 30 `
         -TargetGroupId $targetGroupId `
@@ -105,7 +107,7 @@ try {
     Write-Step "3. Launching Target App ($TargetPackage) and verifying initial blocking..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Milliseconds 500
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     $initialCheck = Assert-TargetBlocked -TimeoutSeconds 10
     if ($initialCheck.Blocked) {
@@ -184,7 +186,7 @@ try {
 
     Write-Step "7. Bringing Target App back to foreground and verifying immediate re-blocking..."
     # Do NOT force-stop: bring existing background task back to foreground
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     $reblockCheck = Assert-TargetBlocked -TimeoutSeconds 8
     if ($reblockCheck.Blocked) {
@@ -209,17 +211,6 @@ try {
 
 } finally {
     Write-Step "9. Cleanup: Restoring original settings and resetting device state..."
-    try {
-        Set-DeviceAwake $false
-    } catch { }
-
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        Write-Success "Original settings restored from backup."
-    }
-    Clear-TestAppRules | Out-Null
-
-    adb shell "am force-stop $TargetPackage" | Out-Null
-    adb shell "input keyevent 3" | Out-Null # HOME
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
     Write-Success "Target app stopped, returned to home, wake lock released."
 }

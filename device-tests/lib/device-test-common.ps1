@@ -4,6 +4,9 @@
 .DESCRIPTION
     Provides shared helper functions across device test scripts:
     - Assert-AdbDevice: Verify connected ADB device
+    - Start-TestApp: Launch a package by activity or its launcher intent
+    - Backup-DeviceAccessibilitySettings: Capture secure accessibility settings
+    - Restore-DeviceAccessibilitySettings: Restore secure accessibility settings
     - Set-DeviceAwake: Control stay-awake state (svc power stayon true/false)
     - Get-DeviceSettings: Read settings.json from device as raw string or PSCustomObject
     - Backup-DeviceSettings: Safely back up settings.json from device
@@ -18,6 +21,7 @@
     - New-GuardianPinAuthConfig: Generate PBKDF2 salt/verifier GuardianAuthConfig object
     - New-TestAppGroup: Generate AppRuleAppGroup object with default membership history
     - New-ContributorAppRuleConfig: Generate AppRuleSnapshot with contributor condition rule
+    - New-GuardianExtraTimePickerAppRuleConfig: Generate blocking, unrelated, and future-window rules
     - New-TimeRangeAppRuleConfig: Generate AppRuleSnapshot with timeRanges schedule rule
     - New-DailyLimitAppRuleConfig: Generate AppRuleSnapshot with daily allowance limit rule
     - Get-DeviceTimeInfo: Query and calculate device local time in minutes and seconds
@@ -26,17 +30,31 @@
     - Test-AppRuleSkip: Verify whether a rule skip override is recorded and active
     - Test-GuardianAuthConfig: Verify whether a guardian auth config or settings object has active credentials
     - Set-DeviceGuardianAuthConfig: Inject GuardianAuthConfig into device settings.json with proper 660 permissions and broadcast refresh
+    - Set-DeviceUseDayResetTime: Update the test device use-day reset clock and refresh the blocker
     - Get-DeviceProcessPid: Query running process PID from ps/ps -ef
     - Test-AccessibilityServiceBound: Verify whether accessibility service is bound
     - Stop-ServiceProcess: Terminate or induce crash on target process PID
+    - Restart-DeviceAccessibilityServiceIfEnabled: Rebind the service only when it was enabled in the saved baseline
     - Enable-AccessibilityService: Ensure accessibility service is enabled in secure settings
     - New-RolloverAppRuleConfig: Generate AppRuleSnapshot with rolloverEnabled and unlockDays
     - New-RuleRolloverPool: Generate RuleRolloverPool PSCustomObject
     - Test-AppRuleGuardianGrant: Verify whether an AppRuleGuardianGrant is recorded in override state
     - Get-RuleRolloverPool: Query RuleRolloverPool object from Settings or AppRuleRolloverState
     - Set-DeviceRolloverState: Inject AppRuleRolloverState into device settings.json with 660 permissions and broadcast refresh
+    - Set-DeviceAppRuleSnapshot: Persist AppRuleSnapshot for main-app UI tests
     - Submit-GuardianPin: Enter and submit guardian PIN in password dialog via UIAutomator
 #>
+
+# Optional script-scoped command seams keep helper tests offline. Production runs
+# leave these unset and use adb; Pester assigns in-memory handlers instead.
+$script:DeviceTestShellHandler = $null
+$script:DeviceTestShellOutputHandler = $null
+$script:DeviceTestFilePushHandler = $null
+$script:DeviceTestTempStringPushHandler = $null
+$script:DeviceTestSettingsReader = $null
+$script:DeviceTestSecureSettingReader = $null
+$script:DeviceTestUiWaitHandler = $null
+$script:DeviceTestSettingsBackupPath = $null
 
 function Write-Step([string]$Msg) {
     Write-Host "`n====> $Msg" -ForegroundColor Cyan
@@ -57,23 +75,187 @@ function Assert-AdbDevice {
     }
 }
 
+function Get-TestAppLaunchCommand(
+    [string]$PackageName,
+    [string]$ActivityName = "",
+    [string]$IntentArguments = ""
+) {
+    if ([string]::IsNullOrWhiteSpace($PackageName)) {
+        Write-Error "PackageName is required to launch a test app."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ActivityName)) {
+        if (-not [string]::IsNullOrWhiteSpace($IntentArguments)) {
+            Write-Error "IntentArguments require an explicit ActivityName."
+        }
+        return "monkey -p $PackageName 1"
+    }
+
+    $activity = $ActivityName.Trim()
+    if ($activity.StartsWith(".")) {
+        $activity = "$PackageName$activity"
+    }
+    $command = "am start -n $PackageName/$activity"
+    if (-not [string]::IsNullOrWhiteSpace($IntentArguments)) {
+        $command += " $($IntentArguments.Trim())"
+    }
+    return $command
+}
+
+function Start-TestApp(
+    [string]$PackageName,
+    [string]$ActivityName = "",
+    [string]$IntentArguments = ""
+) {
+    $launchCommand = Get-TestAppLaunchCommand -PackageName $PackageName -ActivityName $ActivityName -IntentArguments $IntentArguments
+    Invoke-TestDeviceShell -Command $launchCommand
+}
+
+function Backup-DeviceAccessibilitySettings {
+    $enabledServices = Get-DeviceSecureSetting -Name "enabled_accessibility_services"
+    $accessibilityEnabled = Get-DeviceSecureSetting -Name "accessibility_enabled"
+    return [PSCustomObject]@{
+        EnabledServices = $enabledServices
+        AccessibilityEnabled = $accessibilityEnabled
+    }
+}
+
+function Get-DeviceSecureSetting([string]$Name) {
+    if ($script:DeviceTestSecureSettingReader -is [scriptblock]) {
+        return (& $script:DeviceTestSecureSettingReader $Name)
+    }
+    return (adb shell "settings get secure $Name" | Out-String).Trim()
+}
+
+function Get-DeviceAccessibilityRestoreCommands($AccessibilitySettings) {
+    if (-not $AccessibilitySettings) {
+        Write-Error "Accessibility settings backup is required."
+    }
+
+    $commands = @()
+    $settings = @(
+        @{ Name = "enabled_accessibility_services"; Value = [string]$AccessibilitySettings.EnabledServices },
+        @{ Name = "accessibility_enabled"; Value = [string]$AccessibilitySettings.AccessibilityEnabled }
+    )
+    foreach ($setting in $settings) {
+        if ([string]::IsNullOrWhiteSpace($setting.Value) -or $setting.Value -eq "null") {
+            $commands += "settings delete secure $($setting.Name)"
+        } else {
+            $commands += "settings put secure $($setting.Name) $($setting.Value)"
+        }
+    }
+    return ,$commands
+}
+
+function Restore-DeviceAccessibilitySettings($AccessibilitySettings) {
+    $commands = Get-DeviceAccessibilityRestoreCommands -AccessibilitySettings $AccessibilitySettings
+    foreach ($command in $commands) {
+        Invoke-TestDeviceShell -Command $command
+    }
+}
+
+function Invoke-TestDeviceShell([string]$Command) {
+    if ($script:DeviceTestShellHandler -is [scriptblock]) {
+        & $script:DeviceTestShellHandler $Command | Out-Null
+        return
+    }
+    adb shell $Command | Out-Null
+}
+
+function Get-TestDeviceShellOutput([string]$Command) {
+    if ($script:DeviceTestShellOutputHandler -is [scriptblock]) {
+        return (& $script:DeviceTestShellOutputHandler $Command | Out-String).TrimEnd()
+    }
+    return (adb shell $Command | Out-String).TrimEnd()
+}
+
+function Push-TestDeviceFile([string]$LocalPath, [string]$RemotePath) {
+    if ($script:DeviceTestFilePushHandler -is [scriptblock]) {
+        & $script:DeviceTestFilePushHandler $LocalPath $RemotePath | Out-Null
+        return
+    }
+    adb push $LocalPath $RemotePath | Out-Null
+}
+
+function Complete-DeviceTest(
+    [string]$BackupPath = "",
+    [string[]]$TargetPackages = @(),
+    $AccessibilitySettings = $null,
+    [string]$PackageName = "neth.iecal.curbox.debug"
+) {
+    try {
+        Set-DeviceAwake $false
+    } catch {
+        Write-Host "[WARN] Could not restore the device wake state: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    $hasSettingsBackup = $false
+    if (-not [string]::IsNullOrWhiteSpace($BackupPath) -and (Test-Path -LiteralPath $BackupPath)) {
+        $resolvedBackupPath = [System.IO.Path]::GetFullPath($BackupPath)
+        $hasSettingsBackup = ($script:DeviceTestSettingsBackupPath -eq $resolvedBackupPath)
+    }
+
+    if ($hasSettingsBackup) {
+        try {
+            Clear-TestAppRules -PackageName $PackageName | Out-Null
+        } catch {
+            Write-Host "[WARN] Could not clear test rule overrides before restore: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+
+        try {
+            Start-Sleep -Milliseconds 500
+            Restore-DeviceSettings -BackupPath $BackupPath -PackageName $PackageName | Out-Null
+        } catch {
+            Write-Host "[WARN] Could not restore settings backup: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[WARN] No current-run settings backup exists; skipped test override cleanup to preserve current grants and skips." -ForegroundColor Yellow
+    }
+
+    if ($AccessibilitySettings) {
+        try {
+            Restore-DeviceAccessibilitySettings -AccessibilitySettings $AccessibilitySettings
+        } catch {
+            Write-Host "[WARN] Could not restore accessibility settings: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    foreach ($targetPackage in $TargetPackages) {
+        if ([string]::IsNullOrWhiteSpace($targetPackage)) { continue }
+        try {
+            Invoke-TestDeviceShell -Command "am force-stop $targetPackage"
+        } catch {
+            Write-Host "[WARN] Could not stop target app ${targetPackage}: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    try {
+        Invoke-TestDeviceShell -Command "input keyevent 3"
+    } catch {
+        Write-Host "[WARN] Could not return the device to Home: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 function Set-DeviceAwake([bool]$Awake = $true) {
     $val = if ($Awake) { "true" } else { "false" }
-    adb shell "svc power stayon $val" | Out-Null
+    Invoke-TestDeviceShell -Command "svc power stayon $val"
     if ($Awake) {
-        $screenState = (adb shell "dumpsys display | grep -i mScreenState" | Out-String)
+        $screenState = Get-TestDeviceShellOutput -Command "dumpsys display | grep -i mScreenState"
         if ($screenState -match "OFF") {
-            adb shell "input keyevent 26" | Out-Null # POWER
+            Invoke-TestDeviceShell -Command "input keyevent 26" # POWER
             Start-Sleep -Milliseconds 500
         }
-        adb shell "input keyevent 224" | Out-Null # WAKEUP
-        adb shell "wm dismiss-keyguard" | Out-Null
-        adb shell "input keyevent 82" | Out-Null # UNLOCK / MENU
+        Invoke-TestDeviceShell -Command "input keyevent 224" # WAKEUP
+        Invoke-TestDeviceShell -Command "wm dismiss-keyguard"
+        Invoke-TestDeviceShell -Command "input keyevent 82" # UNLOCK / MENU
         Start-Sleep -Milliseconds 500
     }
 }
 
 function Push-TempStringToDevice([string]$Content, [string]$RemotePath) {
+    if ($script:DeviceTestTempStringPushHandler -is [scriptblock]) {
+        & $script:DeviceTestTempStringPushHandler $Content $RemotePath | Out-Null
+        return
+    }
     $tempLocal = [System.IO.Path]::GetTempFileName()
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     [System.IO.File]::WriteAllText($tempLocal, $Content, $utf8NoBom)
@@ -82,6 +264,9 @@ function Push-TempStringToDevice([string]$Content, [string]$RemotePath) {
 }
 
 function Get-DeviceSettings([string]$PackageName = "neth.iecal.curbox.debug", [switch]$AsObject) {
+    if ($script:DeviceTestSettingsReader -is [scriptblock]) {
+        return (& $script:DeviceTestSettingsReader $PackageName ([bool]$AsObject))
+    }
     $rawSettings = (adb shell "run-as $PackageName cat files/datastore/settings.json" | Out-String).Trim().Trim([char]65279)
     if (-not $rawSettings -or $rawSettings -notmatch "\{") {
         return $null
@@ -93,6 +278,10 @@ function Get-DeviceSettings([string]$PackageName = "neth.iecal.curbox.debug", [s
 }
 
 function Backup-DeviceSettings([string]$DestinationPath, [string]$PackageName = "neth.iecal.curbox.debug") {
+    $script:DeviceTestSettingsBackupPath = $null
+    if (Test-Path -LiteralPath $DestinationPath) {
+        Remove-Item -LiteralPath $DestinationPath -Force
+    }
     $rawSettings = Get-DeviceSettings -PackageName $PackageName
     if (-not $rawSettings) {
         Write-Error "Failed to read settings.json from device!"
@@ -100,6 +289,7 @@ function Backup-DeviceSettings([string]$DestinationPath, [string]$PackageName = 
     }
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     [System.IO.File]::WriteAllText($DestinationPath, $rawSettings, $utf8NoBom)
+    $script:DeviceTestSettingsBackupPath = [System.IO.Path]::GetFullPath($DestinationPath)
     return $rawSettings
 }
 
@@ -108,11 +298,31 @@ function Restore-DeviceSettings([string]$BackupPath, [string]$PackageName = "net
         Write-Error "Backup file not found at: $BackupPath"
         return $false
     }
-    adb push $BackupPath "/data/local/tmp/settings_backup.json" | Out-Null
-    adb shell "run-as $PackageName cp /data/local/tmp/settings_backup.json files/datastore/settings.json" | Out-Null
-    adb shell "run-as $PackageName chmod 660 files/datastore/settings.json" | Out-Null
-    adb shell "rm -f /data/local/tmp/settings_backup.json" | Out-Null
-    Clear-TestAppRules -PackageName $PackageName
+    Push-TestDeviceFile -LocalPath $BackupPath -RemotePath "/data/local/tmp/settings_backup.json"
+    Invoke-TestDeviceShell -Command "run-as $PackageName cp /data/local/tmp/settings_backup.json files/datastore/settings.json"
+    Invoke-TestDeviceShell -Command "run-as $PackageName chmod 660 files/datastore/settings.json"
+    Invoke-TestDeviceShell -Command "rm -f /data/local/tmp/settings_backup.json"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName"
+    return $true
+}
+
+function Set-DeviceAppRuleSnapshot($AppRuleSnapshot, [string]$PackageName = "neth.iecal.curbox.debug") {
+    $settingsObj = Get-DeviceSettings -PackageName $PackageName -AsObject
+    if (-not $settingsObj) {
+        Write-Error "Could not read settings before updating the AppRuleSnapshot."
+        return $false
+    }
+
+    $settingsObj.appRuleSnapshot = $AppRuleSnapshot
+    $jsonStr = $settingsObj | ConvertTo-Json -Depth 25 -Compress
+    Push-TempStringToDevice -Content $jsonStr -RemotePath "/data/local/tmp/settings_app_rules.json"
+    Invoke-TestDeviceShell -Command "run-as $PackageName cp /data/local/tmp/settings_app_rules.json files/datastore/settings.json"
+    Invoke-TestDeviceShell -Command "run-as $PackageName chmod 660 files/datastore/settings.json"
+    Invoke-TestDeviceShell -Command "rm -f /data/local/tmp/settings_app_rules.json"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName"
+    Start-Sleep -Seconds 1
     return $true
 }
 
@@ -173,9 +383,9 @@ function Inject-TestAppRules(
 }
 
 function Clear-TestAppRules([string]$PackageName = "neth.iecal.curbox.debug") {
-    adb shell "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName"
 }
 
 function Dump-UI([int]$MaxRetries = 3) {
@@ -197,6 +407,9 @@ function Dump-UI([int]$MaxRetries = 3) {
 }
 
 function Wait-For-UI([string]$Pattern, [int]$TimeoutSeconds = 8) {
+    if ($script:DeviceTestUiWaitHandler -is [scriptblock]) {
+        return (& $script:DeviceTestUiWaitHandler $Pattern $TimeoutSeconds)
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $lastUi = ""
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
@@ -249,6 +462,184 @@ function Tap-Node([string]$Xml, [string]$Pattern, [string]$Label = "", [switch]$
         Write-Host "[FAIL] Could not find node: $Label" -ForegroundColor Red
     }
     return $false
+}
+
+function Tap-TestRulePicker([string]$Xml, [int]$EndIconInsetPixels = 48) {
+    $picker = Get-NodeBounds $Xml 'resource-id="neth.iecal.curbox.debug:id/rule_picker"'
+    if (-not $picker.Found) {
+        return $false
+    }
+
+    $inset = [Math]::Max(1, $EndIconInsetPixels)
+    $tapX = [Math]::Max($picker.X1, $picker.X2 - $inset)
+    Write-Host "[DIAGNOSTIC] Rule picker tap at ($tapX, $($picker.Y)); bounds=[$($picker.X1),$($picker.Y1)][$($picker.X2),$($picker.Y2)]." -ForegroundColor DarkGray
+    Invoke-TestDeviceShell -Command "input tap $tapX $($picker.Y)"
+    return $true
+}
+
+function Get-TestRulePickerLabel([string]$Xml) {
+    try {
+        [xml]$doc = $Xml
+        $node = $doc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/rule_picker']")
+        if ($node) {
+            return $node.GetAttribute("text").Trim()
+        }
+    } catch {
+        return ""
+    }
+    return ""
+}
+
+function Get-TestRulePickerPopupBounds([string]$WindowDump) {
+    if ([string]::IsNullOrWhiteSpace($WindowDump)) {
+        return [PSCustomObject]@{ Found = $false }
+    }
+
+    $lines = $WindowDump -split "`r?`n"
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -notmatch '^\s*Window #\d+ Window\{[^}]*PopupWindow:') {
+            continue
+        }
+
+        $blockLines = @($lines[$i])
+        for ($j = $i + 1; $j -lt $lines.Count -and $lines[$j] -notmatch '^\s*Window #\d+ Window\{'; $j++) {
+            $blockLines += $lines[$j]
+        }
+        $block = $blockLines -join "`n"
+        if ($block -notmatch 'mParentWindow=.*neth\.iecal\.curbox\.debug/' -or
+            $block -notmatch 'mHasSurface=true' -or
+            $block -notmatch 'isVisible=true') {
+            continue
+        }
+
+        $frameLine = @($blockLines | Where-Object { $_ -match '^\s*Frames:' } | Select-Object -First 1)
+        if ($frameLine -and $frameLine[0] -match 'frame=\[(\d+),(\d+)\]\[(\d+),(\d+)\]') {
+            $x1 = [int]$matches[1]
+            $y1 = [int]$matches[2]
+            $x2 = [int]$matches[3]
+            $y2 = [int]$matches[4]
+            if ($x2 -gt $x1 -and $y2 -gt $y1) {
+                return [PSCustomObject]@{
+                    Found = $true
+                    X1 = $x1
+                    Y1 = $y1
+                    X2 = $x2
+                    Y2 = $y2
+                    Width = $x2 - $x1
+                    Height = $y2 - $y1
+                }
+            }
+        }
+    }
+    return [PSCustomObject]@{ Found = $false }
+}
+
+function Get-TestRulePickerRowTapPoint($PopupBounds, [int]$CandidateIndex, [int]$CandidateCount) {
+    if (-not $PopupBounds -or -not $PopupBounds.Found -or
+        $CandidateCount -lt 1 -or $CandidateIndex -lt 0 -or $CandidateIndex -ge $CandidateCount -or
+        $PopupBounds.Width -le 0 -or $PopupBounds.Height -lt $CandidateCount) {
+        return [PSCustomObject]@{ Found = $false }
+    }
+
+    $rowHeight = [double]$PopupBounds.Height / $CandidateCount
+    return [PSCustomObject]@{
+        Found = $true
+        X = [int][Math]::Floor($PopupBounds.X1 + ($PopupBounds.Width / 2.0))
+        Y = [int][Math]::Floor($PopupBounds.Y1 + (($CandidateIndex + 0.5) * $rowHeight))
+    }
+}
+
+function Wait-ForTestRulePickerPopup([int]$TimeoutSeconds = 10) {
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastWindowDump = ""
+    do {
+        $lastWindowDump = Get-TestDeviceShellOutput -Command "dumpsys window windows"
+        $bounds = Get-TestRulePickerPopupBounds -WindowDump $lastWindowDump
+        if ($bounds.Found) {
+            return $bounds
+        }
+        Start-Sleep -Milliseconds 200
+    } while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    $windowLines = $lastWindowDump -split "`r?`n"
+    $popupHeaders = @(for ($i = 0; $i -lt $windowLines.Count; $i++) { if ($windowLines[$i] -match 'Window #\d+ Window\{[^}]*PopupWindow:') { $i } })
+    $windowSummary = @($windowLines | Where-Object { $_ -match 'PopupWindow|mParentWindow|mHasSurface|Frames:|isVisible|mCurrentFocus' } | Select-Object -Last 24)
+    if ($windowSummary.Count -gt 0) {
+        Write-Host "[DIAGNOSTIC] Could not locate the visible picker popup in WindowManager: $($windowSummary -join ' | ')" -ForegroundColor DarkYellow
+    }
+    foreach ($headerIndex in $popupHeaders) {
+        $popupBlock = @($windowLines[$headerIndex..([Math]::Min($windowLines.Count - 1, $headerIndex + 35))])
+        $popupInfo = @($popupBlock | Where-Object { $_ -match 'Window #|mAttrs|mParentWindow|mHasSurface|Frames:|isVisible' })
+        Write-Host "[DIAGNOSTIC] Popup window state: $($popupInfo -join ' | ')" -ForegroundColor DarkYellow
+    }
+    return [PSCustomObject]@{ Found = $false }
+}
+
+function Tap-TestRulePickerRow([int]$CandidateIndex, [int]$CandidateCount) {
+    $popupBounds = Wait-ForTestRulePickerPopup
+    $tapPoint = Get-TestRulePickerRowTapPoint -PopupBounds $popupBounds -CandidateIndex $CandidateIndex -CandidateCount $CandidateCount
+    if (-not $tapPoint.Found) {
+        return $false
+    }
+    Write-Host "Tapped rule picker row $CandidateIndex at ($($tapPoint.X), $($tapPoint.Y)) from visible popup bounds [$($popupBounds.X1),$($popupBounds.Y1)][$($popupBounds.X2),$($popupBounds.Y2)]." -ForegroundColor DarkGray
+    Invoke-TestDeviceShell -Command "input tap $($tapPoint.X) $($tapPoint.Y)"
+    Start-Sleep -Milliseconds 250
+    return $true
+}
+
+function Get-TestRulePickerOptions([string]$CurrentUi, [int]$CandidateCount) {
+    if ($CandidateCount -lt 1) {
+        return [PSCustomObject]@{ Success = $false; Options = @(); Ui = $CurrentUi }
+    }
+
+    $options = @()
+    $ui = $CurrentUi
+    for ($index = 0; $index -lt $CandidateCount; $index++) {
+        if (-not (Tap-TestRulePicker -Xml $ui)) {
+            return [PSCustomObject]@{ Success = $false; Options = @($options); Ui = $ui }
+        }
+        if (-not (Tap-TestRulePickerRow -CandidateIndex $index -CandidateCount $CandidateCount)) {
+            return [PSCustomObject]@{ Success = $false; Options = @($options); Ui = $ui }
+        }
+        $ui = Wait-For-UI -Pattern 'resource-id="neth\.iecal\.curbox\.debug:id/rule_picker"' -TimeoutSeconds 3
+        $label = Get-TestRulePickerLabel -Xml $ui
+        if ([string]::IsNullOrWhiteSpace($label)) {
+            return [PSCustomObject]@{ Success = $false; Options = @($options); Ui = $ui }
+        }
+        $options += [PSCustomObject]@{ Index = $index; Label = $label }
+    }
+
+    $uniqueLabels = @($options | ForEach-Object { $_.Label } | Select-Object -Unique)
+    return [PSCustomObject]@{
+        Success = ($options.Count -eq $CandidateCount -and $uniqueLabels.Count -eq $CandidateCount)
+        Options = @($options)
+        Ui = $ui
+    }
+}
+
+function Select-TestRulePickerOption([string]$CurrentUi, $CandidateOptions, [string]$RuleName) {
+    $options = @($CandidateOptions)
+    $matches = @($options | Where-Object { $_.Label -eq $RuleName })
+    if ($matches.Count -ne 1) {
+        return [PSCustomObject]@{ Success = $false; Label = (Get-TestRulePickerLabel -Xml $CurrentUi); Ui = $CurrentUi }
+    }
+
+    $currentLabel = Get-TestRulePickerLabel -Xml $CurrentUi
+    if ($currentLabel -eq $RuleName) {
+        return [PSCustomObject]@{ Success = $true; Label = $currentLabel; Ui = $CurrentUi }
+    }
+
+    if (-not (Tap-TestRulePicker -Xml $CurrentUi) -or
+        -not (Tap-TestRulePickerRow -CandidateIndex ([int]$matches[0].Index) -CandidateCount $options.Count)) {
+        return [PSCustomObject]@{ Success = $false; Label = $currentLabel; Ui = $CurrentUi }
+    }
+
+    $ui = Wait-For-UI -Pattern 'resource-id="neth\.iecal\.curbox\.debug:id/rule_picker"' -TimeoutSeconds 3
+    $selectedLabel = Get-TestRulePickerLabel -Xml $ui
+    return [PSCustomObject]@{
+        Success = ($selectedLabel -eq $RuleName)
+        Label = $selectedLabel
+        Ui = $ui
+    }
 }
 
 function Assert-WindowFocus([string]$ExpectedActivity, [switch]$PassThru) {
@@ -328,6 +719,7 @@ function New-ContributorAppRuleConfig(
     [string]$TargetGroupId = "test-target-group-01",
     [string]$ContributorGroupId = "test-contrib-group-01",
     [string]$RuleId = "test-rule-01",
+    [bool]$GuardianExtraTimeAllowed = $true,
     [long]$EffectiveFromMs = [long]::MinValue
 ) {
     $groupTarget = New-TestAppGroup -GroupId $TargetGroupId -GroupName "테스트 타깃 앱" -Packages @($TargetPackage)
@@ -349,6 +741,7 @@ function New-ContributorAppRuleConfig(
         }
         contributorGroupIds = @($ContributorGroupId)
         earnedAllowanceEnabled = $false
+        guardianExtraTimeAllowed = $GuardianExtraTimeAllowed
         timeRanges = @(
             [PSCustomObject]@{
                 startMinute = 0
@@ -365,6 +758,107 @@ function New-ContributorAppRuleConfig(
     return [PSCustomObject]@{
         appGroups = @($groupTarget, $groupContrib)
         appRules = @($rule)
+    }
+}
+
+function New-GuardianExtraTimePickerAppRuleConfig(
+    [string]$TargetPackage,
+    [string]$OtherPackage,
+    [string]$TargetGroupId = "picker-target-group",
+    [string]$OtherGroupId = "picker-other-group",
+    [string]$NightRuleId = "night-rule",
+    [string]$BlockingRuleId = "blocking-rule",
+    [string]$UsageRuleId = "usage-rule",
+    [string]$FutureRuleId = "future-rule",
+    [int]$FutureWindowStartMinute = 480
+) {
+    if ($FutureWindowStartMinute -lt 0 -or $FutureWindowStartMinute -ge 1440) {
+        Write-Error "FutureWindowStartMinute must be between 0 and 1439."
+    }
+
+    $targetGroup = New-TestAppGroup -GroupId $TargetGroupId -GroupName "테스트 타깃 앱" -Packages @($TargetPackage)
+    $otherGroup = New-TestAppGroup -GroupId $OtherGroupId -GroupName "다른 앱" -Packages @($OtherPackage)
+
+    $sharedRuleValues = @{
+        isActive = $true
+        weekdays = @(0, 1, 2, 3, 4, 5, 6)
+        startMinute = 0
+        endMinute = 0
+        usageConditionEnabled = $false
+        usageConditionMinutes = 0
+        contributorGroupConditionMinutes = [PSCustomObject]@{}
+        contributorGroupIds = @()
+        earnedAllowanceEnabled = $false
+        timeRanges = @([PSCustomObject]@{ startMinute = 0; endMinute = 0 })
+        rolloverEnabled = $false
+    }
+
+    $nightRule = [PSCustomObject]@{
+        id = $NightRuleId
+        name = "NightRule"
+        appGroupId = $TargetGroupId
+        allowedMinutes = [long]0
+        guardianExtraTimeAllowed = $false
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($TargetGroupId)
+            excludedGroupIds = @()
+        }
+    }
+    $blockingRule = [PSCustomObject]@{
+        id = $BlockingRuleId
+        name = "BlockingRule"
+        appGroupId = $TargetGroupId
+        allowedMinutes = [long]0
+        guardianExtraTimeAllowed = $true
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($TargetGroupId)
+            excludedGroupIds = @()
+        }
+    }
+    $usageRule = [PSCustomObject]@{
+        id = $UsageRuleId
+        name = "UsageRule"
+        appGroupId = $TargetGroupId
+        allowedMinutes = [long]1440
+        guardianExtraTimeAllowed = $true
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($TargetGroupId)
+            excludedGroupIds = @()
+        }
+    }
+    $futureRule = [PSCustomObject]@{
+        id = $FutureRuleId
+        name = "FutureRule"
+        appGroupId = $OtherGroupId
+        allowedMinutes = [long]1440
+        guardianExtraTimeAllowed = $true
+        timeRanges = @(
+            [PSCustomObject]@{
+                startMinute = $FutureWindowStartMinute
+                endMinute = (($FutureWindowStartMinute + 30) % 1440)
+            }
+        )
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($OtherGroupId)
+            excludedGroupIds = @()
+        }
+    }
+
+    foreach ($rule in @($nightRule, $blockingRule, $usageRule, $futureRule)) {
+        foreach ($property in $sharedRuleValues.GetEnumerator()) {
+            if (-not $rule.PSObject.Properties[$property.Key]) {
+                $rule | Add-Member -MemberType NoteProperty -Name $property.Key -Value $property.Value
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        appGroups = @($targetGroup, $otherGroup)
+        appRules = @($nightRule, $blockingRule, $usageRule, $futureRule)
     }
 }
 
@@ -430,6 +924,7 @@ function New-TimeRangeAppRuleConfig(
         contributorGroupConditionMinutes = [PSCustomObject]@{}
         contributorGroupIds = @()
         earnedAllowanceEnabled = $false
+        guardianExtraTimeAllowed = $true
         timeRanges = @(
             [PSCustomObject]@{
                 startMinute = $StartMinute
@@ -472,6 +967,7 @@ function New-DailyLimitAppRuleConfig(
         contributorGroupConditionMinutes = [PSCustomObject]@{}
         contributorGroupIds = @()
         earnedAllowanceEnabled = $false
+        guardianExtraTimeAllowed = $true
         timeRanges = @(
             [PSCustomObject]@{
                 startMinute = 0
@@ -617,12 +1113,54 @@ function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = ":app_block
     return $true
 }
 
+function Restart-DeviceAccessibilityServiceIfEnabled(
+    $AccessibilitySettings,
+    [int]$TimeoutSeconds = 30,
+    [string]$ProcessName = ":app_blocker_service"
+) {
+    if (-not $AccessibilitySettings) {
+        Write-Error "Accessibility settings backup is required before restarting the service."
+        return $null
+    }
+
+    $serviceComponent = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
+    $enabledComponents = @(([string]$AccessibilitySettings.EnabledServices) -split ":" | Where-Object { $_ })
+    if ([string]$AccessibilitySettings.AccessibilityEnabled -ne "1" -or $enabledComponents -notcontains $serviceComponent) {
+        return [PSCustomObject]@{ Skipped = $true; ProcessId = $null }
+    }
+
+    $initialPid = Get-DeviceProcessPid -ProcessName $ProcessName
+    if ($initialPid) {
+        Stop-ServiceProcess -TargetPid $initialPid -ProcessName $ProcessName | Out-Null
+    }
+
+    $wait = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $currentPid = Get-DeviceProcessPid -ProcessName $ProcessName
+        if ($currentPid -and (!$initialPid -or $currentPid -ne $initialPid) -and (Test-AccessibilityServiceBound)) {
+            return [PSCustomObject]@{ Skipped = $false; ProcessId = [int]$currentPid }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return [PSCustomObject]@{ Skipped = $false; ProcessId = $null }
+}
+
 function Enable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.debug", [string]$ServiceName = "neth.iecal.curbox.services.AppBlockerService") {
     $fullService = "$PackageName/$ServiceName"
-    $enabledServices = (adb shell "settings get secure enabled_accessibility_services" | Out-String).Trim()
-    if ($enabledServices -notmatch [regex]::Escape($fullService)) {
-        adb shell "settings put secure enabled_accessibility_services $fullService" | Out-Null
-        adb shell "settings put secure accessibility_enabled 1" | Out-Null
+    $enabledServices = Get-DeviceSecureSetting -Name "enabled_accessibility_services"
+    $accessibilityEnabled = Get-DeviceSecureSetting -Name "accessibility_enabled"
+    $serviceList = @($enabledServices -split ":" | Where-Object { $_ -and $_ -ne "null" })
+    $needsServiceUpdate = $serviceList -notcontains $fullService
+    $needsAccessibilityUpdate = $accessibilityEnabled -ne "1"
+
+    if ($needsServiceUpdate) {
+        $serviceList += $fullService
+        Invoke-TestDeviceShell -Command "settings put secure enabled_accessibility_services $($serviceList -join ':')"
+    }
+    if ($needsAccessibilityUpdate) {
+        Invoke-TestDeviceShell -Command "settings put secure accessibility_enabled 1"
+    }
+    if ($needsServiceUpdate -or $needsAccessibilityUpdate) {
         Start-Sleep -Seconds 2
     }
     return $true
@@ -651,6 +1189,7 @@ function New-RolloverAppRuleConfig(
         contributorGroupConditionMinutes = [PSCustomObject]@{}
         contributorGroupIds = @()
         earnedAllowanceEnabled = $false
+        guardianExtraTimeAllowed = $true
         rolloverEnabled = $true
         unlockDays = @($UnlockDays)
         timeRanges = @(
@@ -795,6 +1334,31 @@ function Set-DeviceRolloverState($RolloverState, [string]$PackageName = "neth.ie
 
     adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
     adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
+    Start-Sleep -Seconds 1
+    return $true
+}
+
+function Set-DeviceUseDayResetTime([int]$Hour, [int]$Minute, [string]$PackageName = "neth.iecal.curbox.debug") {
+    if ($Hour -lt 0 -or $Hour -gt 23 -or $Minute -lt 0 -or $Minute -gt 59) {
+        Write-Error "Use-day reset time must be a valid local clock time."
+        return $false
+    }
+
+    $settingsObj = Get-DeviceSettings -PackageName $PackageName -AsObject
+    if (-not $settingsObj) {
+        Write-Error "Failed to read settings.json to update the use-day reset time!"
+        return $false
+    }
+
+    $settingsObj.useDayResetHour = $Hour
+    $settingsObj.useDayResetMinute = $Minute
+    $jsonStr = $settingsObj | ConvertTo-Json -Depth 20 -Compress
+    Push-TempStringToDevice -Content $jsonStr -RemotePath "/data/local/tmp/settings_use_day_reset.json" | Out-Null
+    Invoke-TestDeviceShell -Command "run-as $PackageName cp /data/local/tmp/settings_use_day_reset.json files/datastore/settings.json"
+    Invoke-TestDeviceShell -Command "run-as $PackageName chmod 660 files/datastore/settings.json"
+    Invoke-TestDeviceShell -Command "rm -f /data/local/tmp/settings_use_day_reset.json"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName"
     Start-Sleep -Seconds 1
     return $true
 }

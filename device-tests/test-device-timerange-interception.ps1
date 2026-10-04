@@ -14,7 +14,7 @@
 
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
-    [string]$TargetActivity = "com.woodenpharm.choseonggacha.MainActivity",
+    [string]$TargetActivity = "",
     [int]$MaxPollSeconds = 90
 )
 
@@ -24,6 +24,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_timerange_test"
 if (-not (Test-Path $tmpDir)) {
@@ -72,7 +73,7 @@ try {
     Write-Step "4. Launching Target App ($TargetPackage) in advance (before timeRange start)..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Milliseconds 500
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     $launchSw = [System.Diagnostics.Stopwatch]::StartNew()
     $targetFocused = $false
@@ -142,11 +143,5 @@ try {
 
 } finally {
     Write-Step "Cleanup: Restoring original settings and resetting awake state..."
-    Set-DeviceAwake $false
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        adb shell "am force-stop $TargetPackage" | Out-Null
-        adb shell "input keyevent 3"
-        Write-Success "Original settings restored, target app stopped, returned to home."
-    }
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
 }

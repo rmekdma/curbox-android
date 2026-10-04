@@ -5,7 +5,7 @@
     1. Backs up original settings.json from device using device-test-common.
     2. Injects test AppRule configuration requiring 1 minute of contributor app usage.
     3. Launches target app and verifies GuardianApprovalActivity blocks it with '사용 조건 미달' (Step 1).
-    4. Launches contributor app (com.initialcoms.ridi) and maintains foreground for 70s to accumulate usage (Step 2).
+    4. Launches the selected contributor app and maintains foreground for 70s to accumulate usage (Step 2).
     5. Returns to home screen and waits 2s to flush usage session (Step 3).
     6. Relaunches target app and verifies it is unblocked and running in foreground (Step 4).
     7. Restores original settings.json and cleans up (Step 5).
@@ -13,9 +13,9 @@
 
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
-    [string]$TargetActivity = "com.woodenpharm.choseonggacha.MainActivity",
+    [string]$TargetActivity = "",
     [string]$ContributorPackage = "com.initialcoms.ridi",
-    [string]$ContributorActivity = "com.ridi.books.viewer.main.activity.SplashActivity",
+    [string]$ContributorActivity = "",
     [int]$UsageWaitSeconds = 70
 )
 
@@ -24,6 +24,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_contrib_test"
 if (-not (Test-Path $tmpDir)) {
@@ -58,7 +59,7 @@ try {
     Write-Step "1-2. Launching Target App ($TargetPackage) - Expecting Block (GuardianApprovalActivity)..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $focusResult = $null
@@ -90,7 +91,7 @@ try {
     adb shell "am force-stop $ContributorPackage" | Out-Null
     Start-Sleep -Milliseconds 500
 
-    adb shell "am start -n $ContributorPackage/$ContributorActivity" | Out-Null
+    Start-TestApp -PackageName $ContributorPackage -ActivityName $ContributorActivity
     Start-Sleep -Seconds 2
 
     $contribFocus = Assert-WindowFocus -ExpectedActivity $ContributorPackage -PassThru
@@ -119,7 +120,7 @@ try {
     Write-Step "4. Relaunching Target App ($TargetPackage) - Expecting Unblocked (MainActivity on top)..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
     Start-Sleep -Seconds 3
 
     $finalFocus = Assert-WindowFocus -ExpectedActivity "$TargetPackage" -PassThru
@@ -162,12 +163,5 @@ try {
 
 } finally {
     Write-Step "Cleanup: Restoring original settings and returning home..."
-    Set-DeviceAwake $false
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        adb shell "am force-stop $TargetPackage" | Out-Null
-        adb shell "am force-stop $ContributorPackage" | Out-Null
-        adb shell "input keyevent 3"
-        Write-Success "Original settings restored, apps stopped, returned to home."
-    }
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage, $ContributorPackage) -AccessibilitySettings $accessibilityBackup
 }

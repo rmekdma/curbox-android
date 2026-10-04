@@ -13,7 +13,9 @@
 #>
 
 param(
-    [string]$TargetPackage = "com.woodenpharm.choseonggacha"
+    [string]$TargetPackage = "com.woodenpharm.choseonggacha",
+    [string]$TargetActivity = "",
+    [string]$OtherPackage = "com.initialcoms.ridi"
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +24,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_dialog_ui_test"
 if (-not (Test-Path $tmpDir)) {
@@ -36,79 +39,14 @@ try {
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
     Write-Success "Backup saved to $backupFile"
 
-    Write-Step "2. Crafting Test AppRule configuration..."
-    $settingsObj = $rawSettings | ConvertFrom-Json
-
-    $targetGroupId = "test-target-group-01"
-    $contributorGroupId = "test-contrib-group-01"
-    $ruleId = "test-rule-01"
-
-    $groupTarget = [PSCustomObject]@{
-        id = $targetGroupId
-        name = "테스트 타깃 앱"
-        selectedPackages = @($TargetPackage)
-        membershipHistory = @(
-            [PSCustomObject]@{
-                effectiveFromMs = [long]-9223372036854775808
-                selectedPackages = @($TargetPackage)
-            }
-        )
-    }
-
-    $groupContrib = [PSCustomObject]@{
-        id = $contributorGroupId
-        name = "학습"
-        selectedPackages = @("com.initialcoms.ridi")
-        membershipHistory = @(
-            [PSCustomObject]@{
-                effectiveFromMs = [long]-9223372036854775808
-                selectedPackages = @("com.initialcoms.ridi")
-            }
-        )
-    }
-
-    $rule = [PSCustomObject]@{
-        id = $ruleId
-        name = "게임 제한"
-        isActive = $true
-        weekdays = @(0, 1, 2, 3, 4, 5, 6)
-        startMinute = 0
-        endMinute = 0
-        appGroupId = $targetGroupId
-        allowedMinutes = [long]30
-        usageConditionEnabled = $true
-        usageConditionMinutes = [long]20
-        contributorGroupConditionMinutes = [PSCustomObject]@{
-            $contributorGroupId = [long]15
-        }
-        contributorGroupIds = @($contributorGroupId)
-        earnedAllowanceEnabled = $false
-        timeRanges = @(
-            [PSCustomObject]@{
-                startMinute = 0
-                endMinute = 0
-            }
-        )
-        scope = [PSCustomObject]@{
-            includeAllApps = $false
-            includedGroupIds = @($targetGroupId)
-            excludedGroupIds = @()
-        }
-    }
-
-    # Reset any existing grants/skips for clean test state
-    $settingsObj.appRuleOverrideState = [PSCustomObject]@{
-        grants = @()
-        skips = @()
-        useDayGenerationStartedAtMs = [long]0
-        useDayId = (Get-Date -Format "yyyy-MM-dd")
-    }
-
-    $appRuleSnapshot = [PSCustomObject]@{
-        appGroups = @($groupTarget, $groupContrib)
-        appRules = @($rule)
-    }
-    $settingsObj.appRuleSnapshot = $appRuleSnapshot
+    Write-Step "2. Crafting an eligible rule picker with a blocking default..."
+    $deviceTimeInfo = Get-DeviceTimeInfo
+    if (-not $deviceTimeInfo) { throw "Could not read device time for the future-window rule fixture." }
+    $futureWindowStartMinute = (($deviceTimeInfo.CurrentMinute + 120) % 1440)
+    $appRuleSnapshot = New-GuardianExtraTimePickerAppRuleConfig `
+        -TargetPackage $TargetPackage `
+        -OtherPackage $OtherPackage `
+        -FutureWindowStartMinute $futureWindowStartMinute
 
     Write-Step "3. Injecting test AppRule configuration via broadcast seam..."
     Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot
@@ -120,7 +58,7 @@ try {
     adb shell "wm dismiss-keyguard"
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/com.woodenpharm.choseonggacha.MainActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     Write-Step "5. Verifying GuardianApprovalActivity is displayed..."
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -161,6 +99,83 @@ try {
         Write-Success "Extra Time Dialog displayed initial total 0 minutes!"
     } else {
         Write-Fail "Extra Time Dialog did not display expected initial total 0 min."
+        $passedAll = $false
+    }
+
+    $defaultIsBlockingRule = ($ui -match 'rule_picker[^>]*text="BlockingRule"' -or $ui -match 'text="BlockingRule"[^>]*rule_picker')
+    if ($defaultIsBlockingRule) {
+        Write-Success "The first eligible rule, which is actively blocking the target, is selected by default."
+    } else {
+        Write-Fail "The blocking eligible rule was not selected by default."
+        $passedAll = $false
+    }
+
+    $picker = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/rule_picker"'
+    if ($picker.Found) {
+        $pickerCandidates = Get-TestRulePickerOptions -CurrentUi $ui -CandidateCount 3
+        $candidateLabels = @($pickerCandidates.Options | ForEach-Object { $_.Label })
+        $expectedCandidateLabels = @("BlockingRule", "UsageRule", "FutureRule")
+        $hasExpectedCandidates = ($pickerCandidates.Success -and
+            $candidateLabels.Count -eq $expectedCandidateLabels.Count -and
+            @($expectedCandidateLabels | Where-Object { $candidateLabels -notcontains $_ }).Count -eq 0)
+        if ($hasExpectedCandidates) {
+            Write-Success "Picker includes eligible rules across target apps and excludes the disallowed NightRule."
+        } else {
+            Write-Fail "Picker candidates did not match enabled, extra-time-eligible rules."
+            Write-Host "[DIAGNOSTIC] Picker options: $($candidateLabels -join ' | ')" -ForegroundColor DarkYellow
+            $passedAll = $false
+        }
+
+        if ($hasExpectedCandidates) {
+            $usageSelection = Select-TestRulePickerOption -CurrentUi $pickerCandidates.Ui -CandidateOptions $pickerCandidates.Options -RuleName "UsageRule"
+            if ($usageSelection.Success) {
+                Write-Success "UsageRule is selected before the input reset check."
+                $ui = $usageSelection.Ui
+                $nodeAdditional = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
+                if ($nodeAdditional.Found) {
+                    adb shell "input tap $($nodeAdditional.X) $($nodeAdditional.Y)" | Out-Null
+                    adb shell "input text 15" | Out-Null
+                    $ui = Dump-UI
+                    $futureSelection = Select-TestRulePickerOption -CurrentUi $ui -CandidateOptions $pickerCandidates.Options -RuleName "FutureRule"
+                    if ($futureSelection.Success) {
+                        $resetUi = $futureSelection.Ui
+                        try {
+                            [xml]$resetDoc = $resetUi
+                            $resetAdditional = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
+                            $resetTotal = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/total_minutes_input']")
+                            $fieldsReset = ($resetAdditional -and $resetTotal -and $resetAdditional.GetAttribute("text") -ne "15" -and $resetTotal.GetAttribute("text") -ne "15")
+                        } catch {
+                            $fieldsReset = $false
+                        }
+                        if ($fieldsReset) {
+                            Write-Success "Changing rules clears both input fields instead of carrying the prior rule's value."
+                        } else {
+                            Write-Fail "Changing rules left stale input values or hid an input field."
+                            $passedAll = $false
+                        }
+
+                        $usageSelection = Select-TestRulePickerOption -CurrentUi $resetUi -CandidateOptions $pickerCandidates.Options -RuleName "UsageRule"
+                        if ($usageSelection.Success) {
+                            $ui = $usageSelection.Ui
+                        } else {
+                            Write-Fail "Could not restore UsageRule selection before cancellation checks."
+                            $passedAll = $false
+                        }
+                    } else {
+                        Write-Fail "Could not switch to FutureRule after entering a value."
+                        $passedAll = $false
+                    }
+                } else {
+                    Write-Fail "Could not find the additional-time input for the rule-switch reset check."
+                    $passedAll = $false
+                }
+            } else {
+                Write-Fail "Could not select UsageRule for the input reset check."
+                $passedAll = $false
+            }
+        }
+    } else {
+        Write-Fail "The app rule selector is missing from the grant form."
         $passedAll = $false
     }
 
@@ -306,11 +321,5 @@ try {
 
 } finally {
     Write-Step "11. Cleanup & Restoring original settings.json..."
-    Set-DeviceAwake $false
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        adb shell "am force-stop $TargetPackage" | Out-Null
-        adb shell "input keyevent 3" # HOME
-        Write-Success "Original settings restored, target app stopped, returned to home."
-    }
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
 }
