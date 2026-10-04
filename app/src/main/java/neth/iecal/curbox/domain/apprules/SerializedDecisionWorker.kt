@@ -969,6 +969,7 @@ private class SerializedForegroundSessionPersistence(
     private data class ActiveSession(
         val packageName: String,
         val useDayId: String,
+        val useDayGenerationStartedAtMs: Long,
         val sessionId: Long,
         val recordingEnabled: Boolean,
         val statisticsTracked: Boolean,
@@ -992,11 +993,13 @@ private class SerializedForegroundSessionPersistence(
         val suppressLaunchForRotation = mutableSetOf<String>()
         for (packageName in existingPackages) {
             val session = active[packageName] ?: continue
-            val policyRotated = session.recordingEnabled != recordingEnabled ||
-                session.statisticsTracked != usageTrackingDecision.recordStatistics
+            val sessionBoundaryChanged =
+                session.useDayGenerationStartedAtMs != runtime.useDayGenerationStartedAtMs ||
+                    session.recordingEnabled != recordingEnabled ||
+                    session.statisticsTracked != usageTrackingDecision.recordStatistics
             val remainsVisible = packageName in visiblePackages &&
                 session.useDayId == currentUseDayId &&
-                !policyRotated
+                !sessionBoundaryChanged
             if (!flush(session, nowWallMs, nowElapsedMs)) return false
             if (!remainsVisible) {
                 if (packageName in visiblePackages) {
@@ -1029,6 +1032,7 @@ private class SerializedForegroundSessionPersistence(
             active[packageName] = ActiveSession(
                 packageName = packageName,
                 useDayId = currentUseDayId,
+                useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
                 sessionId = id,
                 recordingEnabled = recordingEnabled,
                 statisticsTracked = usageTrackingDecision.recordStatistics,
@@ -1075,6 +1079,7 @@ private class SerializedForegroundSessionPersistence(
             val session = active[restart.packageName] ?: return@forEach
             active[restart.packageName] = session.copy(
                 useDayId = request.useDayId,
+                useDayGenerationStartedAtMs = request.generationStartedAtMs,
                 sessionId = restartedSessionId,
                 lastCommittedWallMs = request.resetAtMs,
                 lastCommittedElapsedMs = maxOf(
