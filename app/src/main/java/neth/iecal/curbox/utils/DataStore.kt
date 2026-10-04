@@ -113,6 +113,7 @@ class GsonSerializer<T>(
             }
             rule.add("contributorGroupConditionMinutes", normalizedGroupConditions)
             ensureBoolean(rule, "earnedAllowanceEnabled", false)
+            ensureBoolean(rule, "guardianExtraTimeAllowed", true)
             ensureArray(rule, "contributorGroupIds")
             ensureArray(rule, "timeRanges")
             val ranges = normalizedArray(arrayField(rule, "timeRanges")) { range ->
@@ -405,6 +406,10 @@ class DataStoreManager(private val context: Context) {
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
+            if (current.appRuleSnapshot.appRules.none {
+                    it.id == ruleId && it.guardianExtraTimeAllowed
+                }
+            ) return@updateData current
             val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
                 neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
                     current.appRuleOverrideState,
@@ -449,6 +454,10 @@ class DataStoreManager(private val context: Context) {
         val updated = settingsDataStore.updateData { current ->
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
+            ) return@updateData current
+            if (current.appRuleSnapshot.appRules.none {
+                    it.id == ruleId && it.guardianExtraTimeAllowed
+                }
             ) return@updateData current
 
             val pool = current.appRuleRolloverState.pools[ruleId] ?: return@updateData current
@@ -532,17 +541,31 @@ class DataStoreManager(private val context: Context) {
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
-            current.copy(appRuleOverrideState = state)
+            val allowedRuleIds = current.appRuleSnapshot.appRules
+                .filter { it.guardianExtraTimeAllowed }
+                .map { it.id }
+                .toSet()
+            val filtered = state.copy(grants = state.grants.filter { it.ruleId in allowedRuleIds })
+            current.copy(appRuleOverrideState = filtered)
         }
         return updated.appRuleOverrideState == state
     }
 
     /** Trusted runtime settlement and in-app management use this immediate write path. */
-    suspend fun writeAppRuleRolloverState(state: AppRuleRolloverState): Boolean {
+    suspend fun writeAppRuleRolloverState(state: AppRuleRolloverState, basedOn: Settings): Boolean {
         val updated = settingsDataStore.updateData { current ->
+            if (!neth.iecal.curbox.domain.apprules.appRuleRolloverInputsMatch(current, basedOn)) {
+                return@updateData current
+            }
             val mergedPools = current.appRuleRolloverState.pools.toMutableMap()
             for ((ruleId, newPool) in state.pools) {
+                val rule = current.appRuleSnapshot.appRules.find { it.id == ruleId }
+                    ?: continue
                 val existing = mergedPools[ruleId]
+                if (!rule.guardianExtraTimeAllowed) {
+                    if (newPool.accumulatedMinutes == 0L) mergedPools[ruleId] = newPool
+                    continue
+                }
                 if (existing == null || newPool.lastSettledUseDayId >= existing.lastSettledUseDayId) {
                     mergedPools[ruleId] = newPool
                 }
@@ -551,7 +574,12 @@ class DataStoreManager(private val context: Context) {
         }
         return state.pools.all { (ruleId, pool) ->
             val settled = updated.appRuleRolloverState.pools[ruleId]
-            settled != null && settled.lastSettledUseDayId >= pool.lastSettledUseDayId
+            val ruleAllowsExtraTime = updated.appRuleSnapshot.appRules
+                .any { it.id == ruleId && it.guardianExtraTimeAllowed }
+            (ruleAllowsExtraTime || pool.accumulatedMinutes == 0L) &&
+                settled != null &&
+                settled.accumulatedMinutes == pool.accumulatedMinutes &&
+                settled.lastSettledUseDayId >= pool.lastSettledUseDayId
         }
     }
 
@@ -638,6 +666,7 @@ class DataStoreManager(private val context: Context) {
                 useDayGenerationStartedAtMs = current.useDayGenerationStartedAtMs,
                 guardianAuthConfig = current.guardianAuthConfig,
                 appRuleOverrideState = current.appRuleOverrideState,
+                appRuleRolloverState = current.appRuleRolloverState,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -652,12 +681,16 @@ class DataStoreManager(private val context: Context) {
                 if ((!timeGateActive && !tamperGated) ||
                     RestrictionComparator.isSameOrStricter(field, current, proposed)
                 ) {
+                    val now = System.currentTimeMillis()
                     updated = proposed.copy(
                         settingsChangeDelayConfig2 = proposed.settingsChangeDelayConfig2.copy(
                             pendingChanges = proposed.settingsChangeDelayConfig2.pendingChanges
                                 .filterNot { it.field == field.name }
                         )
                     )
+                    if (field == GatedSettingsField.APP_RULES) {
+                        updated = applyGuardianExtraTimeRevocations(updated, proposed, now)
+                    }
                 } else {
                     val now = System.currentTimeMillis()
                     val delayMinutes = delayConfig.delayMinutes.coerceIn(
@@ -671,12 +704,22 @@ class DataStoreManager(private val context: Context) {
                         requestedAtMs = now,
                         appliesAtMs = appliesAt,
                     )
-                    updated = updated.copy(
+                    val withPendingChange = updated.copy(
                         settingsChangeDelayConfig2 = updated.settingsChangeDelayConfig2.copy(
                             pendingChanges = updated.settingsChangeDelayConfig2.pendingChanges
                                 .filterNot { it.field == field.name } + pending
                         )
                     )
+                    updated = if (field == GatedSettingsField.APP_RULES) {
+                        applyImmediateGuardianExtraTimeDisables(
+                            current = updated,
+                            proposed = proposed,
+                            result = withPendingChange,
+                            nowMs = now
+                        )
+                    } else {
+                        withPendingChange
+                    }
                 }
             }
             updated
@@ -1042,8 +1085,13 @@ class DataStoreManager(private val context: Context) {
                 } else {
                     proposed
                 }
-                val effectiveDelayConfig = effective.settingsChangeDelayConfig2
-                effective.copy(settingsChangeDelayConfig2 = effectiveDelayConfig.copy(
+                val effectiveWithRevocations = if (field == GatedSettingsField.APP_RULES) {
+                    applyGuardianExtraTimeRevocations(current, effective, transactionNowMs)
+                } else {
+                    effective
+                }
+                val effectiveDelayConfig = effectiveWithRevocations.settingsChangeDelayConfig2
+                effectiveWithRevocations.copy(settingsChangeDelayConfig2 = effectiveDelayConfig.copy(
                     pendingChanges = effectiveDelayConfig.pendingChanges.filterNot { it.field == field.name }
                 ))
             } else {
@@ -1062,9 +1110,19 @@ class DataStoreManager(private val context: Context) {
                         emptyMap()
                     }
                 )
-                current.copy(settingsChangeDelayConfig2 = delayConfig.copy(
+                val withPendingChange = current.copy(settingsChangeDelayConfig2 = delayConfig.copy(
                     pendingChanges = delayConfig.pendingChanges.filterNot { it.field == field.name } + pending
                 ))
+                if (field == GatedSettingsField.APP_RULES) {
+                    applyImmediateGuardianExtraTimeDisables(
+                        current = current,
+                        proposed = proposed,
+                        result = withPendingChange,
+                        nowMs = now
+                    )
+                } else {
+                    withPendingChange
+                }
             }
         }
         schedulePendingChanges()
@@ -1084,7 +1142,7 @@ class DataStoreManager(private val context: Context) {
     ): Settings? {
         val field = runCatching { GatedSettingsField.valueOf(change.field) }.getOrNull() ?: return null
         val parsed = withFieldValue(settings, field, change.newValueJson) ?: return null
-        return if (field == GatedSettingsField.APP_RULES &&
+        val applied = if (field == GatedSettingsField.APP_RULES &&
             change.appGroupEditModes.isNotEmpty() &&
             effectiveAtNowMs != null
         ) {
@@ -1097,6 +1155,54 @@ class DataStoreManager(private val context: Context) {
         } else {
             parsed
         }
+        return if (field == GatedSettingsField.APP_RULES && effectiveAtNowMs != null) {
+            applyGuardianExtraTimeRevocations(settings, applied, effectiveAtNowMs)
+        } else {
+            applied
+        }
+    }
+
+    private fun applyGuardianExtraTimeRevocations(
+        current: Settings,
+        proposed: Settings,
+        nowMs: Long
+    ): Settings {
+        val disabledRuleIds = proposed.appRuleSnapshot.appRules
+            .filterNot { it.guardianExtraTimeAllowed }
+            .map { it.id }
+            .toSet()
+        val withLocalRuntime = proposed.copy(
+            appRuleOverrideState = current.appRuleOverrideState,
+            appRuleRolloverState = current.appRuleRolloverState
+        )
+        if (disabledRuleIds.isEmpty()) return withLocalRuntime
+
+        val useDayId = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime).idAt(nowMs)
+        return withLocalRuntime.clearGuardianExtraTimeForRules(disabledRuleIds, useDayId)
+    }
+
+    /** Applies only requested OFF transitions while unrelated weakening changes remain pending. */
+    private fun applyImmediateGuardianExtraTimeDisables(
+        current: Settings,
+        proposed: Settings,
+        result: Settings,
+        nowMs: Long
+    ): Settings {
+        val proposedRulesById = proposed.appRuleSnapshot.appRules.associateBy { it.id }
+        val immediatelyDisabledRules = current.appRuleSnapshot.appRules.map { currentRule ->
+            val proposedRule = proposedRulesById[currentRule.id]
+            if (currentRule.guardianExtraTimeAllowed &&
+                proposedRule?.guardianExtraTimeAllowed == false
+            ) {
+                currentRule.copy(guardianExtraTimeAllowed = false)
+            } else {
+                currentRule
+            }
+        }
+        val immediatelyEffective = result.copy(
+            appRuleSnapshot = current.appRuleSnapshot.copy(appRules = immediatelyDisabledRules)
+        )
+        return applyGuardianExtraTimeRevocations(current, immediatelyEffective, nowMs)
     }
 
     private fun overlayPendingChanges(settings: Settings): Settings {
@@ -1305,6 +1411,29 @@ class DataStoreManager(private val context: Context) {
     }
 }
 
+/** Clears all guardian grants and accumulated time for rules whose setting is actually off. */
+internal fun Settings.clearGuardianExtraTimeForRules(
+    ruleIds: Set<String>,
+    currentUseDayId: String
+): Settings {
+    if (ruleIds.isEmpty()) return this
+    val nextPools = appRuleRolloverState.pools.toMutableMap()
+    ruleIds.forEach { ruleId ->
+        val pool = nextPools[ruleId]
+            ?: neth.iecal.curbox.data.models.RuleRolloverPool(ruleId = ruleId)
+        nextPools[ruleId] = pool.copy(
+            accumulatedMinutes = 0L,
+            lastSettledUseDayId = currentUseDayId
+        )
+    }
+    return copy(
+        appRuleOverrideState = appRuleOverrideState.copy(
+            grants = appRuleOverrideState.grants.filterNot { it.ruleId in ruleIds }
+        ),
+        appRuleRolloverState = AppRuleRolloverState(pools = nextPools)
+    )
+}
+
 /**
  * Pure success predicates for guardian writes.  The caller must use the value returned by
  * DataStore.updateData; inspecting mutable state from inside its transform is not retry safe.
@@ -1319,7 +1448,9 @@ internal object GuardianDataStoreWriteResult {
         useDayId: String,
         grantedMillis: Long,
         grantedAtMs: Long
-    ): Boolean = settings.appRuleOverrideState.grants.any {
+    ): Boolean = settings.appRuleSnapshot.appRules.any {
+        it.id == ruleId && it.guardianExtraTimeAllowed
+    } && settings.appRuleOverrideState.grants.any {
         it.ruleId == ruleId &&
             it.useDayId == useDayId &&
             it.grantedMillis == grantedMillis &&
@@ -1350,6 +1481,9 @@ internal object GuardianDataStoreWriteResult {
     ): Boolean {
         val pool = settings.appRuleRolloverState.pools[ruleId]
         val poolMatches = pool != null && pool.accumulatedMinutes == expectedRemainingPoolMinutes
+        val ruleAllowsGuardianTime = settings.appRuleSnapshot.appRules.any {
+            it.id == ruleId && it.guardianExtraTimeAllowed
+        }
         val grantMatches = settings.appRuleOverrideState.grants.any {
             it.ruleId == ruleId &&
                 it.useDayId == useDayId &&
@@ -1357,6 +1491,6 @@ internal object GuardianDataStoreWriteResult {
                 it.grantedAtMs == grantedAtMs &&
                 it.isFromAccumulatedPool
         }
-        return poolMatches && grantMatches
+        return ruleAllowsGuardianTime && poolMatches && grantMatches
     }
 }

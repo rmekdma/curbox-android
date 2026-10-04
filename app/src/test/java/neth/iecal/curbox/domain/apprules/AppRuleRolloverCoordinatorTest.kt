@@ -68,7 +68,7 @@ class AppRuleRolloverCoordinatorTest {
             sessionRepository = repo,
             zone = { zone },
             readSettings = { initialSettings },
-            writeRolloverState = { state: AppRuleRolloverState ->
+            writeRolloverState = { state: AppRuleRolloverState, _ ->
                 writtenState = state
                 true
             }
@@ -114,7 +114,7 @@ class AppRuleRolloverCoordinatorTest {
             sessionRepository = FakeSessionRepository(),
             zone = { zone },
             readSettings = { initialSettings },
-            writeRolloverState = { state: AppRuleRolloverState ->
+            writeRolloverState = { state: AppRuleRolloverState, _ ->
                 writtenState = state
                 true
             }
@@ -163,7 +163,7 @@ class AppRuleRolloverCoordinatorTest {
             sessionRepository = FakeSessionRepository(),
             zone = { zone },
             readSettings = { initialSettings },
-            writeRolloverState = { state: AppRuleRolloverState ->
+            writeRolloverState = { state: AppRuleRolloverState, _ ->
                 writtenState = state
                 true
             }
@@ -202,7 +202,7 @@ class AppRuleRolloverCoordinatorTest {
             sessionRepository = FakeSessionRepository(),
             zone = { zone },
             readSettings = { initialSettings },
-            writeRolloverState = { true }
+            writeRolloverState = { _, _ -> true }
         )
 
         val tuesdayMs = Instant.parse("2026-08-18T06:00:00Z").toEpochMilli()
@@ -211,6 +211,100 @@ class AppRuleRolloverCoordinatorTest {
         assertTrue(result.committed)
         assertEquals(25L, result.settledPools["rule1"]?.accumulatedMinutes)
         assertEquals("2026-08-18", result.settledPools["rule1"]?.lastSettledUseDayId)
+    }
+
+    @Test
+    fun disabledGuardianExtraTimeClearsPoolWithoutSettlingOldGrants() = runBlocking {
+        val rule = AppRule(
+            id = "rule1",
+            appGroupId = group.id,
+            allowedMinutes = 30,
+            rolloverEnabled = true,
+            unlockDays = setOf(6, 0),
+            guardianExtraTimeAllowed = false
+        )
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+        val pool = RuleRolloverPool("rule1", 20L, "2026-08-17")
+        val settings = Settings(
+            appRuleSnapshot = snapshot,
+            appRuleRolloverState = AppRuleRolloverState(pools = mapOf(pool.ruleId to pool)),
+            appRuleOverrideState = AppRuleOverrideState(
+                useDayId = "2026-08-17",
+                grants = listOf(
+                    AppRuleGuardianGrant(rule.id, "2026-08-17", 1_000L, 15 * 60_000L)
+                )
+            )
+        )
+        var writtenState: AppRuleRolloverState? = null
+        val coordinator = AppRuleRolloverCoordinator(
+            sessionRepository = FakeSessionRepository(),
+            zone = { zone },
+            readSettings = { settings },
+            writeRolloverState = { next, _ ->
+                writtenState = next
+                true
+            }
+        )
+
+        val result = coordinator.reconcileSettlement(
+            Instant.parse("2026-08-18T04:01:00Z").toEpochMilli()
+        )
+
+        assertTrue(result.committed)
+        assertTrue(result.transitions.isEmpty())
+        assertEquals(0L, result.settledPools.getValue("rule1").accumulatedMinutes)
+        assertEquals("2026-08-18", writtenState?.pools?.get("rule1")?.lastSettledUseDayId)
+    }
+
+    @Test
+    fun settlementCalculatedBeforeDisableCannotCommitAfterReenable() = runBlocking {
+        val rule = AppRule(
+            id = "rule1",
+            appGroupId = group.id,
+            allowedMinutes = 30,
+            rolloverEnabled = true,
+            unlockDays = setOf(6, 0)
+        )
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+        val pool = RuleRolloverPool("rule1", 10L, "2026-08-17")
+        val original = Settings(
+            appRuleSnapshot = snapshot,
+            appRuleRolloverState = AppRuleRolloverState(pools = mapOf(pool.ruleId to pool)),
+            appRuleOverrideState = AppRuleOverrideState(
+                useDayId = "2026-08-17",
+                grants = listOf(
+                    AppRuleGuardianGrant(rule.id, "2026-08-17", 1_000L, 20 * 60_000L)
+                )
+            )
+        )
+        var latest = original
+        val coordinator = AppRuleRolloverCoordinator(
+            sessionRepository = FakeSessionRepository(),
+            zone = { zone },
+            readSettings = { original },
+            writeRolloverState = { _, basedOn ->
+                val offSnapshot = AppRuleSnapshot(
+                    listOf(group),
+                    listOf(rule.copy(guardianExtraTimeAllowed = false))
+                )
+                val offPool = RuleRolloverPool("rule1", 0L, "2026-08-18")
+                val disabled = original.copy(
+                    appRuleSnapshot = offSnapshot,
+                    appRuleRolloverState = AppRuleRolloverState(pools = mapOf("rule1" to offPool)),
+                    appRuleOverrideState = original.appRuleOverrideState.copy(grants = emptyList())
+                )
+                latest = disabled.copy(appRuleSnapshot = snapshot)
+                appRuleRolloverInputsMatch(latest, basedOn)
+            }
+        )
+
+        val result = coordinator.reconcileSettlement(
+            Instant.parse("2026-08-18T04:01:00Z").toEpochMilli()
+        )
+
+        assertFalse(result.committed)
+        assertEquals(0L, latest.appRuleRolloverState.poolFor("rule1").accumulatedMinutes)
+        assertTrue(latest.appRuleOverrideState.grants.isEmpty())
     }
 
     @Test

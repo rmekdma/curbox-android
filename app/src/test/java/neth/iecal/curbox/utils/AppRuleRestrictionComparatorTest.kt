@@ -2,14 +2,20 @@ package neth.iecal.curbox.utils
 
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleRolloverState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.GatedSettingsField
+import neth.iecal.curbox.data.models.RuleRolloverPool
 import neth.iecal.curbox.data.models.Settings
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -37,6 +43,108 @@ class AppRuleRestrictionComparatorTest {
         )
 
         assertTrue(RestrictionComparator.isSameOrStricter(GatedSettingsField.APP_RULES, old, proposed))
+    }
+
+    @Test
+    fun disablingGuardianExtraTimeIsImmediateButEnablingItIsDelayed() {
+        val allowed = rule.copy(guardianExtraTimeAllowed = true)
+        val disabled = allowed.copy(guardianExtraTimeAllowed = false)
+        val oldAllowed = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(allowed)))
+        val proposedDisabled = oldAllowed.copy(
+            appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(disabled))
+        )
+        val oldDisabled = Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(disabled)))
+        val proposedEnabled = oldDisabled.copy(
+            appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(allowed))
+        )
+
+        assertTrue(
+            RestrictionComparator.isSameOrStricter(
+                GatedSettingsField.APP_RULES,
+                oldAllowed,
+                proposedDisabled
+            )
+        )
+        assertFalse(
+            RestrictionComparator.isSameOrStricter(
+                GatedSettingsField.APP_RULES,
+                oldDisabled,
+                proposedEnabled
+            )
+        )
+    }
+
+    @Test
+    fun enablingGuardianExtraTimeIsDelayedEvenWhenTheRuleIsInactive() {
+        val disabled = rule.copy(isActive = false, guardianExtraTimeAllowed = false)
+        val enabled = disabled.copy(guardianExtraTimeAllowed = true)
+
+        assertFalse(
+            RestrictionComparator.isSameOrStricter(
+                GatedSettingsField.APP_RULES,
+                Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(disabled))),
+                Settings(appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(enabled)))
+            )
+        )
+    }
+
+    @Test
+    fun missingGuardianExtraTimeFieldDefaultsToAllowed() {
+        val json = JsonParser.parseString(Gson().toJson(rule)).asJsonObject.apply {
+            remove("guardianExtraTimeAllowed")
+        }
+
+        val restored = Gson().fromJson(json, AppRule::class.java)
+
+        assertTrue(restored.guardianExtraTimeAllowed)
+    }
+
+    @Test
+    fun settingsSerializerRestoresMissingGuardianExtraTimeAsAllowed() = runBlocking {
+        val settings = Settings(
+            appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+        )
+        val root = JsonParser.parseString(Gson().toJson(settings)).asJsonObject
+        root.getAsJsonObject("appRuleSnapshot")
+            .getAsJsonArray("appRules")
+            .get(0).asJsonObject
+            .remove("guardianExtraTimeAllowed")
+
+        val restored = GsonSerializer(Gson(), Settings::class.java, Settings()).readFrom(
+            ByteArrayInputStream(root.toString().toByteArray())
+        )
+
+        assertTrue(restored.appRuleSnapshot.appRules.single().guardianExtraTimeAllowed)
+    }
+
+    @Test
+    fun disabledGuardianExtraTimeAndClearedPoolSurviveSettingsReloadAndReenable() = runBlocking {
+        val disabledRule = rule.copy(guardianExtraTimeAllowed = false)
+        val disabledSettings = Settings(
+            appRuleSnapshot = AppRuleSnapshot(listOf(group), listOf(disabledRule)),
+            appRuleRolloverState = AppRuleRolloverState(
+                pools = mapOf(rule.id to RuleRolloverPool(rule.id, 0L, "2026-08-17"))
+            )
+        )
+        val serializer = GsonSerializer(Gson(), Settings::class.java, Settings())
+        val output = ByteArrayOutputStream()
+        serializer.writeTo(disabledSettings, output)
+
+        val restored = serializer.readFrom(ByteArrayInputStream(output.toByteArray()))
+        assertFalse(restored.appRuleSnapshot.appRules.single().guardianExtraTimeAllowed)
+        assertTrue(restored.appRuleOverrideState.grants.isEmpty())
+        assertEquals(0L, restored.appRuleRolloverState.poolFor(rule.id).accumulatedMinutes)
+
+        val reenabled = restored.copy(
+            appRuleSnapshot = restored.appRuleSnapshot.copy(
+                appRules = restored.appRuleSnapshot.appRules.map {
+                    it.copy(guardianExtraTimeAllowed = true)
+                }
+            )
+        )
+        assertTrue(reenabled.appRuleSnapshot.appRules.single().guardianExtraTimeAllowed)
+        assertTrue(reenabled.appRuleOverrideState.grants.isEmpty())
+        assertEquals(0L, reenabled.appRuleRolloverState.poolFor(rule.id).accumulatedMinutes)
     }
 
     @Test

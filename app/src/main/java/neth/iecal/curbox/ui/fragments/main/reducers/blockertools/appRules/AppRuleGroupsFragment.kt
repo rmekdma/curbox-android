@@ -210,7 +210,8 @@ class AppRuleGroupsFragment : Fragment() {
                 snapshot = snapshot,
                 evaluation = evaluations?.get(rule.id),
                 usageAvailable = usageAvailable,
-                rolloverPool = settings.appRuleRolloverState.pools[rule.id]
+                rolloverPool = settings.appRuleRolloverState.pools[rule.id],
+                basedOnSettings = settings
             )
         }
     }
@@ -273,7 +274,8 @@ class AppRuleGroupsFragment : Fragment() {
         snapshot: AppRuleSnapshot,
         evaluation: AppRuleEvaluation?,
         usageAvailable: Boolean,
-        rolloverPool: RuleRolloverPool?
+        rolloverPool: RuleRolloverPool?,
+        basedOnSettings: Settings
     ) {
         val scope = rule.effectiveScope()
         val groupNames = scope.includedGroupIds.mapNotNull { id ->
@@ -289,7 +291,8 @@ class AppRuleGroupsFragment : Fragment() {
         val contributorNames = scopeContributorNames(rule, snapshot)
         val missingContributorIds = snapshot.missingContributorGroupIds(rule)
         val poolMinutes = rolloverPool?.accumulatedMinutes ?: 0L
-        val hasRolloverInfo = rule.rolloverEnabled || poolMinutes > 0L
+        val hasRolloverInfo = rule.guardianExtraTimeAllowed &&
+            (rule.rolloverEnabled || poolMinutes > 0L)
         val status = buildString {
             append(
                 getString(
@@ -337,7 +340,12 @@ class AppRuleGroupsFragment : Fragment() {
                 )
             )
             append("\n")
-            append(formatAppRuleRolloverSummary(rule) { resId, args ->
+            val effectiveRolloverRule = if (rule.guardianExtraTimeAllowed) {
+                rule
+            } else {
+                rule.copy(rolloverEnabled = false, unlockDays = emptySet())
+            }
+            append(formatAppRuleRolloverSummary(effectiveRolloverRule) { resId, args ->
                 if (args.isEmpty()) getString(resId) else getString(resId, *args)
             })
             if (hasRolloverInfo) {
@@ -412,7 +420,7 @@ class AppRuleGroupsFragment : Fragment() {
                 text = status
                 textSize = 15f
             })
-            if (hasRolloverInfo) {
+            if (hasRolloverInfo && rule.guardianExtraTimeAllowed) {
                 addView(MaterialButton(
                     context,
                     null,
@@ -420,7 +428,7 @@ class AppRuleGroupsFragment : Fragment() {
                 ).apply {
                     text = getString(R.string.app_rules_change_accumulated_time)
                     setOnClickListener {
-                        showChangeAccumulatedTimeDialog(rule, poolMinutes)
+                        showChangeAccumulatedTimeDialog(rule, poolMinutes, basedOnSettings)
                     }
                 }, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -439,7 +447,12 @@ class AppRuleGroupsFragment : Fragment() {
         })
     }
 
-    private fun showChangeAccumulatedTimeDialog(rule: AppRule, currentMinutes: Long) {
+    private fun showChangeAccumulatedTimeDialog(
+        rule: AppRule,
+        currentMinutes: Long,
+        basedOnSettings: Settings
+    ) {
+        if (!rule.guardianExtraTimeAllowed) return
         val dialogBinding = DialogGuardianAccumulatedTimeBinding.inflate(layoutInflater)
         dialogBinding.accumulatedTotalDesc.text = getString(
             R.string.app_rules_accumulated_time_summary,
@@ -479,12 +492,11 @@ class AppRuleGroupsFragment : Fragment() {
                     }
                     is InAppAccumulatedTimeSubmission.Valid -> {
                         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                            val currentSettings = dataStore.settings.first()
-                            val existingPool = currentSettings.appRuleRolloverState.pools[rule.id]
+                            val existingPool = basedOnSettings.appRuleRolloverState.pools[rule.id]
                             val updatedPool = (existingPool ?: RuleRolloverPool(ruleId = rule.id))
                                 .copy(accumulatedMinutes = submission.minutes)
-                            val newState = currentSettings.appRuleRolloverState.withPool(updatedPool)
-                            val success = dataStore.writeAppRuleRolloverState(newState)
+                            val newState = basedOnSettings.appRuleRolloverState.withPool(updatedPool)
+                            val success = dataStore.writeAppRuleRolloverState(newState, basedOnSettings)
                             withContext(Dispatchers.Main) {
                                 if (isAdded && success) {
                                     dialog.dismiss()

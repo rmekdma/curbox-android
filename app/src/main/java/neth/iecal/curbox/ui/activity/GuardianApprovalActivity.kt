@@ -172,18 +172,34 @@ class GuardianApprovalActivity : AppCompatActivity() {
             selectedRuleId = GuardianApprovalSelection
                 .selectedDenial(denials, checkedId - 1)
                 ?.ruleId
+            updateGuardianGrantButton(selectedRuleId)
             updateAccumulatedButton(selectedRuleId)
         }
         binding.approvalAddTime.setOnClickListener { requestGrant() }
         binding.approvalUseAccumulatedTime.setOnClickListener { requestAccumulatedGrant() }
         binding.approvalSkipRule.setOnClickListener { requestSkip() }
         binding.approvalCancel.setOnClickListener { navigateHomeAndFinish() }
+        updateGuardianGrantButton(selectedRuleId)
         updateAccumulatedButton(selectedRuleId)
     }
 
-    private fun updateAccumulatedButton(ruleId: String?) {
+    private fun updateGuardianGrantButton(ruleId: String?) {
+        binding.approvalAddTime.visibility = View.GONE
         if (ruleId == null) {
-            binding.approvalUseAccumulatedTime.visibility = View.GONE
+            return
+        }
+        lifecycleScope.launch {
+            val allowed = dataStore.settings.first().appRuleSnapshot.appRules
+                .any { it.id == ruleId && it.guardianExtraTimeAllowed }
+            if (selectedRuleId == ruleId) {
+                binding.approvalAddTime.visibility = if (allowed) View.VISIBLE else View.GONE
+            }
+        }
+    }
+
+    private fun updateAccumulatedButton(ruleId: String?) {
+        binding.approvalUseAccumulatedTime.visibility = View.GONE
+        if (ruleId == null) {
             return
         }
         lifecycleScope.launch {
@@ -225,6 +241,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             } catch (_: Exception) {
                 return@launch
             }
+            if (currentTotalMinutes == null) return@launch
 
             if (selectedRuleId != ruleId) {
                 requestGrant()
@@ -234,8 +251,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun readCurrentGrantTotalMinutes(ruleId: String): Long {
+    private suspend fun readCurrentGrantTotalMinutes(ruleId: String): Long? {
         val settings = dataStore.settings.first()
+        if (settings.appRuleSnapshot.appRules.none {
+                it.id == ruleId && it.guardianExtraTimeAllowed
+            }
+        ) return null
         val now = System.currentTimeMillis()
         val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
         val useDayId = calculator.idAt(now)

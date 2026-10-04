@@ -33,6 +33,8 @@
     <string name="app_rules_thursday_short">목</string>
     <string name="app_rules_friday_short">금</string>
     <string name="app_rules_saturday_short">토</string>
+    <string name="app_rules_guardian_extra_time_allowed">보호자 추가 시간 허용</string>
+    <string name="app_rules_guardian_extra_time_cleared_desc">끄면 오늘 지급한 추가 시간과 누적 시간이 모두 삭제돼요.</string>
     <string name="app_rules_rollover_enabled">미소진 보호자 추가시간 이월</string>
     <string name="app_rules_unlock_days">해금 요일</string>
     <string name="app_rules_rollover_unlock_days_required">이월 기능을 켜려면 해금 요일을 하나 이상 선택해 주세요</string>

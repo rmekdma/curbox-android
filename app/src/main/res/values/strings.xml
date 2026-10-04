@@ -1469,6 +1469,8 @@
     <string name="app_rules_thursday_short">Thu</string>
     <string name="app_rules_friday_short">Fri</string>
     <string name="app_rules_saturday_short">Sat</string>
+    <string name="app_rules_guardian_extra_time_allowed">Allow guardian extra time</string>
+    <string name="app_rules_guardian_extra_time_cleared_desc">Turning this off clears today\'s extra time and accumulated time.</string>
     <string name="app_rules_rollover_enabled">Roll over unused extra time</string>
     <string name="app_rules_unlock_days">Unlock days</string>
     <string name="app_rules_rollover_unlock_days_required">Choose at least one unlock day to roll over extra time</string>
