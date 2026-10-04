@@ -15,6 +15,8 @@ import android.text.TextWatcher
 import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.Toast
+import android.widget.ArrayAdapter
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -23,22 +25,27 @@ import com.google.gson.reflect.TypeToken
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import android.view.View
 import neth.iecal.curbox.R
+import neth.iecal.curbox.data.db.AppDatabase
+import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
+import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.databinding.ActivityGuardianApprovalBinding
 import neth.iecal.curbox.databinding.DialogGuardianAccumulatedTimeBinding
 import neth.iecal.curbox.databinding.DialogGuardianExtraTimeBinding
-import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeFormState
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeSubmission
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeValidationError
-import neth.iecal.curbox.domain.apprules.GuardianExtraTimeFormState
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeInputSource
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeSubmission
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeValidationError
 import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantFormState
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeRulePicker
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
+import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
 import java.time.Duration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -53,12 +60,23 @@ class GuardianApprovalActivity : AppCompatActivity() {
         val denials: List<AppRuleGuardianDenial>
     )
 
+    private data class GuardianGrantRuleOption(
+        val rule: AppRule,
+        val basis: GuardianExtraTimeGrantBasis
+    ) {
+        val label: String
+            get() = rule.name.takeIf(String::isNotBlank) ?: rule.id
+    }
+
     private lateinit var binding: ActivityGuardianApprovalBinding
     private val dataStore by lazy { DataStoreManager(applicationContext) }
     private var denials: List<AppRuleGuardianDenial> = emptyList()
+    private var targetPackageName: String = ""
     private var selectedRuleId: String? = null
     private var hasPassword = false
     private var grantInProgress = false
+    private var grantPickerLoading = false
+    private var grantDialogOpen = false
     private var guardianClosedBroadcastSent = false
     private var guardianStateReceiverRegistered = false
     private var closeReason: String = REASON_INTERRUPTED
@@ -106,6 +124,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             return
         }
         denials = payload.denials
+        targetPackageName = payload.packageName
         ContextCompat.registerReceiver(
             this,
             guardianStateRequestReceiver,
@@ -126,6 +145,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         if (isFinishing) return
         setIntent(intent)
         denials = payload.denials
+        targetPackageName = payload.packageName
         selectedRuleId = denials.first().ruleId
         render()
     }
@@ -172,28 +192,23 @@ class GuardianApprovalActivity : AppCompatActivity() {
             selectedRuleId = GuardianApprovalSelection
                 .selectedDenial(denials, checkedId - 1)
                 ?.ruleId
-            updateGuardianGrantButton(selectedRuleId)
             updateAccumulatedButton(selectedRuleId)
         }
         binding.approvalAddTime.setOnClickListener { requestGrant() }
         binding.approvalUseAccumulatedTime.setOnClickListener { requestAccumulatedGrant() }
         binding.approvalSkipRule.setOnClickListener { requestSkip() }
         binding.approvalCancel.setOnClickListener { navigateHomeAndFinish() }
-        updateGuardianGrantButton(selectedRuleId)
+        updateGuardianGrantButton()
         updateAccumulatedButton(selectedRuleId)
     }
 
-    private fun updateGuardianGrantButton(ruleId: String?) {
+    private fun updateGuardianGrantButton() {
         binding.approvalAddTime.visibility = View.GONE
-        if (ruleId == null) {
-            return
-        }
         lifecycleScope.launch {
-            val allowed = dataStore.settings.first().appRuleSnapshot.appRules
-                .any { it.id == ruleId && it.isActive && it.guardianExtraTimeAllowed }
-            if (selectedRuleId == ruleId) {
-                binding.approvalAddTime.visibility = if (allowed) View.VISIBLE else View.GONE
+            val allowed = dataStore.settings.first().appRuleSnapshot.appRules.any {
+                it.isActive && it.guardianExtraTimeAllowed
             }
+            binding.approvalAddTime.visibility = if (allowed) View.VISIBLE else View.GONE
         }
     }
 
@@ -230,61 +245,133 @@ class GuardianApprovalActivity : AppCompatActivity() {
         return GuardianApprovalSelection.resolveAccumulatedButtonState(rule, pool, useDayId)
     }
 
-    private fun requestGrant() {
-        if (grantInProgress) return
-        val ruleId = selectedRuleId ?: return
+    private fun requestGrant(preferredRuleId: String? = null) {
+        if (grantInProgress || grantPickerLoading || grantDialogOpen) return
+        val packageName = targetPackageName.takeIf(String::isNotBlank) ?: return
+        grantPickerLoading = true
         lifecycleScope.launch {
-            val currentTotalMinutes = try {
-                withContext(Dispatchers.IO) { readCurrentGrantTotalMinutes(ruleId) }
+            val options = try {
+                withContext(Dispatchers.IO) { readCurrentGrantCandidates(packageName) }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
+                grantPickerLoading = false
+                toast(R.string.guardian_write_failed)
                 return@launch
             }
-            if (currentTotalMinutes == null) return@launch
-
-            if (selectedRuleId != ruleId) {
-                requestGrant()
+            grantPickerLoading = false
+            if (options.isEmpty()) {
+                toast(R.string.guardian_no_extra_time_rules)
                 return@launch
             }
-            showGrantDialog(ruleId, currentTotalMinutes)
+            val selectedIndex = options.indexOfFirst { it.rule.id == preferredRuleId }
+                .takeIf { it >= 0 }
+                ?: 0
+            grantDialogOpen = true
+            showGrantDialog(options, selectedIndex)
         }
     }
 
-    private suspend fun readCurrentGrantTotalMinutes(ruleId: String): Long? {
+    private suspend fun readCurrentGrantCandidates(
+        packageName: String
+    ): List<GuardianGrantRuleOption> {
         val settings = dataStore.settings.first()
-        if (settings.appRuleSnapshot.appRules.none {
-                it.id == ruleId && it.isActive && it.guardianExtraTimeAllowed
-            }
-        ) return null
         val now = System.currentTimeMillis()
         val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
         val useDayId = calculator.idAt(now)
-        return AppRuleGuardianOverrides.grantMillisForRule(
-            state = settings.appRuleOverrideState,
-            ruleId = ruleId,
+        val database = AppDatabase.getInstance(applicationContext)
+        val sessions = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
+            .sessionsForUseDay(useDayId, settings.useDayGenerationStartedAtMs)
+        val ruleSnapshot = settings.appRuleSnapshot.normalized()
+        val candidates = GuardianExtraTimeRulePicker.candidates(
+            snapshot = ruleSnapshot,
+            packageName = packageName,
             useDayId = useDayId,
+            sessions = sessions,
             nowMs = now,
+            resetTime = settings.useDayResetTime,
             useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
-            includeAccumulatedGrants = false
-        ) / GuardianExtraTimeFormState.MILLIS_PER_MINUTE
+            overrides = settings.appRuleOverrideState
+        )
+        return candidates.mapNotNull { rule ->
+            GuardianExtraTimeGrantBasis.capture(settings, rule.id, now)?.let { basis ->
+                GuardianGrantRuleOption(rule, basis)
+            }
+        }
     }
 
-    private fun showGrantDialog(ruleId: String, currentTotalMinutes: Long) {
+    private suspend fun readGrantBasis(ruleId: String): GuardianExtraTimeGrantBasis? {
+        val settings = dataStore.settings.first()
+        return GuardianExtraTimeGrantBasis.capture(
+            settings = settings,
+            ruleId = ruleId,
+            nowMs = System.currentTimeMillis()
+        )
+    }
+
+    private fun showGrantDialog(
+        options: List<GuardianGrantRuleOption>,
+        selectedIndex: Int
+    ) {
         val dialogBinding = DialogGuardianExtraTimeBinding.inflate(layoutInflater)
+        var currentOptions = options
+        var grantFormState = GuardianExtraTimeGrantFormState.initial(options[selectedIndex].basis)
+        var positiveButton: android.widget.Button? = null
+        var grantDialog: AlertDialog? = null
+        val ruleAdapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_list_item_1,
+            currentOptions.map(GuardianGrantRuleOption::label)
+        )
+        dialogBinding.rulePicker.setAdapter(ruleAdapter)
+        dialogBinding.rulePicker.setText(currentOptions[selectedIndex].label, false)
         dialogBinding.currentTotal.text = getString(
             R.string.guardian_current_total,
-            currentTotalMinutes
+            grantFormState.input.currentTotalMinutes
         )
-        dialogBinding.totalMinutesLayout.placeholderText = currentTotalMinutes.toString()
+        dialogBinding.totalMinutesLayout.placeholderText =
+            grantFormState.input.currentTotalMinutes.toString()
         dialogBinding.additionalMinutesInput.setSelectAllOnFocus(true)
         dialogBinding.totalMinutesInput.setSelectAllOnFocus(true)
-        var formState = GuardianExtraTimeFormState.initial(currentTotalMinutes)
         var updatingDerivedValue = false
+
+        fun renderGrantForm() {
+            val basis = grantFormState.basis
+            val currentTotalMinutes = grantFormState.input.currentTotalMinutes
+            dialogBinding.currentTotal.text = getString(
+                R.string.guardian_current_total,
+                currentTotalMinutes
+            )
+            dialogBinding.totalMinutesLayout.placeholderText =
+                currentTotalMinutes.toString()
+            dialogBinding.additionalMinutesLayout.error = null
+            dialogBinding.totalMinutesLayout.error = null
+            positiveButton?.isEnabled = basis != null
+        }
+
+        fun resetGrantForm(basis: GuardianExtraTimeGrantBasis?) {
+            if (basis == null) {
+                grantFormState = grantFormState.clearInputs()
+            } else {
+                if (basis.ruleId != grantFormState.selectedRuleId) {
+                    grantFormState = grantFormState.selectRule(basis.ruleId)
+                }
+                grantFormState = grantFormState.receiveBasis(
+                    grantFormState.selectionRevision,
+                    basis
+                )
+            }
+            updatingDerivedValue = true
+            dialogBinding.additionalMinutesInput.setText("")
+            dialogBinding.totalMinutesInput.setText("")
+            updatingDerivedValue = false
+            renderGrantForm()
+        }
+
         dialogBinding.additionalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) return@setOnFocusChangeListener
             if (!updatingDerivedValue) {
-                formState = formState.editAdditionalMinutes(
+                grantFormState = grantFormState.editAdditionalMinutes(
                     dialogBinding.additionalMinutesInput.text?.toString().orEmpty()
                 )
             }
@@ -292,7 +379,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         dialogBinding.totalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) return@setOnFocusChangeListener
             if (!updatingDerivedValue) {
-                formState = formState.editTotalMinutes(
+                grantFormState = grantFormState.editTotalMinutes(
                     dialogBinding.totalMinutesInput.text?.toString().orEmpty()
                 )
             }
@@ -305,11 +392,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
             override fun afterTextChanged(editable: Editable?) {
                 if (updatingDerivedValue) return
-                formState = formState.editAdditionalMinutes(editable?.toString().orEmpty())
+                grantFormState = grantFormState.editAdditionalMinutes(editable?.toString().orEmpty())
                 dialogBinding.additionalMinutesLayout.error = null
                 dialogBinding.totalMinutesLayout.error = null
                 updatingDerivedValue = true
-                dialogBinding.totalMinutesInput.setText(formState.totalMinutesText)
+                dialogBinding.totalMinutesInput.setText(grantFormState.input.totalMinutesText)
                 updatingDerivedValue = false
             }
         })
@@ -320,14 +407,66 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
             override fun afterTextChanged(editable: Editable?) {
                 if (updatingDerivedValue) return
-                formState = formState.editTotalMinutes(editable?.toString().orEmpty())
+                grantFormState = grantFormState.editTotalMinutes(editable?.toString().orEmpty())
                 dialogBinding.additionalMinutesLayout.error = null
                 dialogBinding.totalMinutesLayout.error = null
                 updatingDerivedValue = true
-                dialogBinding.additionalMinutesInput.setText(formState.additionalMinutesText)
+                dialogBinding.additionalMinutesInput.setText(
+                    grantFormState.input.additionalMinutesText
+                )
                 updatingDerivedValue = false
             }
         })
+
+        dialogBinding.rulePicker.setOnItemClickListener { _, _, position, _ ->
+            val option = currentOptions.getOrNull(position) ?: return@setOnItemClickListener
+            if (option.rule.id == grantFormState.selectedRuleId) return@setOnItemClickListener
+
+            grantFormState = grantFormState.selectRule(option.rule.id)
+            val revision = grantFormState.selectionRevision
+            resetGrantForm(null)
+            lifecycleScope.launch {
+                val currentBasis = try {
+                    withContext(Dispatchers.IO) { readGrantBasis(option.rule.id) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                if (revision != grantFormState.selectionRevision) return@launch
+                if (currentBasis != null) {
+                    grantFormState = grantFormState.receiveBasis(revision, currentBasis)
+                    renderGrantForm()
+                    return@launch
+                }
+
+                val refreshedOptions = try {
+                    withContext(Dispatchers.IO) {
+                        readCurrentGrantCandidates(targetPackageName)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                if (revision != grantFormState.selectionRevision) return@launch
+                if (refreshedOptions.isEmpty()) {
+                    grantDialog?.dismiss()
+                    toast(R.string.guardian_no_extra_time_rules)
+                    return@launch
+                }
+
+                currentOptions = refreshedOptions
+                ruleAdapter.clear()
+                ruleAdapter.addAll(currentOptions.map(GuardianGrantRuleOption::label))
+                ruleAdapter.notifyDataSetChanged()
+                val refreshedIndex = currentOptions.indexOfFirst {
+                    it.rule.id == option.rule.id
+                }.takeIf { it >= 0 } ?: 0
+                dialogBinding.rulePicker.setText(currentOptions[refreshedIndex].label, false)
+                resetGrantForm(currentOptions[refreshedIndex].basis)
+            }
+        }
 
         val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.guardian_add_time)
@@ -335,13 +474,18 @@ class GuardianApprovalActivity : AppCompatActivity() {
             .setPositiveButton(R.string.guardian_apply, null)
             .setNegativeButton(R.string.cancel, null)
             .create()
+        grantDialog = dialog
+        dialog.setOnDismissListener { grantDialogOpen = false }
         dialog.setOnShowListener {
-            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+            positiveButton = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+            positiveButton?.isEnabled = grantFormState.basis != null
+            positiveButton?.setOnClickListener {
                 if (grantInProgress) return@setOnClickListener
-                when (val submission = formState.submit()) {
+                val basis = grantFormState.basis ?: return@setOnClickListener
+                when (val submission = grantFormState.input.submit()) {
                     is GuardianExtraTimeSubmission.Invalid -> {
                         val errorLayout = if (
-                            formState.activeSource == GuardianExtraTimeInputSource.TOTAL_MINUTES
+                            grantFormState.input.activeSource == GuardianExtraTimeInputSource.TOTAL_MINUTES
                         ) {
                             dialogBinding.totalMinutesLayout
                         } else {
@@ -366,10 +510,10 @@ class GuardianApprovalActivity : AppCompatActivity() {
                         ).isEnabled = false
                         dialog.dismiss()
                         authenticateThen(
-                            ruleId = ruleId,
+                            ruleId = basis.ruleId,
                             onCancelled = { grantInProgress = false },
-                            onAuthenticated = { capturedRuleId, password ->
-                                writeGrant(capturedRuleId, password, submission.additionalMinutes)
+                            onAuthenticated = { _, password ->
+                                writeGrant(basis, password, submission.additionalMinutes)
                             }
                         )
                     }
@@ -524,25 +668,36 @@ class GuardianApprovalActivity : AppCompatActivity() {
         GuardianOwnedDialog.show(dialog, onCancel = onCancelled)
     }
 
-    private fun writeGrant(ruleId: String, password: String, minutes: Long) {
+    private fun writeGrant(
+        basis: GuardianExtraTimeGrantBasis,
+        password: String,
+        minutes: Long
+    ) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val success = try {
-                val settings = dataStore.settings.first()
-                val now = System.currentTimeMillis()
-                val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
-                val useDayId = calculator.idAt(now)
-                dataStore.grantAppRuleTime(password, ruleId, useDayId, minutes, now)
+            val result = try {
+                dataStore.grantAppRuleTime(password, basis, minutes)
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
-                false
+                GuardianExtraTimeGrantWrite.Result.Rejected
             }
             withContext(Dispatchers.Main) {
-                if (success) {
-                    finishAndLaunch()
-                } else {
-                    grantInProgress = false
-                    toast(R.string.guardian_write_failed)
+                when (result) {
+                    GuardianExtraTimeGrantWrite.Result.Stored -> finishAndLaunch()
+                    is GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation -> {
+                        grantInProgress = false
+                        toast(R.string.guardian_grant_basis_changed)
+                        requestGrant(preferredRuleId = basis.ruleId)
+                    }
+                    GuardianExtraTimeGrantWrite.Result.Unavailable -> {
+                        grantInProgress = false
+                        toast(R.string.guardian_grant_rule_changed)
+                        requestGrant()
+                    }
+                    GuardianExtraTimeGrantWrite.Result.Rejected -> {
+                        grantInProgress = false
+                        toast(R.string.guardian_write_failed)
+                    }
                 }
             }
         }

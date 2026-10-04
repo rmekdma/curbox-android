@@ -34,12 +34,14 @@ import neth.iecal.curbox.data.models.upgradeLegacyAppGroupConfigs
 import neth.iecal.curbox.data.models.upgradeLegacyKeywordGroupConfigs
 import neth.iecal.curbox.data.models.upgradeLegacyConfig
 import neth.iecal.curbox.domain.apprules.AppGroupMembershipTimeline
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import neth.iecal.curbox.hardcoded.normalized
 import neth.iecal.curbox.services.TemporaryGroupDisableJob
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.lang.reflect.Type
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.jvm.java
 
 class GsonSerializer<T>(
@@ -429,6 +431,38 @@ class DataStoreManager(private val context: Context) {
             useDayId,
             grantedMillis,
             grantedAtMs.coerceAtLeast(0L)
+        )
+    }
+
+    /**
+     * Stores a direct grant only if the selected rule and the form's use-day basis are still
+     * current inside the DataStore transaction.
+     */
+    internal suspend fun grantAppRuleTime(
+        password: String,
+        basis: GuardianExtraTimeGrantBasis,
+        durationMinutes: Long
+    ): GuardianExtraTimeGrantWrite.Result {
+        if (durationMinutes <= 0L ||
+            durationMinutes > Long.MAX_VALUE / 60_000L ||
+            basis.ruleId.isBlank() || basis.useDayId.isBlank()
+        ) return GuardianExtraTimeGrantWrite.Result.Rejected
+
+        val grantedAtMs = GuardianExtraTimeGrantWrite.nextGrantTimestamp()
+        val updated = settingsDataStore.updateData { current ->
+            GuardianExtraTimeGrantWrite.nextSettings(
+                current = current,
+                password = password,
+                basis = basis,
+                durationMinutes = durationMinutes,
+                grantedAtMs = grantedAtMs
+            )
+        }
+        return GuardianExtraTimeGrantWrite.resultFor(
+            settings = updated,
+            basis = basis,
+            durationMinutes = durationMinutes,
+            grantedAtMs = grantedAtMs
         )
     }
 
@@ -1456,6 +1490,107 @@ internal fun Settings.clearGuardianExtraTimeForRules(
         ),
         appRuleRolloverState = AppRuleRolloverState(pools = nextPools)
     )
+}
+
+/** The transaction transform and result check for a form-bound direct grant. */
+internal object GuardianExtraTimeGrantWrite {
+    sealed class Result {
+        data object Stored : Result()
+        data class NeedsReconfirmation(
+            val latestBasis: GuardianExtraTimeGrantBasis
+        ) : Result()
+        data object Unavailable : Result()
+        data object Rejected : Result()
+    }
+
+    // The timestamp also identifies this appended grant when the committed DataStore value returns.
+    private val lastTimestampMs = AtomicLong(0L)
+
+    fun nextGrantTimestamp(nowMs: Long = System.currentTimeMillis()): Long =
+        lastTimestampMs.updateAndGet { previous ->
+            val nextAfterPrevious = if (previous == Long.MAX_VALUE) previous else previous + 1L
+            maxOf(nowMs.coerceAtLeast(0L), nextAfterPrevious)
+        }
+
+    fun nextSettings(
+        current: Settings,
+        password: String,
+        basis: GuardianExtraTimeGrantBasis,
+        durationMinutes: Long,
+        grantedAtMs: Long
+    ): Settings {
+        if (durationMinutes <= 0L ||
+            durationMinutes > Long.MAX_VALUE / 60_000L ||
+            basis.ruleId.isBlank() ||
+            basis.useDayId.isBlank()
+        ) return current
+        val grantedMillis = durationMinutes * 60_000L
+        if (basis.currentTotalMillis > Long.MAX_VALUE - grantedMillis) return current
+        if (current.guardianAuthConfig.isConfigured &&
+            !GuardianPassword.verify(password, current.guardianAuthConfig)
+        ) return current
+
+        val latestBasis = GuardianExtraTimeGrantBasis.capture(
+            settings = current,
+            ruleId = basis.ruleId,
+            nowMs = grantedAtMs
+        ) ?: return current
+        if (latestBasis != basis) return current
+
+        val currentDayState = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
+            current.appRuleOverrideState,
+            basis.useDayId,
+            current.useDayGenerationStartedAtMs
+        )
+        val nextState = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
+            state = currentDayState,
+            ruleId = basis.ruleId,
+            useDayId = basis.useDayId,
+            grantedMillis = grantedMillis,
+            grantedAtMs = grantedAtMs,
+            useDayGenerationStartedAtMs = basis.useDayGenerationStartedAtMs
+        )
+        return current.copy(appRuleOverrideState = nextState)
+    }
+
+    fun resultFor(
+        settings: Settings,
+        basis: GuardianExtraTimeGrantBasis,
+        durationMinutes: Long,
+        grantedAtMs: Long
+    ): Result {
+        if (durationMinutes <= 0L || durationMinutes > Long.MAX_VALUE / 60_000L) {
+            return Result.Rejected
+        }
+        val latestBasis = GuardianExtraTimeGrantBasis.capture(
+            settings = settings,
+            ruleId = basis.ruleId,
+            nowMs = grantedAtMs
+        ) ?: return Result.Unavailable
+
+        val grantedMillis = durationMinutes * 60_000L
+        val expectedTotal = if (basis.currentTotalMillis <= Long.MAX_VALUE - grantedMillis) {
+            basis.currentTotalMillis + grantedMillis
+        } else {
+            return Result.Rejected
+        }
+        val matchingGrantExists = settings.appRuleOverrideState.grants.any {
+            it.ruleId == basis.ruleId &&
+                it.useDayId == basis.useDayId &&
+                it.grantedAtMs == grantedAtMs &&
+                it.grantedMillis == grantedMillis &&
+                !it.isFromAccumulatedPool
+        }
+        if (matchingGrantExists &&
+            latestBasis == basis.copy(currentTotalMillis = expectedTotal)
+        ) return Result.Stored
+
+        return if (latestBasis != basis) {
+            Result.NeedsReconfirmation(latestBasis)
+        } else {
+            Result.Rejected
+        }
+    }
 }
 
 /**
