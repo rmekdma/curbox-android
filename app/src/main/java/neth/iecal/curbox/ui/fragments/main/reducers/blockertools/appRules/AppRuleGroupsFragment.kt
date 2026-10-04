@@ -420,7 +420,7 @@ class AppRuleGroupsFragment : Fragment() {
                 text = status
                 textSize = 15f
             })
-            if (hasRolloverInfo && rule.guardianExtraTimeAllowed) {
+            if (hasRolloverInfo && rule.isActive && rule.guardianExtraTimeAllowed) {
                 addView(MaterialButton(
                     context,
                     null,
@@ -452,7 +452,7 @@ class AppRuleGroupsFragment : Fragment() {
         currentMinutes: Long,
         basedOnSettings: Settings
     ) {
-        if (!rule.guardianExtraTimeAllowed) return
+        if (!rule.isActive || !rule.guardianExtraTimeAllowed) return
         val dialogBinding = DialogGuardianAccumulatedTimeBinding.inflate(layoutInflater)
         dialogBinding.accumulatedTotalDesc.text = getString(
             R.string.app_rules_accumulated_time_summary,
@@ -492,11 +492,11 @@ class AppRuleGroupsFragment : Fragment() {
                     }
                     is InAppAccumulatedTimeSubmission.Valid -> {
                         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                            val existingPool = basedOnSettings.appRuleRolloverState.pools[rule.id]
-                            val updatedPool = (existingPool ?: RuleRolloverPool(ruleId = rule.id))
-                                .copy(accumulatedMinutes = submission.minutes)
-                            val newState = basedOnSettings.appRuleRolloverState.withPool(updatedPool)
-                            val success = dataStore.writeAppRuleRolloverState(newState, basedOnSettings)
+                            val success = dataStore.writeManualAppRuleRolloverPool(
+                                ruleId = rule.id,
+                                accumulatedMinutes = submission.minutes,
+                                basedOn = basedOnSettings
+                            )
                             withContext(Dispatchers.Main) {
                                 if (isAdded && success) {
                                     dialog.dismiss()

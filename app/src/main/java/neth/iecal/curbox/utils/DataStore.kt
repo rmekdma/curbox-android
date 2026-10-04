@@ -406,10 +406,9 @@ class DataStoreManager(private val context: Context) {
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
-            if (current.appRuleSnapshot.appRules.none {
-                    it.id == ruleId && it.guardianExtraTimeAllowed
-                }
-            ) return@updateData current
+            if (!GuardianDataStoreWriteResult.ruleCanManageExtraTime(current, ruleId)) {
+                return@updateData current
+            }
             val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
                 neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
                     current.appRuleOverrideState,
@@ -455,10 +454,9 @@ class DataStoreManager(private val context: Context) {
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
-            if (current.appRuleSnapshot.appRules.none {
-                    it.id == ruleId && it.guardianExtraTimeAllowed
-                }
-            ) return@updateData current
+            if (!GuardianDataStoreWriteResult.ruleCanManageExtraTime(current, ruleId)) {
+                return@updateData current
+            }
 
             val pool = current.appRuleRolloverState.pools[ruleId] ?: return@updateData current
             if (pool.accumulatedMinutes < approvedMinutes) return@updateData current
@@ -542,13 +540,39 @@ class DataStoreManager(private val context: Context) {
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
             ) return@updateData current
             val allowedRuleIds = current.appRuleSnapshot.appRules
-                .filter { it.guardianExtraTimeAllowed }
+                .filter { it.isActive && it.guardianExtraTimeAllowed }
                 .map { it.id }
                 .toSet()
             val filtered = state.copy(grants = state.grants.filter { it.ruleId in allowedRuleIds })
             current.copy(appRuleOverrideState = filtered)
         }
         return updated.appRuleOverrideState == state
+    }
+
+    /** Manual balance edits require a rule that is still active when the DataStore write commits. */
+    suspend fun writeManualAppRuleRolloverPool(
+        ruleId: String,
+        accumulatedMinutes: Long,
+        basedOn: Settings
+    ): Boolean {
+        if (ruleId.isBlank() || accumulatedMinutes < 0L) return false
+        val updated = settingsDataStore.updateData { current ->
+            val nextRolloverState = GuardianManualPoolWrite.nextState(
+                current = current,
+                basedOn = basedOn,
+                ruleId = ruleId,
+                accumulatedMinutes = accumulatedMinutes
+            ) ?: return@updateData current
+            current.copy(appRuleRolloverState = nextRolloverState)
+        }
+        val lastSettledUseDayId = basedOn.appRuleRolloverState.pools[ruleId]
+            ?.lastSettledUseDayId.orEmpty()
+        return GuardianDataStoreWriteResult.manualRolloverPoolWasStored(
+            settings = updated,
+            ruleId = ruleId,
+            accumulatedMinutes = accumulatedMinutes,
+            lastSettledUseDayId = lastSettledUseDayId
+        )
     }
 
     /** Trusted runtime settlement and in-app management use this immediate write path. */
@@ -1439,6 +1463,11 @@ internal fun Settings.clearGuardianExtraTimeForRules(
  * DataStore.updateData; inspecting mutable state from inside its transform is not retry safe.
  */
 internal object GuardianDataStoreWriteResult {
+    fun ruleCanManageExtraTime(settings: Settings, ruleId: String): Boolean =
+        settings.appRuleSnapshot.appRules.any {
+            it.id == ruleId && it.isActive && it.guardianExtraTimeAllowed
+        }
+
     fun passwordWasStored(settings: Settings, credential: GuardianAuthConfig): Boolean =
         settings.guardianAuthConfig == credential
 
@@ -1448,9 +1477,8 @@ internal object GuardianDataStoreWriteResult {
         useDayId: String,
         grantedMillis: Long,
         grantedAtMs: Long
-    ): Boolean = settings.appRuleSnapshot.appRules.any {
-        it.id == ruleId && it.guardianExtraTimeAllowed
-    } && settings.appRuleOverrideState.grants.any {
+    ): Boolean = ruleCanManageExtraTime(settings, ruleId) &&
+        settings.appRuleOverrideState.grants.any {
         it.ruleId == ruleId &&
             it.useDayId == useDayId &&
             it.grantedMillis == grantedMillis &&
@@ -1481,9 +1509,6 @@ internal object GuardianDataStoreWriteResult {
     ): Boolean {
         val pool = settings.appRuleRolloverState.pools[ruleId]
         val poolMatches = pool != null && pool.accumulatedMinutes == expectedRemainingPoolMinutes
-        val ruleAllowsGuardianTime = settings.appRuleSnapshot.appRules.any {
-            it.id == ruleId && it.guardianExtraTimeAllowed
-        }
         val grantMatches = settings.appRuleOverrideState.grants.any {
             it.ruleId == ruleId &&
                 it.useDayId == useDayId &&
@@ -1491,6 +1516,40 @@ internal object GuardianDataStoreWriteResult {
                 it.grantedAtMs == grantedAtMs &&
                 it.isFromAccumulatedPool
         }
-        return ruleAllowsGuardianTime && poolMatches && grantMatches
+        return ruleCanManageExtraTime(settings, ruleId) && poolMatches && grantMatches
+    }
+
+    fun manualRolloverPoolWasStored(
+        settings: Settings,
+        ruleId: String,
+        accumulatedMinutes: Long,
+        lastSettledUseDayId: String
+    ): Boolean {
+        val pool = settings.appRuleRolloverState.pools[ruleId]
+        return ruleCanManageExtraTime(settings, ruleId) &&
+            pool != null &&
+            pool.accumulatedMinutes == accumulatedMinutes &&
+            pool.lastSettledUseDayId == lastSettledUseDayId
+    }
+}
+
+/** Pure transaction transform for the in-app manual pool editor, separate from rollover lifecycle. */
+internal object GuardianManualPoolWrite {
+    fun nextState(
+        current: Settings,
+        basedOn: Settings,
+        ruleId: String,
+        accumulatedMinutes: Long
+    ): AppRuleRolloverState? {
+        if (ruleId.isBlank() || accumulatedMinutes < 0L ||
+            !neth.iecal.curbox.domain.apprules.appRuleRolloverInputsMatch(current, basedOn) ||
+            !GuardianDataStoreWriteResult.ruleCanManageExtraTime(current, ruleId)
+        ) return null
+
+        val existing = current.appRuleRolloverState.pools[ruleId]
+            ?: neth.iecal.curbox.data.models.RuleRolloverPool(ruleId = ruleId)
+        return current.appRuleRolloverState.withPool(
+            existing.copy(accumulatedMinutes = accumulatedMinutes)
+        )
     }
 }

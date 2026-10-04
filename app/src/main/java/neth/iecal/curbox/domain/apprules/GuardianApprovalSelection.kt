@@ -21,7 +21,7 @@ object GuardianApprovalSelection {
         pool: RuleRolloverPool?,
         useDayId: String
     ): AccumulatedTimeButtonState {
-        if (rule == null || !rule.guardianExtraTimeAllowed || !rule.rolloverEnabled) {
+        if (rule == null || !rule.isActive || !rule.guardianExtraTimeAllowed || !rule.rolloverEnabled) {
             return AccumulatedTimeButtonState(isVisible = false, accumulatedMinutes = 0L)
         }
         val isUnlockDay = AppRuleRolloverPolicy.dayRoleFor(useDayId, rule.unlockDays) == AppRuleDayRole.UNLOCK

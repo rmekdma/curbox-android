@@ -190,7 +190,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         lifecycleScope.launch {
             val allowed = dataStore.settings.first().appRuleSnapshot.appRules
-                .any { it.id == ruleId && it.guardianExtraTimeAllowed }
+                .any { it.id == ruleId && it.isActive && it.guardianExtraTimeAllowed }
             if (selectedRuleId == ruleId) {
                 binding.approvalAddTime.visibility = if (allowed) View.VISIBLE else View.GONE
             }
@@ -254,7 +254,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private suspend fun readCurrentGrantTotalMinutes(ruleId: String): Long? {
         val settings = dataStore.settings.first()
         if (settings.appRuleSnapshot.appRules.none {
-                it.id == ruleId && it.guardianExtraTimeAllowed
+                it.id == ruleId && it.isActive && it.guardianExtraTimeAllowed
             }
         ) return null
         val now = System.currentTimeMillis()
