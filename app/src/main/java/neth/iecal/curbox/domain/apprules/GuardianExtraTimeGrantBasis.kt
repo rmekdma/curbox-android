@@ -18,17 +18,6 @@ data class GuardianExtraTimeGrantBasis(
         fun capture(
             settings: Settings,
             ruleId: String,
-            nowMs: Long
-        ): GuardianExtraTimeGrantBasis? = capture(
-            settings = settings,
-            ruleId = ruleId,
-            nowMs = nowMs,
-            zone = ZoneId.systemDefault()
-        )
-
-        fun capture(
-            settings: Settings,
-            ruleId: String,
             nowMs: Long,
             zone: ZoneId = ZoneId.systemDefault()
         ): GuardianExtraTimeGrantBasis? {
