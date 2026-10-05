@@ -9,6 +9,7 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.RuleRolloverPool
 import neth.iecal.curbox.data.models.Settings
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -34,24 +35,6 @@ class DataStoreGuardianWriteTest {
             GuardianDataStoreWriteResult.passwordWasStored(
                 finalSettings,
                 GuardianAuthConfig("different", "verifier")
-            )
-        )
-        assertTrue(
-            GuardianDataStoreWriteResult.grantWasStored(
-                finalSettings,
-                "rule",
-                "day",
-                300_000L,
-                100L
-            )
-        )
-        assertFalse(
-            GuardianDataStoreWriteResult.grantWasStored(
-                finalSettings,
-                "rule",
-                "day",
-                600_000L,
-                100L
             )
         )
         assertTrue(
@@ -166,7 +149,7 @@ class DataStoreGuardianWriteTest {
     }
 
     @Test
-    fun grantWriteResultRejectsRuleWithGuardianExtraTimeOff() {
+    fun accumulatedGrantWriteResultRejectsRuleWithGuardianExtraTimeOff() {
         val disabled = Settings(
             appRuleSnapshot = AppRuleSnapshot(
                 appRules = listOf(AppRule(id = "rule", guardianExtraTimeAllowed = false))
@@ -180,7 +163,6 @@ class DataStoreGuardianWriteTest {
             )
         )
 
-        assertFalse(GuardianDataStoreWriteResult.grantWasStored(disabled, "rule", "day", 300_000L, 100L))
         assertFalse(
             GuardianDataStoreWriteResult.accumulatedGrantWasStored(
                 settings = disabled,
@@ -214,7 +196,27 @@ class DataStoreGuardianWriteTest {
         )
 
         assertFalse(GuardianDataStoreWriteResult.ruleCanManageExtraTime(latestInactive, "rule"))
-        assertFalse(GuardianDataStoreWriteResult.grantWasStored(latestInactive, "rule", "day", 300_000L, 100L))
+        val activeSettings = latestInactive.copy(appRuleSnapshot = activeSnapshot)
+        val basis = GuardianExtraTimeGrantBasis.capture(activeSettings, "rule", 1_000L)!!
+        assertEquals(
+            latestInactive,
+            GuardianExtraTimeGrantWrite.nextSettings(
+                current = latestInactive,
+                password = "",
+                basis = basis,
+                durationMinutes = 5L,
+                grantedAtMs = 1_001L
+            )
+        )
+        assertEquals(
+            GuardianExtraTimeGrantWrite.Result.Unavailable,
+            GuardianExtraTimeGrantWrite.resultFor(
+                settings = latestInactive,
+                basis = basis,
+                durationMinutes = 5L,
+                grantedAtMs = 1_001L
+            )
+        )
         assertFalse(
             GuardianDataStoreWriteResult.accumulatedGrantWasStored(
                 settings = latestInactive,

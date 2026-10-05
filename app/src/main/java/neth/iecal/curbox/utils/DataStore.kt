@@ -388,53 +388,6 @@ class DataStoreManager(private val context: Context) {
         settingsDataStore.data.first().guardianAuthConfig.isConfigured
 
     /**
-     * Guardian approval writes stay in the owner DataStore transaction. There is no exported
-     * broadcast carrying a rule id or duration; the service observes the shared flow instead.
-     */
-    suspend fun grantAppRuleTime(
-        password: String,
-        ruleId: String,
-        useDayId: String,
-        durationMinutes: Long,
-        grantedAtMs: Long = System.currentTimeMillis()
-    ): Boolean {
-        if (durationMinutes <= 0L ||
-            durationMinutes > Long.MAX_VALUE / 60_000L ||
-            ruleId.isBlank() ||
-            useDayId.isBlank()
-        ) return false
-        val grantedMillis = durationMinutes * 60_000L
-        val updated = settingsDataStore.updateData { current ->
-            if (current.guardianAuthConfig.isConfigured &&
-                !GuardianPassword.verify(password, current.guardianAuthConfig)
-            ) return@updateData current
-            if (!GuardianDataStoreWriteResult.ruleCanManageExtraTime(current, ruleId)) {
-                return@updateData current
-            }
-            val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
-                neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
-                    current.appRuleOverrideState,
-                    useDayId,
-                    current.useDayGenerationStartedAtMs
-                ),
-                ruleId,
-                useDayId,
-                grantedMillis,
-                grantedAtMs,
-                current.useDayGenerationStartedAtMs
-            )
-            current.copy(appRuleOverrideState = next)
-        }
-        return GuardianDataStoreWriteResult.grantWasStored(
-            updated,
-            ruleId,
-            useDayId,
-            grantedMillis,
-            grantedAtMs.coerceAtLeast(0L)
-        )
-    }
-
-    /**
      * Stores a direct grant only if the selected rule and the form's use-day basis are still
      * current inside the DataStore transaction.
      */
@@ -1672,20 +1625,6 @@ internal object GuardianDataStoreWriteResult {
 
     fun passwordWasStored(settings: Settings, credential: GuardianAuthConfig): Boolean =
         settings.guardianAuthConfig == credential
-
-    fun grantWasStored(
-        settings: Settings,
-        ruleId: String,
-        useDayId: String,
-        grantedMillis: Long,
-        grantedAtMs: Long
-    ): Boolean = ruleCanManageExtraTime(settings, ruleId) &&
-        settings.appRuleOverrideState.grants.any {
-        it.ruleId == ruleId &&
-            it.useDayId == useDayId &&
-            it.grantedMillis == grantedMillis &&
-            it.grantedAtMs == grantedAtMs
-    }
 
     fun skipWasStored(
         settings: Settings,
