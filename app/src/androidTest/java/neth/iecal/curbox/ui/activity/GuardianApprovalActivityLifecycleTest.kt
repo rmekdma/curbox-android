@@ -4,14 +4,19 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.SystemClock
 import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.NoMatchingRootException
+import androidx.test.espresso.NoMatchingViewException
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.action.ViewActions.replaceText
 import androidx.test.espresso.matcher.RootMatchers.isDialog
+import androidx.test.espresso.matcher.RootMatchers.isPlatformPopup
 import androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.espresso.assertion.ViewAssertions.matches
@@ -22,15 +27,23 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.core.content.ContextCompat
 import neth.iecal.curbox.R
 import neth.iecal.curbox.blockers.AppRuleBlocker
+import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.AppRuleOverrideState
+import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.GatedSettingsField
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantCandidate
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianSessionRegistry
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
@@ -190,12 +203,23 @@ class GuardianApprovalActivityLifecycleTest {
     @Test
     fun addTimeFlowKeepsTheOriginalRuleAfterValidReplacement() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        resetGuardianOverrides(context)
+        val grantRuleId = "lifecycle-grant-${java.util.UUID.randomUUID()}"
+        val grantRuleName = "Rule ${java.util.UUID.randomUUID()}"
+        val originalSnapshot = seedEligibleGrantRule(context, grantRuleId, grantRuleName)
         try {
+            resetGuardianOverrides(context)
             ActivityScenario.launch<GuardianApprovalActivity>(
-                approvalIntent(ruleId = "rule_a", ruleName = "Rule A")
+                approvalIntent(ruleId = grantRuleId, ruleName = grantRuleName)
             ).use {
+                awaitDisplayed(R.id.approval_add_time)
                 onView(withId(R.id.approval_add_time)).perform(click())
+                awaitDisplayed(R.id.rule_picker, inDialog = true)
+                onView(withId(R.id.rule_picker))
+                    .inRoot(isDialog())
+                    .perform(click())
+                onView(withText(grantRuleName))
+                    .inRoot(isPlatformPopup())
+                    .perform(click())
                 onView(isAssignableFrom(EditText::class.java))
                     .inRoot(isDialog())
                     .perform(replaceText("5"))
@@ -211,11 +235,98 @@ class GuardianApprovalActivityLifecycleTest {
                     .perform(click())
 
                 val state = awaitOverrideState(context) { it.grants.isNotEmpty() }
-                assertEquals(listOf("rule_a"), state.grants.map { it.ruleId })
+                assertEquals(listOf(grantRuleId), state.grants.map { it.ruleId })
                 assertTrue(state.skips.isEmpty())
             }
         } finally {
-            resetGuardianOverrides(context)
+            try {
+                resetGuardianOverrides(context)
+            } finally {
+                restoreAppRuleSnapshot(context, originalSnapshot)
+            }
+        }
+    }
+
+    @Test
+    fun dismissingAddTimeFormAllowsItToBeOpenedAgain() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val grantRuleId = "dialog-reopen-${java.util.UUID.randomUUID()}"
+        val originalSnapshot = seedEligibleGrantRule(context, grantRuleId, "Dialog test rule")
+        try {
+            val scenario = ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(ruleId = grantRuleId, ruleName = "Dialog test rule")
+            )
+            try {
+                awaitDisplayed(R.id.approval_add_time)
+                onView(withId(R.id.approval_add_time)).perform(click())
+                awaitDisplayed(R.id.rule_picker, inDialog = true)
+                onView(withText(R.string.cancel))
+                    .inRoot(isDialog())
+                    .perform(click())
+                awaitDialogViewDismissed(R.id.rule_picker)
+
+                awaitDisplayed(R.id.approval_add_time)
+                onView(withId(R.id.approval_add_time)).perform(click())
+                awaitDisplayed(R.id.rule_picker, inDialog = true)
+                assertTrue(
+                    "The open grant form should own the guardian session",
+                    GuardianSessionRegistry.isOwnedDialogActive()
+                )
+            } finally {
+                scenario.close()
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            assertFalse(
+                "An open grant form must release its guardian session when the activity is destroyed",
+                GuardianSessionRegistry.isOwnedDialogActive()
+            )
+        } finally {
+            restoreAppRuleSnapshot(context, originalSnapshot)
+        }
+    }
+
+    @Test
+    fun completedGrantPickerCannotShowDialogAfterActivityIsDestroyed() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val grantRuleId = "dialog-destroyed-${java.util.UUID.randomUUID()}"
+        val originalSnapshot = seedEligibleGrantRule(context, grantRuleId, "Dialog test rule")
+        try {
+            val scenario = ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(ruleId = grantRuleId, ruleName = "Dialog test rule")
+            )
+            lateinit var destroyedActivity: GuardianApprovalActivity
+            scenario.onActivity { destroyedActivity = it }
+            scenario.close()
+
+            val settings = runBlocking { DataStoreManager(context).settings.first() }
+            val rule = settings.appRuleSnapshot.appRules.first { it.id == grantRuleId }
+            val basis = GuardianExtraTimeGrantBasis.capture(
+                settings = settings,
+                ruleId = grantRuleId,
+                nowMs = System.currentTimeMillis()
+            ) ?: error("The seeded guardian grant rule must produce a grant basis")
+            val completion = GuardianApprovalActivity::class.java.getDeclaredMethod(
+                "showGrantDialog",
+                List::class.java,
+                Int::class.javaPrimitiveType
+            ).apply { isAccessible = true }
+
+            instrumentation.runOnMainSync {
+                completion.invoke(
+                    destroyedActivity,
+                    listOf(GuardianExtraTimeGrantCandidate(rule, basis)),
+                    0
+                )
+            }
+            instrumentation.waitForIdleSync()
+
+            assertFalse(
+                "a completed picker must not show a grant form for a destroyed activity",
+                GuardianSessionRegistry.isOwnedDialogActive()
+            )
+        } finally {
+            restoreAppRuleSnapshot(context, originalSnapshot)
         }
     }
 
@@ -346,6 +457,107 @@ class GuardianApprovalActivityLifecycleTest {
                 )
             }
         )
+    }
+
+    private fun seedEligibleGrantRule(
+        context: Context,
+        ruleId: String,
+        ruleName: String
+    ): AppRuleSnapshot {
+        val dataStore = DataStoreManager(context)
+        val settings = runBlocking { dataStore.settings.first() }
+        val delayConfig = settings.settingsChangeDelayConfig2
+        val hasPendingAppRuleEdit = delayConfig.pendingChanges.any {
+            it.field == GatedSettingsField.APP_RULES.name
+        }
+        assumeTrue(
+            "Guardian lifecycle UI tests require immediate app-rule writes so their fixture can be restored",
+            !hasPendingAppRuleEdit &&
+                (!delayConfig.isEnabled || delayConfig.delayMinutes == 0) &&
+                (!delayConfig.requireTamperProtectionOff ||
+                    !settings.antiUninstallConfig2.isEnabled)
+        )
+
+        val originalSnapshot = settings.appRuleSnapshot
+        val testRule = AppRule(
+            id = ruleId,
+            name = ruleName,
+            allowedMinutes = Long.MAX_VALUE / 60_000L
+        )
+        val seededSnapshot = originalSnapshot.copy(
+            appRules = originalSnapshot.appRules.filterNot { it.id == ruleId } + testRule
+        ).normalized()
+        try {
+            assertTrue(runBlocking { dataStore.updateAppRuleSnapshot(seededSnapshot) })
+            runBlocking {
+                withTimeout(5_000L) {
+                    dataStore.settings.first { it.appRuleSnapshot == seededSnapshot }
+                }
+            }
+        } catch (error: Throwable) {
+            restoreAppRuleSnapshot(context, originalSnapshot)
+            throw error
+        }
+        return originalSnapshot
+    }
+
+    private fun restoreAppRuleSnapshot(context: Context, snapshot: AppRuleSnapshot) {
+        val normalizedSnapshot = snapshot.normalized()
+        val dataStore = DataStoreManager(context)
+        assertTrue(runBlocking { dataStore.updateAppRuleSnapshot(normalizedSnapshot) })
+        runBlocking {
+            withTimeout(5_000L) {
+                dataStore.settings.first { it.appRuleSnapshot == normalizedSnapshot }
+            }
+        }
+    }
+
+    private fun awaitDisplayed(
+        viewId: Int,
+        inDialog: Boolean = false,
+        timeoutMs: Long = 5_000L
+    ) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        var lastFailure: Throwable? = null
+        do {
+            instrumentation.waitForIdleSync()
+            try {
+                val interaction = onView(withId(viewId))
+                if (inDialog) interaction.inRoot(isDialog())
+                interaction.check(matches(isDisplayed()))
+                return
+            } catch (error: NoMatchingViewException) {
+                lastFailure = error
+            } catch (error: NoMatchingRootException) {
+                lastFailure = error
+            } catch (error: AssertionError) {
+                lastFailure = error
+            }
+            SystemClock.sleep(50L)
+        } while (SystemClock.uptimeMillis() < deadline)
+        throw AssertionError("Timed out waiting for view $viewId to be displayed", lastFailure)
+    }
+
+    private fun awaitDialogViewDismissed(viewId: Int, timeoutMs: Long = 5_000L) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        do {
+            instrumentation.waitForIdleSync()
+            try {
+                onView(withId(viewId))
+                    .inRoot(isDialog())
+                    .check(matches(isDisplayed()))
+            } catch (_: NoMatchingViewException) {
+                return
+            } catch (_: NoMatchingRootException) {
+                return
+            } catch (_: AssertionError) {
+                return
+            }
+            SystemClock.sleep(50L)
+        } while (SystemClock.uptimeMillis() < deadline)
+        throw AssertionError("Dialog view $viewId did not disappear")
     }
 
     private fun awaitOverrideState(

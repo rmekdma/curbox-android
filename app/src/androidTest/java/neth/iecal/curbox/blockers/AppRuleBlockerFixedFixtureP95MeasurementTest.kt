@@ -235,26 +235,28 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
         val activeSlotRef = AtomicReference<AttemptSlot?>(null)
         val unverifiedIngressDetected = AtomicBoolean(false)
 
-        blocker.decisionOutcomeSinkObserver = { outcome ->
+        blocker.decisionOutcomeSinkObserver = observer@ { outcome ->
+            val enforcementOutcome = outcome as? DecisionOutcome.EnforcementOutcome
+                ?: return@observer
             val nowNs = SystemClock.elapsedRealtimeNanos()
             val slot = activeSlotRef.get()
             if (slot == null) {
                 unverifiedIngressDetected.set(true)
             } else {
                 val targetPkg = if (slot.fixtureLabel == FIXTURE_ALLOW) PACKAGE_ALLOW else PACKAGE_DENY
-                val decision = outcome.packageDecisions.firstOrNull { it.packageName == targetPkg }
+                val decision = enforcementOutcome.packageDecisions.firstOrNull { it.packageName == targetPkg }
                 if (decision != null) {
                     slot.selectedEndNs = nowNs
                     slot.selectedEndPresent = true
-                    slot.packageDecisionCount = outcome.packageDecisions.size
+                    slot.packageDecisionCount = enforcementOutcome.packageDecisions.size
                     slot.decision = if (decision.isAllowed) "ALLOW" else "DENY"
                     slot.denyingRuleCount = decision.denyingRuleIds.size
-                    slot.sourceOrderIdentity = outcome.sourceOrderIdentity.value.toString()
+                    slot.sourceOrderIdentity = enforcementOutcome.sourceOrderIdentity.value.toString()
                     slot.observationKind = ObservationKind.REAL_EVENT.name
-                    slot.lifecycleGeneration = outcome.lifecycleGeneration.value
-                    slot.acceptedRuntimeRevision = outcome.acceptedRuntimeRevision.value
-                    slot.commitStatus = outcome.commitStatus.name
-                    slot.publicationStatus = outcome.publicationStatus.name
+                    slot.lifecycleGeneration = enforcementOutcome.lifecycleGeneration.value
+                    slot.acceptedRuntimeRevision = enforcementOutcome.acceptedRuntimeRevision.value
+                    slot.commitStatus = enforcementOutcome.commitStatus.name
+                    slot.publicationStatus = enforcementOutcome.publicationStatus.name
                     slot.endLatch.countDown()
                 }
             }
@@ -262,16 +264,18 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
 
         // Unmeasured sanity preflight
         run {
-            val sanityAllowOutcomeRef = AtomicReference<DecisionOutcome?>(null)
-            val sanityDenyOutcomeRef = AtomicReference<DecisionOutcome?>(null)
+            val sanityAllowOutcomeRef = AtomicReference<DecisionOutcome.EnforcementOutcome?>(null)
+            val sanityDenyOutcomeRef = AtomicReference<DecisionOutcome.EnforcementOutcome?>(null)
             val sanityLatch = CountDownLatch(1)
 
-            blocker.decisionOutcomeSinkObserver = { outcome ->
-                val allowDec = outcome.packageDecisions.firstOrNull { it.packageName == PACKAGE_ALLOW }
-                val denyDec = outcome.packageDecisions.firstOrNull { it.packageName == PACKAGE_DENY }
-                if (allowDec != null) sanityAllowOutcomeRef.set(outcome)
+            blocker.decisionOutcomeSinkObserver = observer@ { outcome ->
+                val enforcementOutcome = outcome as? DecisionOutcome.EnforcementOutcome
+                    ?: return@observer
+                val allowDec = enforcementOutcome.packageDecisions.firstOrNull { it.packageName == PACKAGE_ALLOW }
+                val denyDec = enforcementOutcome.packageDecisions.firstOrNull { it.packageName == PACKAGE_DENY }
+                if (allowDec != null) sanityAllowOutcomeRef.set(enforcementOutcome)
                 if (denyDec != null) {
-                    sanityDenyOutcomeRef.set(outcome)
+                    sanityDenyOutcomeRef.set(enforcementOutcome)
                     sanityLatch.countDown()
                 }
             }
@@ -311,26 +315,28 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
             assertFalse("Unexpected recheck must not occur during sanity preflight", unexpectedRecheckDetected.get())
 
             // Restore decision outcome sink observer for measured attempts
-            blocker.decisionOutcomeSinkObserver = { outcome ->
+            blocker.decisionOutcomeSinkObserver = observer@ { outcome ->
+                val enforcementOutcome = outcome as? DecisionOutcome.EnforcementOutcome
+                    ?: return@observer
                 val nowNs = SystemClock.elapsedRealtimeNanos()
                 val slot = activeSlotRef.get()
                 if (slot == null) {
                     unverifiedIngressDetected.set(true)
                 } else {
                     val targetPkg = if (slot.fixtureLabel == FIXTURE_ALLOW) PACKAGE_ALLOW else PACKAGE_DENY
-                    val decision = outcome.packageDecisions.firstOrNull { it.packageName == targetPkg }
+                    val decision = enforcementOutcome.packageDecisions.firstOrNull { it.packageName == targetPkg }
                     if (decision != null) {
                         slot.selectedEndNs = nowNs
                         slot.selectedEndPresent = true
-                        slot.packageDecisionCount = outcome.packageDecisions.size
+                        slot.packageDecisionCount = enforcementOutcome.packageDecisions.size
                         slot.decision = if (decision.isAllowed) "ALLOW" else "DENY"
                         slot.denyingRuleCount = decision.denyingRuleIds.size
-                        slot.sourceOrderIdentity = outcome.sourceOrderIdentity.value.toString()
+                        slot.sourceOrderIdentity = enforcementOutcome.sourceOrderIdentity.value.toString()
                         slot.observationKind = ObservationKind.REAL_EVENT.name
-                        slot.lifecycleGeneration = outcome.lifecycleGeneration.value
-                        slot.acceptedRuntimeRevision = outcome.acceptedRuntimeRevision.value
-                        slot.commitStatus = outcome.commitStatus.name
-                        slot.publicationStatus = outcome.publicationStatus.name
+                        slot.lifecycleGeneration = enforcementOutcome.lifecycleGeneration.value
+                        slot.acceptedRuntimeRevision = enforcementOutcome.acceptedRuntimeRevision.value
+                        slot.commitStatus = enforcementOutcome.commitStatus.name
+                        slot.publicationStatus = enforcementOutcome.publicationStatus.name
                         slot.endLatch.countDown()
                     }
                 }

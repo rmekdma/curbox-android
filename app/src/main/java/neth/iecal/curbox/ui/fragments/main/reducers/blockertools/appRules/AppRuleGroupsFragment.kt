@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import android.widget.Toast
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.core.content.ContextCompat
 import android.text.Editable
@@ -40,12 +41,16 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.databinding.FragmentAppRuleGroupsBinding
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
-import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeRulePicker
 import neth.iecal.curbox.domain.apprules.UsageResetUiPolicy
 import neth.iecal.curbox.ui.activity.FragmentActivity
+import neth.iecal.curbox.ui.activity.GuardianExtraTimeGrantFormDialog
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianExtraTimeGrantQueryFactory
+import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.UsageResetManager
 import neth.iecal.curbox.utils.UsageResetStatus
@@ -69,7 +74,17 @@ class AppRuleGroupsFragment : Fragment() {
     private val packageScopeReader by lazy {
         AppRulePackageScopeReader.fromContext(requireContext().applicationContext)
     }
+    private val grantQuery by lazy {
+        GuardianExtraTimeGrantQueryFactory.create(
+            requireContext().applicationContext,
+            dataStore
+        )
+    }
     private var latestSettings: Settings? = null
+    private var grantPickerLoading = false
+    private var grantInProgress = false
+    private var grantFormDialog: AlertDialog? = null
+    private val ownedDialogs = mutableSetOf<AlertDialog>()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -84,6 +99,7 @@ class AppRuleGroupsFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         binding.addGroupButton.setOnClickListener { open(CreateAppRuleGroupFragment.FRAGMENT_ID) }
         binding.addRuleButton.setOnClickListener { open(CreateAppRuleFragment.FRAGMENT_ID) }
+        binding.changeExtraTimeButton.setOnClickListener { requestGuardianExtraTimeGrant() }
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
@@ -148,33 +164,7 @@ class AppRuleGroupsFragment : Fragment() {
 
     private suspend fun refresh(settings: Settings) {
         val usage = try {
-            withContext(Dispatchers.IO) {
-                val now = System.currentTimeMillis()
-                val zone = ZoneId.systemDefault()
-                val calculator = ConfigurableUseDayCalculator(zone, settings.useDayResetTime)
-                val useDayId = calculator.idAt(now)
-                val sessions = sessionRepository.sessionsForUseDay(
-                    useDayId,
-                    settings.useDayGenerationStartedAtMs
-                )
-                val availablePackages = packageScopeReader.readLaunchablePackages()
-                val essentialPackages = packageScopeReader.readEssentialPackages()
-                settings.appRuleSnapshot.appRules.associate { rule ->
-                    rule.id to AppRuleEvaluator.evaluateRuleForSnapshot(
-                        snapshot = settings.appRuleSnapshot,
-                        rule = rule,
-                        useDayId = useDayId,
-                        sessions = sessions,
-                        nowMs = now,
-                        zone = zone,
-                        useDayCalculator = calculator,
-                        useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
-                        availablePackages = availablePackages,
-                        essentialExcludedPackages = essentialPackages,
-                        overrides = settings.appRuleOverrideState
-                    )
-                }
-            }
+            readAppRuleEvaluations(settings)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -193,6 +183,10 @@ class AppRuleGroupsFragment : Fragment() {
         val snapshot = settings.appRuleSnapshot
         binding.groupsContainer.removeAllViews()
         binding.rulesContainer.removeAllViews()
+        binding.changeExtraTimeButton.visibility = if (snapshot.appRules.any {
+                it.isActive && it.guardianExtraTimeAllowed
+            }
+        ) View.VISIBLE else View.GONE
         val errors = snapshot.validate()
         val hasMissingContributors = snapshot.appRules.any {
             snapshot.missingContributorGroupIds(it).isNotEmpty()
@@ -210,8 +204,133 @@ class AppRuleGroupsFragment : Fragment() {
                 snapshot = snapshot,
                 evaluation = evaluations?.get(rule.id),
                 usageAvailable = usageAvailable,
-                rolloverPool = settings.appRuleRolloverState.pools[rule.id]
+                rolloverPool = settings.appRuleRolloverState.pools[rule.id],
+                basedOnSettings = settings
             )
+        }
+    }
+
+    private suspend fun readAppRuleEvaluations(
+        settings: Settings,
+        nowMs: Long = System.currentTimeMillis()
+    ): Map<String, AppRuleEvaluation> = withContext(Dispatchers.IO) {
+        val now = nowMs
+        val zone = ZoneId.systemDefault()
+        val calculator = ConfigurableUseDayCalculator(zone, settings.useDayResetTime)
+        val useDayId = calculator.idAt(now)
+        val sessions = sessionRepository.sessionsForUseDay(
+            useDayId,
+            settings.useDayGenerationStartedAtMs
+        )
+        val availablePackages = packageScopeReader.readLaunchablePackages()
+        val essentialPackages = packageScopeReader.readEssentialPackages()
+        GuardianExtraTimeRulePicker.evaluateRules(
+            snapshot = settings.appRuleSnapshot,
+            useDayId = useDayId,
+            sessions = sessions,
+            nowMs = now,
+            resetTime = settings.useDayResetTime,
+            zone = zone,
+            useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
+            availablePackages = availablePackages,
+            essentialExcludedPackages = essentialPackages,
+            overrides = settings.appRuleOverrideState
+        )
+    }
+
+    private fun requestGuardianExtraTimeGrant(preferredRuleId: String? = null) {
+        if (grantInProgress || grantPickerLoading || grantFormDialog?.isShowing == true) return
+        grantPickerLoading = true
+        viewLifecycleOwner.lifecycleScope.launch {
+            var failed = false
+            val options = try {
+                grantQuery.candidates()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                failed = true
+                emptyList()
+            } finally {
+                grantPickerLoading = false
+            }
+            if (!isAdded || _binding == null) return@launch
+            if (options.isEmpty()) {
+                Toast.makeText(
+                    requireContext(),
+                    if (failed) R.string.guardian_write_failed else R.string.guardian_no_extra_time_rules,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@launch
+            }
+
+            val selectedIndex = options.indexOfFirst { it.rule.id == preferredRuleId }
+                .takeIf { it >= 0 } ?: 0
+            grantFormDialog = GuardianExtraTimeGrantFormDialog(
+                context = requireContext(),
+                inflater = layoutInflater,
+                scope = viewLifecycleOwner.lifecycleScope,
+                readCurrentBasis = grantQuery::currentBasis,
+                readCurrentCandidates = grantQuery::candidates,
+                onSubmit = ::submitGuardianExtraTimeGrant,
+                onDismiss = { dismissedDialog ->
+                    ownedDialogs.remove(dismissedDialog)
+                    if (grantFormDialog === dismissedDialog) grantFormDialog = null
+                }
+            ).show(options, selectedIndex)
+            grantFormDialog?.let(ownedDialogs::add)
+        }
+    }
+
+    private fun submitGuardianExtraTimeGrant(
+        basis: GuardianExtraTimeGrantBasis,
+        minutes: Long
+    ) {
+        if (grantInProgress || !isAdded || _binding == null) return
+        GuardianOwnedDialog.launchCommit(
+            requireContext(),
+            viewLifecycleOwner.lifecycleScope
+        ) {
+            if (!isAdded || _binding == null || grantInProgress) return@launchCommit
+            grantInProgress = true
+            viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                val result = try {
+                    dataStore.grantAppRuleTimeFromAuthenticatedSession(basis, minutes)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    GuardianExtraTimeGrantWrite.Result.Rejected
+                }
+                withContext(Dispatchers.Main) {
+                    grantInProgress = false
+                    if (!isAdded || _binding == null) return@withContext
+                    when (result) {
+                        GuardianExtraTimeGrantWrite.Result.Stored -> Unit
+                        is GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation -> {
+                            Toast.makeText(
+                                requireContext(),
+                                R.string.guardian_grant_basis_changed,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            requestGuardianExtraTimeGrant(preferredRuleId = basis.ruleId)
+                        }
+                        GuardianExtraTimeGrantWrite.Result.Unavailable -> {
+                            Toast.makeText(
+                                requireContext(),
+                                R.string.guardian_grant_rule_changed,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            requestGuardianExtraTimeGrant()
+                        }
+                        GuardianExtraTimeGrantWrite.Result.Rejected -> {
+                            Toast.makeText(
+                                requireContext(),
+                                R.string.guardian_write_failed,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -243,7 +362,7 @@ class AppRuleGroupsFragment : Fragment() {
             .setNegativeButton(R.string.cancel, null)
             .setPositiveButton(R.string.usage_reset_confirm) { _, _ -> resetGroupUsage(group.id) }
             .create()
-        GuardianOwnedDialog.show(dialog)
+        showOwnedDialog(dialog)
     }
 
     private fun resetGroupUsage(groupId: String) {
@@ -273,7 +392,8 @@ class AppRuleGroupsFragment : Fragment() {
         snapshot: AppRuleSnapshot,
         evaluation: AppRuleEvaluation?,
         usageAvailable: Boolean,
-        rolloverPool: RuleRolloverPool?
+        rolloverPool: RuleRolloverPool?,
+        basedOnSettings: Settings
     ) {
         val scope = rule.effectiveScope()
         val groupNames = scope.includedGroupIds.mapNotNull { id ->
@@ -289,7 +409,8 @@ class AppRuleGroupsFragment : Fragment() {
         val contributorNames = scopeContributorNames(rule, snapshot)
         val missingContributorIds = snapshot.missingContributorGroupIds(rule)
         val poolMinutes = rolloverPool?.accumulatedMinutes ?: 0L
-        val hasRolloverInfo = rule.rolloverEnabled || poolMinutes > 0L
+        val hasRolloverInfo = rule.guardianExtraTimeAllowed &&
+            (rule.rolloverEnabled || poolMinutes > 0L)
         val status = buildString {
             append(
                 getString(
@@ -337,7 +458,12 @@ class AppRuleGroupsFragment : Fragment() {
                 )
             )
             append("\n")
-            append(formatAppRuleRolloverSummary(rule) { resId, args ->
+            val effectiveRolloverRule = if (rule.guardianExtraTimeAllowed) {
+                rule
+            } else {
+                rule.copy(rolloverEnabled = false, unlockDays = emptySet())
+            }
+            append(formatAppRuleRolloverSummary(effectiveRolloverRule) { resId, args ->
                 if (args.isEmpty()) getString(resId) else getString(resId, *args)
             })
             if (hasRolloverInfo) {
@@ -412,7 +538,7 @@ class AppRuleGroupsFragment : Fragment() {
                 text = status
                 textSize = 15f
             })
-            if (hasRolloverInfo) {
+            if (hasRolloverInfo && rule.isActive && rule.guardianExtraTimeAllowed) {
                 addView(MaterialButton(
                     context,
                     null,
@@ -420,7 +546,7 @@ class AppRuleGroupsFragment : Fragment() {
                 ).apply {
                     text = getString(R.string.app_rules_change_accumulated_time)
                     setOnClickListener {
-                        showChangeAccumulatedTimeDialog(rule, poolMinutes)
+                        showChangeAccumulatedTimeDialog(rule, poolMinutes, basedOnSettings)
                     }
                 }, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -439,7 +565,12 @@ class AppRuleGroupsFragment : Fragment() {
         })
     }
 
-    private fun showChangeAccumulatedTimeDialog(rule: AppRule, currentMinutes: Long) {
+    private fun showChangeAccumulatedTimeDialog(
+        rule: AppRule,
+        currentMinutes: Long,
+        basedOnSettings: Settings
+    ) {
+        if (!rule.isActive || !rule.guardianExtraTimeAllowed) return
         val dialogBinding = DialogGuardianAccumulatedTimeBinding.inflate(layoutInflater)
         dialogBinding.accumulatedTotalDesc.text = getString(
             R.string.app_rules_accumulated_time_summary,
@@ -479,12 +610,11 @@ class AppRuleGroupsFragment : Fragment() {
                     }
                     is InAppAccumulatedTimeSubmission.Valid -> {
                         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                            val currentSettings = dataStore.settings.first()
-                            val existingPool = currentSettings.appRuleRolloverState.pools[rule.id]
-                            val updatedPool = (existingPool ?: RuleRolloverPool(ruleId = rule.id))
-                                .copy(accumulatedMinutes = submission.minutes)
-                            val newState = currentSettings.appRuleRolloverState.withPool(updatedPool)
-                            val success = dataStore.writeAppRuleRolloverState(newState)
+                            val success = dataStore.writeManualAppRuleRolloverPool(
+                                ruleId = rule.id,
+                                accumulatedMinutes = submission.minutes,
+                                basedOn = basedOnSettings
+                            )
                             withContext(Dispatchers.Main) {
                                 if (isAdded && success) {
                                     dialog.dismiss()
@@ -496,7 +626,7 @@ class AppRuleGroupsFragment : Fragment() {
             }
         }
 
-        GuardianOwnedDialog.show(dialog)
+        showOwnedDialog(dialog)
     }
 
     private fun scopeContributorNames(
@@ -520,7 +650,17 @@ class AppRuleGroupsFragment : Fragment() {
         startActivity(intent)
     }
 
+    private fun showOwnedDialog(dialog: AlertDialog) {
+        ownedDialogs += dialog
+        GuardianOwnedDialog.show(dialog, onDismiss = { ownedDialogs.remove(dialog) })
+    }
+
     override fun onDestroyView() {
+        (ownedDialogs + listOfNotNull(grantFormDialog)).toList().forEach { dialog ->
+            runCatching { dialog.dismiss() }
+        }
+        ownedDialogs.clear()
+        grantFormDialog = null
         super.onDestroyView()
         _binding = null
     }

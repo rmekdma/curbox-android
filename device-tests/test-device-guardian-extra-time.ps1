@@ -11,7 +11,9 @@
 #>
 
 param(
-    [string]$TargetPackage = "com.woodenpharm.choseonggacha"
+    [string]$TargetPackage = "com.woodenpharm.choseonggacha",
+    [string]$TargetActivity = "",
+    [string]$OtherPackage = "com.initialcoms.ridi"
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +22,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_extra_time_test"
 if (-not (Test-Path $tmpDir)) {
@@ -34,82 +37,24 @@ try {
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
     Write-Success "Backup saved to $backupFile"
 
-    Write-Step "2. Crafting Test AppRule configuration..."
-    $settingsObj = $rawSettings | ConvertFrom-Json
-
-    $targetGroupId = "test-target-group-01"
-    $contributorGroupId = "test-contrib-group-01"
-    $ruleId = "test-rule-01"
-
-    $groupTarget = [PSCustomObject]@{
-        id = $targetGroupId
-        name = "테스트 타깃 앱"
-        selectedPackages = @($TargetPackage)
-        membershipHistory = @(
-            [PSCustomObject]@{
-                effectiveFromMs = [long]-9223372036854775808
-                selectedPackages = @($TargetPackage)
-            }
-        )
-    }
-
-    $groupContrib = [PSCustomObject]@{
-        id = $contributorGroupId
-        name = "학습"
-        selectedPackages = @("com.initialcoms.ridi")
-        membershipHistory = @(
-            [PSCustomObject]@{
-                effectiveFromMs = [long]-9223372036854775808
-                selectedPackages = @("com.initialcoms.ridi")
-            }
-        )
-    }
-
-    $rule = [PSCustomObject]@{
-        id = $ruleId
-        name = "게임 제한"
-        isActive = $true
-        weekdays = @(0, 1, 2, 3, 4, 5, 6)
-        startMinute = 0
-        endMinute = 0
-        appGroupId = $targetGroupId
-        allowedMinutes = [long]30
-        usageConditionEnabled = $true
-        usageConditionMinutes = [long]20
-        contributorGroupConditionMinutes = [PSCustomObject]@{
-            $contributorGroupId = [long]15
-        }
-        contributorGroupIds = @($contributorGroupId)
-        earnedAllowanceEnabled = $false
-        timeRanges = @(
-            [PSCustomObject]@{
-                startMinute = 0
-                endMinute = 0
-            }
-        )
-        scope = [PSCustomObject]@{
-            includeAllApps = $false
-            includedGroupIds = @($targetGroupId)
-            excludedGroupIds = @()
-        }
-    }
-
-    # Reset any existing grants/skips for clean test state
-    $settingsObj.appRuleOverrideState = [PSCustomObject]@{
-        grants = @()
-        skips = @()
-        useDayGenerationStartedAtMs = [long]0
-        useDayId = (Get-Date -Format "yyyy-MM-dd")
-    }
-
-    $appRuleSnapshot = [PSCustomObject]@{
-        appGroups = @($groupTarget, $groupContrib)
-        appRules = @($rule)
-    }
-    $settingsObj.appRuleSnapshot = $appRuleSnapshot
+    Write-Step "2. Crafting a denying rule and eligible rules for two other app rules..."
+    $testStartTimeMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $deviceTimeInfo = Get-DeviceTimeInfo
+    if (-not $deviceTimeInfo) { throw "Could not read device time for the future-window rule fixture." }
+    $futureWindowStartMinute = (($deviceTimeInfo.CurrentMinute + 120) % 1440)
+    $ruleId = "usage-rule"
+    $nightRuleId = "night-rule"
+    $futureRuleId = "future-rule"
+    $appRuleSnapshot = New-GuardianExtraTimePickerAppRuleConfig `
+        -TargetPackage $TargetPackage `
+        -OtherPackage $OtherPackage `
+        -NightRuleId $nightRuleId `
+        -UsageRuleId $ruleId `
+        -FutureRuleId $futureRuleId `
+        -FutureWindowStartMinute $futureWindowStartMinute
 
     Write-Step "3. Injecting test AppRule configuration via broadcast seam..."
-    Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot
+    Inject-TestAppRules -AppRuleSnapshot $appRuleSnapshot -UsageGenerationStartedAtMs $testStartTimeMs
     Write-Success "Injected test AppRules via broadcast seam."
 
     Write-Step "4. Launching Target App ($TargetPackage) to trigger Lock Screen..."
@@ -118,7 +63,7 @@ try {
     adb shell "wm dismiss-keyguard"
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/com.woodenpharm.choseonggacha.MainActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     Write-Step "5. Verifying GuardianApprovalActivity is displayed..."
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -154,57 +99,117 @@ try {
     }
 
     $ui = Wait-For-UI "current_total" 6
+    $picker = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/rule_picker"'
+    $pickerCandidates = $null
+    $canSubmitUsageGrant = $false
+    if ($picker.Found) {
+        $pickerCandidates = Get-TestRulePickerOptions -CurrentUi $ui -CandidateCount 3
+        $candidateLabels = @($pickerCandidates.Options | ForEach-Object { $_.Label })
+        $expectedCandidateLabels = @("BlockingRule", "UsageRule", "FutureRule")
+        $hasExpectedCandidates = ($pickerCandidates.Success -and
+            $candidateLabels.Count -eq $expectedCandidateLabels.Count -and
+            @($expectedCandidateLabels | Where-Object { $candidateLabels -notcontains $_ }).Count -eq 0)
+        if ($hasExpectedCandidates -and $candidateLabels -notcontains "NightRule") {
+            Write-Success "Picker includes another app's future-window rule and excludes the disallowed blocking rule."
+        } else {
+            Write-Fail "Picker did not show the expected eligible rule list."
+            Write-Host "[DIAGNOSTIC] Picker options: $($candidateLabels -join ' | ')" -ForegroundColor DarkYellow
+            $passedAll = $false
+        }
+
+        if ($hasExpectedCandidates) {
+            $futureSelection = Select-TestRulePickerOption -CurrentUi $pickerCandidates.Ui -CandidateOptions $pickerCandidates.Options -RuleName "FutureRule"
+            if (-not $futureSelection.Success) {
+                Write-Fail "Could not select FutureRule from the visible eligible list."
+                $passedAll = $false
+            }
+            if ($futureSelection.Success) {
+                $usageSelection = Select-TestRulePickerOption -CurrentUi $futureSelection.Ui -CandidateOptions $pickerCandidates.Options -RuleName "UsageRule"
+                if ($usageSelection.Success -and $usageSelection.Label -eq "UsageRule") {
+                    Write-Success "UsageRule is selected for the target app grant."
+                    $ui = $usageSelection.Ui
+                    $canSubmitUsageGrant = $true
+                } else {
+                    Write-Fail "The picker did not confirm UsageRule selection for the target app grant."
+                    $passedAll = $false
+                }
+            }
+        } else {
+            Write-Fail "Could not validate the eligible picker set, so no grant will be submitted."
+            $passedAll = $false
+        }
+    } else {
+        Write-Fail "The app rule selector is missing from the grant form."
+        $passedAll = $false
+    }
 
     Write-Step "7. Entering 15 minutes in Additional Minutes..."
     $nodeInput = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
-    if ($nodeInput.Found) {
+    if ($canSubmitUsageGrant -and $nodeInput.Found) {
         adb shell "input tap $($nodeInput.X) $($nodeInput.Y)"
         Start-Sleep -Milliseconds 500
         adb shell "input text 15"
         Start-Sleep -Seconds 1
         Write-Success "Entered '15' into additional_minutes_input."
-    } else {
+    } elseif (-not $nodeInput.Found) {
         Write-Fail "Could not find additional_minutes_input."
         $passedAll = $false
     }
 
-    $ui = Dump-UI
-
-    Write-Step "8. Submitting valid extra time (15 minutes)..."
-    $applied = Tap-Node $ui 'resource-id="android:id/button1"' "적용/Apply 버튼" -Optional
-    if (-not $applied) {
-        $applied = Tap-Node $ui 'text="적용"' "적용 버튼" -Optional
+    if ($canSubmitUsageGrant) {
+        $ui = Dump-UI
+        Write-Step "8. Submitting valid extra time (15 minutes)..."
+        $applied = Tap-Node $ui 'resource-id="android:id/button1"' "적용/Apply 버튼" -Optional
+        if (-not $applied) {
+            $applied = Tap-Node $ui 'text="적용"' "적용 버튼" -Optional
+        }
+        if (-not $applied) {
+            $applied = Tap-Node $ui 'text="Apply"' "Apply button"
+        }
+        Start-Sleep -Seconds 2
+    } else {
+        Write-Fail "Skipped the grant because the picker did not confirm UsageRule."
+        $passedAll = $false
     }
-    if (-not $applied) {
-        $applied = Tap-Node $ui 'text="Apply"' "Apply button"
-    }
-    Start-Sleep -Seconds 2
 
     Write-Step "9. Verifying Grant Persistence in DataStore..."
-    $updatedSettings = (adb shell "run-as neth.iecal.curbox.debug cat files/datastore/settings.json" | Out-String).Trim().Trim([char]65279)
-    $updatedObj = $updatedSettings | ConvertFrom-Json
+    $updatedObj = Get-DeviceSettings -AsObject
     $grants = $updatedObj.appRuleOverrideState.grants
-    if ($grants -and $grants.Count -gt 0 -and $grants[0].grantedMillis -eq 900000 -and $grants[0].ruleId -eq $ruleId) {
-        Write-Success "DataStore successfully recorded 15-minute grant! (900,000 ms, Rule: $($grants[0].ruleId))"
+    if ($grants -and $grants.Count -eq 1 -and $grants[0].grantedMillis -eq 900000 -and $grants[0].ruleId -eq $ruleId) {
+        Write-Success "DataStore recorded 15 minutes on UsageRule only; NightRule remains unpaid."
     } else {
         Write-Fail "Grant of 15 minutes not found in DataStore settings! Grants: $($grants | ConvertTo-Json -Compress)"
         $passedAll = $false
     }
 
-    Write-Step "10. Verifying Target App is now unlocked and on top..."
-    $targetFocus = Assert-WindowFocus -ExpectedActivity $TargetPackage -PassThru
-    if ($targetFocus.Success) {
-        Write-Success "Target app is unlocked and running in foreground!"
+    $blockingRule = $appRuleSnapshot.appRules | Where-Object { $_.id -eq "blocking-rule" }
+    $blockingRule.allowedMinutes = [long]1440
+    if (-not (Set-DeviceAppRuleSnapshot -AppRuleSnapshot $appRuleSnapshot)) {
+        Write-Fail "Could not remove the temporary eligible blocker before checking NightRule."
+        $passedAll = $false
+    }
+    $settingsAfterSnapshotRefresh = Get-DeviceSettings -AsObject
+    $usageGrantAfterRefresh = @($settingsAfterSnapshotRefresh.appRuleOverrideState.grants | Where-Object { $_.ruleId -eq $ruleId })
+    if ($usageGrantAfterRefresh.Count -ne 1 -or $usageGrantAfterRefresh[0].grantedMillis -ne 900000) {
+        Write-Fail "Refreshing the rule snapshot did not preserve the UsageRule payout."
+        $passedAll = $false
+    }
+
+    Write-Step "10. Verifying NightRule still blocks the target app after granting UsageRule..."
+    adb shell "input keyevent 3" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
+    $blockingFocus = $null
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 10) {
+        $blockingFocus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity|WarningActivity" -PassThru
+        if ($blockingFocus.Success) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($blockingFocus -and $blockingFocus.Success) {
+        Write-Success "The target app is still blocked by the unrelated NightRule after UsageRule received extra time."
     } else {
-        # Check if activity is still on top or resuming
-        Start-Sleep -Seconds 1
-        $targetFocusRetry = Assert-WindowFocus -ExpectedActivity $TargetPackage -PassThru
-        if ($targetFocusRetry.Success) {
-            Write-Success "Target app is unlocked and running in foreground!"
-        } else {
-            Write-Fail "Target app was not unlocked / did not regain focus! Focus: $($targetFocusRetry.RawFocus)"
-            $passedAll = $false
-        }
+        Write-Fail "The target app was not re-intercepted by NightRule after granting another rule. Focus: $($blockingFocus.RawFocus)"
+        $passedAll = $false
     }
 
     Write-Step "11. Final Result Summary"
@@ -221,11 +226,5 @@ try {
 
 } finally {
     Write-Step "12. Cleanup & Restoring original settings.json..."
-    Set-DeviceAwake $false
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        adb shell "am force-stop $TargetPackage" | Out-Null
-        adb shell "input keyevent 3" # HOME
-        Write-Success "Original settings restored, target app stopped, returned to home."
-    }
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
 }

@@ -1433,6 +1433,10 @@
     <string name="guardian_exceeds_accumulated_minutes">Cannot exceed available accumulated minutes.</string>
     <string name="guardian_extra_minutes">Extra time</string>
     <string name="guardian_total_extra_minutes">Total extra time</string>
+    <string name="guardian_extra_time_rule">App rule</string>
+    <string name="guardian_no_extra_time_rules">No apps allow extra time right now.</string>
+    <string name="guardian_grant_basis_changed">The total changed. Review it and try again.</string>
+    <string name="guardian_grant_rule_changed">That rule no longer allows extra time. Choose another rule.</string>
     <string name="guardian_current_total">Current total extra time: %1$d minutes</string>
     <string name="guardian_apply">Apply</string>
     <string name="guardian_total_not_greater">Total extra time must be greater than the current value.</string>
@@ -1469,6 +1473,8 @@
     <string name="app_rules_thursday_short">Thu</string>
     <string name="app_rules_friday_short">Fri</string>
     <string name="app_rules_saturday_short">Sat</string>
+    <string name="app_rules_guardian_extra_time_allowed">Allow guardian extra time</string>
+    <string name="app_rules_guardian_extra_time_cleared_desc">Turning this off clears today\'s extra time and accumulated time.</string>
     <string name="app_rules_rollover_enabled">Roll over unused extra time</string>
     <string name="app_rules_unlock_days">Unlock days</string>
     <string name="app_rules_rollover_unlock_days_required">Choose at least one unlock day to roll over extra time</string>

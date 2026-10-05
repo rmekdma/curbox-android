@@ -16,7 +16,8 @@
 
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
-    [string]$TargetActivity = "com.woodenpharm.choseonggacha.MainActivity",
+    [string]$TargetActivity = "",
+    [string]$ContributorPackage = "com.initialcoms.ridi",
     [string]$Pin = "1234",
     [string]$WrongPin = "9999"
 )
@@ -27,6 +28,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_guardian_pin_test"
 if (-not (Test-Path $tmpDir)) {
@@ -148,7 +150,7 @@ try {
 
     $appRuleSnapshot = New-ContributorAppRuleConfig `
         -TargetPackage $TargetPackage `
-        -ContributorPackage "com.initialcoms.ridi" `
+        -ContributorPackage $ContributorPackage `
         -RequiredMinutes 15 `
         -AllowedMinutes 30 `
         -TargetGroupId $targetGroupId `
@@ -163,7 +165,7 @@ try {
     Write-Step "5. Launching Target App ($TargetPackage) to trigger Lock Screen..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     Write-Step "6. Verifying GuardianApprovalActivity is displayed..."
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -209,7 +211,10 @@ try {
         }
 
         # Check error indication: assert toast event for Curbox package
-        $recentLogs = (adb logcat -d -t 200 | Out-String)
+        # Read the full buffer since the preceding logcat -c. Some devices emit
+        # enough vendor activity logs during this interaction to push the toast
+        # beyond a short line-count tail.
+        $recentLogs = (adb logcat -d | Out-String)
         $hasErrorIndication = (
             ($recentLogs -match "Toast" -and $recentLogs -match "neth.iecal.curbox.debug") -or
             ($recentLogs -match "That password is wrong" -or $recentLogs -match "guardian_wrong_password")
@@ -271,7 +276,7 @@ try {
     Write-Step "11. Verifying Target App relaunch maintains unblocked execution..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Seconds 1
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     Start-Sleep -Seconds 2
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -311,18 +316,6 @@ try {
 
 } finally {
     Write-Step "13. Cleanup & Restoring original settings.json..."
-    try {
-        Set-DeviceAwake $false
-    } catch { }
-
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-        Write-Success "Original settings restored from backup."
-    } else {
-        Clear-TestAppRules | Out-Null
-    }
-
-    adb shell "am force-stop $TargetPackage" | Out-Null
-    adb shell "input keyevent 3" | Out-Null # HOME
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
     Write-Success "Target app stopped, returned to home."
 }

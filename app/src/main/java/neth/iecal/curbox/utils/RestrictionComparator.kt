@@ -100,6 +100,13 @@ object RestrictionComparator {
     fun appRuleSnapshots(old: AppRuleSnapshot, new: AppRuleSnapshot): Boolean {
         if (!old.isValid || !new.isValid) return false
         val newRules = new.appRules.associateBy { it.id }
+        // Guardian time can be granted while a rule is inactive, so restoring this allowance
+        // must still wait even though the rule currently blocks no apps.
+        if (old.appRules.any { oldRule ->
+                !oldRule.guardianExtraTimeAllowed &&
+                    newRules[oldRule.id]?.guardianExtraTimeAllowed == true
+            }
+        ) return false
         return old.appRules.filter { it.isActive }.all { oldRule ->
             val newRule = newRules[oldRule.id] ?: return@all false
             appRule(oldRule, newRule, old.appGroups, new.appGroups)
@@ -113,6 +120,9 @@ object RestrictionComparator {
         newGroups: List<neth.iecal.curbox.data.models.AppRuleAppGroup>
     ): Boolean {
         if (!new.isActive) return false
+        // Turning guardian extra time off removes usable allowance immediately. Turning it back
+        // on weakens the rule and stays behind the existing app-rule delay.
+        if (!old.guardianExtraTimeAllowed && new.guardianExtraTimeAllowed) return false
         // A wider target set adds protection and is safe to apply immediately. Removing a
         // previously covered package weakens the rule and must stay behind the delay.
         if (!appRuleScopeSameOrWider(old, new, oldGroups, newGroups)) return false

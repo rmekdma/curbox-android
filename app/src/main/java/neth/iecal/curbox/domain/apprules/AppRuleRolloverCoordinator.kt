@@ -22,7 +22,7 @@ class AppRuleRolloverCoordinator(
     private val zone: () -> ZoneId = { ZoneId.systemDefault() },
     private val onNonFatalError: (Throwable) -> Unit = {},
     internal val readSettings: (suspend () -> Settings)? = null,
-    internal val writeRolloverState: (suspend (AppRuleRolloverState) -> Boolean)? = null
+    internal val writeRolloverState: (suspend (AppRuleRolloverState, Settings) -> Boolean)? = null
 ) {
     suspend fun reconcileSettlement(nowMs: Long = wallClockMs()): RolloverCoordinatorResult {
         try {
@@ -54,6 +54,18 @@ class AppRuleRolloverCoordinator(
                     )
                     existingPools[rule.id] = pool
                     stateChanged = true
+                }
+
+                if (!rule.guardianExtraTimeAllowed) {
+                    val clearedPool = pool.copy(
+                        accumulatedMinutes = 0L,
+                        lastSettledUseDayId = currentUseDayId
+                    )
+                    if (clearedPool != pool) {
+                        existingPools[rule.id] = clearedPool
+                        stateChanged = true
+                    }
+                    continue
                 }
 
                 if (!rule.rolloverEnabled) {
@@ -98,8 +110,8 @@ class AppRuleRolloverCoordinator(
 
             val committed = if (stateChanged) {
                 val newState = AppRuleRolloverState(pools = existingPools)
-                val writeResult = writeRolloverState?.invoke(newState)
-                    ?: dataStoreManager?.writeAppRuleRolloverState(newState)
+                val writeResult = writeRolloverState?.invoke(newState, settings)
+                    ?: dataStoreManager?.writeAppRuleRolloverState(newState, settings)
                     ?: false
                 writeResult
             } else {
@@ -126,3 +138,12 @@ class AppRuleRolloverCoordinator(
         }
     }
 }
+
+/** Settings that can invalidate a calculated settlement before its DataStore write commits. */
+internal fun appRuleRolloverInputsMatch(current: Settings, basedOn: Settings): Boolean =
+    current.appRuleSnapshot == basedOn.appRuleSnapshot &&
+        current.appRuleOverrideState == basedOn.appRuleOverrideState &&
+        current.appRuleRolloverState == basedOn.appRuleRolloverState &&
+        current.useDayResetHour == basedOn.useDayResetHour &&
+        current.useDayResetMinute == basedOn.useDayResetMinute &&
+        current.useDayGenerationStartedAtMs == basedOn.useDayGenerationStartedAtMs

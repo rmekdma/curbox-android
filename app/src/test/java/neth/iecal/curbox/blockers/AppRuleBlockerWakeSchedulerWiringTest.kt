@@ -219,7 +219,7 @@ class AppRuleBlockerWakeSchedulerWiringTest {
                     useDayResetMinute = 0
                 )
             },
-            writeRolloverState = {
+            writeRolloverState = { _, _ ->
                 reconciled.set(true)
                 latch.countDown()
                 true

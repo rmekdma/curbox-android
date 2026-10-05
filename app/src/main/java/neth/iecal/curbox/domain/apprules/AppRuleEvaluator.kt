@@ -313,13 +313,17 @@ object AppRuleEvaluator {
             nowMs,
             useDayGenerationStartedAtMs
         )
-        val grants = AppRuleGuardianOverrides.grantsForRule(
-            activeOverrides,
-            rule.id,
-            useDayId,
-            nowMs,
-            useDayGenerationStartedAtMs
-        )
+        val grants = if (rule.guardianExtraTimeAllowed) {
+            AppRuleGuardianOverrides.grantsForRule(
+                activeOverrides,
+                rule.id,
+                useDayId,
+                nowMs,
+                useDayGenerationStartedAtMs
+            )
+        } else {
+            emptyList()
+        }
         val skipIntervals = AppRuleGuardianOverrides.skipsForRule(
             activeOverrides,
             rule.id,
@@ -733,7 +737,7 @@ object AppRuleEvaluator {
         availablePackages: Set<String> = emptySet(),
         essentialExcludedPackages: Set<String> = emptySet()
     ): Long {
-        if (!rule.rolloverEnabled) return 0L
+        if (!rule.guardianExtraTimeAllowed || !rule.rolloverEnabled) return 0L
         val activeOverrides = AppRuleGuardianOverrides.normalize(
             overrides,
             useDayId,

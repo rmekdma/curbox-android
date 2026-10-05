@@ -110,6 +110,35 @@ class AppRuleEvaluatorTest {
     }
 
     @Test
+    fun disabledGuardianExtraTimeDoesNotAffectRuleAllowance() {
+        val restrictedRule = rule(allowedMinutes = 0).copy(guardianExtraTimeAllowed = false)
+        val useDayId = "2026-08-17"
+        val result = AppRuleEvaluator.evaluate(
+            snapshot = AppRuleSnapshot(listOf(group), listOf(restrictedRule)),
+            packageName = "com.example.reader",
+            useDayId = useDayId,
+            sessions = emptyList(),
+            nowMs = now,
+            zone = zone,
+            overrides = AppRuleOverrideState(
+                useDayId = useDayId,
+                grants = listOf(
+                    AppRuleGuardianGrant(
+                        ruleId = restrictedRule.id,
+                        useDayId = useDayId,
+                        grantedAtMs = now - 60_000L,
+                        grantedMillis = 30 * 60_000L
+                    )
+                )
+            )
+        )
+
+        assertFalse(result.isAllowed)
+        assertEquals(0L, result.evaluations.single().guardianAllowanceMillis)
+        assertEquals(0L, result.evaluations.single().remainingMillis)
+    }
+
+    @Test
     fun usageIsSummedAcrossTargetPackagesAndStopsAtAllowance() {
         val secondPackage = "com.example.notes"
         val twoApps = group.copy(selectedPackages = group.selectedPackages + secondPackage)
@@ -444,6 +473,28 @@ class AppRuleEvaluatorTest {
         val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
         val grant = AppRuleGuardianGrant(rule.id, "2026-08-17", now - 3600_000L, 20 * 60_000L)
         val overrides = AppRuleOverrideState(grants = listOf(grant))
+
+        val unused = AppRuleEvaluator.computeUnusedGuardianMinutes(
+            rule = rule,
+            snapshot = snapshot,
+            useDayId = "2026-08-17",
+            sessions = emptyList(),
+            overrides = overrides,
+            zone = zone
+        )
+
+        assertEquals(0L, unused)
+    }
+
+    @Test
+    fun disabledGuardianExtraTimeCannotBeSettledIntoRollover() {
+        val rule = rule(allowedMinutes = 30).copy(
+            rolloverEnabled = true,
+            guardianExtraTimeAllowed = false
+        )
+        val snapshot = AppRuleSnapshot(listOf(group), listOf(rule))
+        val grant = AppRuleGuardianGrant(rule.id, "2026-08-17", now - 60_000L, 20 * 60_000L)
+        val overrides = AppRuleOverrideState(useDayId = "2026-08-17", grants = listOf(grant))
 
         val unused = AppRuleEvaluator.computeUnusedGuardianMinutes(
             rule = rule,

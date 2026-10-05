@@ -188,7 +188,9 @@ data class AppRule(
     /** When enabled, unused guardian extra time rolls over into the accumulated pool. */
     val rolloverEnabled: Boolean = false,
     /** Days of week when accumulated rollover time can be unlocked (Sunday=0..Saturday=6). */
-    val unlockDays: Set<Int> = emptySet()
+    val unlockDays: Set<Int> = emptySet(),
+    /** When enabled, guardian extra time can be granted and used for this rule. */
+    val guardianExtraTimeAllowed: Boolean = true
 ) {
     companion object {
         fun create(
@@ -205,7 +207,8 @@ data class AppRule(
             contributorGroupConditionMinutes: Map<String, Long> = emptyMap(),
             earnedAllowanceEnabled: Boolean = false,
             rolloverEnabled: Boolean = false,
-            unlockDays: Set<Int> = emptySet()
+            unlockDays: Set<Int> = emptySet(),
+            guardianExtraTimeAllowed: Boolean = true
         ): AppRule = AppRule(
             id = newId(),
             name = name,
@@ -221,7 +224,8 @@ data class AppRule(
             contributorGroupConditionMinutes = contributorGroupConditionMinutes,
             earnedAllowanceEnabled = earnedAllowanceEnabled,
             rolloverEnabled = rolloverEnabled,
-            unlockDays = unlockDays.toSet()
+            unlockDays = unlockDays.toSet(),
+            guardianExtraTimeAllowed = guardianExtraTimeAllowed
         )
     }
 

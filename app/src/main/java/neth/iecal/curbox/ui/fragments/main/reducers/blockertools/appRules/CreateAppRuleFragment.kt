@@ -150,6 +150,7 @@ class CreateAppRuleFragment : Fragment() {
         contributorGroupConditionMinutesMap.putAll(rule.effectiveContributorGroupConditionMinutes())
         binding.earnedAllowanceSwitch.isChecked = rule.earnedAllowanceEnabled
         binding.activeSwitch.isChecked = rule.isActive
+        binding.guardianExtraTimeAllowed.isChecked = rule.guardianExtraTimeAllowed
         weekdayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.weekdays }
         binding.rolloverSwitch.isChecked = rule.rolloverEnabled
         unlockDayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.unlockDays }
@@ -411,7 +412,8 @@ class CreateAppRuleFragment : Fragment() {
             contributorGroupConditionMinutes = cleanedGroupConditionMinutes,
             earnedAllowanceEnabled = earnedAllowanceEnabled,
             rolloverEnabled = rolloverEnabled,
-            unlockDays = unlockDays
+            unlockDays = unlockDays,
+            guardianExtraTimeAllowed = binding.guardianExtraTimeAllowed.isChecked
         )
         viewLifecycleOwner.lifecycleScope.launch {
             val current = dataStore.settingsForEditing.first().appRuleSnapshot

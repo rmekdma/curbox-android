@@ -929,6 +929,114 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun useDayGenerationBoundaryRotatesStillVisibleSessionAndEnforcesNewGeneration() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val essentialPackage = "com.android.launcher3"
+        val initialRuntime = runtime(allowedMinutes = 1L).copy(
+            evidencePolicy = ForegroundEvidencePolicySnapshot(
+                essentialPackages = setOf(essentialPackage)
+            )
+        )
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            acceptedRuntime = AcceptedRuleRuntimeSnapshot(
+                runtime = initialRuntime,
+                runtimeRevision = RuntimeRevision(1L)
+            )
+        )
+        try {
+            worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            assertTrue(outcomes.awaitCount(1))
+            val oldSession = repository.persistedSessions().single()
+
+            // Essential foreground UI preserves the last app session when its own window is
+            // unavailable. A following settings generation still needs to cut that old row.
+            worker.submit(
+                DecisionRequest(
+                    sourceOrderIdentity = SourceOrderIdentity(2L),
+                    lifecycleGeneration = LifecycleGeneration(1L),
+                    reason = ObservationKind.REAL_EVENT,
+                    observation = ForegroundFacts(
+                        capturedAtWallMs = 1_500L,
+                        capturedAtElapsedMs = 1_500L,
+                        signal = SignalFact(
+                            kind = ObservationKind.REAL_EVENT,
+                            eventPackage = essentialPackage,
+                            eventWallMs = 1_500L,
+                            eventElapsedMs = 1_500L
+                        ),
+                        activeRoot = ActiveRootFact(
+                            packageName = essentialPackage,
+                            readState = ForegroundReadState.AVAILABLE
+                        ),
+                        applicationWindows = ApplicationWindowsFact(
+                            readState = ForegroundReadState.EMPTY
+                        ),
+                        displayState = DisplayState.UNLOCKED
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitCount(2))
+            assertEquals(null, repository.persistedSessions().single().endedAtMs)
+
+            val newGeneration = 2_000L
+            worker.submit(
+                request(
+                    sourceOrder = 3L,
+                    lifecycle = 1L,
+                    packageName = TARGET_PACKAGE,
+                    capturedAtMs = newGeneration,
+                    runtimePublication = RuntimePublication(
+                        runtimeRevision = RuntimeRevision(2L),
+                        candidateRuntime = initialRuntime.copy(
+                            useDayGenerationStartedAtMs = newGeneration
+                        )
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitCount(3))
+
+            val sessionsAfterRotation = repository.persistedSessions()
+                .filter { it.packageName == TARGET_PACKAGE }
+            assertEquals(2, sessionsAfterRotation.size)
+            val oldSessionAfterRotation = sessionsAfterRotation.first { it.id == oldSession.id }
+            val newSessionAfterRotation = sessionsAfterRotation.last()
+            assertEquals(newGeneration, oldSessionAfterRotation.endedAtMs)
+            assertEquals(0L, oldSessionAfterRotation.useDayGenerationStartedAtMs)
+            assertEquals(newGeneration, newSessionAfterRotation.startedAtMs)
+            assertEquals(
+                newGeneration,
+                newSessionAfterRotation.useDayGenerationStartedAtMs
+            )
+            assertEquals(
+                "a still-visible generation rotation must not create another launch",
+                1,
+                repository.launchEvents.size
+            )
+
+            worker.submit(
+                request(
+                    sourceOrder = 4L,
+                    lifecycle = 1L,
+                    packageName = TARGET_PACKAGE,
+                    capturedAtMs = newGeneration + 60_001L
+                )
+            )
+            assertTrue(outcomes.awaitCount(4))
+            val finalDecision = outcomes.enforcementOutcomes.last().packageDecisions.single()
+            assertFalse(
+                "the new generation's full minute of use must exhaust its allowance",
+                finalDecision.isAllowed
+            )
+            assertTrue(TARGET_RULE_ID in finalDecision.denyingRuleIds)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun rapidSwitchesAreSerializedAndPersistedRowsMatchPublishedDecisions() {
         val repository = RecordingRepository()
         val outcomes = RecordingOutcomeSink()
@@ -1395,7 +1503,10 @@ class SerializedDecisionWorkerTest {
             val id = startSession(useDayId, packageName, startedAtMs)
             synchronized(sessions) {
                 val index = sessions.indexOfFirst { it.id == id }
-                sessions[index] = sessions[index].copy(statisticsTracked = statisticsTracked)
+                sessions[index] = sessions[index].copy(
+                    useDayGenerationStartedAtMs = generationStartedAtMs,
+                    statisticsTracked = statisticsTracked
+                )
             }
             return id
         }
@@ -1441,6 +1552,14 @@ class SerializedDecisionWorkerTest {
             evaluatorFailure?.let { throw it }
             operations += "evaluate:${sessions.lastOrNull()?.packageName ?: "none"}"
             return persistedSessions()
+        }
+
+        override suspend fun sessionsForUseDay(
+            useDayId: String,
+            generationStartedAtMs: Long
+        ): List<ForegroundSession> = sessionsForUseDay(useDayId).filter { session ->
+            generationStartedAtMs <= 0L ||
+                session.useDayGenerationStartedAtMs >= generationStartedAtMs
         }
 
         override suspend fun finishOpenSessions(useDayId: String, endedAtMs: Long) = Unit

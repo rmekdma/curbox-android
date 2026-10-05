@@ -65,6 +65,22 @@ class GuardianApprovalSelectionTest {
         org.junit.Assert.assertFalse(disabledState.isVisible)
         assertEquals(0L, disabledState.accumulatedMinutes)
 
+        val guardianTimeDisabledState = GuardianApprovalSelection.resolveAccumulatedButtonState(
+            rule = rule.copy(guardianExtraTimeAllowed = false),
+            pool = pool,
+            useDayId = "2026-09-20"
+        )
+        org.junit.Assert.assertFalse(guardianTimeDisabledState.isVisible)
+        assertEquals(0L, guardianTimeDisabledState.accumulatedMinutes)
+
+        val inactiveRuleState = GuardianApprovalSelection.resolveAccumulatedButtonState(
+            rule = rule.copy(isActive = false),
+            pool = pool,
+            useDayId = "2026-09-20"
+        )
+        org.junit.Assert.assertFalse(inactiveRuleState.isVisible)
+        assertEquals(0L, inactiveRuleState.accumulatedMinutes)
+
         // Null rule or null pool -> Hidden
         val nullState = GuardianApprovalSelection.resolveAccumulatedButtonState(
             rule = null,

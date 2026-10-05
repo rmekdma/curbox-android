@@ -15,7 +15,7 @@
 
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
-    [string]$TargetActivity = "com.woodenpharm.choseonggacha.MainActivity",
+    [string]$TargetActivity = "",
     [int]$AllowedMinutes = 1,
     [int]$MaxWaitSeconds = 95
 )
@@ -26,6 +26,7 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
 
 Assert-AdbDevice
+$accessibilityBackup = Backup-DeviceAccessibilitySettings
 
 $tmpDir = Join-Path $env:TEMP "curbox_limit_exhaustion_test"
 if (-not (Test-Path $tmpDir)) {
@@ -44,6 +45,22 @@ try {
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
     Write-Success "Backup saved to $backupFile"
 
+    Write-Step "1a. Ensuring the accessibility service is bound before measuring usage..."
+    Enable-AccessibilityService | Out-Null
+    $serviceWait = [System.Diagnostics.Stopwatch]::StartNew()
+    $serviceBound = $false
+    while ($serviceWait.Elapsed.TotalSeconds -lt 15) {
+        if (Test-AccessibilityServiceBound) {
+            $serviceBound = $true
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $serviceBound) {
+        throw "Curbox AppBlockerService did not bind; daily-limit enforcement cannot be measured."
+    }
+    Write-Success "Curbox AppBlockerService is bound and ready for the daily-limit test."
+
     Write-Step "2. Crafting and injecting AppRule with ${AllowedMinutes}-minute Daily Allowance limit..."
     $appRuleSnapshot = New-DailyLimitAppRuleConfig `
         -TargetPackage $TargetPackage `
@@ -57,7 +74,7 @@ try {
     Write-Step "3. Launching Target App ($TargetPackage) - Expecting Unblocked initially..."
     adb shell "am force-stop $TargetPackage" | Out-Null
     Start-Sleep -Milliseconds 500
-    adb shell "am start -n $TargetPackage/$TargetActivity" | Out-Null
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
 
     $launchSw = [System.Diagnostics.Stopwatch]::StartNew()
     $targetFocused = $false
@@ -111,6 +128,9 @@ try {
         $currentElapsed = [int]$pollSw.Elapsed.TotalSeconds
         if ($currentElapsed % 10 -eq 0 -and $currentElapsed -gt 0) {
             Write-Host "Accumulating usage: ${currentElapsed}s / ${MaxWaitSeconds}s (current focus: $lastFocus)"
+            $serviceBoundNow = Test-AccessibilityServiceBound
+            $enabledAccessibilityNow = Get-DeviceSecureSetting -Name "enabled_accessibility_services"
+            Write-Host "[DIAGNOSTIC] Accessibility service at ${currentElapsed}s: bound=$serviceBoundNow; enabled=$($enabledAccessibilityNow -match 'AppBlockerService')"
         }
         Start-Sleep -Milliseconds 1000
     }
@@ -125,9 +145,31 @@ try {
             Write-Fail "Lock screen does not display expected limit exhaustion reason. UI dump preview: $($uiDump.Substring(0, [math]::Min(500, $uiDump.Length)))"
             $passedAll = $false
         }
+
+        $diagnosticScript = Join-Path (Split-Path -Parent $PSScriptRoot) ".scratch\diagnose-limit-ledger.py"
+        $pythonPath = "C:\Users\DELL\.pixi\bin\python.exe"
+        if ((Test-Path -LiteralPath $diagnosticScript) -and (Test-Path -LiteralPath $pythonPath)) {
+            Write-Host "[DIAGNOSTIC] Capturing the successful test rule, service, focus, and ledger before cleanup..." -ForegroundColor Cyan
+            $diagnosticTemp = Join-Path (Split-Path -Parent $PSScriptRoot) ".scratch\limit-ledger-probe-temp"
+            if (-not (Test-Path -LiteralPath $diagnosticTemp)) {
+                New-Item -ItemType Directory -Path $diagnosticTemp | Out-Null
+            }
+            & $pythonPath $diagnosticScript --serial $env:ANDROID_SERIAL --package $TargetPackage
+        }
     } else {
         Write-Fail "GuardianApprovalActivity did NOT intercept within ${MaxWaitSeconds}s. Last focus: $lastFocus"
         $passedAll = $false
+
+        $diagnosticScript = Join-Path (Split-Path -Parent $PSScriptRoot) ".scratch\diagnose-limit-ledger.py"
+        $pythonPath = "C:\Users\DELL\.pixi\bin\python.exe"
+        if ((Test-Path -LiteralPath $diagnosticScript) -and (Test-Path -LiteralPath $pythonPath)) {
+            Write-Host "[DIAGNOSTIC] Capturing the test rule, service, foreground focus, and Chrome session ledger before cleanup..." -ForegroundColor Cyan
+            $diagnosticTemp = Join-Path (Split-Path -Parent $PSScriptRoot) ".scratch\limit-ledger-probe-temp"
+            if (-not (Test-Path -LiteralPath $diagnosticTemp)) {
+                New-Item -ItemType Directory -Path $diagnosticTemp | Out-Null
+            }
+            & $pythonPath $diagnosticScript --serial $env:ANDROID_SERIAL --package $TargetPackage
+        }
     }
 
     Write-Step "6. Final Result Summary"
@@ -148,11 +190,6 @@ try {
 
 } finally {
     Write-Step "Cleanup: Restoring original settings, stopping app, and resetting awake state..."
-    Set-DeviceAwake $false
-    if (Test-Path $backupFile) {
-        Restore-DeviceSettings -BackupPath $backupFile | Out-Null
-    }
-    adb shell "am force-stop $TargetPackage" | Out-Null
-    adb shell "input keyevent 3" | Out-Null
+    Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
     Write-Success "Cleanup completed: original settings restored, target app stopped, returned to home."
 }

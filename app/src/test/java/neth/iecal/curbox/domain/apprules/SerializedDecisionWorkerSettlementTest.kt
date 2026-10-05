@@ -99,7 +99,7 @@ class SerializedDecisionWorkerSettlementTest {
                     useDayResetMinute = 0
                 )
             },
-            writeRolloverState = {
+            writeRolloverState = { _, _ ->
                 reconciled = true
                 true
             }
