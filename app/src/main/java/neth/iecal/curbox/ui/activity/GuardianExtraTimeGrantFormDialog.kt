@@ -10,26 +10,16 @@ import androidx.appcompat.app.AlertDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
-import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.databinding.DialogGuardianExtraTimeBinding
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantCandidate
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantFormState
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeInputSource
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeSubmission
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeValidationError
 import neth.iecal.curbox.utils.GuardianOwnedDialog
-
-data class GuardianExtraTimeGrantOption(
-    val rule: AppRule,
-    val basis: GuardianExtraTimeGrantBasis
-) {
-    val label: String
-        get() = rule.name.takeIf(String::isNotBlank) ?: rule.id
-}
 
 /** Shared form used by the lock screen and the authenticated app rule screen. */
 class GuardianExtraTimeGrantFormDialog(
@@ -37,12 +27,12 @@ class GuardianExtraTimeGrantFormDialog(
     private val inflater: LayoutInflater,
     private val scope: CoroutineScope,
     private val readCurrentBasis: suspend (String) -> GuardianExtraTimeGrantBasis?,
-    private val readCurrentCandidates: suspend () -> List<GuardianExtraTimeGrantOption>,
+    private val readCurrentCandidates: suspend () -> List<GuardianExtraTimeGrantCandidate>,
     private val onSubmit: (GuardianExtraTimeGrantBasis, Long) -> Unit,
     private val onDismiss: (AlertDialog) -> Unit = {}
 ) {
     fun show(
-        options: List<GuardianExtraTimeGrantOption>,
+        options: List<GuardianExtraTimeGrantCandidate>,
         selectedIndex: Int = 0
     ): AlertDialog? {
         if (options.isEmpty()) return null
@@ -57,10 +47,10 @@ class GuardianExtraTimeGrantFormDialog(
         val adapter = ArrayAdapter(
             context,
             android.R.layout.simple_list_item_1,
-            currentOptions.map(GuardianExtraTimeGrantOption::label)
+            currentOptions.map(::grantCandidateLabel)
         )
         binding.rulePicker.setAdapter(adapter)
-        binding.rulePicker.setText(currentOptions[initialIndex].label, false)
+        binding.rulePicker.setText(grantCandidateLabel(currentOptions[initialIndex]), false)
         binding.additionalMinutesInput.setSelectAllOnFocus(true)
         binding.totalMinutesInput.setSelectAllOnFocus(true)
 
@@ -167,12 +157,15 @@ class GuardianExtraTimeGrantFormDialog(
 
                 currentOptions = refreshedOptions
                 adapter.clear()
-                adapter.addAll(currentOptions.map(GuardianExtraTimeGrantOption::label))
+                adapter.addAll(currentOptions.map(::grantCandidateLabel))
                 adapter.notifyDataSetChanged()
                 val refreshedIndex = currentOptions.indexOfFirst {
                     it.rule.id == option.rule.id
                 }.takeIf { it >= 0 } ?: 0
-                binding.rulePicker.setText(currentOptions[refreshedIndex].label, false)
+                binding.rulePicker.setText(
+                    grantCandidateLabel(currentOptions[refreshedIndex]),
+                    false
+                )
                 reset(currentOptions[refreshedIndex].basis)
             }
         }
@@ -220,15 +213,15 @@ class GuardianExtraTimeGrantFormDialog(
     }
 
     private suspend fun readBasis(ruleId: String): GuardianExtraTimeGrantBasis? = try {
-        withContext(Dispatchers.IO) { readCurrentBasis(ruleId) }
+        readCurrentBasis(ruleId)
     } catch (error: CancellationException) {
         throw error
     } catch (_: Exception) {
         null
     }
 
-    private suspend fun readCandidates(): List<GuardianExtraTimeGrantOption>? = try {
-        withContext(Dispatchers.IO) { readCurrentCandidates() }
+    private suspend fun readCandidates(): List<GuardianExtraTimeGrantCandidate>? = try {
+        readCurrentCandidates()
     } catch (error: CancellationException) {
         throw error
     } catch (_: Exception) {
@@ -236,3 +229,6 @@ class GuardianExtraTimeGrantFormDialog(
         null
     }
 }
+
+private fun grantCandidateLabel(candidate: GuardianExtraTimeGrantCandidate): String =
+    candidate.rule.name.takeIf(String::isNotBlank) ?: candidate.rule.id

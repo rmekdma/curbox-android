@@ -24,9 +24,6 @@ import com.google.gson.reflect.TypeToken
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import android.view.View
 import neth.iecal.curbox.R
-import neth.iecal.curbox.data.db.AppDatabase
-import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
-import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.databinding.ActivityGuardianApprovalBinding
 import neth.iecal.curbox.databinding.DialogGuardianAccumulatedTimeBinding
@@ -35,19 +32,18 @@ import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeSubmission
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeValidationError
 import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
-import neth.iecal.curbox.domain.apprules.GuardianExtraTimeRulePicker
-import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantCandidate
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
+import neth.iecal.curbox.utils.GuardianExtraTimeGrantQueryFactory
 import java.time.Duration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.time.ZoneId
 
 /** Internal approval surface. It has no exported intent or broadcast write path. */
 class GuardianApprovalActivity : AppCompatActivity() {
@@ -58,8 +54,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityGuardianApprovalBinding
     private val dataStore by lazy { DataStoreManager(applicationContext) }
-    private val packageScopeReader by lazy {
-        AppRulePackageScopeReader.fromContext(applicationContext)
+    private val grantQuery by lazy {
+        GuardianExtraTimeGrantQueryFactory.create(applicationContext, dataStore)
     }
     private var denials: List<AppRuleGuardianDenial> = emptyList()
     private var targetPackageName: String = ""
@@ -249,7 +245,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         grantPickerLoading = true
         lifecycleScope.launch {
             val options = try {
-                withContext(Dispatchers.IO) { readCurrentGrantCandidates() }
+                grantQuery.candidates()
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -271,50 +267,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun readCurrentGrantCandidates(): List<GuardianExtraTimeGrantOption> {
-        val settings = dataStore.settings.first()
-        val now = System.currentTimeMillis()
-        val zone = ZoneId.systemDefault()
-        val calculator = ConfigurableUseDayCalculator(zone, settings.useDayResetTime)
-        val useDayId = calculator.idAt(now)
-        val database = AppDatabase.getInstance(applicationContext)
-        val sessions = RoomCurrentUseDaySessionRepository(database.foregroundSessionDao())
-            .sessionsForUseDay(useDayId, settings.useDayGenerationStartedAtMs)
-        val ruleSnapshot = settings.appRuleSnapshot.normalized()
-        val evaluations = GuardianExtraTimeRulePicker.evaluateRules(
-            snapshot = ruleSnapshot,
-            useDayId = useDayId,
-            sessions = sessions,
-            nowMs = now,
-            resetTime = settings.useDayResetTime,
-            zone = zone,
-            useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
-            availablePackages = packageScopeReader.readLaunchablePackages(),
-            essentialExcludedPackages = packageScopeReader.readEssentialPackages(),
-            overrides = settings.appRuleOverrideState
-        )
-        val candidates = GuardianExtraTimeRulePicker.candidates(
-            snapshot = ruleSnapshot,
-            evaluations = evaluations.values
-        )
-        return candidates.mapNotNull { rule ->
-            GuardianExtraTimeGrantBasis.capture(settings, rule.id, now)?.let { basis ->
-                GuardianExtraTimeGrantOption(rule, basis)
-            }
-        }
-    }
-
-    private suspend fun readGrantBasis(ruleId: String): GuardianExtraTimeGrantBasis? {
-        val settings = dataStore.settings.first()
-        return GuardianExtraTimeGrantBasis.capture(
-            settings = settings,
-            ruleId = ruleId,
-            nowMs = System.currentTimeMillis()
-        )
-    }
-
     private fun showGrantDialog(
-        options: List<GuardianExtraTimeGrantOption>,
+        options: List<GuardianExtraTimeGrantCandidate>,
         selectedIndex: Int
     ) {
         if (!canHandleCallbacks()) {
@@ -325,8 +279,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
             context = this,
             inflater = layoutInflater,
             scope = lifecycleScope,
-            readCurrentBasis = ::readGrantBasis,
-            readCurrentCandidates = ::readCurrentGrantCandidates,
+            readCurrentBasis = grantQuery::currentBasis,
+            readCurrentCandidates = grantQuery::candidates,
             onSubmit = { basis, minutes ->
                 if (canHandleCallbacks() && !grantInProgress) {
                     grantInProgress = true

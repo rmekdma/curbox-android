@@ -2,6 +2,7 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
+import java.time.ZoneId
 
 /** The form's authority to add minutes to one rule's current use-day total. */
 data class GuardianExtraTimeGrantBasis(
@@ -14,13 +15,30 @@ data class GuardianExtraTimeGrantBasis(
         get() = currentTotalMillis / GuardianExtraTimeFormState.MILLIS_PER_MINUTE
 
     companion object {
-        fun capture(settings: Settings, ruleId: String, nowMs: Long): GuardianExtraTimeGrantBasis? {
+        fun capture(
+            settings: Settings,
+            ruleId: String,
+            nowMs: Long
+        ): GuardianExtraTimeGrantBasis? = capture(
+            settings = settings,
+            ruleId = ruleId,
+            nowMs = nowMs,
+            zone = ZoneId.systemDefault()
+        )
+
+        fun capture(
+            settings: Settings,
+            ruleId: String,
+            nowMs: Long,
+            zone: ZoneId = ZoneId.systemDefault()
+        ): GuardianExtraTimeGrantBasis? {
             if (ruleId.isBlank() || settings.appRuleSnapshot.appRules.none {
                     it.id == ruleId && it.isActive && it.guardianExtraTimeAllowed
                 }
             ) return null
 
             val useDayId = ConfigurableUseDayCalculator(
+                zone = zone,
                 resetTime = settings.useDayResetTime
             ).idAt(nowMs)
             return GuardianExtraTimeGrantBasis(

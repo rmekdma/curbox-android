@@ -47,9 +47,9 @@ import neth.iecal.curbox.domain.apprules.GuardianExtraTimeRulePicker
 import neth.iecal.curbox.domain.apprules.UsageResetUiPolicy
 import neth.iecal.curbox.ui.activity.FragmentActivity
 import neth.iecal.curbox.ui.activity.GuardianExtraTimeGrantFormDialog
-import neth.iecal.curbox.ui.activity.GuardianExtraTimeGrantOption
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.GuardianExtraTimeGrantQueryFactory
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.UsageResetManager
@@ -73,6 +73,12 @@ class AppRuleGroupsFragment : Fragment() {
     }
     private val packageScopeReader by lazy {
         AppRulePackageScopeReader.fromContext(requireContext().applicationContext)
+    }
+    private val grantQuery by lazy {
+        GuardianExtraTimeGrantQueryFactory.create(
+            requireContext().applicationContext,
+            dataStore
+        )
     }
     private var latestSettings: Settings? = null
     private var grantPickerLoading = false
@@ -238,7 +244,7 @@ class AppRuleGroupsFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             var failed = false
             val options = try {
-                withContext(Dispatchers.IO) { readCurrentGrantCandidates() }
+                grantQuery.candidates()
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -263,8 +269,8 @@ class AppRuleGroupsFragment : Fragment() {
                 context = requireContext(),
                 inflater = layoutInflater,
                 scope = viewLifecycleOwner.lifecycleScope,
-                readCurrentBasis = ::readCurrentGrantBasis,
-                readCurrentCandidates = ::readCurrentGrantCandidates,
+                readCurrentBasis = grantQuery::currentBasis,
+                readCurrentCandidates = grantQuery::candidates,
                 onSubmit = ::submitGuardianExtraTimeGrant,
                 onDismiss = { dismissedDialog ->
                     ownedDialogs.remove(dismissedDialog)
@@ -273,29 +279,6 @@ class AppRuleGroupsFragment : Fragment() {
             ).show(options, selectedIndex)
             grantFormDialog?.let(ownedDialogs::add)
         }
-    }
-
-    private suspend fun readCurrentGrantCandidates(): List<GuardianExtraTimeGrantOption> {
-        val settings = dataStore.settings.first()
-        val now = System.currentTimeMillis()
-        val evaluations = readAppRuleEvaluations(settings, now)
-        return GuardianExtraTimeRulePicker.candidates(
-            snapshot = settings.appRuleSnapshot.normalized(),
-            evaluations = evaluations.values
-        ).mapNotNull { rule ->
-            GuardianExtraTimeGrantBasis.capture(settings, rule.id, now)?.let { basis ->
-                GuardianExtraTimeGrantOption(rule, basis)
-            }
-        }
-    }
-
-    private suspend fun readCurrentGrantBasis(ruleId: String): GuardianExtraTimeGrantBasis? {
-        val settings = dataStore.settings.first()
-        return GuardianExtraTimeGrantBasis.capture(
-            settings = settings,
-            ruleId = ruleId,
-            nowMs = System.currentTimeMillis()
-        )
     }
 
     private fun submitGuardianExtraTimeGrant(

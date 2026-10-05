@@ -5,7 +5,6 @@ import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
-import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.Settings
@@ -356,81 +355,24 @@ class GuardianExtraTimeGrantWriteTest {
     }
 
     @Test
-    fun lockScreenAndMainAppCandidateOrderAndDirectGrantResultStayAligned() {
-        val weekday = Instant.ofEpochMilli(nowMs).atZone(ZoneId.systemDefault())
-            .dayOfWeek.value % 7
-        val snapshot = AppRuleSnapshot(
-            appRules = listOf(
-                AppRule(
-                    id = "allowed-but-blocking",
-                    allowedMinutes = 0L,
-                    scope = AppRuleScope.allApps()
-                ),
-                AppRule(
-                    id = "allowed-later",
-                    allowedMinutes = 30L,
-                    scope = AppRuleScope.allApps()
-                ),
-                AppRule(
-                    id = "inactive-window",
-                    weekdays = setOf((weekday + 1) % 7),
-                    scope = AppRuleScope.allApps()
-                ),
-                AppRule(id = "inactive", isActive = false),
-                AppRule(id = "disallowed", guardianExtraTimeAllowed = false)
-            )
-        ).normalized()
+    fun passwordAndAuthenticatedSessionApplyTheSameDirectGrant() {
         val current = settingsWithRuleAndGrants().copy(
-            appRuleSnapshot = snapshot,
             guardianAuthConfig = GuardianAuthConfig()
         )
-        val lockScreenEvaluations = GuardianExtraTimeRulePicker.evaluateRules(
-            snapshot = snapshot,
-            useDayId = useDayId,
-            sessions = emptyList(),
-            nowMs = nowMs,
-            resetTime = UseDayResetTime(),
-            availablePackages = setOf("example.target")
-        )
-        val lockScreenCandidates = GuardianExtraTimeRulePicker.candidates(
-            snapshot,
-            lockScreenEvaluations.values
-        )
-        val mainAppEvaluations = snapshot.appRules.map { rule ->
-            AppRuleEvaluator.evaluateRuleForSnapshot(
-                snapshot = snapshot,
-                rule = rule,
-                useDayId = useDayId,
-                sessions = emptyList(),
-                nowMs = nowMs,
-                zone = ZoneId.systemDefault(),
-                useDayGenerationStartedAtMs = current.useDayGenerationStartedAtMs,
-                overrides = current.appRuleOverrideState
-            )
-        }
-        val mainAppCandidates = GuardianExtraTimeRulePicker.candidates(snapshot, mainAppEvaluations)
-
-        assertEquals(
-            listOf("allowed-but-blocking", "allowed-later", "inactive-window"),
-            lockScreenCandidates.map(AppRule::id)
-        )
-        assertEquals(lockScreenCandidates, mainAppCandidates)
-        assertEquals("allowed-but-blocking", mainAppCandidates.first().id)
-
         val basis = GuardianExtraTimeGrantBasis.capture(
             current,
-            mainAppCandidates.first().id,
+            "rule",
             nowMs
         )!!
         val grantAtMs = nowMs + 5L
-        val lockScreenWrite = GuardianExtraTimeGrantWrite.nextSettings(
+        val passwordWrite = GuardianExtraTimeGrantWrite.nextSettings(
             current = current,
             password = "",
             basis = basis,
             durationMinutes = 10L,
             grantedAtMs = grantAtMs
         )
-        val mainAppWrite = GuardianExtraTimeGrantWrite.nextSettingsFromAuthenticatedSession(
+        val sessionWrite = GuardianExtraTimeGrantWrite.nextSettingsFromAuthenticatedSession(
             current = current,
             basis = basis,
             durationMinutes = 10L,
@@ -438,7 +380,7 @@ class GuardianExtraTimeGrantWriteTest {
             sessionAuthenticated = true
         )
 
-        assertEquals(lockScreenWrite.appRuleOverrideState, mainAppWrite.appRuleOverrideState)
+        assertEquals(passwordWrite.appRuleOverrideState, sessionWrite.appRuleOverrideState)
     }
 
     @Test

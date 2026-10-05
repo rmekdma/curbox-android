@@ -33,6 +33,7 @@ import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
+import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantCandidate
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianSessionRegistry
 import kotlinx.coroutines.flow.first
@@ -314,7 +315,7 @@ class GuardianApprovalActivityLifecycleTest {
             instrumentation.runOnMainSync {
                 completion.invoke(
                     destroyedActivity,
-                    listOf(GuardianExtraTimeGrantOption(rule, basis)),
+                    listOf(GuardianExtraTimeGrantCandidate(rule, basis)),
                     0
                 )
             }
