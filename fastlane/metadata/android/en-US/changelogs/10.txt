@@ -1,0 +1,5 @@
+Choose whether each app rule allows guardian extra time.
+Grant time to any eligible rule from the lock screen or app rule management, even while another rule keeps the app locked.
+Turning off extra time clears that rule's saved balance and current day grants.
+Changed grant totals now require fresh input before saving.
+Improved rule switching, dialog cleanup, and usage tracking after a use day reset.

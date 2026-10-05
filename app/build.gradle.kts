@@ -54,8 +54,8 @@ android {
         applicationId = "neth.iecal.curbox"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "4.1.1"
+        versionCode = 10
+        versionName = "v4.1.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resValue("string", "app_name", "Curbox")
 
