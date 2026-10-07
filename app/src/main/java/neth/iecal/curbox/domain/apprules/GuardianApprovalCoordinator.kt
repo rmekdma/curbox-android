@@ -28,6 +28,13 @@ class GuardianApprovalCoordinator {
         val operation: Operation? = null
     )
 
+    data class DirectCheckIdentity(
+        val screenRequestId: String,
+        val operationId: String,
+        val checkId: String,
+        val lifecycleGeneration: LifecycleGeneration
+    )
+
     private val lock = Any()
     private var owner: Owner? = null
 
@@ -113,6 +120,9 @@ class GuardianApprovalCoordinator {
         DirectCheckPhase.TIMED_OUT
     )
 
+    fun timeOutDirectCheck(identity: DirectCheckIdentity): Boolean =
+        updateDirectPhase(identity, DirectCheckPhase.TIMED_OUT)
+
     fun completeDirectCheck(
         screenRequestId: String,
         operationId: String,
@@ -123,6 +133,9 @@ class GuardianApprovalCoordinator {
         checkId,
         DirectCheckPhase.FINISHED
     )
+
+    fun completeDirectCheck(identity: DirectCheckIdentity): Boolean =
+        updateDirectPhase(identity, DirectCheckPhase.FINISHED)
 
     fun beginLegacyOperation(screenRequestId: String, operationId: String): Boolean =
         synchronized(lock) {
@@ -178,6 +191,22 @@ class GuardianApprovalCoordinator {
         if (current.screenRequestId != screenRequestId ||
             direct.operationId != operationId ||
             direct.checkId != checkId ||
+            direct.phase != DirectCheckPhase.CHECKING
+        ) return@synchronized false
+        owner = current.copy(operation = direct.copy(phase = nextPhase))
+        true
+    }
+
+    private fun updateDirectPhase(
+        identity: DirectCheckIdentity,
+        nextPhase: DirectCheckPhase
+    ): Boolean = synchronized(lock) {
+        val current = owner ?: return@synchronized false
+        val direct = current.operation as? Operation.Direct ?: return@synchronized false
+        if (current.screenRequestId != identity.screenRequestId ||
+            current.lifecycleGeneration != identity.lifecycleGeneration ||
+            direct.operationId != identity.operationId ||
+            direct.checkId != identity.checkId ||
             direct.phase != DirectCheckPhase.CHECKING
         ) return@synchronized false
         owner = current.copy(operation = direct.copy(phase = nextPhase))

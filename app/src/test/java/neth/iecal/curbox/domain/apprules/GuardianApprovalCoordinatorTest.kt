@@ -22,16 +22,40 @@ class GuardianApprovalCoordinatorTest {
         assertTrue(coordinator.beginDirectCheck("screen-1", "grant-1", "check-1", receipt))
         assertFalse(coordinator.beginDirectCheck("screen-1", "grant-1", "check-1", receipt))
 
-        assertTrue(coordinator.timeOutDirectCheck("screen-1", "grant-1", "check-1"))
-        assertFalse(coordinator.completeDirectCheck("screen-1", "grant-1", "check-1"))
+        val expiredCheck = GuardianApprovalCoordinator.DirectCheckIdentity(
+            screenRequestId = "screen-1",
+            operationId = "grant-1",
+            checkId = "check-1",
+            lifecycleGeneration = LifecycleGeneration(3L)
+        )
+        assertFalse(
+            coordinator.timeOutDirectCheck(
+                expiredCheck.copy(lifecycleGeneration = LifecycleGeneration(2L))
+            )
+        )
+        assertTrue(coordinator.timeOutDirectCheck(expiredCheck))
+        assertFalse(coordinator.completeDirectCheck(expiredCheck))
         assertTrue(coordinator.retryDirectCheck("screen-1", "grant-1", "check-2"))
 
         val current = coordinator.currentOwner()
         assertEquals("grant-1", (current?.operation as GuardianApprovalCoordinator.Operation.Direct).operationId)
         assertEquals("check-2", (current.operation as GuardianApprovalCoordinator.Operation.Direct).checkId)
         assertEquals(receipt, (current.operation as GuardianApprovalCoordinator.Operation.Direct).receipt)
-        assertFalse(coordinator.completeDirectCheck("screen-1", "grant-1", "check-1"))
-        assertTrue(coordinator.completeDirectCheck("screen-1", "grant-1", "check-2"))
+        assertFalse(coordinator.completeDirectCheck(expiredCheck))
+        assertEquals(
+            GuardianApprovalCoordinator.DirectCheckPhase.CHECKING,
+            (coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Direct).phase
+        )
+        assertTrue(
+            coordinator.completeDirectCheck(
+                GuardianApprovalCoordinator.DirectCheckIdentity(
+                    screenRequestId = "screen-1",
+                    operationId = "grant-1",
+                    checkId = "check-2",
+                    lifecycleGeneration = LifecycleGeneration(3L)
+                )
+            )
+        )
     }
 
     @Test
