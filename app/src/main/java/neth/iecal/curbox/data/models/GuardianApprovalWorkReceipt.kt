@@ -1,5 +1,11 @@
 package neth.iecal.curbox.data.models
 
+/** Identifies whether a grant was given directly or drawn from the accumulated pool. */
+enum class GuardianApprovalGrantOrigin(val isFromAccumulatedPool: Boolean) {
+    DIRECT(false),
+    ACCUMULATED_POOL(true)
+}
+
 /** Identifies the exact persisted effect of one guardian approval operation. */
 sealed interface GuardianApprovalWorkReceipt {
     val ruleId: String
@@ -25,13 +31,8 @@ sealed interface GuardianApprovalWorkReceipt {
         ) return false
 
         return when (this) {
-            is DirectGrant -> state.grants.any(grant::matches)
-            is AccumulatedGrant -> state.grants.any {
-                it.ruleId == ruleId &&
-                    it.useDayId == useDayId &&
-                    it.grantedAtMs == grantedAtMs &&
-                    it.grantedMillis == grantedMillis &&
-                    it.isFromAccumulatedPool
+            is Grant -> state.grants.any {
+                grant.matches(it, origin)
             }
             is RuleSkip -> state.skips.any {
                 it.ruleId == ruleId &&
@@ -42,8 +43,9 @@ sealed interface GuardianApprovalWorkReceipt {
         }
     }
 
-    data class DirectGrant(
+    data class Grant(
         val grant: GuardianApprovalGrantReceipt,
+        val origin: GuardianApprovalGrantOrigin,
         override val useDayGenerationStartedAtMs: Long
     ) : GuardianApprovalWorkReceipt {
         init {
@@ -54,24 +56,6 @@ sealed interface GuardianApprovalWorkReceipt {
 
         override val ruleId: String get() = grant.ruleId
         override val useDayId: String get() = grant.useDayId
-    }
-
-    data class AccumulatedGrant(
-        override val ruleId: String,
-        override val useDayId: String,
-        val grantedAtMs: Long,
-        val grantedMillis: Long,
-        override val useDayGenerationStartedAtMs: Long
-    ) : GuardianApprovalWorkReceipt {
-        init {
-            require(ruleId.isNotBlank()) { "accumulated receipt must name a rule" }
-            require(useDayId.isNotBlank()) { "accumulated receipt must name a use day" }
-            require(grantedAtMs >= 0L) { "accumulated receipt timestamp must not be negative" }
-            require(grantedMillis > 0L) { "accumulated receipt must contain a positive grant" }
-            require(useDayGenerationStartedAtMs >= 0L) {
-                "approval receipt generation must not be negative"
-            }
-        }
     }
 
     data class RuleSkip(

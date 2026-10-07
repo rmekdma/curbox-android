@@ -22,6 +22,7 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDayResetTime
@@ -49,7 +50,11 @@ class SerializedDecisionWorkerTest {
             acceptedRuntime = approvalRuntime(
                 revision = RuntimeRevision(5L),
                 useDayId = useDayId,
-                receipt = GuardianApprovalWorkReceipt.DirectGrant(receipt, 0L)
+                receipt = GuardianApprovalWorkReceipt.Grant(
+                    receipt,
+                    GuardianApprovalGrantOrigin.DIRECT,
+                    0L
+                )
             )
         )
         try {
@@ -71,7 +76,11 @@ class SerializedDecisionWorkerTest {
                         operationId = "grant-1",
                         checkId = "check-1",
                         packageName = TARGET_PACKAGE,
-                        approvalReceipt = GuardianApprovalWorkReceipt.DirectGrant(receipt, 0L),
+                        approvalReceipt = GuardianApprovalWorkReceipt.Grant(
+                            receipt,
+                            GuardianApprovalGrantOrigin.DIRECT,
+                            0L
+                        ),
                         capturedAtWallMs = wallNow,
                         capturedAtElapsedMs = wallNow
                     )
@@ -126,7 +135,11 @@ class SerializedDecisionWorkerTest {
                         operationId = "grant-2",
                         checkId = "check-2",
                         packageName = TARGET_PACKAGE,
-                        approvalReceipt = GuardianApprovalWorkReceipt.DirectGrant(receipt, 0L),
+                        approvalReceipt = GuardianApprovalWorkReceipt.Grant(
+                            receipt,
+                            GuardianApprovalGrantOrigin.DIRECT,
+                            0L
+                        ),
                         capturedAtWallMs = wallNow,
                         capturedAtElapsedMs = wallNow
                     )
@@ -147,11 +160,14 @@ class SerializedDecisionWorkerTest {
         val wallNow = 2_000L
         val useDayId = ConfigurableUseDayCalculator().idAt(wallNow)
         val receipts = listOf(
-            GuardianApprovalWorkReceipt.AccumulatedGrant(
-                ruleId = "usage",
-                useDayId = useDayId,
-                grantedAtMs = 1_500L,
-                grantedMillis = 15 * 60_000L,
+            GuardianApprovalWorkReceipt.Grant(
+                grant = GuardianApprovalGrantReceipt(
+                    ruleId = "usage",
+                    useDayId = useDayId,
+                    grantedAtMs = 1_500L,
+                    grantedMillis = 15 * 60_000L
+                ),
+                origin = GuardianApprovalGrantOrigin.ACCUMULATED_POOL,
                 useDayGenerationStartedAtMs = 7L
             ),
             GuardianApprovalWorkReceipt.RuleSkip(
@@ -1590,21 +1606,13 @@ class SerializedDecisionWorkerTest {
         nightAllowedMinutes: Long = 0L
     ): AcceptedRuleRuntimeSnapshot {
         val grants = when (receipt) {
-            is GuardianApprovalWorkReceipt.DirectGrant -> listOf(
+            is GuardianApprovalWorkReceipt.Grant -> listOf(
                 AppRuleGuardianGrant(
                     ruleId = receipt.grant.ruleId,
                     useDayId = receipt.grant.useDayId,
                     grantedAtMs = receipt.grant.grantedAtMs,
-                    grantedMillis = receipt.grant.grantedMillis
-                )
-            )
-            is GuardianApprovalWorkReceipt.AccumulatedGrant -> listOf(
-                AppRuleGuardianGrant(
-                    ruleId = receipt.ruleId,
-                    useDayId = receipt.useDayId,
-                    grantedAtMs = receipt.grantedAtMs,
-                    grantedMillis = receipt.grantedMillis,
-                    isFromAccumulatedPool = true
+                    grantedMillis = receipt.grant.grantedMillis,
+                    isFromAccumulatedPool = receipt.origin.isFromAccumulatedPool
                 )
             )
             else -> emptyList()

@@ -42,6 +42,7 @@ import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
@@ -2360,27 +2361,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             if (legacyDirectAction) 0L else -1L
         )
         if (generation < 0L) return null
-        when (intent.getStringExtra(GuardianApprovalActivity.EXTRA_APPROVAL_KIND)
+        val approvalKind = intent.getStringExtra(GuardianApprovalActivity.EXTRA_APPROVAL_KIND)
             ?: if (legacyDirectAction) GuardianApprovalActivity.APPROVAL_KIND_DIRECT else null
-        ) {
-            GuardianApprovalActivity.APPROVAL_KIND_DIRECT ->
-                GuardianApprovalWorkReceipt.DirectGrant(
-                    grant = GuardianApprovalGrantReceipt(
-                        ruleId = ruleId,
-                        useDayId = useDayId,
-                        grantedAtMs = intent.getLongExtra(
-                            GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS,
-                            -1L
-                        ),
-                        grantedMillis = intent.getLongExtra(
-                            GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_MILLIS,
-                            -1L
-                        )
-                    ),
-                    useDayGenerationStartedAtMs = generation
-                )
+        val grantOrigin = when (approvalKind) {
+            GuardianApprovalActivity.APPROVAL_KIND_DIRECT -> GuardianApprovalGrantOrigin.DIRECT
             GuardianApprovalActivity.APPROVAL_KIND_ACCUMULATED ->
-                GuardianApprovalWorkReceipt.AccumulatedGrant(
+                GuardianApprovalGrantOrigin.ACCUMULATED_POOL
+            else -> null
+        }
+        when {
+            grantOrigin != null -> GuardianApprovalWorkReceipt.Grant(
+                grant = GuardianApprovalGrantReceipt(
                     ruleId = ruleId,
                     useDayId = useDayId,
                     grantedAtMs = intent.getLongExtra(
@@ -2390,10 +2381,12 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     grantedMillis = intent.getLongExtra(
                         GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_MILLIS,
                         -1L
-                    ),
-                    useDayGenerationStartedAtMs = generation
-                )
-            GuardianApprovalActivity.APPROVAL_KIND_SKIP ->
+                    )
+                ),
+                origin = grantOrigin,
+                useDayGenerationStartedAtMs = generation
+            )
+            approvalKind == GuardianApprovalActivity.APPROVAL_KIND_SKIP ->
                 GuardianApprovalWorkReceipt.RuleSkip(
                     ruleId = ruleId,
                     useDayId = useDayId,

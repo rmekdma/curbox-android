@@ -26,6 +26,7 @@ import android.view.View
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.databinding.ActivityGuardianApprovalBinding
 import neth.iecal.curbox.databinding.DialogGuardianAccumulatedTimeBinding
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeFormState
@@ -535,8 +536,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
                         grantInProgress = false
                         beginApprovalConfirmation(
                             operationId,
-                            GuardianApprovalWorkReceipt.DirectGrant(
+                            GuardianApprovalWorkReceipt.Grant(
                                 grant = result.receipt,
+                                origin = GuardianApprovalGrantOrigin.DIRECT,
                                 useDayGenerationStartedAtMs = basis.useDayGenerationStartedAtMs
                             )
                         )
@@ -691,18 +693,18 @@ class GuardianApprovalActivity : AppCompatActivity() {
             .putExtra(EXTRA_CHECK_ID, checkId)
             .putExtra(EXTRA_RECEIPT_USE_DAY_GENERATION, receipt.useDayGenerationStartedAtMs)
         when (receipt) {
-            is GuardianApprovalWorkReceipt.DirectGrant -> request
-                .putExtra(EXTRA_APPROVAL_KIND, APPROVAL_KIND_DIRECT)
+            is GuardianApprovalWorkReceipt.Grant -> request
+                .putExtra(
+                    EXTRA_APPROVAL_KIND,
+                    when (receipt.origin) {
+                        GuardianApprovalGrantOrigin.DIRECT -> APPROVAL_KIND_DIRECT
+                        GuardianApprovalGrantOrigin.ACCUMULATED_POOL -> APPROVAL_KIND_ACCUMULATED
+                    }
+                )
                 .putExtra(EXTRA_RECEIPT_RULE_ID, receipt.grant.ruleId)
                 .putExtra(EXTRA_RECEIPT_USE_DAY_ID, receipt.grant.useDayId)
                 .putExtra(EXTRA_RECEIPT_GRANTED_AT_MS, receipt.grant.grantedAtMs)
                 .putExtra(EXTRA_RECEIPT_GRANTED_MILLIS, receipt.grant.grantedMillis)
-            is GuardianApprovalWorkReceipt.AccumulatedGrant -> request
-                .putExtra(EXTRA_APPROVAL_KIND, APPROVAL_KIND_ACCUMULATED)
-                .putExtra(EXTRA_RECEIPT_RULE_ID, receipt.ruleId)
-                .putExtra(EXTRA_RECEIPT_USE_DAY_ID, receipt.useDayId)
-                .putExtra(EXTRA_RECEIPT_GRANTED_AT_MS, receipt.grantedAtMs)
-                .putExtra(EXTRA_RECEIPT_GRANTED_MILLIS, receipt.grantedMillis)
             is GuardianApprovalWorkReceipt.RuleSkip -> request
                 .putExtra(EXTRA_APPROVAL_KIND, APPROVAL_KIND_SKIP)
                 .putExtra(EXTRA_RECEIPT_RULE_ID, receipt.ruleId)

@@ -14,6 +14,7 @@ import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
@@ -992,11 +993,14 @@ class AppRuleBlockerRecheckTest {
     @Test
     fun accumulatedApprovalReceiverKeepsTheReceiptAcrossConfirmationRetry() =
         assertApprovalReceiverKeepsReceiptAcrossRetry(
-            GuardianApprovalWorkReceipt.AccumulatedGrant(
-                ruleId = "usage",
-                useDayId = "2026-10-07",
-                grantedAtMs = 1_791_360_000_000L,
-                grantedMillis = 15 * 60_000L,
+            GuardianApprovalWorkReceipt.Grant(
+                grant = GuardianApprovalGrantReceipt(
+                    ruleId = "usage",
+                    useDayId = "2026-10-07",
+                    grantedAtMs = 1_791_360_000_000L,
+                    grantedMillis = 15 * 60_000L
+                ),
+                origin = GuardianApprovalGrantOrigin.ACCUMULATED_POOL,
                 useDayGenerationStartedAtMs = 1_791_360_000_000L
             )
         )
@@ -1122,10 +1126,15 @@ class AppRuleBlockerRecheckTest {
         )
         .apply {
             when (receipt) {
-                is GuardianApprovalWorkReceipt.DirectGrant -> {
+                is GuardianApprovalWorkReceipt.Grant -> {
                     putExtra(
                         GuardianApprovalActivity.EXTRA_APPROVAL_KIND,
-                        GuardianApprovalActivity.APPROVAL_KIND_DIRECT
+                        when (receipt.origin) {
+                            GuardianApprovalGrantOrigin.DIRECT ->
+                                GuardianApprovalActivity.APPROVAL_KIND_DIRECT
+                            GuardianApprovalGrantOrigin.ACCUMULATED_POOL ->
+                                GuardianApprovalActivity.APPROVAL_KIND_ACCUMULATED
+                        }
                     )
                     putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID, receipt.grant.ruleId)
                     putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID, receipt.grant.useDayId)
@@ -1136,22 +1145,6 @@ class AppRuleBlockerRecheckTest {
                     putExtra(
                         GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_MILLIS,
                         receipt.grant.grantedMillis
-                    )
-                }
-                is GuardianApprovalWorkReceipt.AccumulatedGrant -> {
-                    putExtra(
-                        GuardianApprovalActivity.EXTRA_APPROVAL_KIND,
-                        GuardianApprovalActivity.APPROVAL_KIND_ACCUMULATED
-                    )
-                    putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID, receipt.ruleId)
-                    putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID, receipt.useDayId)
-                    putExtra(
-                        GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS,
-                        receipt.grantedAtMs
-                    )
-                    putExtra(
-                        GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_MILLIS,
-                        receipt.grantedMillis
                     )
                 }
                 is GuardianApprovalWorkReceipt.RuleSkip -> {

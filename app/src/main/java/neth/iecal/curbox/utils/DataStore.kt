@@ -23,6 +23,7 @@ import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleRolloverState
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.GatedSettingsField
+import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.data.models.KeywordBlocker
@@ -473,20 +474,6 @@ class DataStoreManager(private val context: Context) {
      * Atomically deducts accumulated minutes from the rule's pool and issues an
      * AppRuleGuardianGrant with isFromAccumulatedPool = true in a single DataStore transaction.
      */
-    suspend fun approveAccumulatedTime(
-        password: String,
-        ruleId: String,
-        useDayId: String,
-        approvedMinutes: Long,
-        grantedAtMs: Long = System.currentTimeMillis()
-    ): Boolean = approveAccumulatedTimeWithReceipt(
-        password = password,
-        ruleId = ruleId,
-        useDayId = useDayId,
-        approvedMinutes = approvedMinutes,
-        grantedAtMs = grantedAtMs
-    ) != null
-
     /** Writes the accumulated grant once and returns the receipt from that same update result. */
     suspend fun approveAccumulatedTimeWithReceipt(
         password: String,
@@ -494,7 +481,7 @@ class DataStoreManager(private val context: Context) {
         useDayId: String,
         approvedMinutes: Long,
         grantedAtMs: Long = System.currentTimeMillis()
-    ): GuardianApprovalWorkReceipt.AccumulatedGrant? {
+    ): GuardianApprovalWorkReceipt.Grant? {
         if (approvedMinutes <= 0L ||
             approvedMinutes > Long.MAX_VALUE / 60_000L ||
             ruleId.isBlank() ||
@@ -544,30 +531,17 @@ class DataStoreManager(private val context: Context) {
             expectedRemainingPoolMinutes = expectedRemainingPool
         )
         if (!stored) return null
-        return GuardianApprovalWorkReceipt.AccumulatedGrant(
-            ruleId = ruleId,
-            useDayId = useDayId,
-            grantedAtMs = grantedAtMs.coerceAtLeast(0L),
-            grantedMillis = grantedMillis,
+        return GuardianApprovalWorkReceipt.Grant(
+            grant = GuardianApprovalGrantReceipt(
+                ruleId = ruleId,
+                useDayId = useDayId,
+                grantedAtMs = grantedAtMs.coerceAtLeast(0L),
+                grantedMillis = grantedMillis
+            ),
+            origin = GuardianApprovalGrantOrigin.ACCUMULATED_POOL,
             useDayGenerationStartedAtMs = updated.appRuleOverrideState.useDayGenerationStartedAtMs
         )
     }
-
-    suspend fun skipAppRuleUntil(
-        password: String,
-        ruleId: String,
-        useDayId: String,
-        selectedUntilMs: Long,
-        nextResetAtMs: Long,
-        nowMs: Long = System.currentTimeMillis()
-    ): Boolean = skipAppRuleUntilWithReceipt(
-        password = password,
-        ruleId = ruleId,
-        useDayId = useDayId,
-        selectedUntilMs = selectedUntilMs,
-        nextResetAtMs = nextResetAtMs,
-        nowMs = nowMs
-    ) != null
 
     /** Writes a rule skip once and returns the receipt from that same update result. */
     suspend fun skipAppRuleUntilWithReceipt(

@@ -1,6 +1,7 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 
 /** Owns one guardian screen request and the operation currently allowed to complete it. */
@@ -140,7 +141,11 @@ class GuardianApprovalCoordinator {
         screenRequestId,
         operationId,
         checkId,
-        GuardianApprovalWorkReceipt.DirectGrant(receipt, useDayGenerationStartedAtMs = 0L)
+        GuardianApprovalWorkReceipt.Grant(
+            grant = receipt,
+            origin = GuardianApprovalGrantOrigin.DIRECT,
+            useDayGenerationStartedAtMs = 0L
+        )
     )
 
     fun retryDirectCheck(

@@ -1,6 +1,7 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -42,7 +43,11 @@ class GuardianApprovalCoordinatorTest {
         assertEquals("grant-1", (current?.operation as GuardianApprovalCoordinator.Operation.Confirmation).operationId)
         assertEquals("check-2", (current.operation as GuardianApprovalCoordinator.Operation.Confirmation).checkId)
         assertEquals(
-            GuardianApprovalWorkReceipt.DirectGrant(receipt, 0L),
+            GuardianApprovalWorkReceipt.Grant(
+                receipt,
+                GuardianApprovalGrantOrigin.DIRECT,
+                0L
+            ),
             (current.operation as GuardianApprovalCoordinator.Operation.Confirmation).receipt
         )
         assertFalse(coordinator.completeDirectCheck(expiredCheck))
@@ -104,11 +109,14 @@ class GuardianApprovalCoordinatorTest {
     @Test
     fun accumulatedConfirmationRetryKeepsItsEffectAndFencesDuplicateAndLateResults() {
         val coordinator = GuardianApprovalCoordinator()
-        val receipt = GuardianApprovalWorkReceipt.AccumulatedGrant(
-            ruleId = "usage",
-            useDayId = "2026-10-07",
-            grantedAtMs = 100L,
-            grantedMillis = 15 * 60_000L,
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            grant = GuardianApprovalGrantReceipt(
+                ruleId = "usage",
+                useDayId = "2026-10-07",
+                grantedAtMs = 100L,
+                grantedMillis = 15 * 60_000L
+            ),
+            origin = GuardianApprovalGrantOrigin.ACCUMULATED_POOL,
             useDayGenerationStartedAtMs = 40L
         )
         assertTrue(coordinator.openScreen("screen-5", TARGET_PACKAGE, LifecycleGeneration(7L)))
@@ -119,7 +127,9 @@ class GuardianApprovalCoordinatorTest {
                 "screen-5",
                 "acc-1",
                 "check-2",
-                receipt.copy(grantedMillis = 30 * 60_000L)
+                receipt.copy(
+                    grant = receipt.grant.copy(grantedMillis = 30 * 60_000L)
+                )
             )
         )
 
