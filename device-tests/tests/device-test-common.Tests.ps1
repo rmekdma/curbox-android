@@ -783,6 +783,56 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
         }
     }
 
+    Context "Disable-AccessibilityService" {
+        It "removes only Curbox and preserves other enabled services" {
+            $serviceName = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
+            $script:secureValues = @{
+                enabled_accessibility_services = "com.example/.Reader:${serviceName}:com.example/.Magnifier"
+                accessibility_enabled = "1"
+            }
+            $script:accessibilityCommands = @()
+            $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+
+            (Disable-AccessibilityService) | Should Be $true
+
+            ($script:accessibilityCommands -contains "settings put secure enabled_accessibility_services com.example/.Reader:com.example/.Magnifier") | Should Be $true
+            @($script:accessibilityCommands | Where-Object { $_ -match "accessibility_enabled" }).Count | Should Be 0
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+
+        It "deletes an empty services value when Curbox is the only enabled service" {
+            $script:secureValues = @{
+                enabled_accessibility_services = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
+                accessibility_enabled = "1"
+            }
+            $script:accessibilityCommands = @()
+            $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+
+            (Disable-AccessibilityService) | Should Be $true
+
+            ($script:accessibilityCommands -contains "settings delete secure enabled_accessibility_services") | Should Be $true
+            @($script:accessibilityCommands | Where-Object { $_ -match "accessibility_enabled" }).Count | Should Be 0
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+
+        It "does not rewrite accessibility settings when Curbox is already disabled" {
+            $script:secureValues = @{
+                enabled_accessibility_services = "com.example/.Reader"
+                accessibility_enabled = "1"
+            }
+            $script:accessibilityCommands = @()
+            $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+
+            (Disable-AccessibilityService) | Should Be $false
+
+            $script:accessibilityCommands.Count | Should Be 0
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+    }
+
     Context "Stop-ServiceProcess" {
         It "returns false when target PID is 0 or negative" {
             (Stop-ServiceProcess -TargetPid 0) | Should Be $false

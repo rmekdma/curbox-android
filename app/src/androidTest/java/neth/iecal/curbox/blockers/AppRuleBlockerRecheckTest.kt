@@ -965,28 +965,68 @@ class AppRuleBlockerRecheckTest {
         val blocker = AppRuleBlocker()
         setField(blocker, "service", service)
         setField(blocker, "setupReady", true)
+        val connectionId = "guardian-connection-current"
+        val currentRequestId = "guardian-screen-current"
+        openGuardianOwnerForTest(blocker, PACKAGE, currentRequestId, connectionId)
         val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
 
         receiver.onReceive(
             service,
-            Intent(GuardianApprovalActivity.INTENT_ACTION_OPENED)
-                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_OPENED,
+                PACKAGE,
+                "guardian-screen-old",
+                connectionId
+            )
+        )
+        assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+        assertEquals(
+            currentRequestId,
+            (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                .currentOwner()?.screenRequestId
+        )
+
+        receiver.onReceive(
+            service,
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                OTHER_PACKAGE,
+                currentRequestId,
+                connectionId
+            )
         )
         assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
 
         receiver.onReceive(
             service,
-            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
-                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, OTHER_PACKAGE)
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                PACKAGE,
+                "guardian-screen-old",
+                connectionId
+            )
         )
-        assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+        assertEquals(
+            currentRequestId,
+            (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                .currentOwner()?.screenRequestId
+        )
 
         receiver.onReceive(
             service,
-            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
-                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                PACKAGE,
+                currentRequestId,
+                connectionId
+            )
         )
         assertEquals(null, getField(blocker, "activeGuardianPackage"))
+        assertEquals(
+            null,
+            (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                .currentOwner()
+        )
         blocker.onDestroy()
     }
 
@@ -1017,6 +1057,100 @@ class AppRuleBlockerRecheckTest {
             )
         )
 
+    @Test
+    fun currentScreenRebindsAfterReconnectAndRejectsOldConnectionCommands() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val blocker = AppRuleBlocker()
+        val queuedDispatcher = QueuedDispatcher()
+        val connectionId = "guardian-connection-reconnected"
+        val oldConnectionId = "guardian-connection-old"
+        val screenRequestId = "guardian-screen-live"
+        val operationId = "guardian-operation-live"
+        val receipt = GuardianApprovalWorkReceipt.RuleSkip(
+            ruleId = "usage",
+            useDayId = "2026-10-07",
+            skipFromMs = 1_791_360_000_000L,
+            skipUntilMs = 1_791_360_900_000L,
+            useDayGenerationStartedAtMs = 1_791_360_000_000L
+        )
+        val currentCheckId = "check-after-reconnect"
+        setField(blocker, "service", service)
+        setField(blocker, "setupReady", true)
+        setField(blocker, "scope", CoroutineScope(SupervisorJob() + queuedDispatcher))
+        setField(blocker, "serviceConnectionId", connectionId)
+        (getField(blocker, "lifecycleGeneration") as AtomicLong).set(2L)
+        val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+        val coordinator = getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator
+
+        receiver.onReceive(
+            service,
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_OPENED,
+                PACKAGE,
+                screenRequestId,
+                connectionId
+            )
+        )
+        assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+        assertEquals(
+            LifecycleGeneration(2L),
+            coordinator.currentOwner()?.lifecycleGeneration
+        )
+
+        receiver.onReceive(
+            service,
+            approvalCheckIntent(
+                action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER,
+                screenRequestId = screenRequestId,
+                operationId = operationId,
+                checkId = currentCheckId,
+                receipt = receipt,
+                connectionId = connectionId
+            )
+        )
+        assertEquals(
+            GuardianApprovalCoordinator.Operation.Confirmation(
+                operationId = operationId,
+                checkId = currentCheckId,
+                receipt = receipt,
+                phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            ),
+            coordinator.currentOwner()?.operation
+        )
+
+        receiver.onReceive(
+            service,
+            approvalCheckIntent(
+                action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
+                screenRequestId = screenRequestId,
+                operationId = operationId,
+                checkId = "old-check",
+                receipt = receipt,
+                connectionId = oldConnectionId
+            )
+        )
+        receiver.onReceive(
+            service,
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                PACKAGE,
+                "old-screen",
+                connectionId
+            )
+        )
+        assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+        assertEquals(
+            GuardianApprovalCoordinator.Operation.Confirmation(
+                operationId = operationId,
+                checkId = currentCheckId,
+                receipt = receipt,
+                phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            ),
+            coordinator.currentOwner()?.operation
+        )
+        blocker.onDestroy()
+    }
+
     private fun assertApprovalReceiverKeepsReceiptAcrossRetry(
         receipt: GuardianApprovalWorkReceipt
     ) {
@@ -1034,6 +1168,7 @@ class AppRuleBlockerRecheckTest {
         val firstCheckId = "check-1"
         val retryCheckId = "check-2"
         val generation = LifecycleGeneration(1L)
+        setField(blocker, "serviceConnectionId", TEST_GUARDIAN_CONNECTION_ID)
         val coordinator = getField(blocker, "guardianApprovalCoordinator")
             as GuardianApprovalCoordinator
         assertTrue(coordinator.openScreen(screenRequestId, PACKAGE, generation))
@@ -1046,7 +1181,8 @@ class AppRuleBlockerRecheckTest {
                 screenRequestId = screenRequestId,
                 operationId = operationId,
                 checkId = firstCheckId,
-                receipt = receipt
+                receipt = receipt,
+                connectionId = TEST_GUARDIAN_CONNECTION_ID
             )
         )
 
@@ -1077,7 +1213,8 @@ class AppRuleBlockerRecheckTest {
                 screenRequestId = screenRequestId,
                 operationId = operationId,
                 checkId = retryCheckId,
-                receipt = receipt
+                receipt = receipt,
+                connectionId = TEST_GUARDIAN_CONNECTION_ID
             )
         )
         assertEquals(
@@ -1097,7 +1234,8 @@ class AppRuleBlockerRecheckTest {
                 screenRequestId = screenRequestId,
                 operationId = operationId,
                 checkId = retryCheckId,
-                receipt = receipt
+                receipt = receipt,
+                connectionId = TEST_GUARDIAN_CONNECTION_ID
             )
         )
         assertEquals(
@@ -1114,12 +1252,14 @@ class AppRuleBlockerRecheckTest {
         screenRequestId: String,
         operationId: String,
         checkId: String,
-        receipt: GuardianApprovalWorkReceipt
+        receipt: GuardianApprovalWorkReceipt,
+        connectionId: String
     ): Intent = Intent(action)
         .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
         .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
         .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
         .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, checkId)
+        .putExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID, connectionId)
         .putExtra(
             GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_GENERATION,
             receipt.useDayGenerationStartedAtMs
@@ -1160,6 +1300,37 @@ class AppRuleBlockerRecheckTest {
             }
         }
 
+    private fun openGuardianOwnerForTest(
+        blocker: AppRuleBlocker,
+        packageName: String,
+        screenRequestId: String,
+        connectionId: String
+    ) {
+        setField(blocker, "serviceConnectionId", connectionId)
+        val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong)
+            .get().coerceAtLeast(1L)
+        val coordinator = getField(blocker, "guardianApprovalCoordinator")
+            as GuardianApprovalCoordinator
+        assertTrue(
+            coordinator.openScreen(
+                screenRequestId,
+                packageName,
+                LifecycleGeneration(generation)
+            )
+        )
+        setField(blocker, "activeGuardianPackage", packageName)
+    }
+
+    private fun guardianLifecycleIntent(
+        action: String,
+        packageName: String,
+        screenRequestId: String,
+        connectionId: String
+    ): Intent = Intent(action)
+        .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, packageName)
+        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+        .putExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID, connectionId)
+
     private class QueuedDispatcher : CoroutineDispatcher() {
         private val queued = ArrayDeque<Runnable>()
 
@@ -1180,14 +1351,19 @@ class AppRuleBlockerRecheckTest {
         }
         setField(blocker, "service", service)
         setField(blocker, "setupReady", true)
-        setField(blocker, "activeGuardianPackage", PACKAGE)
+        val requestId = "guardian-interrupted-close"
+        openGuardianOwnerForTest(blocker, PACKAGE, requestId, TEST_GUARDIAN_CONNECTION_ID)
         setField(blocker, "lastShownAt", 5000L)
 
         val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
         receiver.onReceive(
             service,
-            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
-                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                PACKAGE,
+                requestId,
+                TEST_GUARDIAN_CONNECTION_ID
+            )
                 .putExtra(
                     GuardianApprovalActivity.EXTRA_CLOSE_REASON,
                     GuardianApprovalActivity.REASON_INTERRUPTED
@@ -1213,14 +1389,25 @@ class AppRuleBlockerRecheckTest {
         }
         setField(blocker, "service", service)
         setField(blocker, "setupReady", true)
-        setField(blocker, "activeGuardianPackage", PACKAGE)
+        val requestId = "guardian-granted-close"
+        val operationId = "guardian-legacy-operation"
+        openGuardianOwnerForTest(blocker, PACKAGE, requestId, TEST_GUARDIAN_CONNECTION_ID)
+        assertTrue(
+            (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                .beginLegacyOperation(requestId, operationId)
+        )
         setField(blocker, "lastShownAt", 5000L)
 
         val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
         receiver.onReceive(
             service,
-            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
-                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                PACKAGE,
+                requestId,
+                TEST_GUARDIAN_CONNECTION_ID
+            )
+                .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
                 .putExtra(
                     GuardianApprovalActivity.EXTRA_CLOSE_REASON,
                     GuardianApprovalActivity.REASON_GRANTED
@@ -1340,6 +1527,7 @@ class AppRuleBlockerRecheckTest {
             setField(blocker, "sessionRepository", repository)
             setField(blocker, "enforcement", AppRuleEnforcement(repository))
             setField(blocker, "setupReady", true)
+            setField(blocker, "serviceConnectionId", TEST_GUARDIAN_CONNECTION_ID)
             setField(blocker, "launchablePackages", setOf(PACKAGE))
             setField(blocker, "overrideState", grantedOverrides)
             val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
@@ -1410,10 +1598,21 @@ class AppRuleBlockerRecheckTest {
                 assertEquals(null, getField(blocker, "pendingGrantedPackage"))
             } else {
                 val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+                val operationId = "guardian-legacy-operation-$screenRequestId"
+                val legacyCoordinator = getField(
+                    blocker,
+                    "guardianApprovalCoordinator"
+                ) as GuardianApprovalCoordinator
+                assertTrue(legacyCoordinator.beginLegacyOperation(screenRequestId, operationId))
                 receiver.onReceive(
                     service,
-                    Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
-                        .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+                    guardianLifecycleIntent(
+                        GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                        PACKAGE,
+                        screenRequestId,
+                        TEST_GUARDIAN_CONNECTION_ID
+                    )
+                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CLOSE_REASON,
                             GuardianApprovalActivity.REASON_GRANTED
@@ -1475,14 +1674,19 @@ class AppRuleBlockerRecheckTest {
         }
         setField(blocker, "service", service)
         setField(blocker, "setupReady", true)
-        setField(blocker, "activeGuardianPackage", PACKAGE)
+        val requestId = "guardian-cancelled-close"
+        openGuardianOwnerForTest(blocker, PACKAGE, requestId, TEST_GUARDIAN_CONNECTION_ID)
         setField(blocker, "lastShownAt", 5000L)
 
         val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
         receiver.onReceive(
             service,
-            Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
-                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                PACKAGE,
+                requestId,
+                TEST_GUARDIAN_CONNECTION_ID
+            )
                 .putExtra(
                     GuardianApprovalActivity.EXTRA_CLOSE_REASON,
                     GuardianApprovalActivity.REASON_CANCELLED
@@ -3164,6 +3368,7 @@ class AppRuleBlockerRecheckTest {
     private companion object {
         const val PACKAGE = "com.example.reader"
         const val OTHER_PACKAGE = "com.example.other"
+        const val TEST_GUARDIAN_CONNECTION_ID = "guardian-test-connection"
         const val WAIT_TIMEOUT_MS = 2_000L
     }
 }

@@ -50,6 +50,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
@@ -60,6 +62,50 @@ import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(AndroidJUnit4::class)
 class GuardianApprovalActivityLifecycleTest {
+    private val fakeServiceConnectionId = AtomicReference("test-service-connection-1")
+    private lateinit var fakeServiceContext: Context
+    private lateinit var fakeServiceReceiver: BroadcastReceiver
+
+    @Before
+    fun registerCurrentScreenServiceAdapter() {
+        fakeServiceContext = InstrumentationRegistry.getInstrumentation().targetContext
+        fakeServiceConnectionId.set("test-service-connection-1")
+        fakeServiceReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != GuardianApprovalActivity.INTENT_ACTION_OPENED) return
+                val connectionId = fakeServiceConnectionId.get()
+                val requestConnectionId = intent.getStringExtra(
+                    GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID
+                )
+                if (requestConnectionId != null && requestConnectionId != connectionId) return
+                fakeServiceContext.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_SCREEN_REGISTERED)
+                        .setPackage(fakeServiceContext.packageName)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
+                            intent.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE,
+                            intent.getStringExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE)
+                        )
+                        .putExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID, connectionId)
+                )
+            }
+        }
+        ContextCompat.registerReceiver(
+            fakeServiceContext,
+            fakeServiceReceiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_OPENED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    @After
+    fun unregisterCurrentScreenServiceAdapter() {
+        fakeServiceContext.unregisterReceiver(fakeServiceReceiver)
+    }
+
     @Test
     fun repeatedDenialReusesTheVisibleApprovalScreen() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -214,11 +260,32 @@ class GuardianApprovalActivityLifecycleTest {
         val grantRuleId = "lifecycle-grant-${java.util.UUID.randomUUID()}"
         val grantRuleName = "Rule ${java.util.UUID.randomUUID()}"
         val originalSnapshot = seedEligibleGrantRule(context, grantRuleId, grantRuleName)
+        val approvalRequests = LinkedBlockingQueue<Intent>()
+        val requestReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED ||
+                    intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY ||
+                    intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER
+                ) {
+                    approvalRequests.offer(intent)
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            requestReceiver,
+            IntentFilter().apply {
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         try {
             resetGuardianOverrides(context)
             ActivityScenario.launch<GuardianApprovalActivity>(
                 approvalIntent(ruleId = grantRuleId, ruleName = grantRuleName)
-            ).use {
+            ).use { scenario ->
                 awaitDisplayed(R.id.approval_add_time)
                 onView(withId(R.id.approval_add_time)).perform(click())
                 awaitDisplayed(R.id.rule_picker, inDialog = true)
@@ -245,12 +312,28 @@ class GuardianApprovalActivityLifecycleTest {
                 val state = awaitOverrideState(context) { it.grants.isNotEmpty() }
                 assertEquals(listOf(grantRuleId), state.grants.map { it.ruleId })
                 assertTrue(state.skips.isEmpty())
+                assertTrue(
+                    "a stored grant from the replaced screen must not start confirmation for the new screen",
+                    approvalRequests.poll(500, TimeUnit.MILLISECONDS) == null
+                )
+                scenario.onActivity { activity ->
+                    assertDenialReason(activity, "Rule B")
+                    assertFalse(
+                        "the old write callback must not replace the current screen with a confirmation wait",
+                        activity.findViewById<android.view.View>(R.id.approval_confirmation_progress)
+                            .isShown
+                    )
+                }
             }
         } finally {
             try {
                 resetGuardianOverrides(context)
             } finally {
-                restoreAppRuleSnapshot(context, originalSnapshot)
+                try {
+                    restoreAppRuleSnapshot(context, originalSnapshot)
+                } finally {
+                    context.unregisterReceiver(requestReceiver)
+                }
             }
         }
     }
@@ -373,6 +456,7 @@ class GuardianApprovalActivityLifecycleTest {
         val originalSettings = runBlocking { dataStore.settings.first() }
         assumeTrue("This UI test requires an unset guardian PIN", !originalSettings.guardianAuthConfig.isConfigured)
         val ruleId = "approval-skip-${java.util.UUID.randomUUID()}"
+        val originalSnapshot = seedActiveRuleWithoutRefresh(context, ruleId, "Skip test rule")
         val requests = LinkedBlockingQueue<Intent>()
         val requestReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -385,18 +469,20 @@ class GuardianApprovalActivityLifecycleTest {
             IntentFilter().apply {
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
                 addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
         try {
             ActivityScenario.launch<GuardianApprovalActivity>(
-                approvalIntent(ruleId = ruleId, ruleName = "Usage")
+                approvalIntent(
+                    ruleId = ruleId,
+                    ruleName = "Usage",
+                    targetPackageName = "com.example.guardian.target"
+                )
             ).use { scenario ->
-                onView(withId(R.id.approval_skip_rule)).perform(click())
-                onView(withText(R.string.guardian_skip_15_minutes))
-                    .inRoot(isDialog())
-                    .perform(click())
+                scenario.onActivity { activity -> chooseSkipDuration(activity, 0) }
 
                 val persisted = awaitOverrideState(context) {
                     it.skips.any { skip -> skip.ruleId == ruleId }
@@ -416,21 +502,85 @@ class GuardianApprovalActivityLifecycleTest {
                 val firstCheckId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
                 assertTrue(stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_UNTIL_MS, 0L) >
                     stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, Long.MAX_VALUE))
-                awaitDisplayed(R.id.approval_confirmation_progress)
+                scenario.onActivity { activity ->
+                    assertViewVisibility(activity, R.id.approval_confirmation_progress, android.view.View.VISIBLE)
+                }
+
+                val reconnectedId = "test-service-connection-2"
+                fakeServiceConnectionId.set(reconnectedId)
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_STATE_REQUEST)
+                        .setPackage(context.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID, reconnectedId)
+                )
+                val recovered = requests.poll(5, TimeUnit.SECONDS)
+                    ?: error("The live screen did not rebind its approval receipt after service reconnect")
+                assertEquals(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER, recovered.action)
+                assertEquals(operationId, recovered.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID))
+                assertEquals(screenRequestId, recovered.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID))
+                assertTrue(firstCheckId != recovered.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID))
+                assertEquals(
+                    stored.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID),
+                    recovered.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID)
+                )
+                assertEquals(
+                    stored.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID),
+                    recovered.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID)
+                )
+                assertEquals(
+                    stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, -1L),
+                    recovered.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, -2L)
+                )
+                assertEquals(
+                    stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_UNTIL_MS, -1L),
+                    recovered.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_UNTIL_MS, -2L)
+                )
+                assertEquals(reconnectedId, recovered.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID))
 
                 context.sendBroadcast(
                     Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
                         .setPackage(context.packageName)
                         .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
                         .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
                         .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, firstCheckId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                )
+                scenario.onActivity { activity ->
+                    assertViewVisibility(activity, R.id.approval_confirmation_progress, android.view.View.VISIBLE)
+                }
+                scenario.onActivity { activity -> assertDenialReason(activity, "Daily limit reached") }
+                assertEquals(
+                    "reconnecting must not write another skip",
+                    persisted,
+                    awaitOverrideState(context) { it.skips.any { skip -> skip.ruleId == ruleId } }
+                )
+
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID, reconnectedId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CHECK_ID,
+                            recovered.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                        )
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
                         )
                 )
-                awaitDisplayed(R.id.approval_confirmation_retry)
-                onView(withId(R.id.approval_confirmation_retry)).perform(click())
+                scenario.onActivity { activity ->
+                    assertViewVisibility(activity, R.id.approval_confirmation_retry, android.view.View.VISIBLE)
+                    activity.findViewById<android.view.View>(R.id.approval_confirmation_retry).performClick()
+                }
 
                 val retry = requests.poll(5, TimeUnit.SECONDS)
                     ?: error("The skip check retry was not sent")
@@ -455,6 +605,10 @@ class GuardianApprovalActivityLifecycleTest {
                     Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
                         .setPackage(context.packageName)
                         .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            retry.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
                         .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CHECK_ID,
@@ -479,18 +633,157 @@ class GuardianApprovalActivityLifecycleTest {
                 )
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
                 scenario.onActivity { activity -> assertDenialReason(activity, "Night rule") }
-                onView(withId(R.id.approval_confirmation_retry))
-                    .check(matches(withEffectiveVisibility(Visibility.GONE)))
+                scenario.onActivity { activity ->
+                    assertViewVisibility(activity, R.id.approval_confirmation_retry, android.view.View.GONE)
+                }
                 assertTrue("a matching generic GRANTED close must not be sent", requests.isEmpty())
             }
         } finally {
-            assertTrue(
-                "The preexisting guardian override state must be restored",
-                runBlocking {
-                    dataStore.writeAppRuleOverrideState("", originalSettings.appRuleOverrideState)
+            try {
+                assertTrue(
+                    "The preexisting guardian override state must be restored",
+                    runBlocking {
+                        dataStore.writeAppRuleOverrideState("", originalSettings.appRuleOverrideState)
+                    }
+                )
+            } finally {
+                try {
+                    writeAppRuleSnapshotDirectlyForTest(context, originalSnapshot)
+                } finally {
+                    context.unregisterReceiver(requestReceiver)
                 }
-            )
-            context.unregisterReceiver(requestReceiver)
+            }
+        }
+    }
+
+    @Test
+    fun oldConfirmationResultCannotFinishAReusedCurrentScreen() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val dataStore = DataStoreManager(context)
+        val originalSettings = runBlocking { dataStore.settings.first() }
+        assumeTrue("This UI test requires an unset guardian PIN", !originalSettings.guardianAuthConfig.isConfigured)
+        val ruleId = "approval-reuse-${java.util.UUID.randomUUID()}"
+        val originalSnapshot = seedActiveRuleWithoutRefresh(context, ruleId, "Original denial")
+        val requests = LinkedBlockingQueue<Intent>()
+        val requestReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED) {
+                    requests.offer(intent)
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            requestReceiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        try {
+            resetGuardianOverrides(context)
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(
+                    ruleId = ruleId,
+                    ruleName = "Original denial",
+                    targetPackageName = "com.example.guardian.target"
+                )
+            ).use { scenario ->
+                scenario.onActivity { activity -> chooseSkipDuration(activity, 0) }
+                val originalRequest = requests.poll(5, TimeUnit.SECONDS)
+                    ?: error("The original screen did not submit its skip receipt")
+                val persistedBeforeReuse = awaitOverrideState(context) {
+                    it.skips.any { skip -> skip.ruleId == ruleId }
+                }
+                assertEquals(1, persistedBeforeReuse.skips.count { it.ruleId == ruleId })
+
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
+                            originalRequest.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            originalRequest.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_OPERATION_ID,
+                            originalRequest.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CHECK_ID,
+                            originalRequest.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+                        )
+                )
+                scenario.onActivity { activity ->
+                    assertViewVisibility(activity, R.id.approval_confirmation_retry, android.view.View.VISIBLE)
+                }
+                lateinit var originalActivity: GuardianApprovalActivity
+                scenario.onActivity { originalActivity = it }
+
+                context.startActivity(
+                    approvalIntent(ruleId = "replacement", reason = "Current denial after reuse")
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity ->
+                    assertSame(originalActivity, activity)
+                    assertDenialReason(activity, "Current denial after reuse")
+                }
+
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
+                            originalRequest.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            originalRequest.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_OPERATION_ID,
+                            originalRequest.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CHECK_ID,
+                            originalRequest.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity ->
+                    assertFalse("the stale ALLOWED result must not finish the reused screen", activity.isFinishing)
+                    assertDenialReason(activity, "Current denial after reuse")
+                }
+                assertEquals(
+                    "the committed approval remains after the current screen changes",
+                    persistedBeforeReuse,
+                    awaitOverrideState(context) { it.skips.any { skip -> skip.ruleId == ruleId } }
+                )
+            }
+        } finally {
+            try {
+                assertTrue(
+                    "the preexisting guardian override state must be restored",
+                    runBlocking {
+                        dataStore.writeAppRuleOverrideState("", originalSettings.appRuleOverrideState)
+                    }
+                )
+            } finally {
+                try {
+                    writeAppRuleSnapshotDirectlyForTest(context, originalSnapshot)
+                } finally {
+                    context.unregisterReceiver(requestReceiver)
+                }
+            }
         }
     }
 
@@ -539,6 +832,7 @@ class GuardianApprovalActivityLifecycleTest {
             IntentFilter().apply {
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
                 addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED
@@ -611,6 +905,10 @@ class GuardianApprovalActivityLifecycleTest {
                     Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
                         .setPackage(context.packageName)
                         .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
                         .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
                         .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, firstCheckId)
                         .putExtra(
@@ -655,6 +953,10 @@ class GuardianApprovalActivityLifecycleTest {
                     Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
                         .setPackage(context.packageName)
                         .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
                         .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
                         .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, firstCheckId)
                         .putExtra(
@@ -669,6 +971,10 @@ class GuardianApprovalActivityLifecycleTest {
                     Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
                         .setPackage(context.packageName)
                         .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            retry.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
                         .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CHECK_ID,
@@ -703,6 +1009,10 @@ class GuardianApprovalActivityLifecycleTest {
                     Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
                         .setPackage(context.packageName)
                         .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
                         .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
                         .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, firstCheckId)
                         .putExtra(
@@ -824,6 +1134,31 @@ class GuardianApprovalActivityLifecycleTest {
             removeExtra(GuardianApprovalActivity.EXTRA_PACKAGE)
         }
 
+    private fun chooseSkipDuration(activity: GuardianApprovalActivity, position: Int) {
+        activity.findViewById<android.view.View>(R.id.approval_skip_rule).performClick()
+        val dialogsField = GuardianApprovalActivity::class.java.getDeclaredField("ownedDialogs").apply {
+            isAccessible = true
+        }
+        @Suppress("UNCHECKED_CAST")
+        val dialogs = dialogsField.get(activity) as Set<androidx.appcompat.app.AlertDialog>
+        val dialog = dialogs.lastOrNull() ?: error("The skip duration dialog was not shown")
+        val listView = dialog.listView
+        require(position in 0 until listView.adapter.count)
+        listView.performItemClick(null, position, listView.adapter.getItemId(position))
+    }
+
+    private fun assertViewVisibility(
+        activity: GuardianApprovalActivity,
+        viewId: Int,
+        expectedVisibility: Int
+    ) {
+        assertEquals(
+            "Unexpected visibility for view id $viewId",
+            expectedVisibility,
+            activity.findViewById<android.view.View>(viewId).visibility
+        )
+    }
+
     private fun resetGuardianOverrides(context: Context) {
         assertTrue(
             "Guardian lifecycle tests require an unset guardian password",
@@ -879,6 +1214,36 @@ class GuardianApprovalActivityLifecycleTest {
             throw error
         }
         return originalSnapshot
+    }
+
+    private fun seedActiveRuleWithoutRefresh(
+        context: Context,
+        ruleId: String,
+        ruleName: String
+    ): AppRuleSnapshot {
+        val settings = runBlocking { DataStoreManager(context).settings.first() }
+        val originalSnapshot = settings.appRuleSnapshot
+        val testRule = AppRule(
+            id = ruleId,
+            name = ruleName,
+            allowedMinutes = Long.MAX_VALUE / 60_000L
+        )
+        val seededSnapshot = originalSnapshot.copy(
+            appRules = originalSnapshot.appRules.filterNot { it.id == ruleId } + testRule
+        ).normalized()
+        writeAppRuleSnapshotDirectlyForTest(context, seededSnapshot)
+        return originalSnapshot
+    }
+
+    private fun writeAppRuleSnapshotDirectlyForTest(context: Context, snapshot: AppRuleSnapshot) {
+        val storeField = DataStoreManager::class.java.getDeclaredField("settingsDataStore").apply {
+            isAccessible = true
+        }
+        @Suppress("UNCHECKED_CAST")
+        val store = storeField.get(DataStoreManager(context)) as androidx.datastore.core.DataStore<Settings>
+        runBlocking {
+            store.updateData { current -> current.copy(appRuleSnapshot = snapshot.normalized()) }
+        }
     }
 
     private fun restoreAppRuleSnapshot(context: Context, snapshot: AppRuleSnapshot) {
@@ -978,7 +1343,8 @@ class GuardianApprovalActivityLifecycleTest {
     private fun approvalIntent(
         ruleId: String = "test_rule",
         ruleName: String = "Test Rule",
-        reason: String = "Daily limit reached"
+        reason: String = "Daily limit reached",
+        targetPackageName: String? = null
     ): Intent {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val denials = listOf(
@@ -990,7 +1356,7 @@ class GuardianApprovalActivityLifecycleTest {
         )
         return AppRuleBlocker.createGuardianApprovalIntent(
             context = context,
-            packageName = context.packageName,
+            packageName = targetPackageName ?: context.packageName,
             denials = denials
         )
     }

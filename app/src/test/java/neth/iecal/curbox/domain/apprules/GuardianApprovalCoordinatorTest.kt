@@ -80,6 +80,82 @@ class GuardianApprovalCoordinatorTest {
     }
 
     @Test
+    fun rebindRestartsOnlyTheCurrentReceiptAndFencesThePreviousGenerationCheck() {
+        val coordinator = GuardianApprovalCoordinator()
+        val originalGeneration = LifecycleGeneration(12L)
+        val reconnectedGeneration = LifecycleGeneration(13L)
+        val approval = GuardianApprovalWorkReceipt.Grant(
+            grant = receipt,
+            origin = GuardianApprovalGrantOrigin.DIRECT,
+            useDayGenerationStartedAtMs = 7L
+        )
+        assertTrue(coordinator.openScreen("screen-live", TARGET_PACKAGE, originalGeneration))
+        assertTrue(coordinator.beginConfirmation("screen-live", "grant-live", "check-old", approval))
+
+        assertTrue(coordinator.closeScreen("screen-live"))
+        assertTrue(coordinator.openScreen("screen-live", TARGET_PACKAGE, reconnectedGeneration))
+        assertFalse(
+            "a receipt from a previous screen must not be rebound under another request identity",
+            coordinator.rebindConfirmation(
+                screenRequestId = "screen-old",
+                operationId = "grant-live",
+                checkId = "check-current",
+                receipt = approval,
+                lifecycleGeneration = reconnectedGeneration
+            )
+        )
+        assertFalse(
+            "an older service generation must not bind a current screen",
+            coordinator.rebindConfirmation(
+                screenRequestId = "screen-live",
+                operationId = "grant-live",
+                checkId = "check-current",
+                receipt = approval,
+                lifecycleGeneration = originalGeneration
+            )
+        )
+        assertTrue(
+            coordinator.rebindConfirmation(
+                screenRequestId = "screen-live",
+                operationId = "grant-live",
+                checkId = "check-current",
+                receipt = approval,
+                lifecycleGeneration = reconnectedGeneration
+            )
+        )
+        assertFalse(
+            "the previous check cannot complete after its request is rebound",
+            coordinator.completeConfirmation(
+                GuardianApprovalCoordinator.CheckIdentity(
+                    "screen-live",
+                    "grant-live",
+                    "check-old",
+                    originalGeneration
+                )
+            )
+        )
+        assertEquals(
+            GuardianApprovalCoordinator.Operation.Confirmation(
+                operationId = "grant-live",
+                checkId = "check-current",
+                receipt = approval,
+                phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            ),
+            coordinator.currentOwner()?.operation
+        )
+        assertTrue(
+            coordinator.completeConfirmation(
+                GuardianApprovalCoordinator.CheckIdentity(
+                    "screen-live",
+                    "grant-live",
+                    "check-current",
+                    reconnectedGeneration
+                )
+            )
+        )
+    }
+
+    @Test
     fun lateLegacyCompletionCannotReplaceOrCloseANewerDirectOperation() {
         val coordinator = GuardianApprovalCoordinator()
         assertTrue(coordinator.openScreen("screen-3", TARGET_PACKAGE, LifecycleGeneration(5L)))

@@ -126,6 +126,41 @@ class GuardianApprovalCoordinator {
         true
     }
 
+    /** Reattaches a live approval receipt after service reconnection or screen re-registration. */
+    fun rebindConfirmation(
+        screenRequestId: String,
+        operationId: String,
+        checkId: String,
+        receipt: GuardianApprovalWorkReceipt,
+        lifecycleGeneration: LifecycleGeneration
+    ): Boolean = synchronized(lock) {
+        val current = owner ?: return@synchronized false
+        if (current.screenRequestId != screenRequestId ||
+            operationId.isBlank() || checkId.isBlank() ||
+            current.lifecycleGeneration != lifecycleGeneration
+        ) return@synchronized false
+
+        val previous = current.operation
+        if (previous != null) {
+            val confirmation = previous as? Operation.Confirmation
+                ?: return@synchronized false
+            if (confirmation.operationId != operationId || confirmation.receipt != receipt) {
+                return@synchronized false
+            }
+            if (confirmation.checkId == checkId) return@synchronized false
+        }
+
+        owner = current.copy(
+            operation = Operation.Confirmation(
+                operationId = operationId,
+                checkId = checkId,
+                receipt = receipt,
+                phase = ConfirmationPhase.CHECKING
+            )
+        )
+        true
+    }
+
     fun timeOutConfirmation(identity: CheckIdentity): Boolean =
         updateConfirmationPhase(identity, ConfirmationPhase.TIMED_OUT)
 

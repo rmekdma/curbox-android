@@ -48,6 +48,40 @@ function Wait-ForGuardianLog([string]$Pattern, [string]$Label, [int]$TimeoutSeco
     throw "Timed out waiting for $Label. Recent GuardianApprovalE2E logs:`n$lastLogs"
 }
 
+function Wait-ForAccessibilityBoundState([bool]$Expected, [string]$Label, [int]$TimeoutSeconds = 20) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $dump = Get-TestDeviceShellOutput -Command "dumpsys accessibility"
+        $bound = Test-AccessibilityServiceBound -DumpsysOutput $dump
+        if ($bound -eq $Expected) { return }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "Timed out waiting for Curbox accessibility service bound=$Expected ($Label)."
+}
+
+function Reconnect-GuardianServiceForLiveScreen([string]$ScreenRequestId, [string]$OldConnectionId) {
+    if (-not (Disable-AccessibilityService -PackageName $packageName)) {
+        throw "Could not remove Curbox from the enabled accessibility services for reconnect."
+    }
+    Wait-ForAccessibilityBoundState -Expected $false -Label "service disconnect"
+    # setup cancels the old worker scope, which releases its consumed in-memory test gate.
+    $script:activeGateId = ""
+    Enable-AccessibilityService -PackageName $packageName | Out-Null
+    Wait-ForAccessibilityBoundState -Expected $true -Label "service reconnect"
+
+    $request = Wait-ForGuardianLog `
+        -Pattern "service_connection_requested id=[^ ]+ screen=$([regex]::Escape($ScreenRequestId)) checking=true" `
+        -Label "live Activity request on the new service connection"
+    $newConnectionId = Get-LogValue $request "id"
+    if (-not $newConnectionId -or $newConnectionId -eq $OldConnectionId) {
+        throw "The live Activity did not request a new service connection. Old=$OldConnectionId Request=$request"
+    }
+    [void](Wait-ForGuardianLog `
+        -Pattern "service_connection_registered id=$([regex]::Escape($newConnectionId)) screen=$([regex]::Escape($ScreenRequestId)) pending_check=[^ ]+" `
+        -Label "live Activity registration acknowledgement on the new service connection")
+    return $newConnectionId
+}
+
 function Get-LogValue([string]$LogLine, [string]$Name) {
     $match = [regex]::Match($LogLine, "(?:^|\s)$([regex]::Escape($Name))=([^\s]+)")
     if (-not $match.Success) { return "" }
@@ -302,7 +336,8 @@ function Invoke-AmbiguousConfirmationCase(
     [string]$ExpectedKind,
     [scriptblock]$SubmitOperation,
     [scriptblock]$UpdateCurrentRules,
-    [string]$ExpectedCurrentDenialName
+    [string]$ExpectedCurrentDenialName,
+    [bool]$ReconnectDuringRetry = $false
 ) {
     $gateId = "$runId-$CaseName"
     Start-GuardianApproval -ExpectedRuleName $RuleName
@@ -317,10 +352,13 @@ function Invoke-AmbiguousConfirmationCase(
         -Label "$CaseName initial confirmation request"
     $operationId = Get-LogValue $firstRequest "operation"
     $firstCheckId = Get-LogValue $firstRequest "check"
+    $screenRequestId = Get-LogValue $firstRequest "screen"
+    $firstConnectionId = Get-LogValue $firstRequest "connection"
     $kind = Get-LogValue $firstRequest "kind"
     $receiptRuleId = Get-LogValue $firstRequest "rule"
     $useDayId = Get-LogValue $firstRequest "use_day"
-    if (-not $operationId -or -not $firstCheckId -or $kind -ne $ExpectedKind -or $receiptRuleId -ne $RuleId) {
+    if (-not $operationId -or -not $firstCheckId -or -not $screenRequestId -or
+        $kind -ne $ExpectedKind -or $receiptRuleId -ne $RuleId) {
         throw "$CaseName confirmation request did not carry the actual $ExpectedKind receipt: $firstRequest"
     }
     Assert-GuardianLedger -Settings $storedSettings -RuleId $RuleId -Kind $ExpectedKind -UseDayId $useDayId
@@ -340,6 +378,18 @@ function Invoke-AmbiguousConfirmationCase(
     $latestRule = @($settingsAfterRules.appRuleSnapshot.appRules | Where-Object { $_.name -eq $ExpectedCurrentDenialName })
     if ($latestRule.Count -ne 1) {
         throw "$CaseName current rule snapshot was not stored through DataStore."
+    }
+
+    $retryGateId = ""
+    if ($ReconnectDuringRetry) {
+        # Free the first timed-out outcome gate, then pause a real retry while it is checking.
+        # The reconnect must rebind the same receipt with a fresh check identity.
+        Release-ServiceEvaluationGate -GateId $gateId
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_outcome_ignored operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($firstCheckId)) .*reason=stale_request" `
+            -Label "$CaseName timed-out worker outcome invalidation")
+        $retryGateId = "$gateId-reconnect"
+        Arm-ServiceEvaluationGate -GateId $retryGateId
     }
 
     Tap-ApprovalRetry -GeometryLine $retryGeometry
@@ -362,19 +412,63 @@ function Invoke-AmbiguousConfirmationCase(
         }
     }
 
-    [void](Wait-ForGuardianLog `
-        -Pattern "ui_state status=remaining operation=$operationId check=$retryCheckId retry_visible=false failed=false .*denials=.*$([regex]::Escape($ExpectedCurrentDenialName))" `
-        -Label "$CaseName current denial rendered by the Activity after retry")
+    $staleOutcomeCheckId = $firstCheckId
+    if ($ReconnectDuringRetry) {
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_gate action=neth\.iecal\.curbox\.blockers\.TEST_GUARDIAN_EVALUATION_GATE_REACHED id=$([regex]::Escape($retryGateId)) accepted=true operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($retryCheckId))" `
+            -Label "$CaseName retry paused in the actual service worker")
+        $retryGateLine = Wait-ForGuardianLog `
+            -Pattern "service_gate_waiting id=$([regex]::Escape($retryGateId)) operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($retryCheckId))" `
+            -Label "$CaseName in-flight retry before service reconnect"
+        $oldServicePid = Get-LogValue $retryGateLine "pid"
+        if (-not $firstConnectionId -or $firstConnectionId -eq "-") {
+            $initialRegistration = Wait-ForGuardianLog `
+                -Pattern "service_connection_registered id=[^ ]+ screen=$([regex]::Escape($screenRequestId)) checking=false" `
+                -Label "$CaseName original live screen registration"
+            $firstConnectionId = Get-LogValue $initialRegistration "id"
+        }
+        $newConnectionId = Reconnect-GuardianServiceForLiveScreen `
+            -ScreenRequestId $screenRequestId `
+            -OldConnectionId $firstConnectionId
+        $recoveryRequest = Wait-ForGuardianLog `
+            -Pattern "check_request test=$([regex]::Escape($gateId)) action=neth\.iecal\.curbox\.guardian\.approval\.recover .*screen=$([regex]::Escape($screenRequestId)) connection=$([regex]::Escape($newConnectionId)) operation=$([regex]::Escape($operationId))" `
+            -Label "$CaseName receipt recovery on the new service connection"
+        $recoveryCheckId = Get-LogValue $recoveryRequest "check"
+        if (-not $recoveryCheckId -or $recoveryCheckId -eq $retryCheckId) {
+            throw "$CaseName recovery did not create a new check identity: $recoveryRequest"
+        }
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_check_accepted operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($recoveryCheckId)) retry=false recovery=true connection=$([regex]::Escape($newConnectionId))" `
+            -Label "$CaseName recovered receipt accepted by the new service coordinator")
+        foreach ($field in @("kind", "rule", "use_day", "generation", "granted_at", "granted_millis", "skip_from", "skip_until")) {
+            $retryValue = Get-LogValue $retryRequest $field
+            $recoveryValue = Get-LogValue $recoveryRequest $field
+            if ($retryValue -ne $recoveryValue) {
+                throw "$CaseName reconnect changed receipt field '$field' from '$retryValue' to '$recoveryValue'."
+            }
+        }
+        [void](Wait-ForGuardianLog `
+            -Pattern "ui_state status=remaining operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($recoveryCheckId)) retry_visible=false failed=false .*denials=.*$([regex]::Escape($ExpectedCurrentDenialName))" `
+            -Label "$CaseName current denial rendered after live-screen recovery")
+        $staleOutcomeCheckId = $retryCheckId
+        Write-Success "$CaseName reconnected the bound service, reused the stored receipt, and kept the current denial on the live Activity."
+    } else {
+        [void](Wait-ForGuardianLog `
+            -Pattern "ui_state status=remaining operation=$operationId check=$retryCheckId retry_visible=false failed=false .*denials=.*$([regex]::Escape($ExpectedCurrentDenialName))" `
+            -Label "$CaseName current denial rendered by the Activity after retry")
+    }
 
     $settingsBeforeLateResult = Get-DeviceSettings -PackageName $packageName -AsObject
-    Release-ServiceEvaluationGate -GateId $gateId
-    [void](Wait-ForGuardianLog `
-        -Pattern "service_outcome_ignored operation=$operationId check=$firstCheckId current_check=$retryCheckId reason=stale_request" `
-        -Label "$CaseName actual service worker discarded its superseded outcome")
+    if (-not $ReconnectDuringRetry) {
+        Release-ServiceEvaluationGate -GateId $gateId
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_outcome_ignored operation=$operationId check=$firstCheckId current_check=$retryCheckId reason=stale_request" `
+            -Label "$CaseName actual service worker discarded its superseded outcome")
+    }
     $allLogs = Get-GuardianApprovalLogs
     $staleAllowedResult = [regex]::IsMatch(
         $allLogs,
-        "result test=$([regex]::Escape($gateId)) status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($firstCheckId))"
+        "result test=$([regex]::Escape($gateId)) status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($staleOutcomeCheckId))"
     )
     $activityFocus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
     if (-not $activityFocus.Success -or $staleAllowedResult) {
@@ -486,7 +580,8 @@ try {
                 -GuardianExtraTimeAllowed $false
             $snapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($current)
             Inject-TestAppRules -AppRuleSnapshot $snapshot -PreserveOverrides -PackageName $packageName
-        }
+        } `
+        -ReconnectDuringRetry $true
 
     Invoke-TestDeviceShell -Command "input keyevent 3"
     Start-Sleep -Milliseconds 800
@@ -593,7 +688,7 @@ try {
 
     Write-Host "`n==========================================================================" -ForegroundColor Green
     Write-Host ">>> [GUARDIAN RETRY AND SUPERSEDE DEVICE RESULT: PASS] <<<" -ForegroundColor Green
-    Write-Host "Direct, accumulated, and skip receipts were each committed once by DataStore, evaluated by the bound :app_blocker_service worker, retried against a real updated snapshot, and protected from a superseded worker outcome." -ForegroundColor Green
+    Write-Host "Direct, accumulated, and skip receipts were each committed once by DataStore and evaluated by the bound :app_blocker_service worker. The direct receipt survived a real service reconnect without another write; every effect kept the current denial and rejected a superseded result." -ForegroundColor Green
     Write-Host "==========================================================================`n" -ForegroundColor Green
 } finally {
     if ($activeGateId) {

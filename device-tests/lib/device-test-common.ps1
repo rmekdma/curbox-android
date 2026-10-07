@@ -36,6 +36,7 @@
     - Stop-ServiceProcess: Terminate or induce crash on target process PID
     - Restart-DeviceAccessibilityServiceIfEnabled: Rebind the service only when it was enabled in the saved baseline
     - Enable-AccessibilityService: Ensure accessibility service is enabled in secure settings
+    - Disable-AccessibilityService: Temporarily remove Curbox while preserving other accessibility services
     - New-RolloverAppRuleConfig: Generate AppRuleSnapshot with rolloverEnabled and unlockDays
     - New-RuleRolloverPool: Generate RuleRolloverPool PSCustomObject
     - Test-AppRuleGuardianGrant: Verify whether an AppRuleGuardianGrant is recorded in override state
@@ -1166,6 +1167,24 @@ function Enable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.d
     if ($needsServiceUpdate -or $needsAccessibilityUpdate) {
         Start-Sleep -Seconds 2
     }
+    return $true
+}
+
+function Disable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.debug", [string]$ServiceName = "neth.iecal.curbox.services.AppBlockerService") {
+    $fullService = "$PackageName/$ServiceName"
+    $enabledServices = Get-DeviceSecureSetting -Name "enabled_accessibility_services"
+    $serviceList = @($enabledServices -split ":" | Where-Object { $_ -and $_ -ne "null" })
+    if ($serviceList -notcontains $fullService) {
+        return $false
+    }
+
+    $remainingServices = @($serviceList | Where-Object { $_ -ne $fullService })
+    if ($remainingServices.Count -eq 0) {
+        Invoke-TestDeviceShell -Command "settings delete secure enabled_accessibility_services"
+    } else {
+        Invoke-TestDeviceShell -Command "settings put secure enabled_accessibility_services $($remainingServices -join ':')"
+    }
+    Start-Sleep -Seconds 2
     return $true
 }
 

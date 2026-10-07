@@ -348,6 +348,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     @Volatile private var screenOnAwaitingUserPresent = false
     private val recheckGeneration = AtomicLong(0L)
     private val lifecycleGeneration = AtomicLong(0L)
+    @Volatile private var serviceConnectionId: String = ""
     private val schedulerTokenSequence = AtomicLong(0L)
     private var pendingSchedulerWakeGeneration: Long? = null
     private var foregroundEvidenceModule = ForegroundEvidenceModule()
@@ -531,7 +532,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
 
     fun setup(service: BaseBlockingService) {
         servicePackageName = service.packageName
+        val nextServiceConnectionId = UUID.randomUUID().toString()
         val connectionGeneration = lifecycleGeneration.incrementAndGet()
+        serviceConnectionId = nextServiceConnectionId
         val cancelledExternalEffects = synchronized(runtimeLock) {
             destroyed = false
             setupReady = false
@@ -700,6 +703,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             addAction(GuardianApprovalActivity.INTENT_ACTION_DIRECT_CHECK_RETRY)
             addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
             addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
             addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED)
             addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_CANCELLED)
         }
@@ -791,6 +795,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             service.sendBroadcast(
                 Intent(GuardianApprovalActivity.INTENT_ACTION_STATE_REQUEST)
                     .setPackage(service.packageName)
+                    .putExtra(
+                        GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                        serviceConnectionId
+                    )
             )
         } catch (error: CancellationException) {
             throw error
@@ -1851,6 +1859,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             guardianApprovalCoordinator.currentOwner()?.let {
                 guardianApprovalCoordinator.closeScreen(it.screenRequestId)
             }
+            serviceConnectionId = ""
             guardianConfirmationTimeoutJob?.cancel()
             guardianConfirmationTimeoutJob = null
             pendingGrantedPackage = null
@@ -2253,6 +2262,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     receiveGuardianApprovalCheck(intent, isRetry = true)
                     return
                 }
+                GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER -> {
+                    receiveGuardianApprovalCheck(intent, isRetry = false, isRecovery = true)
+                    return
+                }
                 GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED -> {
                     receiveGuardianLegacyStarted(intent)
                     return
@@ -2290,20 +2303,74 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     private fun receiveGuardianScreenOpened(intent: Intent, packageName: String) {
-        val requestId = intent.getStringExtra(
-            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID
-        )?.trim().orEmpty()
-        synchronized(runtimeLock) {
+        val requestId = guardianScreenRequestId(intent) ?: return
+        val incomingConnectionId = guardianServiceConnectionId(intent)
+        var requestCurrentConnection = false
+        val registered = synchronized(runtimeLock) {
             if (!isReadyForChecks()) return
-            if (requestId.isNotBlank()) {
-                guardianApprovalCoordinator.openScreen(
-                    screenRequestId = requestId,
-                    packageName = packageName,
-                    lifecycleGeneration = currentLifecycleGeneration()
-                )
+            val connectionId = serviceConnectionId
+            if (connectionId.isBlank()) return
+            if (incomingConnectionId != null && incomingConnectionId != connectionId) {
+                requestCurrentConnection = true
+                return@synchronized false
             }
-            activeGuardianPackage = packageName
+
+            val owner = guardianApprovalCoordinator.currentOwner()
+            val accepted = when {
+                owner == null -> {
+                    if (incomingConnectionId != connectionId) {
+                        requestCurrentConnection = true
+                        false
+                    } else {
+                        guardianApprovalCoordinator.openScreen(
+                            screenRequestId = requestId,
+                            packageName = packageName,
+                            lifecycleGeneration = currentLifecycleGeneration()
+                        )
+                    }
+                }
+                owner.screenRequestId == requestId && owner.packageName == packageName &&
+                    owner.lifecycleGeneration == currentLifecycleGeneration() -> true
+                else -> false
+            }
+            if (accepted) activeGuardianPackage = packageName
+            accepted
         }
+        if (requestCurrentConnection) {
+            sendGuardianStateRequest()
+            return
+        }
+        if (!registered) return
+        if (BuildConfig.DEBUG) {
+            Log.i(
+                GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                "screen_registered screen=$requestId package=$packageName " +
+                    "connection=$serviceConnectionId generation=${lifecycleGeneration.get()} " +
+                    "pid=${android.os.Process.myPid()}"
+            )
+        }
+        service.sendBroadcast(
+            Intent(GuardianApprovalActivity.INTENT_ACTION_SCREEN_REGISTERED)
+                .setPackage(service.packageName)
+                .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, requestId)
+                .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, packageName)
+                .putExtra(
+                    GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                    serviceConnectionId
+                )
+        )
+    }
+
+    private fun sendGuardianStateRequest() {
+        if (!isReadyForChecks()) return
+        service.sendBroadcast(
+            Intent(GuardianApprovalActivity.INTENT_ACTION_STATE_REQUEST)
+                .setPackage(service.packageName)
+                .putExtra(
+                    GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                    serviceConnectionId
+                )
+        )
     }
 
     private fun receiveGuardianScreenClosed(
@@ -2317,47 +2384,30 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val operationId = intent.getStringExtra(
             GuardianApprovalActivity.EXTRA_OPERATION_ID
         )?.trim().orEmpty()
+        val incomingConnectionId = guardianServiceConnectionId(intent)
         val checkDelayMs = synchronized(runtimeLock) {
             if (!isReadyForChecks()) return
+            if (incomingConnectionId != null && incomingConnectionId != serviceConnectionId) return
+            if (requestId.isBlank()) return
             val owner = guardianApprovalCoordinator.currentOwner()
+            if (owner?.screenRequestId != requestId || owner.packageName != packageName ||
+                owner.lifecycleGeneration != currentLifecycleGeneration()
+            ) return
             if (closeReason == GuardianApprovalActivity.REASON_GRANTED) {
-                if (requestId.isNotBlank() && operationId.isNotBlank()) {
-                    if (owner?.screenRequestId != requestId ||
-                        owner.packageName != packageName ||
-                        !guardianApprovalCoordinator.completeLegacyOperation(
-                            requestId,
-                            operationId
-                        )
-                    ) return
-                    activeGuardianPackage = null
-                    lastShownAt = 0L
-                    pendingGrantedPackage = packageName
-                    pendingGrantedPackageTimestampMs = observationElapsedRealtimeMs()
-                    guardianConfirmationTimeoutJob?.cancel()
-                    guardianConfirmationTimeoutJob = null
-                    return
-                }
-                if (owner?.packageName == packageName &&
-                    owner.operation is GuardianApprovalCoordinator.Operation.Confirmation
+                if (operationId.isBlank() ||
+                    !guardianApprovalCoordinator.completeLegacyOperation(requestId, operationId)
                 ) return
-                applyGuardianLifecycleTransition(
-                    GuardianApprovalActivity.INTENT_ACTION_CLOSED,
-                    packageName
-                )
+                activeGuardianPackage = null
+                lastShownAt = 0L
                 pendingGrantedPackage = packageName
                 pendingGrantedPackageTimestampMs = observationElapsedRealtimeMs()
+                guardianConfirmationTimeoutJob?.cancel()
+                guardianConfirmationTimeoutJob = null
                 return
             }
 
             if (closeReason == GuardianApprovalActivity.REASON_CONFIRMED) return
-            if (requestId.isNotBlank()) {
-                if (owner?.screenRequestId != requestId || owner.packageName != packageName) return
-                guardianApprovalCoordinator.closeScreen(requestId)
-            } else if (owner?.packageName == packageName &&
-                owner.operation is GuardianApprovalCoordinator.Operation.Confirmation
-            ) {
-                return
-            }
+            guardianApprovalCoordinator.closeScreen(requestId)
             if (activeGuardianPackage == packageName) {
                 activeGuardianPackage = null
                 lastShownAt = 0L
@@ -2382,6 +2432,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val packageName = guardianPackage(intent) ?: return
         val requestId = guardianScreenRequestId(intent) ?: return
         val operationId = guardianOperationId(intent) ?: return
+        if (guardianServiceConnectionId(intent) != serviceConnectionId) return
         synchronized(runtimeLock) {
             if (!isReadyForChecks() || activeGuardianPackage != packageName) return
             val owner = guardianApprovalCoordinator.currentOwner() ?: return
@@ -2396,6 +2447,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private fun receiveGuardianLegacyCancelled(intent: Intent) {
         val requestId = guardianScreenRequestId(intent) ?: return
         val operationId = guardianOperationId(intent) ?: return
+        if (guardianServiceConnectionId(intent) != serviceConnectionId) return
         synchronized(runtimeLock) {
             if (!isReadyForChecks()) return
             guardianApprovalCoordinator.cancelLegacyOperation(requestId, operationId)
@@ -2405,7 +2457,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private fun receiveGuardianApprovalCheck(
         intent: Intent,
         isRetry: Boolean,
-        legacyDirectAction: Boolean = false
+        legacyDirectAction: Boolean = false,
+        isRecovery: Boolean = false
     ) {
         val packageName = guardianPackage(intent) ?: return
         val screenRequestId = guardianScreenRequestId(intent) ?: return
@@ -2414,6 +2467,11 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             ?.trim()
             ?.takeIf(String::isNotEmpty)
             ?: return
+        val incomingConnectionId = guardianServiceConnectionId(intent) ?: return
+        if (incomingConnectionId != serviceConnectionId) {
+            logGuardianCheckTestRejection(operationId, checkId, "stale_connection")
+            return
+        }
         val receipt = parseGuardianApprovalReceipt(intent, legacyDirectAction)
         if (BuildConfig.DEBUG) {
             Log.i(
@@ -2471,15 +2529,21 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 )
                 return
             }
-            val accepted = if (isRetry) {
-                guardianApprovalCoordinator.retryConfirmation(
+            val accepted = when {
+                isRecovery -> guardianApprovalCoordinator.rebindConfirmation(
+                    screenRequestId,
+                    operationId,
+                    checkId,
+                    receipt,
+                    LifecycleGeneration(connectionGeneration)
+                )
+                isRetry -> guardianApprovalCoordinator.retryConfirmation(
                     screenRequestId,
                     operationId,
                     checkId,
                     receipt
                 )
-            } else {
-                guardianApprovalCoordinator.beginConfirmation(
+                else -> guardianApprovalCoordinator.beginConfirmation(
                     screenRequestId,
                     operationId,
                     checkId,
@@ -2498,7 +2562,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             if (BuildConfig.DEBUG) {
                 Log.i(
                     GUARDIAN_APPROVAL_TEST_LOG_TAG,
-                    "service_check_accepted operation=$operationId check=$checkId retry=$isRetry pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this)}"
+                    "service_check_accepted operation=$operationId check=$checkId " +
+                        "retry=$isRetry recovery=$isRecovery connection=$serviceConnectionId " +
+                        "pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this)}"
                 )
             }
             guardianConfirmationTimeoutJob?.cancel()
@@ -3050,6 +3116,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val result = Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
             .setPackage(service.packageName)
             .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+            .putExtra(
+                GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                serviceConnectionId
+            )
             .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
             .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, checkId)
             .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS, status)
@@ -3078,6 +3148,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
 
     private fun guardianScreenRequestId(intent: Intent): String? = intent.getStringExtra(
         GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID
+    )?.trim()?.takeIf(String::isNotEmpty)
+
+    private fun guardianServiceConnectionId(intent: Intent): String? = intent.getStringExtra(
+        GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID
     )?.trim()?.takeIf(String::isNotEmpty)
 
     private fun guardianOperationId(intent: Intent): String? = intent.getStringExtra(
