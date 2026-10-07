@@ -399,7 +399,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             currentWorkerInstanceToken = null
             // A reconnect must invalidate work captured by the previous service connection.
             recheckGeneration.incrementAndGet()
-            pendingWorkerEvaluations.clear()
             pendingNotificationPublication = null
             cancelPendingExternalEffectsLocked()
         }
@@ -878,30 +877,22 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                         }
                         return@post
                     }
-                    val evaluated = synchronized(runtimeLock) {
-                        pendingWorkerEvaluations.remove(outcome.sourceOrderIdentity)
-                            ?.get(denied.packageName)
-                    }
                     if (isPendingGrantedPackage(denied.packageName)) {
                         return@post
                     }
-                    if (evaluated != null) {
-                        val now = observationWallClockMs()
-                        val bypassThrottle = reevaluationGate.consumeIfApplicable(
-                            evaluated.evaluations.isNotEmpty()
+                    val now = observationWallClockMs()
+                    val bypassThrottle = reevaluationGate.consumeIfApplicable(
+                        denied.evaluation.evaluations.isNotEmpty()
+                    )
+                    if (bypassThrottle || now - lastShownAt >= 1_000L) {
+                        showWarning(
+                            packageName = denied.packageName,
+                            evaluation = denied.evaluation,
+                            denialRuleNames = denied.denyingRuleNames,
+                            generation = recheckGeneration.get(),
+                            expectedLifecycleGeneration = outcome.lifecycleGeneration,
+                            workerInstanceToken = workerInstanceToken
                         )
-                        if (bypassThrottle || now - lastShownAt >= 1_000L) {
-                            showWarning(
-                                packageName = denied.packageName,
-                                evaluation = evaluated,
-                                evaluatedSnapshot = captureRuleRuntime().snapshot,
-                                generation = recheckGeneration.get(),
-                                expectedLifecycleGeneration = outcome.lifecycleGeneration,
-                                workerInstanceToken = workerInstanceToken
-                            )
-                        }
-                    } else {
-                        showWarningFromDecision(outcome, denied, workerInstanceToken)
                     }
                 } finally {
                     finishExternalEffect(permit)
@@ -917,73 +908,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         armPostedEffect(permit, posted) {
             isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken)
-        }
-    }
-
-    private fun showWarningFromDecision(
-        outcome: DecisionOutcome.EnforcementOutcome,
-        decision: neth.iecal.curbox.domain.apprules.PackageDecision,
-        workerInstanceToken: AppRuleWorkerInstanceToken
-    ) {
-        if (!isCurrentWorkerOutcome(outcome, workerInstanceToken)) return
-        if (isPendingGrantedPackage(decision.packageName)) return
-        if (!service.isDelayOver(1_000)) return
-        val evaluatedSnapshot = synchronized(runtimeLock) {
-            if (!isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken) ||
-                activeGuardianPackage == decision.packageName
-            ) return
-            snapshot.snapshot()
-        }
-        val denials = decision.denyingRuleIds.map { ruleId ->
-            val rule = evaluatedSnapshot.appRules.find { it.id == ruleId }
-            AppRuleGuardianDenial(
-                ruleId = ruleId,
-                ruleName = rule?.name ?: ruleId,
-                reason = service.getString(R.string.app_rules_warning_status_no_condition, 0L, 0L, 0L)
-            )
-        }
-        val permit = synchronized(runtimeLock) {
-            if (activeGuardianPackage == decision.packageName) {
-                null
-            } else {
-                reserveExternalEffectLocked {
-                    isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken) &&
-                        activeGuardianPackage == null
-                }?.also {
-                    activeGuardianPackage = decision.packageName
-                }
-            }
-        } ?: return
-        if (!startExternalEffect(permit) {
-            isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken)
-        }) {
-            synchronized(runtimeLock) {
-                if (activeGuardianPackage == decision.packageName) activeGuardianPackage = null
-            }
-            return
-        }
-        try {
-            warningBeforeFrameworkCallObserver?.invoke(decision.packageName)
-            if (!beginExternalEffectCall(permit) {
-                    isCurrentWorkerOutcomeLocked(outcome, workerInstanceToken)
-                }
-            ) {
-                synchronized(runtimeLock) {
-                    if (activeGuardianPackage == decision.packageName) {
-                        activeGuardianPackage = null
-                    }
-                }
-                return
-            }
-            service.startActivity(createGuardianApprovalIntent(service, decision.packageName, denials))
-            lastShownAt = observationWallClockMs()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            logNonFatal(error)
-        } finally {
-            completeExternalEffectCall(permit)
-            finishExternalEffect(permit)
         }
     }
 
@@ -1004,9 +928,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             outcome.acceptedRuntimeRevision == latestRuntimeRevision &&
             outcome.publicationStatus == neth.iecal.curbox.domain.apprules.PublicationStatus.PUBLISHED
 
-    private val pendingWorkerEvaluations =
-        mutableMapOf<neth.iecal.curbox.domain.apprules.SourceOrderIdentity, MutableMap<String, AppRulesEvaluation>>()
-
     private fun observeWorkerEvaluation(
         workerInstanceToken: AppRuleWorkerInstanceToken,
         request: DecisionRequest,
@@ -1026,8 +947,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     evidenceAtElapsedMs = evidenceAtElapsedMs
                 )
             }
-            pendingWorkerEvaluations
-                .getOrPut(request.sourceOrderIdentity) { mutableMapOf() }[packageName] = evaluation
         }
         if (!isCurrentWorkerRequest(workerInstanceToken, request, accepted)) return
         val observer = evaluationResultObserver ?: return
@@ -1592,7 +1511,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private fun showWarning(
         packageName: String,
         evaluation: neth.iecal.curbox.domain.apprules.AppRulesEvaluation,
-        evaluatedSnapshot: AppRuleSnapshot,
+        denialRuleNames: Map<String, String>,
         generation: Long,
         expectedLifecycleGeneration: LifecycleGeneration,
         workerInstanceToken: AppRuleWorkerInstanceToken? = null
@@ -1603,11 +1522,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         try {
             if (!service.isDelayOver(1_000)) return
             val denialRows = evaluation.denyingRules.map { denial ->
-                val rule = evaluatedSnapshot.appRules.find { it.id == denial.ruleId }
                 val effectiveAllowanceMillis = denial.effectiveAllowanceMillis
                 AppRuleGuardianDenial(
                     ruleId = denial.ruleId,
-                    ruleName = rule?.name ?: denial.ruleId,
+                    ruleName = denialRuleNames[denial.ruleId] ?: denial.ruleId,
                     reason = warningStatus(denial),
                     conditionProgresses = denial.conditionProgresses,
                     isAllowanceExhausted = denial.isAllowanceExhausted,
@@ -1742,7 +1660,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             foregroundEvidenceSuspended = true
             screenOnAwaitingUserPresent = false
             pendingSchedulerWakeGeneration = null
-            pendingWorkerEvaluations.clear()
             pendingNotificationPublication = null
             cancelPendingExternalEffectsLocked()
         }

@@ -76,11 +76,22 @@ interface DecisionOutcomeSink {
 
 data class PackageDecision(
     val packageName: String,
-    val isAllowed: Boolean,
-    val denyingRuleIds: List<String>
+    val evaluation: AppRulesEvaluation,
+    /** Names from the same accepted snapshot used to produce [evaluation]. */
+    val denyingRuleNames: Map<String, String>
 ) {
+    val isAllowed: Boolean
+        get() = evaluation.isAllowed
+
+    val denyingRuleIds: List<String>
+        get() = evaluation.denyingRules.map { it.ruleId }
+
     init {
         require(packageName.isNotBlank()) { "package decision must name a package" }
+        val expectedDenialIds = evaluation.denyingRules.map { it.ruleId }.toSet()
+        require(denyingRuleNames.keys == expectedDenialIds) {
+            "package decision must include names for exactly its denying rules"
+        }
     }
 }
 
@@ -544,8 +555,8 @@ class SerializedDecisionWorker internal constructor(
 
         val calculator = ConfigurableUseDayCalculator(resetTime = accepted.runtime.resetTime)
         val useDayId = calculator.idAt(request.observation.capturedAtWallMs)
-        val evaluatedPackages = mutableListOf<Pair<String, AppRulesEvaluation>>()
         val decisions = mutableListOf<PackageDecision>()
+        val rulesById = accepted.runtime.snapshot.appRules.associateBy { it.id }
         for (outcome in evaluable) {
             val packageName = outcome.packageName ?: continue
             if (!isCurrent(request, accepted)) return
@@ -598,21 +609,22 @@ class SerializedDecisionWorker internal constructor(
             }
             if (!isCurrent(request, accepted)) return
 
-            evaluatedPackages += packageName to evaluation
             decisions += PackageDecision(
                 packageName = packageName,
-                isAllowed = evaluation.isAllowed,
-                denyingRuleIds = evaluation.denyingRules.map { it.ruleId }
+                evaluation = evaluation,
+                denyingRuleNames = evaluation.denyingRules.associate { denial ->
+                    denial.ruleId to (rulesById[denial.ruleId]?.name?.takeIf(String::isNotBlank) ?: denial.ruleId)
+                }
             )
         }
         if (!isCurrent(request, accepted)) return
-        evaluatedPackages.forEach { (packageName, evaluation) ->
+        decisions.forEach { decision ->
             if (!isCurrent(request, accepted)) return
             publishRecheckPlan(
                 request = request,
                 accepted = accepted,
-                packageName = packageName,
-                evaluation = evaluation,
+                packageName = decision.packageName,
+                evaluation = decision.evaluation,
                 useDayId = useDayId,
                 calculator = calculator
             )
