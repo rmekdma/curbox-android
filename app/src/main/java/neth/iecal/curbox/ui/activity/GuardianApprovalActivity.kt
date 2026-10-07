@@ -205,6 +205,22 @@ class GuardianApprovalActivity : AppCompatActivity() {
                             "operation=$oldOperationId check=$oldCheckId status=$status"
                     )
                 }
+                INTENT_ACTION_TEST_SELECT_APPROVAL_RULE -> {
+                    val ruleId = intent.getStringExtra(EXTRA_TEST_GUARDIAN_RULE_ID)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val index = denials.indexOfFirst { it.ruleId == ruleId }
+                    if (index >= 0 && !isFinishing && this@GuardianApprovalActivity::binding.isInitialized) {
+                        (binding.approvalChoices.getChildAt(index) as? RadioButton)?.performClick()
+                    }
+                    val accepted = index >= 0 && selectedRuleId == ruleId
+                    testLog(
+                        "test_rule_selection instance=${System.identityHashCode(this@GuardianApprovalActivity)} " +
+                            "screen=$screenRequestId rule=$ruleId " +
+                            "accepted=$accepted selected=${selectedRuleId.orEmpty()}"
+                    )
+                }
                 AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE,
                 AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE,
                 AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED -> {
@@ -352,12 +368,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
             ?: savedInstanceState?.getString(STATE_SCREEN_REQUEST_ID)
                 ?.takeIf(String::isNotBlank)
             ?: UUID.randomUUID().toString()
+        restoreDenialDisplayState(savedInstanceState)
         restoreConfirmationState(savedInstanceState)
-        testLog(
-            "activity_created instance=${System.identityHashCode(this)} screen=$screenRequestId " +
-                "restored_state=${savedInstanceState != null} package=$targetPackageName " +
-                "denials=${denials.joinToString("|") { it.ruleName }}"
-        )
         ContextCompat.registerReceiver(
             this,
             guardianStateRequestReceiver,
@@ -387,6 +399,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     addAction(INTENT_ACTION_TEST_CLEAR_WRITE_FAILURE)
                     addAction(INTENT_ACTION_TEST_SEND_STALE_CLOSED)
                     addAction(INTENT_ACTION_TEST_SEND_CONFIRMATION_RESULT)
+                    addAction(INTENT_ACTION_TEST_SELECT_APPROVAL_RULE)
                     addAction(AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
                     addAction(AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
                     addAction(AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED)
@@ -395,8 +408,16 @@ class GuardianApprovalActivity : AppCompatActivity() {
             )
             approvalTestReceiverRegistered = true
         }
-        selectedRuleId = denials.first().ruleId
+        selectedRuleId = selectedRuleId?.takeIf { id -> denials.any { it.ruleId == id } }
+            ?: denials.first().ruleId
         render()
+        testLog(
+            "activity_created instance=${System.identityHashCode(this)} screen=$screenRequestId " +
+                "restored_state=${savedInstanceState != null} package=$targetPackageName " +
+                "denials=${denials.joinToString("|") { it.ruleName }} " +
+                "denial_ids=${denials.joinToString("|") { it.ruleId }} " +
+                "selected_rule=${selectedRuleId.orEmpty()}"
+        )
         if (confirmationChecking || confirmationFailed) {
             renderConfirmationState()
             testLog(
@@ -415,6 +436,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(STATE_SCREEN_REQUEST_ID, screenRequestId)
         outState.putString(STATE_TARGET_PACKAGE, targetPackageName)
+        outState.putString(STATE_DENIALS, Gson().toJson(denials))
+        outState.putString(STATE_SELECTED_RULE_ID, selectedRuleId)
         if (BuildConfig.DEBUG) {
             outState.putString(STATE_APPROVAL_TEST_RUN_ID, approvalTestRunId)
         }
@@ -430,6 +453,19 @@ class GuardianApprovalActivity : AppCompatActivity() {
             confirmationReceipt?.let { saveConfirmationReceipt(outState, it) }
         }
         super.onSaveInstanceState(outState)
+    }
+
+    private fun restoreDenialDisplayState(state: Bundle?) {
+        if (state == null ||
+            state.getString(STATE_TARGET_PACKAGE) != targetPackageName ||
+            state.getString(STATE_SCREEN_REQUEST_ID) != screenRequestId
+        ) return
+
+        val savedDenials = readValidatedDenials(state.getString(STATE_DENIALS)) ?: return
+        denials = savedDenials
+        selectedRuleId = state.getString(STATE_SELECTED_RULE_ID)
+            ?.takeIf { id -> savedDenials.any { it.ruleId == id } }
+            ?: savedDenials.first().ruleId
     }
 
     private fun restoreConfirmationState(state: Bundle?) {
@@ -590,9 +626,19 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 ?.trim()
                 ?.takeIf(String::isNotEmpty)
         }.getOrNull() ?: return null
+        val denials = readValidatedDenials(sourceIntent.getStringExtra(EXTRA_DENIALS))
+            ?: return null
+
+        return GuardianApprovalPayload(
+            packageName = packageName,
+            denials = denials
+        )
+    }
+
+    private fun readValidatedDenials(encodedDenials: String?): List<AppRuleGuardianDenial>? {
         val parsedDenials = runCatching {
             Gson().fromJson<List<AppRuleGuardianDenial?>>(
-                sourceIntent.getStringExtra(EXTRA_DENIALS).orEmpty(),
+                encodedDenials.orEmpty(),
                 object : TypeToken<List<AppRuleGuardianDenial?>>() {}.type
             )
         }.getOrNull() ?: return null
@@ -605,20 +651,19 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         if (validatedDenials.any { it == null }) return null
 
-        return GuardianApprovalPayload(
-            packageName = packageName,
-            denials = validatedDenials.filterNotNull()
-        )
+        return validatedDenials.filterNotNull()
     }
 
     private fun render() {
         val choices = binding.approvalChoices
+        selectedRuleId = selectedRuleId?.takeIf { id -> denials.any { it.ruleId == id } }
+            ?: denials.first().ruleId
         choices.removeAllViews()
         denials.forEachIndexed { index, denial ->
             choices.addView(RadioButton(this).apply {
                 id = index + 1
                 text = GuardianApprovalTextFormatter.formatDenial(this@GuardianApprovalActivity, denial)
-                isChecked = index == 0
+                isChecked = denial.ruleId == selectedRuleId
                 setPadding(0, 8, 0, 8)
             })
         }
@@ -1510,6 +1555,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
         private const val TEST_LOG_TAG = "GuardianApprovalE2E"
         private const val STATE_SCREEN_REQUEST_ID = "guardian_state_screen_request_id"
         private const val STATE_TARGET_PACKAGE = "guardian_state_target_package"
+        private const val STATE_DENIALS = "guardian_state_denials"
+        private const val STATE_SELECTED_RULE_ID = "guardian_state_selected_rule_id"
         private const val STATE_APPROVAL_TEST_RUN_ID = "guardian_state_approval_test_run_id"
         private const val STATE_CONFIRMATION_OPERATION_ID = "guardian_state_confirmation_operation_id"
         private const val STATE_CONFIRMATION_CHECK_ID = "guardian_state_confirmation_check_id"
@@ -1538,8 +1585,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
             "neth.iecal.curbox.guardian.TEST_SEND_STALE_CLOSED"
         internal const val INTENT_ACTION_TEST_SEND_CONFIRMATION_RESULT =
             "neth.iecal.curbox.guardian.TEST_SEND_CONFIRMATION_RESULT"
+        internal const val INTENT_ACTION_TEST_SELECT_APPROVAL_RULE =
+            "neth.iecal.curbox.guardian.TEST_SELECT_APPROVAL_RULE"
         internal const val EXTRA_TEST_GATE_ID = "guardian_test_gate_id"
         internal const val EXTRA_TEST_GUARDIAN_PACKAGE = "guardian_test_package"
+        internal const val EXTRA_TEST_GUARDIAN_RULE_ID = "guardian_test_rule_id"
         internal const val EXTRA_TEST_SCREEN_REQUEST_ID = "guardian_test_screen_request_id"
         internal const val EXTRA_TEST_SERVICE_CONNECTION_ID = "guardian_test_service_connection_id"
         internal const val EXTRA_TEST_OPERATION_ID = "guardian_test_operation_id"

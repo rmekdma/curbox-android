@@ -719,13 +719,34 @@ class GuardianApprovalActivityLifecycleTest {
                                         ruleId = "night",
                                         ruleName = "Night rule",
                                         reason = "Night restriction"
+                                    ),
+                                    AppRuleGuardianDenial(
+                                        ruleId = "quiet-hours",
+                                        ruleName = "Quiet hours rule",
+                                        reason = "Quiet hours restriction"
                                     )
                                 )
                             )
                         )
                 )
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-                scenario.onActivity { activity -> assertDenialReason(activity, "Night rule") }
+                scenario.onActivity { activity ->
+                    val choices = activity.findViewById<RadioGroup>(R.id.approval_choices)
+                    assertEquals(2, choices.childCount)
+                    assertDenialReasonAt(activity, 0, "Night rule")
+                    assertDenialReasonAt(activity, 1, "Quiet hours rule")
+                    (choices.getChildAt(1) as RadioButton).performClick()
+                    assertEquals("quiet-hours", selectedRuleId(activity))
+                }
+                scenario.recreate()
+                scenario.onActivity { activity ->
+                    val choices = activity.findViewById<RadioGroup>(R.id.approval_choices)
+                    assertEquals(2, choices.childCount)
+                    assertDenialReasonAt(activity, 0, "Night rule")
+                    assertDenialReasonAt(activity, 1, "Quiet hours rule")
+                    assertTrue((choices.getChildAt(1) as RadioButton).isChecked)
+                    assertEquals("quiet-hours", selectedRuleId(activity))
+                }
                 scenario.onActivity { activity ->
                     assertViewVisibility(activity, R.id.approval_confirmation_retry, android.view.View.GONE)
                 }
@@ -1200,6 +1221,22 @@ class GuardianApprovalActivityLifecycleTest {
                 .getChildAt(0) as RadioButton).text.contains(reason)
         )
     }
+
+    private fun assertDenialReasonAt(
+        activity: GuardianApprovalActivity,
+        index: Int,
+        reason: String
+    ) {
+        assertTrue(
+            (activity.findViewById<RadioGroup>(R.id.approval_choices)
+                .getChildAt(index) as RadioButton).text.contains(reason)
+        )
+    }
+
+    private fun selectedRuleId(activity: GuardianApprovalActivity): String? =
+        GuardianApprovalActivity::class.java.getDeclaredField("selectedRuleId")
+            .apply { isAccessible = true }
+            .get(activity) as? String
 
     private fun guardianClosedReceiver(
         receivedPackage: AtomicReference<String?>,

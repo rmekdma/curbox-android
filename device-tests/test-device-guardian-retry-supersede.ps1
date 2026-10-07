@@ -63,7 +63,7 @@ function Wait-ForAccessibilityBoundState([bool]$Expected, [string]$Label, [int]$
 }
 
 function Rotate-DeviceDisplayForActivityRecreation {
-    if (-not $script:originalAccelerometerRotation) {
+    if ($script:originalUserRotation -eq "") {
         $script:originalAccelerometerRotation = Get-TestDeviceShellOutput `
             -Command "settings get system accelerometer_rotation"
         $script:originalUserRotation = Get-TestDeviceShellOutput `
@@ -73,7 +73,11 @@ function Rotate-DeviceDisplayForActivityRecreation {
             throw "Could not safely read the current display rotation settings."
         }
     }
-    $nextRotation = (([int]$script:originalUserRotation + 1) % 4)
+    $currentRotation = Get-TestDeviceShellOutput -Command "settings get system user_rotation"
+    if ($currentRotation -notmatch '^[0-3]$') {
+        throw "Could not safely read the current display rotation."
+    }
+    $nextRotation = (([int]$currentRotation + 1) % 4)
     $script:displayRotationChanged = $true
     Invoke-TestDeviceShell -Command "settings put system accelerometer_rotation 0"
     Invoke-TestDeviceShell -Command "settings put system user_rotation $nextRotation"
@@ -310,6 +314,16 @@ function Start-LiveApprovalIntent(
         -ExtraArguments "--es guardian_test_package $TargetPackage --es guardian_test_screen_request_id $ScreenRequestId --es guardian_test_rule_id $RuleId --es guardian_test_rule_name '$RuleName' --es guardian_test_reason '$Reason'"
 }
 
+function Select-LiveGuardianApprovalRule([string]$RuleId) {
+    Send-TestBroadcast `
+        -Action "neth.iecal.curbox.guardian.TEST_SELECT_APPROVAL_RULE" `
+        -GateId "" `
+        -ExtraArguments "--es guardian_test_rule_id $RuleId"
+    [void](Wait-ForGuardianLog `
+        -Pattern "test_rule_selection instance=\d+ screen=[^ ]+ rule=$([regex]::Escape($RuleId)) accepted=true selected=$([regex]::Escape($RuleId))" `
+        -Label "live GuardianApprovalActivity selected rule $RuleId")
+}
+
 function Tap-ApprovalAction([string]$ResourceId, [string]$Description) {
     $ui = Wait-For-UI -Pattern ([regex]::Escape($ResourceId)) -TimeoutSeconds 8
     if (-not (Tap-Node $ui "resource-id=`"$packageName`:id/$ResourceId`"" $Description -Optional)) {
@@ -480,9 +494,41 @@ function Invoke-AmbiguousConfirmationCase(
             (ConvertTo-Json -InputObject $settingsAfterRecreationRecovery.appRuleOverrideState -Depth 20 -Compress)) {
             throw "$CaseName Activity recreation or recovery changed the already committed approval ledger."
         }
+        $secondaryRuleId = "${RuleId}-secondary"
+        Select-LiveGuardianApprovalRule -RuleId $secondaryRuleId
+        $activityBeforeCompletedStateRecreation = Wait-ForGuardianLog `
+            -Pattern "test_rule_selection instance=\d+ screen=$([regex]::Escape($screenRequestId)) rule=$([regex]::Escape($secondaryRuleId)) accepted=true selected=$([regex]::Escape($secondaryRuleId))" `
+            -Label "$CaseName selected current secondary denial before completed-state recreation"
+        $instanceBeforeCompletedStateRecreation = Get-LogValue $activityBeforeCompletedStateRecreation "instance"
+        Rotate-DeviceDisplayForActivityRecreation
+        $completedStateRecreation = Wait-ForGuardianLog `
+            -Pattern "activity_created instance=\d+ screen=$([regex]::Escape($screenRequestId)) restored_state=true .*denials=.*$([regex]::Escape($ExpectedCurrentDenialName))\|Secondary denial after Activity recreation denial_ids=.*\|$([regex]::Escape($secondaryRuleId)) selected_rule=$([regex]::Escape($secondaryRuleId))" `
+            -Label "$CaseName restored latest denial rows and selected rule after a completed check"
+        $completedStateInstance = Get-LogValue $completedStateRecreation "instance"
+        if (-not $completedStateInstance -or $completedStateInstance -eq $instanceBeforeCompletedStateRecreation) {
+            throw "$CaseName completed-state rotation did not create a new Activity instance. Before=$activityBeforeCompletedStateRecreation Restored=$completedStateRecreation"
+        }
+        $focusAfterCompletedStateRestore = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+        if (-not $focusAfterCompletedStateRestore.Success) {
+            throw "$CaseName completed-state recreation did not retain GuardianApprovalActivity. Focus: $($focusAfterCompletedStateRestore.RawFocus)"
+        }
+        $logsAfterCompletedStateRestore = Get-GuardianApprovalLogs
+        $writesForOperation = [regex]::Matches($logsAfterCompletedStateRestore, "write_committed id=$gateId ")
+        $recoveryRequests = [regex]::Matches(
+            $logsAfterCompletedStateRestore,
+            "check_request test=$([regex]::Escape($gateId)) action=neth\.iecal\.curbox\.guardian\.approval\.recover "
+        )
+        if ($writesForOperation.Count -ne 1 -or $recoveryRequests.Count -ne 1) {
+            throw "$CaseName completed-state recreation repeated an approval write or confirmation check: writes=$($writesForOperation.Count) recovery_checks=$($recoveryRequests.Count)."
+        }
+        $settingsAfterCompletedStateRecovery = Get-DeviceSettings -PackageName $packageName -AsObject
+        if ((ConvertTo-Json -InputObject $settingsBeforeRecreationRecovery.appRuleOverrideState -Depth 20 -Compress) -ne
+            (ConvertTo-Json -InputObject $settingsAfterCompletedStateRecovery.appRuleOverrideState -Depth 20 -Compress)) {
+            throw "$CaseName completed-state recreation changed the already committed approval ledger."
+        }
         Clear-WriteFailure
         Restore-DeviceDisplayRotation
-        Write-Success "$CaseName recreated the real Activity during a pending check, restored its transient receipt, fenced the old result, and committed only once."
+        Write-Success "$CaseName recreated the real Activity during a pending check and again after remaining; it restored the transient receipt, latest denials, and selected rule, fenced the old result, and committed only once."
         return
     }
 
@@ -934,7 +980,12 @@ try {
                 -RuleName "Current denial after Activity recreation" `
                 -GroupId $groupId `
                 -GuardianExtraTimeAllowed $false
-            $snapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($current)
+            $secondary = New-GuardianRule `
+                -RuleId "${recreateRuleId}-secondary" `
+                -RuleName "Secondary denial after Activity recreation" `
+                -GroupId $groupId `
+                -GuardianExtraTimeAllowed $false
+            $snapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($current, $secondary)
             Inject-TestAppRules -AppRuleSnapshot $snapshot -PreserveOverrides -PackageName $packageName
         } `
         -RecreateActivityDuringCheck $true
@@ -1005,7 +1056,7 @@ try {
 
     Write-Host "`n==========================================================================" -ForegroundColor Green
     Write-Host ">>> [GUARDIAN RETRY AND SUPERSEDE DEVICE RESULT: PASS] <<<" -ForegroundColor Green
-    Write-Host "Direct, accumulated, and skip receipts each survived a real :app_blocker_service reconnect without another write. Configuration recreation restored the pending receipt, and Home cancellation plus same-package replacement ignored stale CLOSED and ALLOWED events." -ForegroundColor Green
+    Write-Host "Direct, accumulated, and skip receipts survived real :app_blocker_service reconnects without another write. Activity recreation restored pending and completed state, including current denial rows and the selected rule. Home cancellation plus same-package replacement ignored stale CLOSED and ALLOWED events." -ForegroundColor Green
     Write-Host "==========================================================================`n" -ForegroundColor Green
 } finally {
     if ($displayRotationChanged) {
