@@ -137,6 +137,99 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
+    fun reusedScreenRegistersTheNewRequestWithItsPreviousIdentity() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val openedRequests = LinkedBlockingQueue<Intent>()
+        val firstRequestRegistered = CountDownLatch(1)
+        val firstRequestId = "screen-before-${java.util.UUID.randomUUID()}"
+        val replacementRequestId = "screen-after-${java.util.UUID.randomUUID()}"
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_OPENED) {
+                    openedRequests.offer(intent)
+                }
+            }
+        }
+        val registrationReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_SCREEN_REGISTERED &&
+                    intent.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID) ==
+                    firstRequestId
+                ) {
+                    firstRequestRegistered.countDown()
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_OPENED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        ContextCompat.registerReceiver(
+            context,
+            registrationReceiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_SCREEN_REGISTERED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(reason = "Original denial").putExtra(
+                    GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
+                    firstRequestId
+                )
+            ).use { scenario ->
+                lateinit var original: GuardianApprovalActivity
+                scenario.onActivity { original = it }
+                pollOpenedRequest(openedRequests, firstRequestId)
+                assertTrue(
+                    "the first screen must register before the same-top replacement arrives",
+                    firstRequestRegistered.await(5, TimeUnit.SECONDS)
+                )
+                instrumentation.waitForIdleSync()
+
+                context.startActivity(
+                    approvalIntent(reason = "Current denial after reuse").putExtra(
+                        GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
+                        replacementRequestId
+                    )
+                )
+                instrumentation.waitForIdleSync()
+
+                val replacementOpen = pollOpenedRequest(openedRequests, replacementRequestId)
+                assertEquals(
+                    firstRequestId,
+                    replacementOpen.getStringExtra(
+                        GuardianApprovalActivity.EXTRA_PREVIOUS_SCREEN_REQUEST_ID
+                    )
+                )
+                scenario.onActivity { activity ->
+                    assertSame(original, activity)
+                    assertDenialReason(activity, "Current denial after reuse")
+                }
+            }
+        } finally {
+            context.unregisterReceiver(registrationReceiver)
+            context.unregisterReceiver(receiver)
+        }
+    }
+
+    private fun pollOpenedRequest(
+        openedRequests: LinkedBlockingQueue<Intent>,
+        screenRequestId: String
+    ): Intent {
+        val deadline = SystemClock.elapsedRealtime() + 5_000L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val request = openedRequests.poll(100, TimeUnit.MILLISECONDS) ?: continue
+            if (request.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID) ==
+                screenRequestId
+            ) return request
+        }
+        error("No OPENED lifecycle event arrived for screen $screenRequestId")
+    }
+
+    @Test
     fun malformedDenialReplacementRetainsTheCurrentApprovalPayload() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val instrumentation = InstrumentationRegistry.getInstrumentation()

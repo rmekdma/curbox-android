@@ -212,8 +212,15 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             "neth.iecal.curbox.blockers.TEST_RELEASE_GUARDIAN_EVALUATION_GATE"
         internal const val INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED =
             "neth.iecal.curbox.blockers.TEST_GUARDIAN_EVALUATION_GATE_REACHED"
+        internal const val INTENT_ACTION_TEST_START_GUARDIAN_APPROVAL =
+            "neth.iecal.curbox.blockers.TEST_START_GUARDIAN_APPROVAL"
         internal const val EXTRA_TEST_GATE_ID = "guardian_test_gate_id"
         internal const val EXTRA_TEST_ACK_PACKAGE = "guardian_test_ack_package"
+        internal const val EXTRA_TEST_GUARDIAN_PACKAGE = "guardian_test_package"
+        internal const val EXTRA_TEST_SCREEN_REQUEST_ID = "guardian_test_screen_request_id"
+        internal const val EXTRA_TEST_RULE_ID = "guardian_test_rule_id"
+        internal const val EXTRA_TEST_RULE_NAME = "guardian_test_rule_name"
+        internal const val EXTRA_TEST_REASON = "guardian_test_reason"
         internal const val EXTRA_TEST_OPERATION_ID = "guardian_test_operation_id"
         internal const val EXTRA_TEST_CHECK_ID = "guardian_test_check_id"
         private const val GUARDIAN_APPROVAL_TEST_LOG_TAG = "GuardianApprovalE2E"
@@ -267,6 +274,50 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private val guardianEvaluationTestGateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (!BuildConfig.DEBUG) return
+            if (intent?.action == INTENT_ACTION_TEST_START_GUARDIAN_APPROVAL) {
+                val targetPackage = intent.getStringExtra(EXTRA_TEST_GUARDIAN_PACKAGE)
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: return
+                val screenRequestId = intent.getStringExtra(EXTRA_TEST_SCREEN_REQUEST_ID)
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: return
+                val ruleId = intent.getStringExtra(EXTRA_TEST_RULE_ID)
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: return
+                val ruleName = intent.getStringExtra(EXTRA_TEST_RULE_NAME)
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: return
+                val reason = intent.getStringExtra(EXTRA_TEST_REASON)
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: return
+                runCatching {
+                    service.startActivity(
+                        createGuardianApprovalIntent(
+                            context = service,
+                            packageName = targetPackage,
+                            denials = listOf(
+                                AppRuleGuardianDenial(
+                                    ruleId = ruleId,
+                                    ruleName = ruleName,
+                                    reason = reason
+                                )
+                            ),
+                            screenRequestId = screenRequestId
+                        )
+                    )
+                }.onSuccess {
+                    Log.i(
+                        GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                        "test_live_screen_started screen=$screenRequestId package=$targetPackage"
+                    )
+                }.onFailure(::logNonFatal)
+                return
+            }
             val gateId = intent?.getStringExtra(EXTRA_TEST_GATE_ID)
                 ?.trim()
                 ?.takeIf(String::isNotEmpty)
@@ -774,6 +825,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                                 IntentFilter().apply {
                                     addAction(INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
                                     addAction(INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
+                                    addAction(INTENT_ACTION_TEST_START_GUARDIAN_APPROVAL)
                                 },
                                 ContextCompat.RECEIVER_EXPORTED
                             )
@@ -2305,7 +2357,11 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private fun receiveGuardianScreenOpened(intent: Intent, packageName: String) {
         val requestId = guardianScreenRequestId(intent) ?: return
         val incomingConnectionId = guardianServiceConnectionId(intent)
+        val replacedRequestId = intent.getStringExtra(
+            GuardianApprovalActivity.EXTRA_PREVIOUS_SCREEN_REQUEST_ID
+        )?.trim()?.takeIf(String::isNotEmpty)
         var requestCurrentConnection = false
+        var replacedOwnerRequestId: String? = null
         val registered = synchronized(runtimeLock) {
             if (!isReadyForChecks()) return
             val connectionId = serviceConnectionId
@@ -2331,9 +2387,25 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 }
                 owner.screenRequestId == requestId && owner.packageName == packageName &&
                     owner.lifecycleGeneration == currentLifecycleGeneration() -> true
+                owner.lifecycleGeneration == currentLifecycleGeneration() &&
+                    incomingConnectionId == connectionId &&
+                    replacedRequestId == owner.screenRequestId -> {
+                    replacedOwnerRequestId = owner.screenRequestId
+                    guardianApprovalCoordinator.openScreen(
+                        screenRequestId = requestId,
+                        packageName = packageName,
+                        lifecycleGeneration = currentLifecycleGeneration()
+                    )
+                }
                 else -> false
             }
-            if (accepted) activeGuardianPackage = packageName
+            if (accepted) {
+                activeGuardianPackage = packageName
+                if (replacedOwnerRequestId != null) {
+                    guardianConfirmationTimeoutJob?.cancel()
+                    guardianConfirmationTimeoutJob = null
+                }
+            }
             accepted
         }
         if (requestCurrentConnection) {
@@ -2342,6 +2414,13 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         if (!registered) return
         if (BuildConfig.DEBUG) {
+            replacedOwnerRequestId?.let { previousRequestId ->
+                Log.i(
+                    GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                    "screen_replaced previous=$previousRequestId current=$requestId " +
+                        "package=$packageName connection=$serviceConnectionId"
+                )
+            }
             Log.i(
                 GUARDIAN_APPROVAL_TEST_LOG_TAG,
                 "screen_registered screen=$requestId package=$packageName " +
@@ -2387,12 +2466,22 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val incomingConnectionId = guardianServiceConnectionId(intent)
         val checkDelayMs = synchronized(runtimeLock) {
             if (!isReadyForChecks()) return
-            if (incomingConnectionId != null && incomingConnectionId != serviceConnectionId) return
+            if (incomingConnectionId != null && incomingConnectionId != serviceConnectionId) {
+                logGuardianScreenCloseIgnored(requestId, packageName, "stale_connection")
+                return
+            }
             if (requestId.isBlank()) return
             val owner = guardianApprovalCoordinator.currentOwner()
             if (owner?.screenRequestId != requestId || owner.packageName != packageName ||
                 owner.lifecycleGeneration != currentLifecycleGeneration()
-            ) return
+            ) {
+                logGuardianScreenCloseIgnored(
+                    requestId,
+                    packageName,
+                    "stale_owner:${owner?.screenRequestId.orEmpty()}"
+                )
+                return
+            }
             if (closeReason == GuardianApprovalActivity.REASON_GRANTED) {
                 if (operationId.isBlank() ||
                     !guardianApprovalCoordinator.completeLegacyOperation(requestId, operationId)
@@ -2414,6 +2503,12 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             }
             guardianConfirmationTimeoutJob?.cancel()
             guardianConfirmationTimeoutJob = null
+            if (BuildConfig.DEBUG) {
+                Log.i(
+                    GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                    "screen_closed screen=$requestId package=$packageName reason=$closeReason"
+                )
+            }
             if (closeReason == GuardianApprovalActivity.REASON_CANCELLED) {
                 300L
             } else {
@@ -2426,6 +2521,20 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 observationKind = ObservationKind.REFRESH
             )
         }
+    }
+
+    private fun logGuardianScreenCloseIgnored(
+        requestId: String,
+        packageName: String,
+        reason: String
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val owner = guardianApprovalCoordinator.currentOwner()
+        Log.i(
+            GUARDIAN_APPROVAL_TEST_LOG_TAG,
+            "screen_close_ignored screen=$requestId package=$packageName " +
+                "owner_screen=${owner?.screenRequestId.orEmpty()} reason=$reason"
+        )
     }
 
     private fun receiveGuardianLegacyStarted(intent: Intent) {

@@ -147,6 +147,64 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     DataStoreManager.guardianApprovalWriteCommitObserverForTest = null
                     testLog("write_failure_cleared")
                 }
+                INTENT_ACTION_TEST_SEND_STALE_CLOSED -> {
+                    val targetPackage = intent.getStringExtra(EXTRA_TEST_GUARDIAN_PACKAGE)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val oldScreenRequestId = intent.getStringExtra(EXTRA_TEST_SCREEN_REQUEST_ID)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val oldConnectionId = intent.getStringExtra(EXTRA_TEST_SERVICE_CONNECTION_ID)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    sendBroadcast(
+                        Intent(INTENT_ACTION_CLOSED)
+                            .setPackage(this@GuardianApprovalActivity.packageName)
+                            .putExtra(EXTRA_GUARDIAN_PACKAGE, targetPackage)
+                            .putExtra(EXTRA_SCREEN_REQUEST_ID, oldScreenRequestId)
+                            .putExtra(EXTRA_SERVICE_CONNECTION_ID, oldConnectionId)
+                            .putExtra(EXTRA_CLOSE_REASON, REASON_INTERRUPTED)
+                    )
+                    testLog("test_stale_closed_sent screen=$oldScreenRequestId package=$targetPackage")
+                }
+                INTENT_ACTION_TEST_SEND_CONFIRMATION_RESULT -> {
+                    val oldScreenRequestId = intent.getStringExtra(EXTRA_TEST_SCREEN_REQUEST_ID)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val oldOperationId = intent.getStringExtra(EXTRA_TEST_OPERATION_ID)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val oldCheckId = intent.getStringExtra(EXTRA_TEST_CHECK_ID)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val oldConnectionId = intent.getStringExtra(EXTRA_TEST_SERVICE_CONNECTION_ID)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val status = intent.getStringExtra(EXTRA_TEST_CONFIRMATION_STATUS)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    sendBroadcast(
+                        Intent(INTENT_ACTION_CONFIRMATION_RESULT)
+                            .setPackage(this@GuardianApprovalActivity.packageName)
+                            .putExtra(EXTRA_SCREEN_REQUEST_ID, oldScreenRequestId)
+                            .putExtra(EXTRA_SERVICE_CONNECTION_ID, oldConnectionId)
+                            .putExtra(EXTRA_OPERATION_ID, oldOperationId)
+                            .putExtra(EXTRA_CHECK_ID, oldCheckId)
+                            .putExtra(EXTRA_CONFIRMATION_STATUS, status)
+                    )
+                    testLog(
+                        "test_confirmation_result_sent screen=$oldScreenRequestId " +
+                            "operation=$oldOperationId check=$oldCheckId status=$status"
+                    )
+                }
                 AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE,
                 AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE,
                 AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED -> {
@@ -291,7 +349,15 @@ class GuardianApprovalActivity : AppCompatActivity() {
         targetPackageName = payload.packageName
         screenRequestId = intent.getStringExtra(EXTRA_SCREEN_REQUEST_ID)
             ?.takeIf(String::isNotBlank)
+            ?: savedInstanceState?.getString(STATE_SCREEN_REQUEST_ID)
+                ?.takeIf(String::isNotBlank)
             ?: UUID.randomUUID().toString()
+        restoreConfirmationState(savedInstanceState)
+        testLog(
+            "activity_created instance=${System.identityHashCode(this)} screen=$screenRequestId " +
+                "restored_state=${savedInstanceState != null} package=$targetPackageName " +
+                "denials=${denials.joinToString("|") { it.ruleName }}"
+        )
         ContextCompat.registerReceiver(
             this,
             guardianStateRequestReceiver,
@@ -319,6 +385,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 IntentFilter().apply {
                     addAction(INTENT_ACTION_TEST_ARM_WRITE_FAILURE)
                     addAction(INTENT_ACTION_TEST_CLEAR_WRITE_FAILURE)
+                    addAction(INTENT_ACTION_TEST_SEND_STALE_CLOSED)
+                    addAction(INTENT_ACTION_TEST_SEND_CONFIRMATION_RESULT)
                     addAction(AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
                     addAction(AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
                     addAction(AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED)
@@ -329,16 +397,141 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         selectedRuleId = denials.first().ruleId
         render()
+        if (confirmationChecking || confirmationFailed) {
+            renderConfirmationState()
+            testLog(
+                "confirmation_restored screen=$screenRequestId " +
+                    "operation=${confirmationOperationId.orEmpty()} " +
+                    "check=${confirmationCheckId.orEmpty()} checking=$confirmationChecking " +
+                    "failed=$confirmationFailed"
+            )
+        }
         sendGuardianScreenOpened()
         lifecycleScope.launch {
             hasPassword = dataStore.settings.first().guardianAuthConfig.isConfigured
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(STATE_SCREEN_REQUEST_ID, screenRequestId)
+        outState.putString(STATE_TARGET_PACKAGE, targetPackageName)
+        if (BuildConfig.DEBUG) {
+            outState.putString(STATE_APPROVAL_TEST_RUN_ID, approvalTestRunId)
+        }
+        if (confirmationChecking || confirmationFailed) {
+            outState.putString(STATE_CONFIRMATION_OPERATION_ID, confirmationOperationId)
+            outState.putString(STATE_CONFIRMATION_CHECK_ID, confirmationCheckId)
+            outState.putBoolean(STATE_CONFIRMATION_CHECKING, confirmationChecking)
+            outState.putBoolean(STATE_CONFIRMATION_FAILED, confirmationFailed)
+            outState.putString(STATE_REQUESTED_CONNECTION_ID, requestedServiceConnectionId)
+            outState.putString(STATE_CONFIRMATION_CONNECTION_ID, confirmationServiceConnectionId)
+            outState.putString(STATE_PENDING_CHECK_ACTION, pendingApprovalCheckAction)
+            outState.putString(STATE_PENDING_CHECK_ID, pendingApprovalCheckId)
+            confirmationReceipt?.let { saveConfirmationReceipt(outState, it) }
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun restoreConfirmationState(state: Bundle?) {
+        if (state == null ||
+            state.getString(STATE_TARGET_PACKAGE) != targetPackageName ||
+            state.getString(STATE_SCREEN_REQUEST_ID) != screenRequestId
+        ) return
+
+        if (BuildConfig.DEBUG) {
+            approvalTestRunId = state.getString(STATE_APPROVAL_TEST_RUN_ID)
+        }
+
+        val operationId = state.getString(STATE_CONFIRMATION_OPERATION_ID)
+        val checkId = state.getString(STATE_CONFIRMATION_CHECK_ID)
+        val receipt = restoreConfirmationReceipt(state)
+        val checking = state.getBoolean(STATE_CONFIRMATION_CHECKING)
+        val failed = state.getBoolean(STATE_CONFIRMATION_FAILED)
+        if ((!checking && !failed) || operationId.isNullOrBlank() ||
+            checkId.isNullOrBlank() || receipt == null
+        ) return
+
+        confirmationOperationId = operationId
+        confirmationReceipt = receipt
+        confirmationChecking = checking
+        confirmationFailed = failed
+        confirmationCheckId = if (checking) UUID.randomUUID().toString() else checkId
+        requestedServiceConnectionId = state.getString(STATE_REQUESTED_CONNECTION_ID)
+        confirmationServiceConnectionId = state.getString(STATE_CONFIRMATION_CONNECTION_ID)
+        if (checking) {
+            pendingApprovalCheckAction = INTENT_ACTION_APPROVAL_RECOVER
+            pendingApprovalCheckId = confirmationCheckId
+            testLogConfirmationRequest(
+                INTENT_ACTION_APPROVAL_RECOVER,
+                operationId,
+                confirmationCheckId!!,
+                receipt
+            )
+        } else {
+            pendingApprovalCheckAction = state.getString(STATE_PENDING_CHECK_ACTION)
+            pendingApprovalCheckId = state.getString(STATE_PENDING_CHECK_ID)
+        }
+    }
+
+    private fun saveConfirmationReceipt(state: Bundle, receipt: GuardianApprovalWorkReceipt) {
+        when (receipt) {
+            is GuardianApprovalWorkReceipt.Grant -> {
+                state.putString(STATE_RECEIPT_KIND, STATE_RECEIPT_GRANT)
+                state.putString(STATE_RECEIPT_RULE_ID, receipt.grant.ruleId)
+                state.putString(STATE_RECEIPT_USE_DAY_ID, receipt.grant.useDayId)
+                state.putLong(STATE_RECEIPT_GENERATION, receipt.useDayGenerationStartedAtMs)
+                state.putLong(STATE_RECEIPT_GRANTED_AT, receipt.grant.grantedAtMs)
+                state.putLong(STATE_RECEIPT_GRANTED_MILLIS, receipt.grant.grantedMillis)
+                state.putString(STATE_RECEIPT_GRANT_ORIGIN, receipt.origin.name)
+            }
+            is GuardianApprovalWorkReceipt.RuleSkip -> {
+                state.putString(STATE_RECEIPT_KIND, STATE_RECEIPT_SKIP)
+                state.putString(STATE_RECEIPT_RULE_ID, receipt.ruleId)
+                state.putString(STATE_RECEIPT_USE_DAY_ID, receipt.useDayId)
+                state.putLong(STATE_RECEIPT_GENERATION, receipt.useDayGenerationStartedAtMs)
+                state.putLong(STATE_RECEIPT_SKIP_FROM, receipt.skipFromMs)
+                state.putLong(STATE_RECEIPT_SKIP_UNTIL, receipt.skipUntilMs)
+            }
+        }
+    }
+
+    private fun restoreConfirmationReceipt(state: Bundle): GuardianApprovalWorkReceipt? =
+        runCatching {
+            val ruleId = state.getString(STATE_RECEIPT_RULE_ID).orEmpty()
+            val useDayId = state.getString(STATE_RECEIPT_USE_DAY_ID).orEmpty()
+            val generation = state.getLong(STATE_RECEIPT_GENERATION)
+            when (state.getString(STATE_RECEIPT_KIND)) {
+                STATE_RECEIPT_GRANT -> {
+                    val origin = GuardianApprovalGrantOrigin.valueOf(
+                        state.getString(STATE_RECEIPT_GRANT_ORIGIN).orEmpty()
+                    )
+                    GuardianApprovalWorkReceipt.Grant(
+                        grant = neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt(
+                            ruleId = ruleId,
+                            useDayId = useDayId,
+                            grantedAtMs = state.getLong(STATE_RECEIPT_GRANTED_AT),
+                            grantedMillis = state.getLong(STATE_RECEIPT_GRANTED_MILLIS)
+                        ),
+                        origin = origin,
+                        useDayGenerationStartedAtMs = generation
+                    )
+                }
+                STATE_RECEIPT_SKIP -> GuardianApprovalWorkReceipt.RuleSkip(
+                    ruleId = ruleId,
+                    useDayId = useDayId,
+                    skipFromMs = state.getLong(STATE_RECEIPT_SKIP_FROM),
+                    skipUntilMs = state.getLong(STATE_RECEIPT_SKIP_UNTIL),
+                    useDayGenerationStartedAtMs = generation
+                )
+                else -> null
+            }
+        }.getOrNull()
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         val payload = readValidatedPayload(intent) ?: return
         if (isFinishing) return
+        val previousScreenRequestId = screenRequestId
         setIntent(intent)
         denials = payload.denials
         targetPackageName = payload.packageName
@@ -361,7 +554,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
         legacyOperationId = null
         selectedRuleId = denials.first().ruleId
         render()
-        sendGuardianScreenOpened()
+        testLog(
+            "screen_reused previous=$previousScreenRequestId current=$screenRequestId " +
+                "package=$targetPackageName denials=${denials.joinToString("|") { it.ruleName }}"
+        )
+        sendGuardianScreenOpened(replacedScreenRequestId = previousScreenRequestId)
     }
 
     override fun onStart() {
@@ -371,14 +568,18 @@ class GuardianApprovalActivity : AppCompatActivity() {
         sendGuardianScreenOpened()
     }
 
-    private fun sendGuardianScreenOpened(connectionId: String? =
-        requestedServiceConnectionId ?: registeredServiceConnectionId
+    private fun sendGuardianScreenOpened(
+        connectionId: String? = requestedServiceConnectionId ?: registeredServiceConnectionId,
+        replacedScreenRequestId: String? = null
     ) {
         if (!canHandleCallbacks() || screenRequestId.isBlank() || targetPackageName.isBlank()) return
         val opened = Intent(INTENT_ACTION_OPENED)
             .setPackage(packageName)
             .putExtra(EXTRA_GUARDIAN_PACKAGE, targetPackageName)
             .putExtra(EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+        replacedScreenRequestId?.takeIf(String::isNotBlank)?.let {
+            opened.putExtra(EXTRA_PREVIOUS_SCREEN_REQUEST_ID, it)
+        }
         connectionId?.let { opened.putExtra(EXTRA_SERVICE_CONNECTION_ID, it) }
         sendBroadcast(opened)
     }
@@ -1307,16 +1508,49 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
     companion object {
         private const val TEST_LOG_TAG = "GuardianApprovalE2E"
+        private const val STATE_SCREEN_REQUEST_ID = "guardian_state_screen_request_id"
+        private const val STATE_TARGET_PACKAGE = "guardian_state_target_package"
+        private const val STATE_APPROVAL_TEST_RUN_ID = "guardian_state_approval_test_run_id"
+        private const val STATE_CONFIRMATION_OPERATION_ID = "guardian_state_confirmation_operation_id"
+        private const val STATE_CONFIRMATION_CHECK_ID = "guardian_state_confirmation_check_id"
+        private const val STATE_CONFIRMATION_CHECKING = "guardian_state_confirmation_checking"
+        private const val STATE_CONFIRMATION_FAILED = "guardian_state_confirmation_failed"
+        private const val STATE_REQUESTED_CONNECTION_ID = "guardian_state_requested_connection_id"
+        private const val STATE_CONFIRMATION_CONNECTION_ID = "guardian_state_confirmation_connection_id"
+        private const val STATE_PENDING_CHECK_ACTION = "guardian_state_pending_check_action"
+        private const val STATE_PENDING_CHECK_ID = "guardian_state_pending_check_id"
+        private const val STATE_RECEIPT_KIND = "guardian_state_receipt_kind"
+        private const val STATE_RECEIPT_GRANT = "grant"
+        private const val STATE_RECEIPT_SKIP = "skip"
+        private const val STATE_RECEIPT_RULE_ID = "guardian_state_receipt_rule_id"
+        private const val STATE_RECEIPT_USE_DAY_ID = "guardian_state_receipt_use_day_id"
+        private const val STATE_RECEIPT_GENERATION = "guardian_state_receipt_generation"
+        private const val STATE_RECEIPT_GRANTED_AT = "guardian_state_receipt_granted_at"
+        private const val STATE_RECEIPT_GRANTED_MILLIS = "guardian_state_receipt_granted_millis"
+        private const val STATE_RECEIPT_GRANT_ORIGIN = "guardian_state_receipt_grant_origin"
+        private const val STATE_RECEIPT_SKIP_FROM = "guardian_state_receipt_skip_from"
+        private const val STATE_RECEIPT_SKIP_UNTIL = "guardian_state_receipt_skip_until"
         internal const val INTENT_ACTION_TEST_ARM_WRITE_FAILURE =
             "neth.iecal.curbox.guardian.TEST_ARM_WRITE_FAILURE"
         internal const val INTENT_ACTION_TEST_CLEAR_WRITE_FAILURE =
             "neth.iecal.curbox.guardian.TEST_CLEAR_WRITE_FAILURE"
+        internal const val INTENT_ACTION_TEST_SEND_STALE_CLOSED =
+            "neth.iecal.curbox.guardian.TEST_SEND_STALE_CLOSED"
+        internal const val INTENT_ACTION_TEST_SEND_CONFIRMATION_RESULT =
+            "neth.iecal.curbox.guardian.TEST_SEND_CONFIRMATION_RESULT"
         internal const val EXTRA_TEST_GATE_ID = "guardian_test_gate_id"
+        internal const val EXTRA_TEST_GUARDIAN_PACKAGE = "guardian_test_package"
+        internal const val EXTRA_TEST_SCREEN_REQUEST_ID = "guardian_test_screen_request_id"
+        internal const val EXTRA_TEST_SERVICE_CONNECTION_ID = "guardian_test_service_connection_id"
+        internal const val EXTRA_TEST_OPERATION_ID = "guardian_test_operation_id"
+        internal const val EXTRA_TEST_CHECK_ID = "guardian_test_check_id"
+        internal const val EXTRA_TEST_CONFIRMATION_STATUS = "guardian_test_confirmation_status"
         private const val EXTRA_TEST_GATE_ACCEPTED = "guardian_test_gate_accepted"
 
         const val EXTRA_DENIALS = "app_rule_denials_json"
         const val EXTRA_PACKAGE = "launch_package"
         const val EXTRA_SCREEN_REQUEST_ID = "guardian_screen_request_id"
+        const val EXTRA_PREVIOUS_SCREEN_REQUEST_ID = "guardian_previous_screen_request_id"
         const val EXTRA_SERVICE_CONNECTION_ID = "guardian_service_connection_id"
         const val INTENT_ACTION_CLOSED = "neth.iecal.curbox.guardian.approval.closed"
         const val INTENT_ACTION_OPENED = "neth.iecal.curbox.guardian.approval.opened"

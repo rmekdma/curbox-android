@@ -997,17 +997,19 @@ class AppRuleBlockerRecheckTest {
         )
         assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
 
+        val replacementRequestId = "guardian-screen-replacement"
         receiver.onReceive(
             service,
             guardianLifecycleIntent(
-                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                GuardianApprovalActivity.INTENT_ACTION_OPENED,
                 PACKAGE,
-                "guardian-screen-old",
-                connectionId
+                replacementRequestId,
+                connectionId,
+                previousScreenRequestId = currentRequestId
             )
         )
         assertEquals(
-            currentRequestId,
+            replacementRequestId,
             (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
                 .currentOwner()?.screenRequestId
         )
@@ -1018,6 +1020,21 @@ class AppRuleBlockerRecheckTest {
                 GuardianApprovalActivity.INTENT_ACTION_CLOSED,
                 PACKAGE,
                 currentRequestId,
+                connectionId
+            )
+        )
+        assertEquals(
+            replacementRequestId,
+            (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                .currentOwner()?.screenRequestId
+        )
+
+        receiver.onReceive(
+            service,
+            guardianLifecycleIntent(
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                PACKAGE,
+                replacementRequestId,
                 connectionId
             )
         )
@@ -1325,11 +1342,17 @@ class AppRuleBlockerRecheckTest {
         action: String,
         packageName: String,
         screenRequestId: String,
-        connectionId: String
+        connectionId: String,
+        previousScreenRequestId: String? = null
     ): Intent = Intent(action)
         .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, packageName)
         .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
         .putExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID, connectionId)
+        .apply {
+            previousScreenRequestId?.let {
+                putExtra(GuardianApprovalActivity.EXTRA_PREVIOUS_SCREEN_REQUEST_ID, it)
+            }
+        }
 
     private class QueuedDispatcher : CoroutineDispatcher() {
         private val queued = ArrayDeque<Runnable>()

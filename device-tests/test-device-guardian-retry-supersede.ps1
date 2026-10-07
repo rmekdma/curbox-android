@@ -31,6 +31,9 @@ $writeFailureArmed = $false
 $restoreVerified = $true
 $originalSettings = $null
 $originalOverlayMode = ""
+$originalAccelerometerRotation = ""
+$originalUserRotation = ""
+$displayRotationChanged = $false
 
 function Get-GuardianApprovalLogs {
     return Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
@@ -59,7 +62,43 @@ function Wait-ForAccessibilityBoundState([bool]$Expected, [string]$Label, [int]$
     throw "Timed out waiting for Curbox accessibility service bound=$Expected ($Label)."
 }
 
-function Reconnect-GuardianServiceForLiveScreen([string]$ScreenRequestId, [string]$OldConnectionId) {
+function Rotate-DeviceDisplayForActivityRecreation {
+    if (-not $script:originalAccelerometerRotation) {
+        $script:originalAccelerometerRotation = Get-TestDeviceShellOutput `
+            -Command "settings get system accelerometer_rotation"
+        $script:originalUserRotation = Get-TestDeviceShellOutput `
+            -Command "settings get system user_rotation"
+        if ($script:originalAccelerometerRotation -notmatch '^[01]$' -or
+            $script:originalUserRotation -notmatch '^[0-3]$') {
+            throw "Could not safely read the current display rotation settings."
+        }
+    }
+    $nextRotation = (([int]$script:originalUserRotation + 1) % 4)
+    $script:displayRotationChanged = $true
+    Invoke-TestDeviceShell -Command "settings put system accelerometer_rotation 0"
+    Invoke-TestDeviceShell -Command "settings put system user_rotation $nextRotation"
+}
+
+function Restore-DeviceDisplayRotation {
+    if (-not $script:displayRotationChanged) { return }
+    Invoke-TestDeviceShell -Command "settings put system user_rotation $script:originalUserRotation"
+    Invoke-TestDeviceShell -Command "settings put system accelerometer_rotation $script:originalAccelerometerRotation"
+    Start-Sleep -Milliseconds 800
+    $restoredAccelerometerRotation = Get-TestDeviceShellOutput `
+        -Command "settings get system accelerometer_rotation"
+    $restoredUserRotation = Get-TestDeviceShellOutput -Command "settings get system user_rotation"
+    if ($restoredAccelerometerRotation -ne $script:originalAccelerometerRotation -or
+        $restoredUserRotation -ne $script:originalUserRotation) {
+        throw "The original display rotation settings did not restore exactly."
+    }
+    $script:displayRotationChanged = $false
+}
+
+function Reconnect-GuardianServiceForLiveScreen(
+    [string]$ScreenRequestId,
+    [string]$OldConnectionId,
+    [bool]$Checking = $true
+) {
     if (-not (Disable-AccessibilityService -PackageName $packageName)) {
         throw "Could not remove Curbox from the enabled accessibility services for reconnect."
     }
@@ -69,15 +108,16 @@ function Reconnect-GuardianServiceForLiveScreen([string]$ScreenRequestId, [strin
     Enable-AccessibilityService -PackageName $packageName | Out-Null
     Wait-ForAccessibilityBoundState -Expected $true -Label "service reconnect"
 
+    $checkingText = if ($Checking) { "true" } else { "false" }
     $request = Wait-ForGuardianLog `
-        -Pattern "service_connection_requested id=[^ ]+ screen=$([regex]::Escape($ScreenRequestId)) checking=true" `
+        -Pattern "service_connection_requested id=[^ ]+ screen=$([regex]::Escape($ScreenRequestId)) checking=$checkingText" `
         -Label "live Activity request on the new service connection"
     $newConnectionId = Get-LogValue $request "id"
     if (-not $newConnectionId -or $newConnectionId -eq $OldConnectionId) {
         throw "The live Activity did not request a new service connection. Old=$OldConnectionId Request=$request"
     }
     [void](Wait-ForGuardianLog `
-        -Pattern "service_connection_registered id=$([regex]::Escape($newConnectionId)) screen=$([regex]::Escape($ScreenRequestId)) pending_check=[^ ]+" `
+        -Pattern "service_connection_registered id=$([regex]::Escape($newConnectionId)) screen=$([regex]::Escape($ScreenRequestId)) pending_check=[^ ]*" `
         -Label "live Activity registration acknowledgement on the new service connection")
     return $newConnectionId
 }
@@ -258,6 +298,18 @@ function Start-GuardianApproval([string]$ExpectedRuleName) {
     }
 }
 
+function Start-LiveApprovalIntent(
+    [string]$ScreenRequestId,
+    [string]$RuleId,
+    [string]$RuleName,
+    [string]$Reason
+) {
+    Send-TestBroadcast `
+        -Action "neth.iecal.curbox.blockers.TEST_START_GUARDIAN_APPROVAL" `
+        -GateId "" `
+        -ExtraArguments "--es guardian_test_package $TargetPackage --es guardian_test_screen_request_id $ScreenRequestId --es guardian_test_rule_id $RuleId --es guardian_test_rule_name '$RuleName' --es guardian_test_reason '$Reason'"
+}
+
 function Tap-ApprovalAction([string]$ResourceId, [string]$Description) {
     $ui = Wait-For-UI -Pattern ([regex]::Escape($ResourceId)) -TimeoutSeconds 8
     if (-not (Tap-Node $ui "resource-id=`"$packageName`:id/$ResourceId`"" $Description -Optional)) {
@@ -337,7 +389,9 @@ function Invoke-AmbiguousConfirmationCase(
     [scriptblock]$SubmitOperation,
     [scriptblock]$UpdateCurrentRules,
     [string]$ExpectedCurrentDenialName,
-    [bool]$ReconnectDuringRetry = $false
+    [bool]$ReconnectDuringRetry = $false,
+    [bool]$RecreateActivityDuringCheck = $false,
+    [bool]$HomeReplaceReconnectDuringCheck = $false
 ) {
     $gateId = "$runId-$CaseName"
     Start-GuardianApproval -ExpectedRuleName $RuleName
@@ -366,6 +420,169 @@ function Invoke-AmbiguousConfirmationCase(
     [void](Wait-ForGuardianLog `
         -Pattern "service_gate action=neth\.iecal\.curbox\.blockers\.TEST_GUARDIAN_EVALUATION_GATE_REACHED id=$gateId accepted=true operation=$operationId check=$firstCheckId" `
         -Label "$CaseName real service-worker evaluation")
+
+    if ($RecreateActivityDuringCheck) {
+        $initialActivity = Wait-ForGuardianLog `
+            -Pattern "activity_created instance=\d+ screen=$([regex]::Escape($screenRequestId)) restored_state=false" `
+            -Label "$CaseName original approval Activity instance"
+        & $UpdateCurrentRules
+        $settingsBeforeRecreationRecovery = Get-DeviceSettings -PackageName $packageName -AsObject
+        Rotate-DeviceDisplayForActivityRecreation
+        $recreatedActivity = Wait-ForGuardianLog `
+            -Pattern "activity_created instance=\d+ screen=$([regex]::Escape($screenRequestId)) restored_state=true" `
+            -Label "$CaseName configuration-recreated approval Activity"
+        $recreatedInstance = Get-LogValue $recreatedActivity "instance"
+        if (-not $recreatedInstance -or $recreatedInstance -eq (Get-LogValue $initialActivity "instance")) {
+            throw "$CaseName display rotation did not create a new Activity instance. Original=$initialActivity Recreated=$recreatedActivity"
+        }
+        $restoredState = Wait-ForGuardianLog `
+            -Pattern "confirmation_restored screen=$([regex]::Escape($screenRequestId)) operation=$([regex]::Escape($operationId)) check=[^ ]+ checking=true failed=false" `
+            -Label "$CaseName saved pending receipt state"
+        $recoveryRequest = Wait-ForGuardianLog `
+            -Pattern "check_request test=$([regex]::Escape($gateId)) action=neth\.iecal\.curbox\.guardian\.approval\.recover .*screen=$([regex]::Escape($screenRequestId)) .*operation=$([regex]::Escape($operationId))" `
+            -Label "$CaseName fresh confirmation after Activity recreation"
+        $recoveryCheckId = Get-LogValue $recoveryRequest "check"
+        $recoveryConnectionId = Get-LogValue $recoveryRequest "connection"
+        if (-not $recoveryCheckId -or $recoveryCheckId -eq $firstCheckId -or
+            -not $recoveryConnectionId -or
+            $recoveryConnectionId -ne (Get-LogValue $firstRequest "connection")) {
+            throw "$CaseName did not rebind its saved receipt to a fresh check on the live service. Original=$firstRequest Restored=$restoredState Recovery=$recoveryRequest"
+        }
+        if ((Get-LogValue $restoredState "check") -ne $recoveryCheckId) {
+            throw "$CaseName restored the pending receipt with a different check than it submitted. Restored=$restoredState Recovery=$recoveryRequest"
+        }
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_check_accepted operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($recoveryCheckId)) retry=false recovery=true connection=$([regex]::Escape($recoveryConnectionId))" `
+            -Label "$CaseName recovered receipt accepted after Activity recreation")
+        foreach ($field in @("kind", "rule", "use_day", "generation", "granted_at", "granted_millis", "skip_from", "skip_until")) {
+            if ((Get-LogValue $firstRequest $field) -ne (Get-LogValue $recoveryRequest $field)) {
+                throw "$CaseName Activity recreation changed receipt field '$field'. Original=$firstRequest Recovery=$recoveryRequest"
+            }
+        }
+
+        Release-ServiceEvaluationGate -GateId $gateId
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_outcome_ignored operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($firstCheckId)) .*reason=stale_request" `
+            -Label "$CaseName pre-recreation worker outcome invalidation")
+        [void](Wait-ForGuardianLog `
+            -Pattern "ui_state status=remaining operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($recoveryCheckId)) retry_visible=false failed=false .*denials=.*$([regex]::Escape($ExpectedCurrentDenialName))" `
+            -Label "$CaseName current denial after Activity state recovery")
+        $focusAfterRestore = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+        if (-not $focusAfterRestore.Success) {
+            throw "$CaseName Activity recreation did not retain the current denial screen. Focus: $($focusAfterRestore.RawFocus)"
+        }
+        $settingsAfterRecreationRecovery = Get-DeviceSettings -PackageName $packageName -AsObject
+        $writesForOperation = [regex]::Matches((Get-GuardianApprovalLogs), "write_committed id=$gateId ")
+        if ($writesForOperation.Count -ne 1) {
+            throw "$CaseName Activity recreation committed $($writesForOperation.Count) approval writes; expected exactly one."
+        }
+        if ((ConvertTo-Json -InputObject $settingsBeforeRecreationRecovery.appRuleOverrideState -Depth 20 -Compress) -ne
+            (ConvertTo-Json -InputObject $settingsAfterRecreationRecovery.appRuleOverrideState -Depth 20 -Compress)) {
+            throw "$CaseName Activity recreation or recovery changed the already committed approval ledger."
+        }
+        Clear-WriteFailure
+        Restore-DeviceDisplayRotation
+        Write-Success "$CaseName recreated the real Activity during a pending check, restored its transient receipt, fenced the old result, and committed only once."
+        return
+    }
+
+    if ($HomeReplaceReconnectDuringCheck) {
+        & $UpdateCurrentRules
+        $oldConnectionId = Get-LogValue $firstRequest "connection"
+        if (-not $oldConnectionId -or $oldConnectionId -eq "-") {
+            $initialRegistration = Wait-ForGuardianLog `
+                -Pattern "service_connection_registered id=[^ ]+ screen=$([regex]::Escape($screenRequestId)) pending_check=[^ ]*" `
+                -Label "$CaseName original Activity service registration"
+            $oldConnectionId = Get-LogValue $initialRegistration "id"
+        }
+        if (-not $oldConnectionId) { throw "$CaseName did not capture the original service connection." }
+
+        Invoke-TestDeviceShell -Command "input keyevent 3"
+        [void](Wait-ForGuardianLog `
+            -Pattern "screen_closed screen=$([regex]::Escape($screenRequestId)) package=$([regex]::Escape($TargetPackage)) reason=interrupted" `
+            -Label "$CaseName Home cancellation of the live approval Activity")
+        $replacementScreenId = "$gateId-replacement"
+        $replacementRuleId = "$RuleId-replacement"
+        Start-LiveApprovalIntent `
+            -ScreenRequestId $replacementScreenId `
+            -RuleId $replacementRuleId `
+            -RuleName $ExpectedCurrentDenialName `
+            -Reason "blocked"
+        $replacementActivity = Wait-ForGuardianLog `
+            -Pattern "activity_created instance=\d+ screen=$([regex]::Escape($replacementScreenId)) restored_state=false package=$([regex]::Escape($TargetPackage)) .*denials=$([regex]::Escape($ExpectedCurrentDenialName))" `
+            -Label "$CaseName replacement Activity with the current target intent"
+        $replacementRegistration = Wait-ForGuardianLog `
+            -Pattern "screen_registered screen=$([regex]::Escape($replacementScreenId)) package=$([regex]::Escape($TargetPackage)) connection=[^ ]+" `
+            -Label "$CaseName replacement request ownership in the actual service"
+        $currentScreenId = "$gateId-reused"
+        Start-LiveApprovalIntent `
+            -ScreenRequestId $currentScreenId `
+            -RuleId $replacementRuleId `
+            -RuleName $ExpectedCurrentDenialName `
+            -Reason "blocked"
+        $reusedActivity = Wait-ForGuardianLog `
+            -Pattern "screen_reused previous=$([regex]::Escape($replacementScreenId)) current=$([regex]::Escape($currentScreenId)) package=$([regex]::Escape($TargetPackage)) denials=.*$([regex]::Escape($ExpectedCurrentDenialName))" `
+            -Label "$CaseName same-package single-top Activity replacement"
+        [void](Wait-ForGuardianLog `
+            -Pattern "screen_replaced previous=$([regex]::Escape($replacementScreenId)) current=$([regex]::Escape($currentScreenId)) package=$([regex]::Escape($TargetPackage)) connection=[^ ]+" `
+            -Label "$CaseName current intent registered as the replacement service owner")
+        $currentRegistration = Wait-ForGuardianLog `
+            -Pattern "screen_registered screen=$([regex]::Escape($currentScreenId)) package=$([regex]::Escape($TargetPackage)) connection=[^ ]+" `
+            -Label "$CaseName reused Activity registration acknowledgement"
+        $currentConnectionId = Get-LogValue $currentRegistration "connection"
+        if (-not $currentConnectionId) {
+            throw "$CaseName replacement Activity did not register its current request. $replacementActivity $replacementRegistration"
+        }
+
+        Send-TestBroadcast `
+            -Action "neth.iecal.curbox.guardian.TEST_SEND_STALE_CLOSED" `
+            -GateId "" `
+            -ExtraArguments "--es guardian_test_package $TargetPackage --es guardian_test_screen_request_id $screenRequestId --es guardian_test_service_connection_id $oldConnectionId"
+        [void](Wait-ForGuardianLog `
+            -Pattern "screen_close_ignored screen=$([regex]::Escape($screenRequestId)) package=$([regex]::Escape($TargetPackage)) owner_screen=$([regex]::Escape($currentScreenId)) reason=stale_owner:$([regex]::Escape($currentScreenId))" `
+            -Label "$CaseName delayed old CLOSED ignored after same-package replacement OPENED")
+
+        $reconnectedConnectionId = Reconnect-GuardianServiceForLiveScreen `
+            -ScreenRequestId $currentScreenId `
+            -OldConnectionId $currentConnectionId `
+            -Checking $false
+        $reconnectedRegistration = Wait-ForGuardianLog `
+            -Pattern "service_connection_registered id=$([regex]::Escape($reconnectedConnectionId)) screen=$([regex]::Escape($currentScreenId)) pending_check=[^ ]*" `
+            -Label "$CaseName current Activity registration after service reconnect"
+        $settingsBeforeStaleCallback = Get-DeviceSettings -PackageName $packageName -AsObject
+        Send-TestBroadcast `
+            -Action "neth.iecal.curbox.guardian.TEST_SEND_CONFIRMATION_RESULT" `
+            -GateId "" `
+            -ExtraArguments "--es guardian_test_screen_request_id $screenRequestId --es guardian_test_service_connection_id $oldConnectionId --es guardian_test_operation_id $operationId --es guardian_test_check_id $firstCheckId --es guardian_test_confirmation_status allowed"
+        [void](Wait-ForGuardianLog `
+            -Pattern "ui_result_ignored status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($firstCheckId)) .*current_denials=.*$([regex]::Escape($ExpectedCurrentDenialName)) finishing=false" `
+            -Label "$CaseName stale ALLOWED callback rejected by the replacement Activity")
+        $activityFocus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+        if (-not $activityFocus.Success) {
+            throw "$CaseName stale ALLOWED callback finished or replaced the current Activity. Focus: $($activityFocus.RawFocus)"
+        }
+        $settingsAfterStaleCallback = Get-DeviceSettings -PackageName $packageName -AsObject
+        $allLogs = Get-GuardianApprovalLogs
+        $writesForOperation = [regex]::Matches($allLogs, "write_committed id=$gateId ")
+        if ($writesForOperation.Count -ne 1) {
+            throw "$CaseName Home/reconnect handling committed $($writesForOperation.Count) writes; expected exactly one."
+        }
+        if ((ConvertTo-Json -InputObject $settingsBeforeStaleCallback.appRuleOverrideState -Depth 20 -Compress) -ne
+            (ConvertTo-Json -InputObject $settingsAfterStaleCallback.appRuleOverrideState -Depth 20 -Compress)) {
+            throw "$CaseName stale callback changed the already committed approval ledger."
+        }
+        $oldReceiptWasRecovered = [regex]::IsMatch(
+            $allLogs,
+            "check_request test=$([regex]::Escape($gateId)) action=neth\.iecal\.curbox\.guardian\.approval\.recover .*screen=$([regex]::Escape($screenRequestId))"
+        )
+        if ($oldReceiptWasRecovered) {
+            throw "$CaseName recovered the old cancelled screen after reconnect."
+        }
+        Clear-WriteFailure
+        Write-Success "$CaseName cancelled at Home, kept the replacement request through reconnect, ignored the old same-package CLOSED and ALLOWED messages, and wrote only once."
+        return
+    }
+
     [void](Wait-ForGuardianLog `
         -Pattern "ui_state status=timeout operation=$operationId check=$firstCheckId retry_visible=true failed=true" `
         -Label "$CaseName bounded confirmation failure and visible retry UI")
@@ -528,6 +745,8 @@ try {
     $accumulatedRuleId = "guardian-accumulated-$runId"
     $skipRuleId = "guardian-skip-$runId"
     $replacementSkipRuleId = "guardian-skip-current-$runId"
+    $recreateRuleId = "guardian-recreate-$runId"
+    $homeRuleId = "guardian-home-$runId"
     $generation = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
     $emptyRollover = [PSCustomObject]@{ pools = [PSCustomObject]@{} }
     $directRule = New-GuardianRule -RuleId $directRuleId -RuleName "E2E direct grant" -GroupId $groupId
@@ -635,7 +854,8 @@ try {
                 -GuardianExtraTimeAllowed $false
             $snapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($current)
             Inject-TestAppRules -AppRuleSnapshot $snapshot -PreserveOverrides -PackageName $packageName
-        }
+        } `
+        -ReconnectDuringRetry $true
 
     Invoke-TestDeviceShell -Command "input keyevent 3"
     Start-Sleep -Milliseconds 800
@@ -674,7 +894,104 @@ try {
                 -GuardianExtraTimeAllowed $false
             $snapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($inactive, $current)
             Inject-TestAppRules -AppRuleSnapshot $snapshot -PreserveOverrides -PackageName $packageName
-        }
+        } `
+        -ReconnectDuringRetry $true
+
+    Invoke-TestDeviceShell -Command "input keyevent 3"
+    Start-Sleep -Milliseconds 800
+    Write-Step "6. Recreate the actual Activity while its direct-grant confirmation is in flight..."
+    $recreateRule = New-GuardianRule `
+        -RuleId $recreateRuleId `
+        -RuleName "E2E recreation grant" `
+        -GroupId $groupId
+    $recreateSnapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($recreateRule)
+    Inject-TestAppRules -AppRuleSnapshot $recreateSnapshot -PreserveOverrides -PackageName $packageName
+    Invoke-AmbiguousConfirmationCase `
+        -CaseName "activity-recreation" `
+        -RuleId $recreateRuleId `
+        -RuleName "E2E recreation grant" `
+        -ExpectedKind "direct_grant" `
+        -ExpectedCurrentDenialName "Current denial after Activity recreation" `
+        -SubmitOperation {
+            param($gateId)
+            Arm-ServiceEvaluationGate -GateId $gateId
+            Arm-WriteFailure -GateId $gateId
+            Tap-ApprovalAction -ResourceId "approval_add_time" -Description "Change extra time"
+            $ui = Wait-For-UI -Pattern 'resource-id="neth\.iecal\.curbox\.debug:id/rule_picker"' -TimeoutSeconds 8
+            $candidates = Get-TestRulePickerOptions -CurrentUi $ui -CandidateCount 1
+            if (-not $candidates.Success) { throw "Could not confirm the Activity recreation grant candidate list." }
+            $selection = Select-TestRulePickerOption -CurrentUi $candidates.Ui -CandidateOptions $candidates.Options -RuleName "E2E recreation grant"
+            if (-not $selection.Success) { throw "Could not select the Activity recreation grant rule from the form." }
+            $inputNode = Get-NodeBounds $selection.Ui 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
+            if (-not $inputNode.Found) { throw "Could not find the Activity recreation grant minutes field." }
+            Invoke-TestDeviceShell -Command "input tap $($inputNode.X) $($inputNode.Y)"
+            Invoke-TestDeviceShell -Command "input text 1"
+            Tap-DialogApply
+        } `
+        -UpdateCurrentRules {
+            $current = New-GuardianRule `
+                -RuleId $recreateRuleId `
+                -RuleName "Current denial after Activity recreation" `
+                -GroupId $groupId `
+                -GuardianExtraTimeAllowed $false
+            $snapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($current)
+            Inject-TestAppRules -AppRuleSnapshot $snapshot -PreserveOverrides -PackageName $packageName
+        } `
+        -RecreateActivityDuringCheck $true
+    Invoke-TestDeviceShell -Command "input keyevent 3"
+    Start-Sleep -Milliseconds 800
+
+    Write-Step "7. Cancel a live receipt at Home, replace the current intent, reconnect, and deliver the old result..."
+    $homeRule = New-GuardianRule `
+        -RuleId $homeRuleId `
+        -RuleName "E2E Home cancellation grant" `
+        -GroupId $groupId
+    $homeSnapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($homeRule)
+    Inject-TestAppRules -AppRuleSnapshot $homeSnapshot -PreserveOverrides -PackageName $packageName
+    Invoke-AmbiguousConfirmationCase `
+        -CaseName "home-replacement-reconnect" `
+        -RuleId $homeRuleId `
+        -RuleName "E2E Home cancellation grant" `
+        -ExpectedKind "direct_grant" `
+        -ExpectedCurrentDenialName "Current denial after Home replacement" `
+        -SubmitOperation {
+            param($gateId)
+            Arm-ServiceEvaluationGate -GateId $gateId
+            Arm-WriteFailure -GateId $gateId
+            Tap-ApprovalAction -ResourceId "approval_add_time" -Description "Change extra time"
+            $ui = Wait-For-UI -Pattern 'resource-id="neth\.iecal\.curbox\.debug:id/rule_picker"' -TimeoutSeconds 8
+            $candidates = Get-TestRulePickerOptions -CurrentUi $ui -CandidateCount 1
+            if (-not $candidates.Success) { throw "Could not confirm the Home cancellation grant candidate list." }
+            $selection = Select-TestRulePickerOption -CurrentUi $candidates.Ui -CandidateOptions $candidates.Options -RuleName "E2E Home cancellation grant"
+            if (-not $selection.Success) { throw "Could not select the Home cancellation grant rule from the form." }
+            $inputNode = Get-NodeBounds $selection.Ui 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
+            if (-not $inputNode.Found) { throw "Could not find the Home cancellation grant minutes field." }
+            Invoke-TestDeviceShell -Command "input tap $($inputNode.X) $($inputNode.Y)"
+            Invoke-TestDeviceShell -Command "input text 1"
+            Tap-DialogApply
+        } `
+        -UpdateCurrentRules {
+            $homeCurrent = New-GuardianRule `
+                -RuleId $homeRuleId `
+                -RuleName "Current denial after Home replacement" `
+                -GroupId $groupId `
+                -GuardianExtraTimeAllowed $false
+            $inactiveSkip = New-GuardianRule `
+                -RuleId $skipRuleId `
+                -RuleName "E2E skip rule" `
+                -GroupId $groupId `
+                -IsActive $false
+            $currentSkip = New-GuardianRule `
+                -RuleId $replacementSkipRuleId `
+                -RuleName "Current denial after skip" `
+                -GroupId $groupId `
+                -GuardianExtraTimeAllowed $false
+            $snapshot = New-GuardianSnapshot `
+                -GroupId $groupId `
+                -Rules @($homeCurrent, $inactiveSkip, $currentSkip)
+            Inject-TestAppRules -AppRuleSnapshot $snapshot -PreserveOverrides -PackageName $packageName
+        } `
+        -HomeReplaceReconnectDuringCheck $true
 
     $finalSettings = Get-DeviceSettings -PackageName $packageName -AsObject
     $finalGrantCount = @($finalSettings.appRuleOverrideState.grants).Count
@@ -682,15 +999,23 @@ try {
     if ($finalGrantCount -ne 0 -or $finalSkipCount -ne 1) {
         throw "The final current snapshot should revoke both invalid grants while retaining one superseded skip receipt; observed grants=$finalGrantCount skips=$finalSkipCount."
     }
-    if ((Get-GuardianApprovalLogs) -notmatch "write_committed id=$runId-(?:direct|accumulated|skip) ") {
+    if ((Get-GuardianApprovalLogs) -notmatch "write_committed id=$runId-(?:direct|accumulated|skip|activity-recreation|home-replacement-reconnect) ") {
         throw "The device log does not contain an actual post-commit failure injection."
     }
 
     Write-Host "`n==========================================================================" -ForegroundColor Green
     Write-Host ">>> [GUARDIAN RETRY AND SUPERSEDE DEVICE RESULT: PASS] <<<" -ForegroundColor Green
-    Write-Host "Direct, accumulated, and skip receipts were each committed once by DataStore and evaluated by the bound :app_blocker_service worker. The direct receipt survived a real service reconnect without another write; every effect kept the current denial and rejected a superseded result." -ForegroundColor Green
+    Write-Host "Direct, accumulated, and skip receipts each survived a real :app_blocker_service reconnect without another write. Configuration recreation restored the pending receipt, and Home cancellation plus same-package replacement ignored stale CLOSED and ALLOWED events." -ForegroundColor Green
     Write-Host "==========================================================================`n" -ForegroundColor Green
 } finally {
+    if ($displayRotationChanged) {
+        try {
+            Restore-DeviceDisplayRotation
+        } catch {
+            $restoreVerified = $false
+            Write-Host "[FAIL] Could not restore the original display rotation settings: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
     if ($activeGateId) {
         try {
             Send-TestBroadcast `
