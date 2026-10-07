@@ -23,6 +23,7 @@ import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleRolloverState
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.GatedSettingsField
+import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
 import neth.iecal.curbox.data.models.KeywordBlocker
 import neth.iecal.curbox.data.models.LegacyAppRuleMigration
 import neth.iecal.curbox.data.models.ManualFocusGroup
@@ -414,12 +415,18 @@ class DataStoreManager(private val context: Context) {
                 transactionNowMs = System.currentTimeMillis()
             )
         }
-        return GuardianExtraTimeGrantWrite.resultFor(
+        val result = GuardianExtraTimeGrantWrite.resultFor(
             settings = updated,
             basis = basis,
             durationMinutes = durationMinutes,
             grantedAtMs = grantedAtMs,
             currentTimeMs = System.currentTimeMillis()
+        )
+        return GuardianExtraTimeGrantWrite.withReceipt(
+            result = result,
+            basis = basis,
+            durationMinutes = durationMinutes,
+            grantedAtMs = grantedAtMs
         )
     }
 
@@ -446,12 +453,18 @@ class DataStoreManager(private val context: Context) {
                 )
             )
         }
-        return GuardianExtraTimeGrantWrite.resultFor(
+        val result = GuardianExtraTimeGrantWrite.resultFor(
             settings = updated,
             basis = basis,
             durationMinutes = durationMinutes,
             grantedAtMs = grantedAtMs,
             currentTimeMs = System.currentTimeMillis()
+        )
+        return GuardianExtraTimeGrantWrite.withReceipt(
+            result = result,
+            basis = basis,
+            durationMinutes = durationMinutes,
+            grantedAtMs = grantedAtMs
         )
     }
 
@@ -1485,6 +1498,9 @@ internal fun Settings.clearGuardianExtraTimeForRules(
 internal object GuardianExtraTimeGrantWrite {
     sealed class Result {
         data object Stored : Result()
+        data class StoredWithReceipt(
+            val receipt: GuardianApprovalGrantReceipt
+        ) : Result()
         data class NeedsReconfirmation(
             val latestBasis: GuardianExtraTimeGrantBasis
         ) : Result()
@@ -1610,6 +1626,24 @@ internal object GuardianExtraTimeGrantWrite {
         } else {
             Result.Rejected
         }
+    }
+
+    fun withReceipt(
+        result: Result,
+        basis: GuardianExtraTimeGrantBasis,
+        durationMinutes: Long,
+        grantedAtMs: Long
+    ): Result = if (result == Result.Stored) {
+        Result.StoredWithReceipt(
+            GuardianApprovalGrantReceipt(
+                ruleId = basis.ruleId,
+                useDayId = basis.useDayId,
+                grantedAtMs = grantedAtMs,
+                grantedMillis = durationMinutes * 60_000L
+            )
+        )
+    } else {
+        result
     }
 }
 

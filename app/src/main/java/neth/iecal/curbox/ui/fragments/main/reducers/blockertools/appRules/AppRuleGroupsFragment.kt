@@ -305,6 +305,7 @@ class AppRuleGroupsFragment : Fragment() {
                     if (!isAdded || _binding == null) return@withContext
                     when (result) {
                         GuardianExtraTimeGrantWrite.Result.Stored -> Unit
+                        is GuardianExtraTimeGrantWrite.Result.StoredWithReceipt -> Unit
                         is GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation -> {
                             Toast.makeText(
                                 requireContext(),

@@ -19,7 +19,10 @@ import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.ForegroundSession
+import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDayResetTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -27,6 +30,117 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SerializedDecisionWorkerTest {
+    @Test
+    fun guardianApprovalCheckSettlesRealSessionAndReturnsCurrentTargetDecision() {
+        val repository = RecordingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val wallNow = 2_000L
+        val useDayId = ConfigurableUseDayCalculator().idAt(wallNow)
+        val receipt = GuardianApprovalGrantReceipt(
+            ruleId = "usage",
+            useDayId = useDayId,
+            grantedAtMs = 1_500L,
+            grantedMillis = 15 * 60_000L
+        )
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            acceptedRuntime = approvalRuntime(
+                revision = RuntimeRevision(5L),
+                useDayId = useDayId,
+                receipt = receipt
+            )
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
+            )
+            assertTrue("the initial foreground decision did not finish", outcomes.awaitCount(1))
+            assertEquals(1, repository.persistedSessions().size)
+            assertEquals(1, repository.launchEvents.size)
+
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitGuardianApprovalEvaluation(
+                    GuardianApprovalEvaluationRequest(
+                        sourceOrderIdentity = SourceOrderIdentity(2L),
+                        lifecycleGeneration = LifecycleGeneration(1L),
+                        screenRequestId = "screen-1",
+                        operationId = "grant-1",
+                        checkId = "check-1",
+                        packageName = TARGET_PACKAGE,
+                        grantReceipt = receipt,
+                        capturedAtWallMs = wallNow,
+                        capturedAtElapsedMs = wallNow
+                    )
+                )
+            )
+            assertTrue(
+                "the explicit guardian check did not finish",
+                outcomes.awaitGuardianApprovalCount(1)
+            )
+
+            val result = outcomes.guardianApprovalEvaluations.single()
+            assertEquals(GuardianApprovalEvaluationStatus.COMPLETED, result.status)
+            assertEquals(GuardianApprovalConfirmationState.REFLECTED, result.confirmationState)
+            assertEquals(listOf("night"), result.evaluation?.denyingRules?.map { it.ruleId })
+            assertEquals(RuntimeRevision(5L), result.acceptedRuntimeRevision)
+            assertEquals(wallNow, repository.persistedSessions().single().endedAtMs)
+            assertEquals("an explicit check must not renew visibility or record another launch", 1, repository.launchEvents.size)
+            assertEquals("an explicit check must not masquerade as a foreground event", 1, outcomes.evaluations.size)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun guardianApprovalCheckDoesNotCallMissingReceiptReflected() {
+        val outcomes = RecordingOutcomeSink()
+        val wallNow = 2_000L
+        val useDayId = ConfigurableUseDayCalculator().idAt(wallNow)
+        val receipt = GuardianApprovalGrantReceipt(
+            ruleId = "usage",
+            useDayId = useDayId,
+            grantedAtMs = 1_500L,
+            grantedMillis = 15 * 60_000L
+        )
+        val worker = worker(
+            repository = RecordingRepository(),
+            sink = outcomes,
+            acceptedRuntime = approvalRuntime(
+                revision = RuntimeRevision(6L),
+                useDayId = useDayId,
+                receipt = null
+            )
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitGuardianApprovalEvaluation(
+                    GuardianApprovalEvaluationRequest(
+                        sourceOrderIdentity = SourceOrderIdentity(1L),
+                        lifecycleGeneration = LifecycleGeneration(1L),
+                        screenRequestId = "screen-2",
+                        operationId = "grant-2",
+                        checkId = "check-2",
+                        packageName = TARGET_PACKAGE,
+                        grantReceipt = receipt,
+                        capturedAtWallMs = wallNow,
+                        capturedAtElapsedMs = wallNow
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitGuardianApprovalCount(1))
+            val result = outcomes.guardianApprovalEvaluations.single()
+            assertEquals(GuardianApprovalEvaluationStatus.COMPLETED, result.status)
+            assertEquals(GuardianApprovalConfirmationState.SUPERSEDED, result.confirmationState)
+            assertEquals(listOf("usage", "night"), result.evaluation?.denyingRules?.map { it.ruleId })
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
     @Test
     fun deadlineStopTimesOutFinalDecisionAndQueuedRefreshForRecoveryOnly() {
         val repository = BlockingReadRepository()
@@ -1373,6 +1487,61 @@ class SerializedDecisionWorkerTest {
         revision
     )
 
+    private fun approvalRuntime(
+        revision: RuntimeRevision,
+        useDayId: String,
+        receipt: GuardianApprovalGrantReceipt?
+    ): AcceptedRuleRuntimeSnapshot {
+        val grant = receipt?.let {
+            AppRuleGuardianGrant(
+                ruleId = it.ruleId,
+                useDayId = it.useDayId,
+                grantedAtMs = it.grantedAtMs,
+                grantedMillis = it.grantedMillis
+            )
+        }
+        return AcceptedRuleRuntimeSnapshot(
+            runtime = RuleRuntimeSnapshot(
+                snapshot = AppRuleSnapshot(
+                    appGroups = listOf(
+                        AppRuleAppGroup(
+                            id = TARGET_GROUP_ID,
+                            name = "Target",
+                            selectedPackages = listOf(TARGET_PACKAGE)
+                        )
+                    ),
+                    appRules = listOf(
+                        AppRule(
+                            id = "usage",
+                            name = "Usage",
+                            weekdays = (0..6).toSet(),
+                            scope = AppRuleScope.forGroup(TARGET_GROUP_ID),
+                            allowedMinutes = 0L,
+                            guardianExtraTimeAllowed = true
+                        ),
+                        AppRule(
+                            id = "night",
+                            name = "Night",
+                            weekdays = (0..6).toSet(),
+                            scope = AppRuleScope(includeAllApps = true),
+                            allowedMinutes = 0L,
+                            guardianExtraTimeAllowed = false
+                        )
+                    )
+                ),
+                resetTime = UseDayResetTime(),
+                useDayGenerationStartedAtMs = 0L,
+                overrideState = neth.iecal.curbox.data.models.AppRuleOverrideState(
+                    useDayId = useDayId,
+                    grants = listOfNotNull(grant)
+                ),
+                launchablePackages = setOf(TARGET_PACKAGE),
+                usageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
+            ),
+            runtimeRevision = revision
+        )
+    }
+
     private fun runtime(
         allowedMinutes: Long = 0L,
         usageTrackingDecision: AppUsageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
@@ -1443,6 +1612,11 @@ class SerializedDecisionWorkerTest {
             values += outcome
         }
 
+        val guardianApprovalEvaluations: List<DecisionOutcome.GuardianApprovalEvaluationReady>
+            get() = synchronized(values) {
+                values.filterIsInstance<DecisionOutcome.GuardianApprovalEvaluationReady>()
+            }
+
         fun awaitCondition(predicate: () -> Boolean): Boolean {
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MS)
             while (System.nanoTime() < deadline) {
@@ -1454,6 +1628,9 @@ class SerializedDecisionWorkerTest {
 
         fun awaitCount(expected: Int): Boolean =
             awaitCondition { enforcementOutcomes.size >= expected }
+
+        fun awaitGuardianApprovalCount(expected: Int): Boolean =
+            awaitCondition { guardianApprovalEvaluations.size >= expected }
 
         fun awaitEvaluationCount(expected: Int): Boolean =
             awaitCondition { evaluations.size >= expected }

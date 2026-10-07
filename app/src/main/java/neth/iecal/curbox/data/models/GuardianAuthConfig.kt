@@ -23,6 +23,28 @@ data class AppRuleGuardianGrant(
     val isFromAccumulatedPool: Boolean = false
 )
 
+/** Identifies one direct grant write when the blocker confirms its accepted settings snapshot. */
+data class GuardianApprovalGrantReceipt(
+    val ruleId: String,
+    val useDayId: String,
+    val grantedAtMs: Long,
+    val grantedMillis: Long
+) {
+    init {
+        require(ruleId.isNotBlank()) { "grant receipt must name a rule" }
+        require(useDayId.isNotBlank()) { "grant receipt must name a use day" }
+        require(grantedAtMs >= 0L) { "grant receipt timestamp must not be negative" }
+        require(grantedMillis > 0L) { "grant receipt must contain a positive grant" }
+    }
+
+    fun matches(grant: AppRuleGuardianGrant): Boolean =
+        grant.ruleId == ruleId &&
+            grant.useDayId == useDayId &&
+            grant.grantedAtMs == grantedAtMs &&
+            grant.grantedMillis == grantedMillis &&
+            !grant.isFromAccumulatedPool
+}
+
 /** A single rule's temporary skip.  The end is always capped by the use-day reset. */
 data class AppRuleGuardianSkip(
     val ruleId: String = "",

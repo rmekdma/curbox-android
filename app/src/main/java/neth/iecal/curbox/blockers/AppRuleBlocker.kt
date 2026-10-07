@@ -18,6 +18,7 @@ import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -40,6 +41,7 @@ import neth.iecal.curbox.data.models.AppBlockerWarningScreenConfig
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
@@ -82,6 +84,9 @@ import neth.iecal.curbox.domain.apprules.RuleRuntimeSnapshot
 import neth.iecal.curbox.domain.apprules.RuntimePublication
 import neth.iecal.curbox.domain.apprules.RuntimeRevision
 import neth.iecal.curbox.domain.apprules.AppRuleRolloverCoordinator
+import neth.iecal.curbox.domain.apprules.GuardianApprovalCoordinator
+import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationRequest
+import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationStatus
 import neth.iecal.curbox.domain.apprules.SettlementRequest
 import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
 import neth.iecal.curbox.domain.apprules.SignalFact
@@ -101,6 +106,7 @@ import neth.iecal.curbox.utils.UseDayResetTime
 import neth.iecal.curbox.utils.UsageResetManager
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.UUID
 
 /** Adapter-local identity for one installed worker instance. */
 @JvmInline
@@ -132,11 +138,13 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         internal fun createGuardianApprovalIntent(
             context: Context,
             packageName: String,
-            denials: List<AppRuleGuardianDenial>
+            denials: List<AppRuleGuardianDenial>,
+            screenRequestId: String = UUID.randomUUID().toString()
         ): Intent = Intent(context, GuardianApprovalActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(GuardianApprovalActivity.EXTRA_PACKAGE, packageName)
             putExtra(GuardianApprovalActivity.EXTRA_DENIALS, Gson().toJson(denials))
+            putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
         }
     }
 
@@ -170,6 +178,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private var lastShownAt = 0L
     @Volatile private var pendingGrantedPackage: String? = null
     @Volatile private var pendingGrantedPackageTimestampMs = 0L
+    private val guardianApprovalCoordinator = GuardianApprovalCoordinator()
+    @Volatile private var guardianConfirmationTimeoutJob: Job? = null
 
     private fun isPendingGrantedPackage(packageName: String): Boolean {
         val pending = pendingGrantedPackage ?: return false
@@ -430,6 +440,11 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         foregroundEvidenceSuspended = false
         screenOnAwaitingUserPresent = false
         lastPostedNotificationModel = null
+        guardianApprovalCoordinator.currentOwner()?.let {
+            guardianApprovalCoordinator.closeScreen(it.screenRequestId)
+        }
+        guardianConfirmationTimeoutJob?.cancel()
+        guardianConfirmationTimeoutJob = null
         activeGuardianPackage = null
         pendingSchedulerWakeGeneration = null
         lastShownAt = 0L
@@ -552,6 +567,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val guardianFilter = IntentFilter().apply {
             addAction(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
             addAction(GuardianApprovalActivity.INTENT_ACTION_OPENED)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_DIRECT_GRANT_STORED)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_DIRECT_CHECK_RETRY)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_CANCELLED)
         }
         val lifecycle = AppRuleReceiverLifecycle(
             registrations = listOf(
@@ -689,6 +708,12 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                                     outcome.evaluation
                                 )
                             }
+                            is DecisionOutcome.GuardianApprovalEvaluationReady -> {
+                                publishGuardianApprovalEvaluation(
+                                    outcome,
+                                    workerInstanceToken
+                                )
+                            }
                             is DecisionOutcome.RecheckPlanReady -> {
                                 applyRecheckPlan(workerInstanceToken, outcome.update)
                             }
@@ -792,6 +817,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 sourceOrderIdentity = sourceOrderIdentity,
                 runtimeRevision = runtimeRevision
             )
+            enqueueCurrentGuardianApprovalEvaluation(connectionGeneration)
             scheduleNextSettlementAlarm()
         }
         return accepted
@@ -1519,6 +1545,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         if (!isCurrentLifecycle(expectedLifecycleGeneration) ||
             recheckGeneration.get() != generation
         ) return
+        val screenRequestId = UUID.randomUUID().toString()
         try {
             if (!service.isDelayOver(1_000)) return
             val denialRows = evaluation.denyingRules.map { denial ->
@@ -1546,6 +1573,11 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                                 workerInstanceMatchesLocked(workerInstanceToken)) &&
                             activeGuardianPackage == null
                     }?.also {
+                        guardianApprovalCoordinator.openScreen(
+                            screenRequestId = screenRequestId,
+                            packageName = packageName,
+                            lifecycleGeneration = expectedLifecycleGeneration
+                        )
                         activeGuardianPackage = packageName
                     }
                 }
@@ -1563,6 +1595,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                         expectedLifecycleGeneration == currentLifecycleGeneration() &&
                         recheckGeneration.get() == generation
                     ) {
+                        guardianApprovalCoordinator.closeScreen(screenRequestId)
                         activeGuardianPackage = null
                     }
                 }
@@ -1579,6 +1612,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     }
                 ) {
                     synchronized(runtimeLock) {
+                        guardianApprovalCoordinator.closeScreen(screenRequestId)
                         if (activeGuardianPackage == packageName) {
                             activeGuardianPackage = null
                         }
@@ -1586,7 +1620,12 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     return
                 }
                 service.startActivity(
-                    createGuardianApprovalIntent(service, packageName, denialRows)
+                    createGuardianApprovalIntent(
+                        service,
+                        packageName,
+                        denialRows,
+                        screenRequestId
+                    )
                 )
                 lastShownAt = observationWallClockMs()
             } finally {
@@ -1596,6 +1635,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
+            guardianApprovalCoordinator.closeScreen(screenRequestId)
+            synchronized(runtimeLock) {
+                if (activeGuardianPackage == packageName) activeGuardianPackage = null
+            }
             logNonFatal(error)
         }
     }
@@ -1653,6 +1696,11 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             currentForegroundPackage = null
             lastNonessentialForegroundPackage = null
             activeGuardianPackage = null
+            guardianApprovalCoordinator.currentOwner()?.let {
+                guardianApprovalCoordinator.closeScreen(it.screenRequestId)
+            }
+            guardianConfirmationTimeoutJob?.cancel()
+            guardianConfirmationTimeoutJob = null
             pendingGrantedPackage = null
             pendingGrantedPackageTimestampMs = 0L
             currentForegroundEvidenceAtElapsedMs = 0L
@@ -2028,9 +2076,27 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private val guardianReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
-            if (action != GuardianApprovalActivity.INTENT_ACTION_CLOSED &&
-                action != GuardianApprovalActivity.INTENT_ACTION_OPENED
-            ) return
+            when (action) {
+                GuardianApprovalActivity.INTENT_ACTION_DIRECT_GRANT_STORED -> {
+                    receiveGuardianDirectCheck(intent, isRetry = false)
+                    return
+                }
+                GuardianApprovalActivity.INTENT_ACTION_DIRECT_CHECK_RETRY -> {
+                    receiveGuardianDirectCheck(intent, isRetry = true)
+                    return
+                }
+                GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED -> {
+                    receiveGuardianLegacyStarted(intent)
+                    return
+                }
+                GuardianApprovalActivity.INTENT_ACTION_LEGACY_CANCELLED -> {
+                    receiveGuardianLegacyCancelled(intent)
+                    return
+                }
+                GuardianApprovalActivity.INTENT_ACTION_OPENED,
+                GuardianApprovalActivity.INTENT_ACTION_CLOSED -> Unit
+                else -> return
+            }
             val packageName = intent.getStringExtra(
                 GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE
             )?.trim().orEmpty()
@@ -2038,32 +2104,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             val closeReason = intent.getStringExtra(
                 GuardianApprovalActivity.EXTRA_CLOSE_REASON
             ) ?: GuardianApprovalActivity.REASON_INTERRUPTED
-
-            var checkDelayMs: Long? = null
-            synchronized(runtimeLock) {
-                if (!isReadyForChecks()) return
-                applyGuardianLifecycleTransition(action, packageName)
-                if (action == GuardianApprovalActivity.INTENT_ACTION_CLOSED) {
-                    when (closeReason) {
-                        GuardianApprovalActivity.REASON_GRANTED -> {
-                            pendingGrantedPackage = packageName
-                            pendingGrantedPackageTimestampMs = observationElapsedRealtimeMs()
-                        }
-                        GuardianApprovalActivity.REASON_CANCELLED -> {
-                            checkDelayMs = 300L
-                        }
-                        else -> {
-                            lastShownAt = 0L
-                            checkDelayMs = 50L
-                        }
-                    }
-                }
-            }
-            checkDelayMs?.let { delay ->
-                postVisibleApplicationCheck(
-                    delayMillis = delay,
-                    observationKind = ObservationKind.REFRESH
-                )
+            if (action == GuardianApprovalActivity.INTENT_ACTION_OPENED) {
+                receiveGuardianScreenOpened(intent, packageName)
+            } else {
+                receiveGuardianScreenClosed(intent, packageName, closeReason)
             }
         }
     }
@@ -2076,6 +2120,620 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             lastShownAt = 0L
         }
     }
+
+    private fun receiveGuardianScreenOpened(intent: Intent, packageName: String) {
+        val requestId = intent.getStringExtra(
+            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID
+        )?.trim().orEmpty()
+        synchronized(runtimeLock) {
+            if (!isReadyForChecks()) return
+            if (requestId.isNotBlank()) {
+                guardianApprovalCoordinator.openScreen(
+                    screenRequestId = requestId,
+                    packageName = packageName,
+                    lifecycleGeneration = currentLifecycleGeneration()
+                )
+            }
+            activeGuardianPackage = packageName
+        }
+    }
+
+    private fun receiveGuardianScreenClosed(
+        intent: Intent,
+        packageName: String,
+        closeReason: String
+    ) {
+        val requestId = intent.getStringExtra(
+            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID
+        )?.trim().orEmpty()
+        val operationId = intent.getStringExtra(
+            GuardianApprovalActivity.EXTRA_OPERATION_ID
+        )?.trim().orEmpty()
+        val checkDelayMs = synchronized(runtimeLock) {
+            if (!isReadyForChecks()) return
+            val owner = guardianApprovalCoordinator.currentOwner()
+            if (closeReason == GuardianApprovalActivity.REASON_GRANTED) {
+                if (requestId.isNotBlank() && operationId.isNotBlank()) {
+                    if (owner?.screenRequestId != requestId ||
+                        owner.packageName != packageName ||
+                        !guardianApprovalCoordinator.completeLegacyOperation(
+                            requestId,
+                            operationId
+                        )
+                    ) return
+                    activeGuardianPackage = null
+                    lastShownAt = 0L
+                    pendingGrantedPackage = packageName
+                    pendingGrantedPackageTimestampMs = observationElapsedRealtimeMs()
+                    guardianConfirmationTimeoutJob?.cancel()
+                    guardianConfirmationTimeoutJob = null
+                    return
+                }
+                if (owner?.packageName == packageName &&
+                    owner.operation is GuardianApprovalCoordinator.Operation.Direct
+                ) return
+                applyGuardianLifecycleTransition(
+                    GuardianApprovalActivity.INTENT_ACTION_CLOSED,
+                    packageName
+                )
+                pendingGrantedPackage = packageName
+                pendingGrantedPackageTimestampMs = observationElapsedRealtimeMs()
+                return
+            }
+
+            if (closeReason == GuardianApprovalActivity.REASON_CONFIRMED) return
+            if (requestId.isNotBlank()) {
+                if (owner?.screenRequestId != requestId || owner.packageName != packageName) return
+                guardianApprovalCoordinator.closeScreen(requestId)
+            } else if (owner?.packageName == packageName &&
+                owner.operation is GuardianApprovalCoordinator.Operation.Direct
+            ) {
+                return
+            }
+            if (activeGuardianPackage == packageName) {
+                activeGuardianPackage = null
+                lastShownAt = 0L
+            }
+            guardianConfirmationTimeoutJob?.cancel()
+            guardianConfirmationTimeoutJob = null
+            if (closeReason == GuardianApprovalActivity.REASON_CANCELLED) {
+                300L
+            } else {
+                50L
+            }
+        }
+        checkDelayMs.let { delay ->
+            postVisibleApplicationCheck(
+                delayMillis = delay,
+                observationKind = ObservationKind.REFRESH
+            )
+        }
+    }
+
+    private fun receiveGuardianLegacyStarted(intent: Intent) {
+        val packageName = guardianPackage(intent) ?: return
+        val requestId = guardianScreenRequestId(intent) ?: return
+        val operationId = guardianOperationId(intent) ?: return
+        synchronized(runtimeLock) {
+            if (!isReadyForChecks() || activeGuardianPackage != packageName) return
+            val owner = guardianApprovalCoordinator.currentOwner() ?: return
+            if (owner.lifecycleGeneration != currentLifecycleGeneration() ||
+                !guardianApprovalCoordinator.beginLegacyOperation(requestId, operationId)
+            ) return
+            guardianConfirmationTimeoutJob?.cancel()
+            guardianConfirmationTimeoutJob = null
+        }
+    }
+
+    private fun receiveGuardianLegacyCancelled(intent: Intent) {
+        val requestId = guardianScreenRequestId(intent) ?: return
+        val operationId = guardianOperationId(intent) ?: return
+        synchronized(runtimeLock) {
+            if (!isReadyForChecks()) return
+            guardianApprovalCoordinator.cancelLegacyOperation(requestId, operationId)
+        }
+    }
+
+    private fun receiveGuardianDirectCheck(intent: Intent, isRetry: Boolean) {
+        val packageName = guardianPackage(intent) ?: return
+        val screenRequestId = guardianScreenRequestId(intent) ?: return
+        val operationId = guardianOperationId(intent) ?: return
+        val checkId = intent.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return
+        val receipt = if (isRetry) {
+            null
+        } else {
+            runCatching {
+                GuardianApprovalGrantReceipt(
+                    ruleId = intent.getStringExtra(
+                        GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID
+                    ).orEmpty(),
+                    useDayId = intent.getStringExtra(
+                        GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID
+                    ).orEmpty(),
+                    grantedAtMs = intent.getLongExtra(
+                        GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS,
+                        -1L
+                    ),
+                    grantedMillis = intent.getLongExtra(
+                        GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_MILLIS,
+                        -1L
+                    )
+                )
+            }.getOrNull()
+        }
+        val connectionGeneration = lifecycleGeneration.get().coerceAtLeast(1L)
+        val started = synchronized(runtimeLock) {
+            if (!isReadyForChecks(connectionGeneration) ||
+                activeGuardianPackage != packageName
+            ) return
+            val owner = guardianApprovalCoordinator.currentOwner() ?: return
+            if (owner.packageName != packageName ||
+                owner.screenRequestId != screenRequestId ||
+                owner.lifecycleGeneration != LifecycleGeneration(connectionGeneration)
+            ) return
+            val accepted = if (isRetry) {
+                guardianApprovalCoordinator.retryDirectCheck(
+                    screenRequestId,
+                    operationId,
+                    checkId
+                )
+            } else {
+                val acceptedReceipt = receipt ?: run {
+                    sendGuardianConfirmationResult(
+                        screenRequestId,
+                        operationId,
+                        checkId,
+                        GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+                    )
+                    return
+                }
+                guardianApprovalCoordinator.beginDirectCheck(
+                    screenRequestId,
+                    operationId,
+                    checkId,
+                    acceptedReceipt
+                )
+            }
+            if (!accepted) return
+            guardianConfirmationTimeoutJob?.cancel()
+            guardianConfirmationTimeoutJob = scope.launch {
+                delay(GuardianApprovalCoordinator.CONFIRMATION_TIMEOUT_MS)
+                val timedOut = synchronized(runtimeLock) guardianTimeoutLock@ {
+                    if (!isReadyForChecks(connectionGeneration)) return@guardianTimeoutLock false
+                    guardianApprovalCoordinator.timeOutDirectCheck(
+                        screenRequestId,
+                        operationId,
+                        checkId
+                    )
+                }
+                if (timedOut) {
+                    sendGuardianConfirmationResult(
+                        screenRequestId,
+                        operationId,
+                        checkId,
+                        GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT
+                    )
+                }
+            }
+            true
+        }
+        if (started) {
+            scope.launch {
+                try {
+                    refreshRuntimeForGuardianCheck(connectionGeneration)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    logNonFatal(error)
+                    failGuardianCheckIfCurrent(
+                        screenRequestId,
+                        operationId,
+                        checkId
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun refreshRuntimeForGuardianCheck(connectionGeneration: Long) {
+        if (!isReadyForChecks(connectionGeneration)) return
+        val settings = service.dataStoreManager.settings.first()
+        val reservation = sourceOrderSequencer.reserveRuntimePublication()
+        val accepted = refreshMutex.withLock {
+            applyAndSubmitRuntimePublication(
+                connectionGeneration = connectionGeneration,
+                settings = settings,
+                sourceOrderIdentity = reservation.sourceOrderIdentity,
+                runtimeRevision = reservation.runtimeRevision
+            )
+        }
+        if (!accepted) {
+            val owner = guardianApprovalCoordinator.currentOwner()
+            val direct = owner?.operation as? GuardianApprovalCoordinator.Operation.Direct
+            if (owner != null && direct != null) {
+                failGuardianCheckIfCurrent(
+                    owner.screenRequestId,
+                    direct.operationId,
+                    direct.checkId
+                )
+            }
+        }
+    }
+
+    private fun enqueueCurrentGuardianApprovalEvaluation(connectionGeneration: Long) {
+        val owner = synchronized(runtimeLock) {
+            if (!isReadyForChecks(connectionGeneration)) return
+            val current = guardianApprovalCoordinator.currentOwner() ?: return
+            val direct = current.operation as? GuardianApprovalCoordinator.Operation.Direct
+                ?: return
+            if (current.lifecycleGeneration != LifecycleGeneration(connectionGeneration) ||
+                direct.phase != GuardianApprovalCoordinator.DirectCheckPhase.CHECKING ||
+                activeGuardianPackage != current.packageName
+            ) return
+            current
+        }
+        val direct = owner.operation as? GuardianApprovalCoordinator.Operation.Direct ?: return
+        val worker = ensureDecisionWorker(connectionGeneration) ?: run {
+            failGuardianCheckIfCurrent(owner.screenRequestId, direct.operationId, direct.checkId)
+            return
+        }
+        val request = GuardianApprovalEvaluationRequest(
+            sourceOrderIdentity = sourceOrderSequencer.nextSourceOrderIdentity(),
+            lifecycleGeneration = owner.lifecycleGeneration,
+            screenRequestId = owner.screenRequestId,
+            operationId = direct.operationId,
+            checkId = direct.checkId,
+            packageName = owner.packageName,
+            grantReceipt = direct.receipt,
+            capturedAtWallMs = observationWallClockMs(),
+            capturedAtElapsedMs = observationElapsedRealtimeMs()
+        )
+        val submitted = worker.submitGuardianApprovalEvaluation(request)
+        if (submitted != SubmissionResult.ACCEPTED) {
+            failGuardianCheckIfCurrent(owner.screenRequestId, direct.operationId, direct.checkId)
+        }
+    }
+
+    private fun publishGuardianApprovalEvaluation(
+        outcome: DecisionOutcome.GuardianApprovalEvaluationReady,
+        workerInstanceToken: AppRuleWorkerInstanceToken
+    ) {
+        if (!isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken)) return
+        scope.launch {
+            try {
+                handleGuardianApprovalEvaluation(outcome, workerInstanceToken)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+                failGuardianCheckIfCurrent(
+                    outcome.request.screenRequestId,
+                    outcome.request.operationId,
+                    outcome.request.checkId
+                )
+            }
+        }
+    }
+
+    private suspend fun handleGuardianApprovalEvaluation(
+        outcome: DecisionOutcome.GuardianApprovalEvaluationReady,
+        workerInstanceToken: AppRuleWorkerInstanceToken
+    ) {
+        val request = outcome.request
+        if (!isCurrentGuardianApprovalCheck(request)) return
+        val latestSettings = service.dataStoreManager.settings.first()
+        val runtimeMatches = runtimeMatchesSettings(outcome, latestSettings)
+        val outcomeStillCurrent = isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken)
+        if (!runtimeMatches || !outcomeStillCurrent) {
+            if (isCurrentGuardianApprovalCheck(request)) {
+                refreshRuntimeForGuardianCheck(request.lifecycleGeneration.value)
+            }
+            return
+        }
+        if (outcome.status != GuardianApprovalEvaluationStatus.COMPLETED ||
+            outcome.evaluation == null
+        ) {
+            failGuardianCheckIfCurrent(
+                request.screenRequestId,
+                request.operationId,
+                request.checkId
+            )
+            return
+        }
+        val evaluation = outcome.evaluation
+        if (!evaluation.isAllowed) {
+            val completed = completeGuardianCheck(request)
+            if (completed) {
+                sendGuardianConfirmationResult(
+                    screenRequestId = request.screenRequestId,
+                    operationId = request.operationId,
+                    checkId = request.checkId,
+                    status = GuardianApprovalActivity.CONFIRMATION_STATUS_REMAINING,
+                    denials = guardianDenialRows(evaluation, outcome.denyingRuleNames),
+                    confirmationState = outcome.confirmationState
+                )
+            }
+            return
+        }
+        launchGuardianTargetIfCurrent(outcome, workerInstanceToken, latestSettings)
+    }
+
+    private fun launchGuardianTargetIfCurrent(
+        outcome: DecisionOutcome.GuardianApprovalEvaluationReady,
+        workerInstanceToken: AppRuleWorkerInstanceToken,
+        latestSettings: Settings
+    ) {
+        val request = outcome.request
+        if (legacyDisplayState() != DisplayState.UNLOCKED) {
+            failGuardianCheckIfCurrent(request.screenRequestId, request.operationId, request.checkId)
+            return
+        }
+        if (!isGuardianApprovalActivityForeground()) {
+            cancelGuardianExecutionIntent(request)
+            return
+        }
+        val launchIntent = try {
+            service.packageManager.getLaunchIntentForPackage(request.packageName)
+                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } catch (error: Exception) {
+            logNonFatal(error)
+            null
+        }
+        if (launchIntent == null) {
+            failGuardianCheckIfCurrent(request.screenRequestId, request.operationId, request.checkId)
+            return
+        }
+        val permit = synchronized(runtimeLock) {
+            reserveExternalEffectLocked {
+                isCurrentGuardianApprovalOutcomeLocked(outcome, workerInstanceToken) &&
+                    isCurrentGuardianApprovalCheckLocked(request) &&
+                    legacyDisplayState() == DisplayState.UNLOCKED &&
+                    runtimeMatchesSettings(outcome, latestSettings)
+            }
+        } ?: return
+        if (!startExternalEffect(permit) {
+                isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken) &&
+                    isCurrentGuardianApprovalCheck(request) &&
+                    legacyDisplayState() == DisplayState.UNLOCKED
+            }
+        ) return
+        var launched = false
+        try {
+            if (!beginExternalEffectCall(permit) {
+                    isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken) &&
+                        isCurrentGuardianApprovalCheck(request) &&
+                        legacyDisplayState() == DisplayState.UNLOCKED
+                }
+            ) return
+            if (legacyDisplayState() != DisplayState.UNLOCKED ||
+                !isGuardianApprovalActivityForeground() ||
+                !isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken) ||
+                !isCurrentGuardianApprovalCheck(request)
+            ) {
+                cancelGuardianExecutionIntent(request)
+                return
+            }
+            service.startActivity(launchIntent)
+            launched = true
+            synchronized(runtimeLock) {
+                guardianApprovalCoordinator.closeScreen(request.screenRequestId)
+                if (activeGuardianPackage == request.packageName) {
+                    activeGuardianPackage = null
+                }
+                guardianConfirmationTimeoutJob?.cancel()
+                guardianConfirmationTimeoutJob = null
+            }
+            sendGuardianConfirmationResult(
+                request.screenRequestId,
+                request.operationId,
+                request.checkId,
+                GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED,
+                confirmationState = outcome.confirmationState
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            logNonFatal(error)
+        } finally {
+            completeExternalEffectCall(permit)
+            finishExternalEffect(permit)
+            if (!launched) {
+                failGuardianCheckIfCurrent(
+                    request.screenRequestId,
+                    request.operationId,
+                    request.checkId
+                )
+            }
+        }
+    }
+
+    private fun isGuardianApprovalActivityForeground(): Boolean {
+        val facts = captureForegroundFacts(null, ObservationKind.SYNTHETIC_RECHECK)
+        return facts.activeRoot.readState == ForegroundReadState.AVAILABLE &&
+            facts.activeRoot.packageName == servicePackageName &&
+            facts.displayState == DisplayState.UNLOCKED
+    }
+
+    private fun cancelGuardianExecutionIntent(request: GuardianApprovalEvaluationRequest) {
+        synchronized(runtimeLock) {
+            val owner = guardianApprovalCoordinator.currentOwner()
+            if (owner?.screenRequestId != request.screenRequestId ||
+                owner.packageName != request.packageName
+            ) return
+            guardianApprovalCoordinator.closeScreen(request.screenRequestId)
+            if (activeGuardianPackage == request.packageName) {
+                activeGuardianPackage = null
+            }
+            guardianConfirmationTimeoutJob?.cancel()
+            guardianConfirmationTimeoutJob = null
+        }
+    }
+
+    private fun completeGuardianCheck(request: GuardianApprovalEvaluationRequest): Boolean =
+        synchronized(runtimeLock) {
+            val completed = guardianApprovalCoordinator.completeDirectCheck(
+                request.screenRequestId,
+                request.operationId,
+                request.checkId
+            )
+            if (completed) {
+                guardianConfirmationTimeoutJob?.cancel()
+                guardianConfirmationTimeoutJob = null
+            }
+            completed
+        }
+
+    private fun failGuardianCheckIfCurrent(
+        screenRequestId: String,
+        operationId: String,
+        checkId: String
+    ) {
+        val failed = synchronized(runtimeLock) {
+            val completed = guardianApprovalCoordinator.completeDirectCheck(
+                screenRequestId,
+                operationId,
+                checkId
+            )
+            if (completed) {
+                guardianConfirmationTimeoutJob?.cancel()
+                guardianConfirmationTimeoutJob = null
+            }
+            completed
+        }
+        if (failed) {
+            sendGuardianConfirmationResult(
+                screenRequestId,
+                operationId,
+                checkId,
+                GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+            )
+        }
+    }
+
+    private fun isCurrentGuardianApprovalCheck(
+        request: GuardianApprovalEvaluationRequest
+    ): Boolean = synchronized(runtimeLock) {
+        isCurrentGuardianApprovalCheckLocked(request)
+    }
+
+    private fun isCurrentGuardianApprovalCheckLocked(
+        request: GuardianApprovalEvaluationRequest
+    ): Boolean {
+        if (!isReadyForChecks() ||
+            request.lifecycleGeneration != currentLifecycleGeneration() ||
+            activeGuardianPackage != request.packageName
+        ) return false
+        val owner = guardianApprovalCoordinator.currentOwner() ?: return false
+        val direct = owner.operation as? GuardianApprovalCoordinator.Operation.Direct
+            ?: return false
+        return owner.screenRequestId == request.screenRequestId &&
+            owner.packageName == request.packageName &&
+            owner.lifecycleGeneration == request.lifecycleGeneration &&
+            direct.operationId == request.operationId &&
+            direct.checkId == request.checkId &&
+            direct.phase == GuardianApprovalCoordinator.DirectCheckPhase.CHECKING
+    }
+
+    private fun isCurrentGuardianApprovalOutcome(
+        outcome: DecisionOutcome.GuardianApprovalEvaluationReady,
+        workerInstanceToken: AppRuleWorkerInstanceToken
+    ): Boolean = synchronized(runtimeLock) {
+        isCurrentGuardianApprovalOutcomeLocked(outcome, workerInstanceToken)
+    }
+
+    private fun isCurrentGuardianApprovalOutcomeLocked(
+        outcome: DecisionOutcome.GuardianApprovalEvaluationReady,
+        workerInstanceToken: AppRuleWorkerInstanceToken
+    ): Boolean = isReadyForChecks() &&
+        outcome.request.lifecycleGeneration == currentLifecycleGeneration() &&
+        workerInstanceMatchesLocked(workerInstanceToken) &&
+        outcome.acceptedRuntimeRevision == latestRuntimeRevision &&
+        isCurrentGuardianApprovalCheckLocked(outcome.request)
+
+    private fun runtimeMatchesSettings(
+        outcome: DecisionOutcome.GuardianApprovalEvaluationReady,
+        settings: Settings
+    ): Boolean {
+        val normalizedSnapshot = runCatching {
+            settings.appRuleSnapshot.normalized().takeIf { it.isValid }
+        }.getOrNull() ?: return false
+        val runtime = outcome.request.let { request ->
+            synchronized(runtimeLock) {
+                if (latestRuntimeRevision != outcome.acceptedRuntimeRevision ||
+                    request.lifecycleGeneration != currentLifecycleGeneration()
+                ) return false
+                ruleRuntimeSnapshotLocked()
+            }
+        }
+        return normalizedSnapshot == runtime.snapshot &&
+            safeResetTime(settings.useDayResetHour, settings.useDayResetMinute) == runtime.resetTime &&
+            settings.useDayGenerationStartedAtMs == runtime.useDayGenerationStartedAtMs &&
+            settings.appRuleOverrideState == runtime.overrideState &&
+            AppUsageTrackingPolicy.decide(
+                statisticsTrackingEnabled = settings.isAppUsageTrackingEnabled,
+                hasActiveTimeBasedRules = settings.appRuleSnapshot.appRules.any { it.isActive }
+            ) == runtime.usageTrackingDecision
+    }
+
+    private fun guardianDenialRows(
+        evaluation: AppRulesEvaluation,
+        names: Map<String, String>
+    ): List<AppRuleGuardianDenial> = evaluation.denyingRules.map { denial ->
+        AppRuleGuardianDenial(
+            ruleId = denial.ruleId,
+            ruleName = names[denial.ruleId] ?: denial.ruleId,
+            reason = warningStatus(denial),
+            conditionProgresses = denial.conditionProgresses,
+            isAllowanceExhausted = denial.isAllowanceExhausted,
+            usedMinutes = (denial.usedMillis / MILLIS_PER_MINUTE).coerceAtLeast(0L),
+            totalAllowedMinutes = (
+                denial.effectiveAllowanceMillis / MILLIS_PER_MINUTE
+            ).coerceAtLeast(0L),
+            earnedAllowanceEnabled = denial.earnedAllowanceEnabled
+        )
+    }
+
+    private fun sendGuardianConfirmationResult(
+        screenRequestId: String,
+        operationId: String,
+        checkId: String,
+        status: String,
+        denials: List<AppRuleGuardianDenial> = emptyList(),
+        confirmationState: neth.iecal.curbox.domain.apprules.GuardianApprovalConfirmationState? = null
+    ) {
+        val result = Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+            .setPackage(service.packageName)
+            .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+            .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+            .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, checkId)
+            .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS, status)
+            .putExtra(
+                GuardianApprovalActivity.EXTRA_CONFIRMATION_DENIALS,
+                Gson().toJson(denials)
+            )
+        confirmationState?.let {
+            result.putExtra(
+                GuardianApprovalActivity.EXTRA_CONFIRMATION_STATE,
+                it.name.lowercase()
+            )
+        }
+        service.sendBroadcast(result)
+    }
+
+    private fun guardianPackage(intent: Intent): String? = intent.getStringExtra(
+        GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE
+    )?.trim()?.takeIf(String::isNotEmpty)
+
+    private fun guardianScreenRequestId(intent: Intent): String? = intent.getStringExtra(
+        GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID
+    )?.trim()?.takeIf(String::isNotEmpty)
+
+    private fun guardianOperationId(intent: Intent): String? = intent.getStringExtra(
+        GuardianApprovalActivity.EXTRA_OPERATION_ID
+    )?.trim()?.takeIf(String::isNotEmpty)
 
     @VisibleForTesting
     internal fun closeGuardianForInstrumentation(packageName: String): Boolean =

@@ -13,13 +13,17 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.data.models.ForegroundSession
+import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
+import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
 import neth.iecal.curbox.domain.apprules.AppRuleRecheckPlan
+import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.DecisionOutcome
 import neth.iecal.curbox.domain.apprules.FakeWakeScheduler
+import neth.iecal.curbox.domain.apprules.GuardianApprovalCoordinator
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.LifecycleGeneration
 import neth.iecal.curbox.domain.apprules.ObservationKind
@@ -29,6 +33,7 @@ import neth.iecal.curbox.domain.apprules.SignalFact
 import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
+import neth.iecal.curbox.utils.UseDayResetTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -1042,6 +1047,236 @@ class AppRuleBlockerRecheckTest {
         assertEquals(PACKAGE, getField(blocker, "pendingGrantedPackage"))
         assertTrue(postedDelays.isEmpty())
         blocker.onDestroy()
+    }
+
+    @Test
+    fun grantingUsageRuleStillShowsUnrelatedNightDenialAfterGuardianCloses() =
+        assertNightDenialShowsAfterGrantClose(
+            elapsedAdvanceAfterGrantMs = 0L,
+            directConfirmation = true
+        )
+
+    @Test
+    fun nightDenialShowsAfterPendingGrantWindowExpires() =
+        assertNightDenialShowsAfterGrantClose(elapsedAdvanceAfterGrantMs = 5_001L)
+
+    private fun assertNightDenialShowsAfterGrantClose(
+        elapsedAdvanceAfterGrantMs: Long,
+        directConfirmation: Boolean = false
+    ) {
+        val nowMs = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator().idAt(nowMs)
+        var elapsedNowMs = SystemClock.elapsedRealtime()
+        val targetGroup = AppRuleAppGroup("target", "Target", listOf(PACKAGE))
+        val snapshot = AppRuleSnapshot(
+            appGroups = listOf(targetGroup),
+            appRules = listOf(
+                AppRule(
+                    id = "usage",
+                    name = "Usage limit",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope.forGroup(targetGroup.id),
+                    allowedMinutes = 0
+                ),
+                AppRule(
+                    id = "night",
+                    name = "Night restriction",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    scope = AppRuleScope(includeAllApps = true),
+                    allowedMinutes = 0,
+                    guardianExtraTimeAllowed = false
+                )
+            )
+        ).normalized()
+        val grantedOverrides = AppRuleGuardianOverrides.grant(
+            state = AppRuleOverrideState(useDayId = useDayId),
+            ruleId = "usage",
+            useDayId = useDayId,
+            grantedMillis = 10 * 60_000L,
+            grantedAtMs = nowMs
+        )
+        val actualEvaluation = AppRuleEvaluator.evaluate(
+            snapshot = snapshot,
+            packageName = PACKAGE,
+            useDayId = useDayId,
+            sessions = emptyList(),
+            nowMs = nowMs,
+            resetTime = UseDayResetTime(),
+            overrides = grantedOverrides,
+            availablePackages = setOf(PACKAGE)
+        )
+
+        assertEquals(listOf("night"), actualEvaluation.denyingRules.map { it.ruleId })
+        assertTrue(actualEvaluation.evaluations.single { it.ruleId == "usage" }.isAllowed)
+
+        val service = RecordingService().also {
+            it.attach(InstrumentationContext.context)
+            it.lastBackPressTimeStamp = 0L
+        }
+        val guardianActivities = CopyOnWriteArrayList<Intent>()
+        val evaluations = CopyOnWriteArrayList<AppRulesEvaluation>()
+        val enforcementOutcomes = CopyOnWriteArrayList<DecisionOutcome.EnforcementOutcome>()
+        service.startActivityObserver = { intent ->
+            if (intent.component?.className == GuardianApprovalActivity::class.java.name) {
+                guardianActivities += intent
+            }
+        }
+        val blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { nowMs }
+            elapsedRealtimeMsProvider = { elapsedNowMs }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            evaluationResultObserver = { evaluations += it }
+            decisionOutcomeSinkObserver = { outcome ->
+                if (outcome is DecisionOutcome.EnforcementOutcome &&
+                    outcome.packageDecisions.any { it.packageName == PACKAGE }
+                ) {
+                    enforcementOutcomes += outcome
+                }
+            }
+        }
+        val repository = EmptySessionRepository()
+
+        try {
+            setField(blocker, "service", service)
+            setField(blocker, "sessionRepository", repository)
+            setField(blocker, "enforcement", AppRuleEnforcement(repository))
+            setField(blocker, "setupReady", true)
+            setField(blocker, "launchablePackages", setOf(PACKAGE))
+            setField(blocker, "overrideState", grantedOverrides)
+            val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+            coordinator.accept(snapshot)
+
+            fun checkPackage() {
+                val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+                try {
+                    event.packageName = PACKAGE
+                    blocker.doAppRuleCheck(event)
+                } finally {
+                    event.recycle()
+                }
+            }
+
+            checkPackage()
+            assertTrue(
+                "the foreground event must reach rule evaluation; evaluations=${evaluations.map { evaluation -> evaluation.denyingRules.map { it.ruleId } }}, outcomes=${enforcementOutcomes.map { it.packageDecisions }}",
+                awaitCondition { evaluations.isNotEmpty() }
+            )
+            assertEquals(listOf("night"), evaluations.first().denyingRules.map { it.ruleId })
+            assertTrue(
+                "the denied foreground decision must publish; outcomes=${enforcementOutcomes.map { it.packageDecisions }}",
+                awaitCondition { enforcementOutcomes.isNotEmpty() }
+            )
+            assertEquals(
+                listOf("night"),
+                enforcementOutcomes.first().packageDecisions
+                    .firstOrNull { it.packageName == PACKAGE }?.denyingRuleIds
+            )
+            androidx.test.platform.app.InstrumentationRegistry
+                .getInstrumentation()
+                .runOnMainSync { }
+            assertTrue(
+                "the existing night denial must show the guardian before the GRANTED close broadcast; started=${service.startedActivities.map { it.component?.className }}, guardian=${guardianActivities.size}",
+                awaitCondition { guardianActivities.isNotEmpty() }
+            )
+            val baselineGuardianCount = guardianActivities.size
+            val screenRequestId = guardianActivities.last()
+                .getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                .orEmpty()
+            if (directConfirmation) {
+                val directCoordinator = getField(
+                    blocker,
+                    "guardianApprovalCoordinator"
+                ) as GuardianApprovalCoordinator
+                val receipt = GuardianApprovalGrantReceipt(
+                    ruleId = "usage",
+                    useDayId = useDayId,
+                    grantedAtMs = nowMs,
+                    grantedMillis = 10 * 60_000L
+                )
+                assertTrue(
+                    directCoordinator.beginDirectCheck(
+                        screenRequestId,
+                        "direct-grant-1",
+                        "direct-check-1",
+                        receipt
+                    )
+                )
+                assertTrue(
+                    directCoordinator.completeDirectCheck(
+                        screenRequestId,
+                        "direct-grant-1",
+                        "direct-check-1"
+                    )
+                )
+                assertEquals(null, getField(blocker, "pendingGrantedPackage"))
+            } else {
+                val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+                receiver.onReceive(
+                    service,
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CLOSED)
+                        .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CLOSE_REASON,
+                            GuardianApprovalActivity.REASON_GRANTED
+                        )
+                )
+            }
+            elapsedNowMs += elapsedAdvanceAfterGrantMs
+            checkPackage()
+
+            assertTrue(
+                "the post grant package evaluation must complete",
+                awaitCondition { evaluations.size >= 2 }
+            )
+            assertEquals(
+                listOf("night"),
+                evaluations.last().denyingRules.map { it.ruleId }
+            )
+            assertTrue(
+                "the post grant enforcement decision must complete",
+                awaitCondition { enforcementOutcomes.size >= 2 }
+            )
+            androidx.test.platform.app.InstrumentationRegistry
+                .getInstrumentation()
+                .runOnMainSync { }
+
+            if (directConfirmation) {
+                assertEquals(
+                    "the current guardian screen remains the sole owner after a direct grant",
+                    baselineGuardianCount,
+                    guardianActivities.size
+                )
+                assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+                assertEquals(null, getField(blocker, "pendingGrantedPackage"))
+                val directCoordinator = getField(
+                    blocker,
+                    "guardianApprovalCoordinator"
+                ) as GuardianApprovalCoordinator
+                assertEquals(screenRequestId, directCoordinator.currentOwner()?.screenRequestId)
+            } else {
+                assertTrue(
+                    "the legacy grant path must recheck after its pending window expires; elapsedAdvance=$elapsedAdvanceAfterGrantMs, baseline=$baselineGuardianCount, started=${service.startedActivities.map { it.component?.className }}, guardian=${guardianActivities.size}, evaluations=${evaluations.map { evaluation -> evaluation.denyingRules.map { it.ruleId } }}, outcomes=${enforcementOutcomes.map { it.packageDecisions }}",
+                    awaitCondition { guardianActivities.size > baselineGuardianCount }
+                )
+            }
+        } finally {
+            blocker.onDestroy()
+        }
     }
 
     @Test
