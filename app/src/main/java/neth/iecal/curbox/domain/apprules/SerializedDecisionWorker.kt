@@ -87,7 +87,8 @@ data class GuardianApprovalEvaluationRequest(
 
 enum class GuardianApprovalConfirmationState {
     REFLECTED,
-    SUPERSEDED
+    SUPERSEDED,
+    UNCONFIRMED
 }
 
 enum class GuardianApprovalEvaluationStatus {
@@ -724,7 +725,8 @@ class SerializedDecisionWorker internal constructor(
             publishGuardianApprovalEvaluation(
                 request = request,
                 accepted = accepted,
-                status = GuardianApprovalEvaluationStatus.FAILED
+                status = GuardianApprovalEvaluationStatus.FAILED,
+                confirmationState = GuardianApprovalConfirmationState.UNCONFIRMED
             )
             return
         }
@@ -749,23 +751,19 @@ class SerializedDecisionWorker internal constructor(
                 publishGuardianApprovalEvaluation(
                     request = request,
                     accepted = accepted,
-                    status = GuardianApprovalEvaluationStatus.FAILED
+                    status = GuardianApprovalEvaluationStatus.FAILED,
+                    confirmationState = GuardianApprovalConfirmationState.UNCONFIRMED
                 )
                 return
             }
         }
         if (!isCurrentGuardianApproval(request, accepted)) return
 
-        val confirmationState = if (request.approvalReceipt.isPresentIn(
-                state = accepted.runtime.overrideState,
-                currentUseDayId = useDayId,
-                currentUseDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs
-            )
-        ) {
-            GuardianApprovalConfirmationState.REFLECTED
-        } else {
-            GuardianApprovalConfirmationState.SUPERSEDED
-        }
+        val confirmationState = resolveGuardianApprovalConfirmationState(
+            request = request,
+            runtime = accepted.runtime,
+            currentUseDayId = useDayId
+        )
         publishGuardianApprovalEvaluation(
             request = request,
             accepted = accepted,
@@ -773,6 +771,37 @@ class SerializedDecisionWorker internal constructor(
             confirmationState = confirmationState,
             evaluation = evaluation
         )
+    }
+
+    private fun resolveGuardianApprovalConfirmationState(
+        request: GuardianApprovalEvaluationRequest,
+        runtime: RuleRuntimeSnapshot,
+        currentUseDayId: String
+    ): GuardianApprovalConfirmationState {
+        val receipt = request.approvalReceipt
+        if (receipt.useDayId != currentUseDayId ||
+            receipt.useDayGenerationStartedAtMs != runtime.useDayGenerationStartedAtMs
+        ) return GuardianApprovalConfirmationState.SUPERSEDED
+
+        val currentRule = runtime.snapshot.appRules.firstOrNull { it.id == receipt.ruleId }
+        val effectWasInvalidated = when (receipt) {
+            is GuardianApprovalWorkReceipt.Grant -> currentRule == null ||
+                !currentRule.isActive ||
+                !currentRule.guardianExtraTimeAllowed
+            is GuardianApprovalWorkReceipt.RuleSkip -> currentRule == null || !currentRule.isActive
+        }
+        if (effectWasInvalidated) return GuardianApprovalConfirmationState.SUPERSEDED
+
+        return if (receipt.isPresentIn(
+                state = runtime.overrideState,
+                currentUseDayId = currentUseDayId,
+                currentUseDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs
+            )
+        ) {
+            GuardianApprovalConfirmationState.REFLECTED
+        } else {
+            GuardianApprovalConfirmationState.UNCONFIRMED
+        }
     }
 
     private suspend fun publishGuardianApprovalEvaluation(

@@ -23,6 +23,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import android.view.View
+import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
@@ -526,13 +527,25 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 dataStore.grantAppRuleTime(password, basis, minutes)
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                logApprovalWriteFailure(error)
                 GuardianExtraTimeGrantWrite.Result.Rejected
             }
             withContext(Dispatchers.Main) {
                 if (!canHandleCallbacks()) return@withContext
                 when (result) {
                     is GuardianExtraTimeGrantWrite.Result.StoredWithReceipt -> {
+                        grantInProgress = false
+                        beginApprovalConfirmation(
+                            operationId,
+                            GuardianApprovalWorkReceipt.Grant(
+                                grant = result.receipt,
+                                origin = GuardianApprovalGrantOrigin.DIRECT,
+                                useDayGenerationStartedAtMs = basis.useDayGenerationStartedAtMs
+                            )
+                        )
+                    }
+                    is GuardianExtraTimeGrantWrite.Result.Uncertain -> {
                         grantInProgress = false
                         beginApprovalConfirmation(
                             operationId,
@@ -573,22 +586,35 @@ class GuardianApprovalActivity : AppCompatActivity() {
     ) {
         val operationId = UUID.randomUUID().toString()
         lifecycleScope.launch(Dispatchers.IO) {
+            var receiptForRecovery: GuardianApprovalWorkReceipt.Grant? = null
             val receipt = try {
                 val settings = dataStore.settings.first()
                 val now = System.currentTimeMillis()
                 val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
                 val useDayId = calculator.idAt(now)
+                receiptForRecovery = GuardianApprovalWorkReceipt.Grant(
+                    grant = neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt(
+                        ruleId = ruleId,
+                        useDayId = useDayId,
+                        grantedAtMs = now,
+                        grantedMillis = minutes * 60_000L
+                    ),
+                    origin = GuardianApprovalGrantOrigin.ACCUMULATED_POOL,
+                    useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
+                )
                 dataStore.approveAccumulatedTimeWithReceipt(
                     password = password,
                     ruleId = ruleId,
                     useDayId = useDayId,
                     approvedMinutes = minutes,
+                    expectedUseDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
                     grantedAtMs = now
                 )
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Exception) {
-                null
+            } catch (error: Exception) {
+                logApprovalWriteFailure(error)
+                receiptForRecovery
             }
             withContext(Dispatchers.Main) {
                 if (!canHandleCallbacks()) return@withContext
@@ -606,6 +632,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private fun writeSkip(ruleId: String, password: String, option: Int) {
         val operationId = UUID.randomUUID().toString()
         lifecycleScope.launch(Dispatchers.IO) {
+            var receiptForRecovery: GuardianApprovalWorkReceipt.RuleSkip? = null
             val receipt = try {
                 val settings = dataStore.settings.first()
                 val now = System.currentTimeMillis()
@@ -617,18 +644,27 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     1 -> now + Duration.ofMinutes(30).toMillis()
                     else -> nextReset
                 }
+                receiptForRecovery = GuardianApprovalWorkReceipt.RuleSkip(
+                    ruleId = ruleId,
+                    useDayId = useDayId,
+                    skipFromMs = now.coerceAtLeast(0L),
+                    skipUntilMs = selected.coerceIn(now, nextReset),
+                    useDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs
+                )
                 dataStore.skipAppRuleUntilWithReceipt(
                     password = password,
                     ruleId = ruleId,
                     useDayId = useDayId,
                     selectedUntilMs = selected,
                     nextResetAtMs = nextReset,
+                    expectedUseDayGenerationStartedAtMs = settings.useDayGenerationStartedAtMs,
                     nowMs = now
                 )
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Exception) {
-                null
+            } catch (error: Exception) {
+                logApprovalWriteFailure(error)
+                receiptForRecovery
             }
             withContext(Dispatchers.Main) {
                 if (!canHandleCallbacks()) return@withContext
@@ -660,6 +696,10 @@ class GuardianApprovalActivity : AppCompatActivity() {
             checkId = checkId,
             receipt = receipt
         )
+    }
+
+    private fun logApprovalWriteFailure(error: Exception) {
+        CrashLogger(applicationContext).logNonFatalError(error)
     }
 
     private fun retryApprovalConfirmation() {

@@ -38,6 +38,7 @@ import neth.iecal.curbox.data.models.RuleRolloverPool
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantCandidate
+import neth.iecal.curbox.domain.apprules.GuardianApprovalConfirmationState
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.GuardianSessionRegistry
@@ -54,6 +55,7 @@ import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(AndroidJUnit4::class)
@@ -521,6 +523,7 @@ class GuardianApprovalActivityLifecycleTest {
             unlockDays = (0..6).toSet(),
             guardianExtraTimeAllowed = true
         )
+        val ambiguousCommitCount = AtomicInteger(0)
         val seededSnapshot = originalSnapshot.copy(
             appRules = originalSnapshot.appRules + rule
         ).normalized()
@@ -567,6 +570,10 @@ class GuardianApprovalActivityLifecycleTest {
                 awaitDisplayed(R.id.approval_use_accumulated_time)
                 onView(withId(R.id.approval_use_accumulated_time)).perform(click())
                 awaitDisplayed(R.id.accumulated_minutes_input, inDialog = true)
+                DataStoreManager.guardianApprovalWriteCommitObserverForTest = {
+                    ambiguousCommitCount.incrementAndGet()
+                    throw java.io.IOException("injected failure after the settings commit")
+                }
                 onView(withText(R.string.guardian_apply))
                     .inRoot(isDialog())
                     .perform(click())
@@ -583,6 +590,7 @@ class GuardianApprovalActivityLifecycleTest {
                 }
                 val stored = requests.poll(5, TimeUnit.SECONDS)
                     ?: error("The accumulated grant did not start the shared confirmation check")
+                DataStoreManager.guardianApprovalWriteCommitObserverForTest = null
                 assertEquals(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED, stored.action)
                 assertEquals(
                     GuardianApprovalActivity.APPROVAL_KIND_ACCUMULATED,
@@ -593,6 +601,7 @@ class GuardianApprovalActivityLifecycleTest {
                 assertEquals(20L, storedSettings.appRuleOverrideState.grants
                     .single { it.ruleId == ruleId }
                     .grantedMillis / 60_000L)
+                assertEquals("the uncertain write committed once", 1, ambiguousCommitCount.get())
                 val operationId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
                 val screenRequestId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
                 val firstCheckId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
@@ -608,6 +617,10 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
                         )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATE,
+                            GuardianApprovalConfirmationState.UNCONFIRMED.name.lowercase()
+                        )
                 )
                 awaitDisplayed(R.id.approval_confirmation_retry)
                 onView(withId(R.id.approval_confirmation_retry)).perform(click())
@@ -621,9 +634,36 @@ class GuardianApprovalActivityLifecycleTest {
                     stored.getLongExtra(GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS, -1L),
                     retry.getLongExtra(GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS, -2L)
                 )
-                val afterRetry = runBlocking { dataStore.settings.first() }
-                assertEquals(storedSettings.appRuleRolloverState, afterRetry.appRuleRolloverState)
-                assertEquals(storedSettings.appRuleOverrideState, afterRetry.appRuleOverrideState)
+                val supersedingSnapshot = seededSnapshot.copy(
+                    appRules = seededSnapshot.appRules.map {
+                        if (it.id == ruleId) it.copy(guardianExtraTimeAllowed = false) else it
+                    }
+                )
+                assertTrue(runBlocking { dataStore.updateAppRuleSnapshot(supersedingSnapshot) })
+                val supersedingSettings = runBlocking {
+                    withTimeout(5_000L) {
+                        dataStore.settings.first {
+                            it.appRuleSnapshot == supersedingSnapshot &&
+                                it.appRuleOverrideState.grants.none { grant -> grant.ruleId == ruleId }
+                        }
+                    }
+                }
+                assertEquals(0L, supersedingSettings.appRuleRolloverState.pools[ruleId]?.accumulatedMinutes)
+                assertEquals(1, ambiguousCommitCount.get())
+
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, firstCheckId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity -> assertDenialReason(activity, "Accumulated test rule") }
 
                 context.sendBroadcast(
                     Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
@@ -643,21 +683,43 @@ class GuardianApprovalActivityLifecycleTest {
                             com.google.gson.Gson().toJson(
                                 listOf(
                                     AppRuleGuardianDenial(
-                                        ruleId = "night",
-                                        ruleName = "Night rule",
-                                        reason = "Night restriction"
+                                        ruleId = ruleId,
+                                        ruleName = "Updated test rule",
+                                        reason = "Extra time was turned off"
                                     )
                                 )
                             )
                         )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATE,
+                            GuardianApprovalConfirmationState.SUPERSEDED.name.lowercase()
+                        )
                 )
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-                scenario.onActivity { activity -> assertDenialReason(activity, "Night rule") }
+                scenario.onActivity { activity -> assertDenialReason(activity, "Updated test rule") }
                 onView(withId(R.id.approval_confirmation_retry))
                     .check(matches(withEffectiveVisibility(Visibility.GONE)))
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, firstCheckId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity -> assertDenialReason(activity, "Updated test rule") }
                 assertTrue("an accumulated grant must not use the legacy close route", requests.isEmpty())
+                val afterRetry = runBlocking { dataStore.settings.first() }
+                assertEquals(supersedingSettings.appRuleRolloverState, afterRetry.appRuleRolloverState)
+                assertEquals(supersedingSettings.appRuleOverrideState, afterRetry.appRuleOverrideState)
+                assertEquals(1, ambiguousCommitCount.get())
             }
         } finally {
+            DataStoreManager.guardianApprovalWriteCommitObserverForTest = null
             val currentSettings = runBlocking { dataStore.settings.first() }
             runBlocking {
                 dataStore.writeManualAppRuleRolloverPool(

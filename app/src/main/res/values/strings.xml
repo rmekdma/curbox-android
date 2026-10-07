@@ -1444,6 +1444,7 @@
     <string name="guardian_password_hint">Password</string>
     <string name="guardian_wrong_password">That password is wrong.</string>
     <string name="guardian_write_failed">Could not save the approval.</string>
+    <string name="guardian_write_uncertain">We could not check if the change was saved. Check the current total before trying again.</string>
     <string name="guardian_confirmation_checking">Checking the saved approval…</string>
     <string name="guardian_confirmation_failed">We could not check the saved approval. Try again.</string>
     <string name="guardian_confirmation_retry">Check again</string>

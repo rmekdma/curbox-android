@@ -2497,13 +2497,19 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             }
             return
         }
+        val evaluation = outcome.evaluation
         if (outcome.status != GuardianApprovalEvaluationStatus.COMPLETED ||
-            outcome.evaluation == null
+            evaluation == null ||
+            (outcome.confirmationState ==
+                neth.iecal.curbox.domain.apprules.GuardianApprovalConfirmationState.UNCONFIRMED &&
+                !evaluation.isAllowed)
         ) {
-            failGuardianCheckIfCurrent(request.checkIdentity())
+            failGuardianCheckIfCurrent(
+                request.checkIdentity(),
+                confirmationState = outcome.confirmationState
+            )
             return
         }
-        val evaluation = outcome.evaluation
         if (!evaluation.isAllowed) {
             val completed = completeGuardianCheck(request)
             if (completed) {
@@ -2649,7 +2655,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         )
 
     private fun failGuardianCheckIfCurrent(
-        identity: GuardianApprovalCoordinator.CheckIdentity
+        identity: GuardianApprovalCoordinator.CheckIdentity,
+        confirmationState: neth.iecal.curbox.domain.apprules.GuardianApprovalConfirmationState? = null
     ) {
         val failed = synchronized(runtimeLock) {
             val completed = guardianApprovalCoordinator.completeConfirmation(identity)
@@ -2664,7 +2671,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 identity.screenRequestId,
                 identity.operationId,
                 identity.checkId,
-                GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+                GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED,
+                confirmationState = confirmationState
             )
         }
     }

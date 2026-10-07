@@ -105,7 +105,7 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
-    fun guardianApprovalCheckDoesNotCallMissingReceiptReflected() {
+    fun guardianApprovalCheckKeepsMissingReceiptUnconfirmedWhileRuleIsStillValid() {
         val outcomes = RecordingOutcomeSink()
         val wallNow = 2_000L
         val useDayId = ConfigurableUseDayCalculator().idAt(wallNow)
@@ -148,6 +148,175 @@ class SerializedDecisionWorkerTest {
             assertTrue(outcomes.awaitGuardianApprovalCount(1))
             val result = outcomes.guardianApprovalEvaluations.single()
             assertEquals(GuardianApprovalEvaluationStatus.COMPLETED, result.status)
+            assertEquals(GuardianApprovalConfirmationState.UNCONFIRMED, result.confirmationState)
+            assertEquals(listOf("usage", "night"), result.evaluation?.denyingRules?.map { it.ruleId })
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun guardianApprovalCheckTreatsAChangedUseDayOrRevokedRuleAsSuperseded() {
+        val wallNow = 2_000_000_000L
+        val originalUseDayId = ConfigurableUseDayCalculator().idAt(wallNow)
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            GuardianApprovalGrantReceipt(
+                ruleId = "usage",
+                useDayId = originalUseDayId,
+                grantedAtMs = wallNow - 100L,
+                grantedMillis = 15 * 60_000L
+            ),
+            GuardianApprovalGrantOrigin.DIRECT,
+            7L
+        )
+        val base = approvalRuntime(
+            revision = RuntimeRevision(40L),
+            useDayId = originalUseDayId,
+            receipt = null,
+            useDayGenerationStartedAtMs = 7L
+        )
+        val usageRule = base.runtime.snapshot.appRules.first { it.id == "usage" }
+        val nightRule = base.runtime.snapshot.appRules.first { it.id == "night" }
+        val changedUseDayId = ConfigurableUseDayCalculator().idAt(wallNow + 86_400_000L)
+        val supersedingRuntimes = listOf(
+            base.copy(
+                runtime = base.runtime.copy(
+                    useDayGenerationStartedAtMs = 8L,
+                    overrideState = base.runtime.overrideState.copy(
+                        useDayId = changedUseDayId,
+                        useDayGenerationStartedAtMs = 8L
+                    )
+                )
+            ),
+            base.copy(
+                runtime = base.runtime.copy(
+                    snapshot = base.runtime.snapshot.copy(appRules = listOf(nightRule))
+                )
+            ),
+            base.copy(
+                runtime = base.runtime.copy(
+                    snapshot = base.runtime.snapshot.copy(
+                        appRules = listOf(usageRule.copy(guardianExtraTimeAllowed = false), nightRule)
+                    )
+                )
+            ),
+            base.copy(
+                runtime = base.runtime.copy(
+                    snapshot = base.runtime.snapshot.copy(appRules = emptyList())
+                )
+            )
+        )
+
+        supersedingRuntimes.forEachIndexed { index, acceptedRuntime ->
+            val outcomes = RecordingOutcomeSink()
+            val worker = worker(
+                repository = RecordingRepository(),
+                sink = outcomes,
+                acceptedRuntime = acceptedRuntime.copy(
+                    runtimeRevision = RuntimeRevision(41L + index)
+                )
+            )
+            try {
+                assertEquals(
+                    SubmissionResult.ACCEPTED,
+                    worker.submitGuardianApprovalEvaluation(
+                        guardianApprovalRequest(
+                            sourceOrder = 41L + index,
+                            operationId = "superseded-$index",
+                            checkId = "check-$index",
+                            receipt = receipt,
+                            capturedAtMs = wallNow + if (index == 0) 86_400_000L else 0L
+                        )
+                    )
+                )
+                assertTrue(outcomes.awaitGuardianApprovalCount(1))
+                val result = outcomes.guardianApprovalEvaluations.single()
+                assertEquals(GuardianApprovalEvaluationStatus.COMPLETED, result.status)
+                assertEquals(GuardianApprovalConfirmationState.SUPERSEDED, result.confirmationState)
+                if (index == 1) {
+                    assertEquals(listOf("night"), result.evaluation?.denyingRules?.map { it.ruleId })
+                }
+                if (index == 3) {
+                    assertTrue("current rules all allow after the approved rule was removed", result.evaluation?.isAllowed == true)
+                }
+            } finally {
+                worker.stop(recoveryStop(LifecycleGeneration(1L)))
+            }
+        }
+    }
+
+    @Test
+    fun guardianApprovalCheckUsesLatestSettingsAfterDelayedOlderPublication() {
+        val outcomes = RecordingOutcomeSink()
+        val wallNow = 2_000_000_000L
+        val useDayId = ConfigurableUseDayCalculator().idAt(wallNow)
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            grant = GuardianApprovalGrantReceipt(
+                ruleId = "usage",
+                useDayId = useDayId,
+                grantedAtMs = wallNow - 100L,
+                grantedMillis = 15 * 60_000L
+            ),
+            origin = GuardianApprovalGrantOrigin.DIRECT,
+            useDayGenerationStartedAtMs = 7L
+        )
+        val current = approvalRuntime(
+            revision = RuntimeRevision(42L),
+            useDayId = useDayId,
+            receipt = null,
+            useDayGenerationStartedAtMs = 7L
+        ).let { accepted ->
+            val currentRules = accepted.runtime.snapshot.appRules.map {
+                if (it.id == "usage") it.copy(guardianExtraTimeAllowed = false) else it
+            }
+            accepted.copy(
+                runtime = accepted.runtime.copy(
+                    snapshot = accepted.runtime.snapshot.copy(appRules = currentRules)
+                )
+            )
+        }
+        val worker = worker(
+            repository = RecordingRepository(),
+            sink = outcomes,
+            acceptedRuntime = current
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(
+                    request(
+                        sourceOrder = 41L,
+                        lifecycle = 1L,
+                        packageName = TARGET_PACKAGE,
+                        runtimePublication = RuntimePublication(
+                            runtimeRevision = RuntimeRevision(41L),
+                            candidateRuntime = approvalRuntime(
+                                revision = RuntimeRevision(41L),
+                                useDayId = useDayId,
+                                receipt = receipt,
+                                useDayGenerationStartedAtMs = 7L
+                            ).runtime
+                        )
+                    )
+                )
+            )
+            assertTrue("delayed old settings publication did not drain", outcomes.awaitIdle())
+
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitGuardianApprovalEvaluation(
+                    guardianApprovalRequest(
+                        sourceOrder = 43L,
+                        operationId = "latest-settings",
+                        checkId = "check-latest-settings",
+                        receipt = receipt,
+                        capturedAtMs = wallNow
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitGuardianApprovalCount(1))
+            val result = outcomes.guardianApprovalEvaluations.single()
+            assertEquals(RuntimeRevision(42L), result.acceptedRuntimeRevision)
             assertEquals(GuardianApprovalConfirmationState.SUPERSEDED, result.confirmationState)
             assertEquals(listOf("usage", "night"), result.evaluation?.denyingRules?.map { it.ruleId })
         } finally {
