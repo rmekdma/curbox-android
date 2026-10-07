@@ -2,7 +2,7 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 
-/** Owns one guardian screen request and the operation currently allowed to complete it. */
+/** Owns one guardian screen request and its current confirmation. */
 class GuardianApprovalCoordinator {
     enum class ConfirmationPhase {
         CHECKING,
@@ -10,20 +10,18 @@ class GuardianApprovalCoordinator {
         TIMED_OUT
     }
 
-    sealed interface Operation {
-        data class Confirmation(
-            val operationId: String,
-            val checkId: String,
-            val receipt: GuardianApprovalWorkReceipt,
-            val phase: ConfirmationPhase
-        ) : Operation
-    }
+    data class Confirmation(
+        val operationId: String,
+        val checkId: String,
+        val receipt: GuardianApprovalWorkReceipt,
+        val phase: ConfirmationPhase
+    )
 
     data class Owner(
         val screenRequestId: String,
         val packageName: String,
         val lifecycleGeneration: LifecycleGeneration,
-        val operation: Operation? = null
+        val confirmation: Confirmation? = null
     )
 
     data class CheckIdentity(
@@ -63,7 +61,7 @@ class GuardianApprovalCoordinator {
         if (current.screenRequestId != screenRequestId ||
             operationId.isBlank() || checkId.isBlank()
         ) return@synchronized false
-        val previous = current.operation as? Operation.Confirmation
+        val previous = current.confirmation
         if (previous != null) {
             if (previous.phase == ConfirmationPhase.CHECKING) return@synchronized false
             if (previous.operationId == operationId && previous.checkId == checkId) {
@@ -74,7 +72,7 @@ class GuardianApprovalCoordinator {
             }
         }
         owner = current.copy(
-            operation = Operation.Confirmation(
+            confirmation = Confirmation(
                 operationId = operationId,
                 checkId = checkId,
                 receipt = receipt,
@@ -91,7 +89,7 @@ class GuardianApprovalCoordinator {
         receipt: GuardianApprovalWorkReceipt? = null
     ): Boolean = synchronized(lock) {
         val current = owner ?: return@synchronized false
-        val previous = current.operation as? Operation.Confirmation ?: return@synchronized false
+        val previous = current.confirmation ?: return@synchronized false
         if (current.screenRequestId != screenRequestId ||
             previous.operationId != operationId ||
             previous.phase == ConfirmationPhase.CHECKING ||
@@ -99,7 +97,7 @@ class GuardianApprovalCoordinator {
             (receipt != null && previous.receipt != receipt)
         ) return@synchronized false
         owner = current.copy(
-            operation = previous.copy(
+            confirmation = previous.copy(
                 checkId = checkId,
                 phase = ConfirmationPhase.CHECKING
             )
@@ -121,18 +119,16 @@ class GuardianApprovalCoordinator {
             current.lifecycleGeneration != lifecycleGeneration
         ) return@synchronized false
 
-        val previous = current.operation
+        val previous = current.confirmation
         if (previous != null) {
-            val confirmation = previous as? Operation.Confirmation
-                ?: return@synchronized false
-            if (confirmation.operationId != operationId || confirmation.receipt != receipt) {
+            if (previous.operationId != operationId || previous.receipt != receipt) {
                 return@synchronized false
             }
-            if (confirmation.checkId == checkId) return@synchronized false
+            if (previous.checkId == checkId) return@synchronized false
         }
 
         owner = current.copy(
-            operation = Operation.Confirmation(
+            confirmation = Confirmation(
                 operationId = operationId,
                 checkId = checkId,
                 receipt = receipt,
@@ -162,14 +158,14 @@ class GuardianApprovalCoordinator {
         nextPhase: ConfirmationPhase
     ): Boolean = synchronized(lock) {
         val current = owner ?: return@synchronized false
-        val confirmation = current.operation as? Operation.Confirmation ?: return@synchronized false
+        val confirmation = current.confirmation ?: return@synchronized false
         if (current.screenRequestId != identity.screenRequestId ||
             current.lifecycleGeneration != identity.lifecycleGeneration ||
             confirmation.operationId != identity.operationId ||
             confirmation.checkId != identity.checkId ||
             confirmation.phase != ConfirmationPhase.CHECKING
         ) return@synchronized false
-        owner = current.copy(operation = confirmation.copy(phase = nextPhase))
+        owner = current.copy(confirmation = confirmation.copy(phase = nextPhase))
         true
     }
 

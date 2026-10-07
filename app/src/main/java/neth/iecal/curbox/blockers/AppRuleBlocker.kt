@@ -2574,7 +2574,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 )
             }
             if (!accepted) {
-                val current = guardianApprovalCoordinator.currentOwner()?.operation
+                val current = guardianApprovalCoordinator.currentOwner()?.confirmation
                 logGuardianCheckTestRejection(
                     operationId,
                     checkId,
@@ -2720,15 +2720,14 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val owner = synchronized(runtimeLock) {
             if (!isReadyForChecks(connectionGeneration)) return
             val current = guardianApprovalCoordinator.currentOwner() ?: return
-            val confirmation = current.operation as? GuardianApprovalCoordinator.Operation.Confirmation
-                ?: return
+            val confirmation = current.confirmation ?: return
             if (current.lifecycleGeneration != LifecycleGeneration(connectionGeneration) ||
                 confirmation.phase != GuardianApprovalCoordinator.ConfirmationPhase.CHECKING ||
                 activeGuardianPackage != current.packageName
             ) return
             current
         }
-        val confirmation = owner.operation as? GuardianApprovalCoordinator.Operation.Confirmation ?: return
+        val confirmation = owner.confirmation ?: return
         val worker = ensureDecisionWorker(connectionGeneration) ?: run {
             failGuardianCheckIfCurrent(
                 GuardianApprovalCoordinator.CheckIdentity(
@@ -2842,8 +2841,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val request = outcome.request
         if (!isCurrentGuardianApprovalCheck(request)) {
             if (BuildConfig.DEBUG) {
-                val currentCheck = guardianApprovalCoordinator.currentOwner()
-                    ?.operation as? GuardianApprovalCoordinator.Operation.Confirmation
+                val currentCheck = guardianApprovalCoordinator.currentOwner()?.confirmation
                 Log.i(
                     GUARDIAN_APPROVAL_TEST_LOG_TAG,
                     "service_outcome_ignored operation=${request.operationId} " +
@@ -3056,8 +3054,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             activeGuardianPackage != request.packageName
         ) return false
         val owner = guardianApprovalCoordinator.currentOwner() ?: return false
-        val confirmation = owner.operation as? GuardianApprovalCoordinator.Operation.Confirmation
-            ?: return false
+        val confirmation = owner.confirmation ?: return false
         return owner.screenRequestId == request.screenRequestId &&
             owner.packageName == request.packageName &&
             owner.lifecycleGeneration == request.lifecycleGeneration &&

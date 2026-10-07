@@ -33,7 +33,7 @@ $backupFile = Join-Path $tmpDir "settings_backup.json"
 $packageName = "neth.iecal.curbox.debug"
 $passedAll = $true
 
-function New-DirectConfirmationRuleSnapshot(
+function New-GuardianApprovalRuleSnapshot(
     [string]$TargetPackage,
     [string]$GroupId,
     [string]$UsageRuleId,
@@ -43,7 +43,7 @@ function New-DirectConfirmationRuleSnapshot(
 ) {
     $targetGroup = New-TestAppGroup `
         -GroupId $GroupId `
-        -GroupName "Direct grant target" `
+        -GroupName "Guardian approval target" `
         -Packages @($TargetPackage)
     $usageRule = [PSCustomObject]@{
         id = $UsageRuleId
@@ -460,7 +460,7 @@ try {
     $nightRuleId = "night-direct-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $usageRuleId = "usage-direct-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $groupId = "direct-target-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $nightFixture = New-DirectConfirmationRuleSnapshot `
+    $nightFixture = New-GuardianApprovalRuleSnapshot `
         -TargetPackage $TargetPackage `
         -GroupId $groupId `
         -UsageRuleId $usageRuleId `
@@ -521,7 +521,7 @@ try {
     $accumulatedRuleId = "usage-accumulated-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $accumulatedNightRuleId = "night-accumulated-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $accumulatedGroupId = "accumulated-target-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $accumulatedFixture = New-DirectConfirmationRuleSnapshot `
+    $accumulatedFixture = New-GuardianApprovalRuleSnapshot `
         -TargetPackage $TargetPackage `
         -GroupId $accumulatedGroupId `
         -UsageRuleId $accumulatedRuleId `
@@ -583,7 +583,7 @@ try {
     $skipRuleId = "usage-skip-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $skipNightRuleId = "night-skip-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $skipGroupId = "skip-target-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $skipFixture = New-DirectConfirmationRuleSnapshot `
+    $skipFixture = New-GuardianApprovalRuleSnapshot `
         -TargetPackage $TargetPackage `
         -GroupId $skipGroupId `
         -UsageRuleId $skipRuleId `
@@ -609,15 +609,26 @@ try {
         $passedAll = $false
     }
     $skipAfter = Get-DeviceSettings -AsObject
-    $minimumSkipUntilMs = [DateTimeOffset]::Now.AddMinutes(14).ToUnixTimeMilliseconds()
-    if ((Test-AppRuleSkip `
+    $skipCheckTimeSeconds = Get-TestDeviceShellOutput -Command "date +%s"
+    if ($skipCheckTimeSeconds -notmatch '^\d+$') {
+        throw "Could not read device epoch time to verify the skip ledger: $skipCheckTimeSeconds"
+    }
+    $skipCheckTimeMs = [long]$skipCheckTimeSeconds * 1000
+    $minimumSkipUntilMs = $skipCheckTimeMs
+    $skipRecorded = Test-AppRuleSkip `
         -OverrideState $skipAfter.appRuleOverrideState `
         -RuleId $skipRuleId `
-        -MinSkipUntilMs $minimumSkipUntilMs) -and
-        @($skipAfter.appRuleOverrideState.grants).Count -eq 0) {
+        -MinSkipUntilMs $minimumSkipUntilMs
+    $skipRecords = @($skipAfter.appRuleOverrideState.skips | Where-Object { $_.ruleId -eq $skipRuleId })
+    $skipIntervalIsActive = $skipRecords.Count -eq 1 -and
+        [long]$skipRecords[0].skipFromMs -le $skipCheckTimeMs -and
+        [long]$skipRecords[0].skipUntilMs -gt $skipCheckTimeMs
+    $skipGrantCount = @($skipAfter.appRuleOverrideState.grants).Count
+    if ($skipRecorded -and $skipIntervalIsActive -and $skipGrantCount -eq 0) {
         Write-Success "The skip ledger contains only the UsageRule interval; no grant was written."
     } else {
-        Write-Fail "The skip ledger did not contain the expected single active UsageRule skip."
+        $skipLedger = $skipRecords | ConvertTo-Json -Depth 5 -Compress
+        Write-Fail "The skip ledger did not contain the expected active UsageRule skip. recorded=$skipRecorded active=$skipIntervalIsActive grants=$skipGrantCount expectedRule=$skipRuleId currentDeviceTimeMs=$skipCheckTimeMs ledger=$skipLedger"
         $passedAll = $false
     }
 
@@ -626,7 +637,7 @@ try {
     Start-Sleep -Seconds 1
     $controlRuleId = "usage-control-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $controlGroupId = "control-target-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $allAllowFixture = New-DirectConfirmationRuleSnapshot `
+    $allAllowFixture = New-GuardianApprovalRuleSnapshot `
         -TargetPackage $TargetPackage `
         -GroupId $controlGroupId `
         -UsageRuleId $controlRuleId
@@ -638,15 +649,32 @@ try {
     Invoke-TestDeviceShell -Command "logcat -c"
     Invoke-TestDeviceShell -Command "am force-stop $TargetPackage"
     Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
-    $usageOnlyUi = Wait-For-UI "approval_add_time|UsageRule" 10
-    $usageOnlyFocus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
-    if ($usageOnlyFocus.Success -and $usageOnlyUi -match "UsageRule") {
+    $controlActivityWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $controlActivityLine = ""
+    $usageOnlyFocus = $null
+    while ($controlActivityWatch.Elapsed.TotalSeconds -lt 15) {
+        $logs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
+        $controlActivityLine = @(
+            $logs -split "`r?`n" |
+                Where-Object { $_ -match "activity_created .*denials=" } |
+                Select-Object -Last 1
+        )
+        $usageOnlyFocus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+        if ($controlActivityLine -and $usageOnlyFocus.Success) { break }
+        Start-Sleep -Milliseconds 300
+    }
+    $controlCaseReady = $controlActivityLine -and
+        $controlActivityLine -match "denials=UsageRule" -and
+        $usageOnlyFocus -and $usageOnlyFocus.Success
+    if ($controlCaseReady) {
         Write-Success "The control case begins with an actual UsageRule denial before saving its grant."
     } else {
-        Write-Fail "The all-allow control did not start with a UsageRule denial."
+        Write-Fail "The all-allow control did not reach GuardianApprovalActivity with a real UsageRule denial. Activity: $controlActivityLine; focus: $($usageOnlyFocus.RawFocus)"
         $passedAll = $false
     }
-    if (Invoke-DirectGuardianGrant -RuleName "UsageRule" -CandidateCount 1) {
+    $controlGrantSaved = $false
+    if ($controlCaseReady -and (Invoke-DirectGuardianGrant -RuleName "UsageRule" -CandidateCount 1)) {
+        $controlGrantSaved = $true
         Write-Success "Saved the UsageRule grant in the separate all-allow control."
     } else {
         Write-Fail "Could not save the all-allow control grant."
@@ -659,15 +687,20 @@ try {
         if ($allowedLaunch.Success) { break }
         Start-Sleep -Milliseconds 500
     }
-    if ($allowedLaunch -and $allowedLaunch.Success) {
-        Write-Success "When the fresh evaluation allows every rule, the requested app launches."
-    } else {
+    if (-not ($allowedLaunch -and $allowedLaunch.Success)) {
         Write-Fail "The all-allow control did not launch the requested app. Focus: $($allowedLaunch.RawFocus)"
         $passedAll = $false
     }
     $allAllowLogs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
-    if ($allAllowLogs -match "service_check_received action=neth\.iecal\.curbox\.guardian\.approval\.stored .*receipt_valid=true" -and
-        $allAllowLogs -match "check_request test=- action=neth\.iecal\.curbox\.guardian\.approval\.stored .*kind=direct_grant rule=$([regex]::Escape($controlRuleId))") {
+    $allAllowReceiptReceived = $allAllowLogs -match "service_check_received action=neth\.iecal\.curbox\.guardian\.approval\.stored .*receipt_valid=true" -and
+        $allAllowLogs -match "check_request test=- action=neth\.iecal\.curbox\.guardian\.approval\.stored .*kind=direct_grant rule=$([regex]::Escape($controlRuleId))"
+    if ($controlGrantSaved -and $allAllowReceiptReceived -and $allowedLaunch -and $allowedLaunch.Success) {
+        Write-Success "After a valid stored receipt, the fresh all-allow evaluation launches the requested app."
+    } else {
+        Write-Fail "The all-allow control did not complete a stored receipt before the target app was allowed."
+        $passedAll = $false
+    }
+    if ($allAllowReceiptReceived) {
         Write-Success "The all-allow control also used the shared typed receipt path."
     } else {
         Write-Fail "The all-allow launch did not show a valid shared confirmation receipt in both processes."

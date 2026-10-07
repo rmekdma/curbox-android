@@ -1126,13 +1126,13 @@ class AppRuleBlockerRecheckTest {
             )
         )
         assertEquals(
-            GuardianApprovalCoordinator.Operation.Confirmation(
+            GuardianApprovalCoordinator.Confirmation(
                 operationId = operationId,
                 checkId = currentCheckId,
                 receipt = receipt,
                 phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
             ),
-            coordinator.currentOwner()?.operation
+            coordinator.currentOwner()?.confirmation
         )
 
         receiver.onReceive(
@@ -1157,13 +1157,13 @@ class AppRuleBlockerRecheckTest {
         )
         assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
         assertEquals(
-            GuardianApprovalCoordinator.Operation.Confirmation(
+            GuardianApprovalCoordinator.Confirmation(
                 operationId = operationId,
                 checkId = currentCheckId,
                 receipt = receipt,
                 phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
             ),
-            coordinator.currentOwner()?.operation
+            coordinator.currentOwner()?.confirmation
         )
         blocker.onDestroy()
     }
@@ -1204,13 +1204,13 @@ class AppRuleBlockerRecheckTest {
         )
 
         assertEquals(
-            GuardianApprovalCoordinator.Operation.Confirmation(
+            GuardianApprovalCoordinator.Confirmation(
                 operationId = operationId,
                 checkId = firstCheckId,
                 receipt = receipt,
                 phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
             ),
-            coordinator.currentOwner()?.operation
+            coordinator.currentOwner()?.confirmation
         )
         assertTrue(
             coordinator.timeOutConfirmation(
@@ -1235,13 +1235,13 @@ class AppRuleBlockerRecheckTest {
             )
         )
         assertEquals(
-            GuardianApprovalCoordinator.Operation.Confirmation(
+            GuardianApprovalCoordinator.Confirmation(
                 operationId = operationId,
                 checkId = retryCheckId,
                 receipt = receipt,
                 phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
             ),
-            coordinator.currentOwner()?.operation
+            coordinator.currentOwner()?.confirmation
         )
 
         receiver.onReceive(
@@ -1258,8 +1258,7 @@ class AppRuleBlockerRecheckTest {
         assertEquals(
             "a duplicate retry must not replace or complete the current request",
             retryCheckId,
-            (coordinator.currentOwner()?.operation as? GuardianApprovalCoordinator.Operation.Confirmation)
-                ?.checkId
+            coordinator.currentOwner()?.confirmation?.checkId
         )
         blocker.onDestroy()
     }

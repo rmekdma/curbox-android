@@ -45,16 +45,16 @@ class GuardianApprovalCoordinatorTest {
         assertTrue(coordinator.retryConfirmation("screen-1", "grant-1", "check-2"))
 
         val current = coordinator.currentOwner()
-        assertEquals("grant-1", (current?.operation as GuardianApprovalCoordinator.Operation.Confirmation).operationId)
-        assertEquals("check-2", (current.operation as GuardianApprovalCoordinator.Operation.Confirmation).checkId)
+        assertEquals("grant-1", current?.confirmation?.operationId)
+        assertEquals("check-2", current?.confirmation?.checkId)
         assertEquals(
             workReceipt,
-            (current.operation as GuardianApprovalCoordinator.Operation.Confirmation).receipt
+            current?.confirmation?.receipt
         )
         assertFalse(coordinator.completeConfirmation(expiredCheck))
         assertEquals(
             GuardianApprovalCoordinator.ConfirmationPhase.CHECKING,
-            (coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Confirmation).phase
+            coordinator.currentOwner()?.confirmation?.phase
         )
         assertTrue(
             coordinator.completeConfirmation(
@@ -145,13 +145,13 @@ class GuardianApprovalCoordinatorTest {
             )
         )
         assertEquals(
-            GuardianApprovalCoordinator.Operation.Confirmation(
+            GuardianApprovalCoordinator.Confirmation(
                 operationId = "grant-live",
                 checkId = "check-current",
                 receipt = approval,
                 phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
             ),
-            coordinator.currentOwner()?.operation
+            coordinator.currentOwner()?.confirmation
         )
         assertTrue(
             coordinator.completeConfirmation(
@@ -200,7 +200,7 @@ class GuardianApprovalCoordinatorTest {
 
         val current = coordinator.currentOwner()
         assertEquals("screen-3", current?.screenRequestId)
-        assertEquals("grant-4", (current?.operation as GuardianApprovalCoordinator.Operation.Confirmation).operationId)
+        assertEquals("grant-4", current?.confirmation?.operationId)
     }
 
     @Test
@@ -240,7 +240,8 @@ class GuardianApprovalCoordinatorTest {
         assertFalse(coordinator.completeConfirmation(firstCheck))
         assertTrue(coordinator.retryConfirmation("screen-5", "acc-1", "check-2"))
         assertFalse(coordinator.completeConfirmation(firstCheck))
-        val current = coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Confirmation
+        val current = coordinator.currentOwner()?.confirmation
+            ?: error("The accumulated confirmation should remain current.")
         assertEquals(receipt, current.receipt)
         assertEquals("check-2", current.checkId)
         val retry = firstCheck.copy(checkId = "check-2")
@@ -261,7 +262,8 @@ class GuardianApprovalCoordinatorTest {
         assertTrue(coordinator.openScreen("screen-6", TARGET_PACKAGE, LifecycleGeneration(8L)))
         assertTrue(coordinator.beginConfirmation("screen-6", "skip-1", "check-1", receipt))
 
-        val current = coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Confirmation
+        val current = coordinator.currentOwner()?.confirmation
+            ?: error("The skip confirmation should remain current.")
         assertEquals(receipt, current.receipt)
         val check = GuardianApprovalCoordinator.CheckIdentity(
             screenRequestId = "screen-6",
