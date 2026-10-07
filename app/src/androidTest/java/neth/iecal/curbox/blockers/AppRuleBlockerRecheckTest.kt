@@ -1396,71 +1396,13 @@ class AppRuleBlockerRecheckTest {
         assertEquals(null, getField(blocker, "activeGuardianPackage"))
         assertEquals(0L, getField(blocker, "lastShownAt"))
         assertEquals(listOf(50L), postedDelays)
-        assertEquals(null, getField(blocker, "pendingGrantedPackage"))
         blocker.onDestroy()
     }
 
     @Test
-    fun guardianClosedWithGrantedReasonSuppressesWarningWithoutImmediateRecheck() {
-        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
-        val postedDelays = mutableListOf<Long>()
-        val blocker = AppRuleBlocker().apply {
-            visibleApplicationCheckPostDelayed = { _, delayMs ->
-                postedDelays.add(delayMs)
-                true
-            }
-        }
-        setField(blocker, "service", service)
-        setField(blocker, "setupReady", true)
-        val requestId = "guardian-granted-close"
-        val operationId = "guardian-legacy-operation"
-        openGuardianOwnerForTest(blocker, PACKAGE, requestId, TEST_GUARDIAN_CONNECTION_ID)
-        assertTrue(
-            (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
-                .beginLegacyOperation(requestId, operationId)
-        )
-        setField(blocker, "lastShownAt", 5000L)
-
-        val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
-        receiver.onReceive(
-            service,
-            guardianLifecycleIntent(
-                GuardianApprovalActivity.INTENT_ACTION_CLOSED,
-                PACKAGE,
-                requestId,
-                TEST_GUARDIAN_CONNECTION_ID
-            )
-                .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
-                .putExtra(
-                    GuardianApprovalActivity.EXTRA_CLOSE_REASON,
-                    GuardianApprovalActivity.REASON_GRANTED
-                )
-        )
-
-        assertEquals(null, getField(blocker, "activeGuardianPackage"))
-        assertEquals(PACKAGE, getField(blocker, "pendingGrantedPackage"))
-        assertTrue(postedDelays.isEmpty())
-        blocker.onDestroy()
-    }
-
-    @Test
-    fun grantingUsageRuleStillShowsUnrelatedNightDenialAfterGuardianCloses() =
-        assertNightDenialShowsAfterGrantClose(
-            elapsedAdvanceAfterGrantMs = 0L,
-            directConfirmation = true
-        )
-
-    @Test
-    fun nightDenialShowsAfterPendingGrantWindowExpires() =
-        assertNightDenialShowsAfterGrantClose(elapsedAdvanceAfterGrantMs = 5_001L)
-
-    private fun assertNightDenialShowsAfterGrantClose(
-        elapsedAdvanceAfterGrantMs: Long,
-        directConfirmation: Boolean = false
-    ) {
+    fun directGrantKeepsUnrelatedNightDenialOnTheCurrentGuardianScreen() {
         val nowMs = System.currentTimeMillis()
         val useDayId = ConfigurableUseDayCalculator().idAt(nowMs)
-        var elapsedNowMs = SystemClock.elapsedRealtime()
         val targetGroup = AppRuleAppGroup("target", "Target", listOf(PACKAGE))
         val snapshot = AppRuleSnapshot(
             appGroups = listOf(targetGroup),
@@ -1521,7 +1463,7 @@ class AppRuleBlockerRecheckTest {
         }
         val blocker = AppRuleBlocker().apply {
             wallClockMsProvider = { nowMs }
-            elapsedRealtimeMsProvider = { elapsedNowMs }
+            elapsedRealtimeMsProvider = { SystemClock.elapsedRealtime() }
             screenInteractiveProvider = { true }
             keyguardLockedProvider = { false }
             activeWindowSnapshotProvider = {
@@ -1553,8 +1495,8 @@ class AppRuleBlockerRecheckTest {
             setField(blocker, "serviceConnectionId", TEST_GUARDIAN_CONNECTION_ID)
             setField(blocker, "launchablePackages", setOf(PACKAGE))
             setField(blocker, "overrideState", grantedOverrides)
-            val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
-            coordinator.accept(snapshot)
+            val snapshotCoordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+            snapshotCoordinator.accept(snapshot)
 
             fun checkPackage() {
                 val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
@@ -1585,64 +1527,49 @@ class AppRuleBlockerRecheckTest {
                 .getInstrumentation()
                 .runOnMainSync { }
             assertTrue(
-                "the existing night denial must show the guardian before the GRANTED close broadcast; started=${service.startedActivities.map { it.component?.className }}, guardian=${guardianActivities.size}",
+                "the existing night denial must show the guardian before the direct grant is confirmed; started=${service.startedActivities.map { it.component?.className }}, guardian=${guardianActivities.size}",
                 awaitCondition { guardianActivities.isNotEmpty() }
             )
             val baselineGuardianCount = guardianActivities.size
             val screenRequestId = guardianActivities.last()
                 .getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
                 .orEmpty()
-            if (directConfirmation) {
-                val directCoordinator = getField(
-                    blocker,
-                    "guardianApprovalCoordinator"
-                ) as GuardianApprovalCoordinator
-                val receipt = GuardianApprovalGrantReceipt(
-                    ruleId = "usage",
-                    useDayId = useDayId,
-                    grantedAtMs = nowMs,
-                    grantedMillis = 10 * 60_000L
+            val coordinator = getField(
+                blocker,
+                "guardianApprovalCoordinator"
+            ) as GuardianApprovalCoordinator
+            val grantReceipt = GuardianApprovalGrantReceipt(
+                ruleId = "usage",
+                useDayId = useDayId,
+                grantedAtMs = nowMs,
+                grantedMillis = 10 * 60_000L
+            )
+            val workReceipt = GuardianApprovalWorkReceipt.Grant(
+                grant = grantReceipt,
+                origin = neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin.DIRECT,
+                useDayGenerationStartedAtMs = 0L
+            )
+            val operationId = "direct-grant-$screenRequestId"
+            val checkId = "direct-check-$screenRequestId"
+            assertTrue(
+                coordinator.beginConfirmation(
+                    screenRequestId,
+                    operationId,
+                    checkId,
+                    workReceipt
                 )
-                assertTrue(
-                    directCoordinator.beginDirectCheck(
+            )
+            val owner = coordinator.currentOwner() ?: error("The approval screen should own the request.")
+            assertTrue(
+                coordinator.completeConfirmation(
+                    GuardianApprovalCoordinator.CheckIdentity(
                         screenRequestId,
-                        "direct-grant-1",
-                        "direct-check-1",
-                        receipt
+                        operationId,
+                        checkId,
+                        owner.lifecycleGeneration
                     )
                 )
-                assertTrue(
-                    directCoordinator.completeDirectCheck(
-                        screenRequestId,
-                        "direct-grant-1",
-                        "direct-check-1"
-                    )
-                )
-                assertEquals(null, getField(blocker, "pendingGrantedPackage"))
-            } else {
-                val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
-                val operationId = "guardian-legacy-operation-$screenRequestId"
-                val legacyCoordinator = getField(
-                    blocker,
-                    "guardianApprovalCoordinator"
-                ) as GuardianApprovalCoordinator
-                assertTrue(legacyCoordinator.beginLegacyOperation(screenRequestId, operationId))
-                receiver.onReceive(
-                    service,
-                    guardianLifecycleIntent(
-                        GuardianApprovalActivity.INTENT_ACTION_CLOSED,
-                        PACKAGE,
-                        screenRequestId,
-                        TEST_GUARDIAN_CONNECTION_ID
-                    )
-                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CLOSE_REASON,
-                            GuardianApprovalActivity.REASON_GRANTED
-                        )
-                )
-            }
-            elapsedNowMs += elapsedAdvanceAfterGrantMs
+            )
             checkPackage()
 
             assertTrue(
@@ -1661,32 +1588,20 @@ class AppRuleBlockerRecheckTest {
                 .getInstrumentation()
                 .runOnMainSync { }
 
-            if (directConfirmation) {
-                assertEquals(
-                    "the current guardian screen remains the sole owner after a direct grant",
-                    baselineGuardianCount,
-                    guardianActivities.size
-                )
-                assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
-                assertEquals(null, getField(blocker, "pendingGrantedPackage"))
-                val directCoordinator = getField(
-                    blocker,
-                    "guardianApprovalCoordinator"
-                ) as GuardianApprovalCoordinator
-                assertEquals(screenRequestId, directCoordinator.currentOwner()?.screenRequestId)
-            } else {
-                assertTrue(
-                    "the legacy grant path must recheck after its pending window expires; elapsedAdvance=$elapsedAdvanceAfterGrantMs, baseline=$baselineGuardianCount, started=${service.startedActivities.map { it.component?.className }}, guardian=${guardianActivities.size}, evaluations=${evaluations.map { evaluation -> evaluation.denyingRules.map { it.ruleId } }}, outcomes=${enforcementOutcomes.map { it.packageDecisions }}",
-                    awaitCondition { guardianActivities.size > baselineGuardianCount }
-                )
-            }
+            assertEquals(
+                "the current guardian screen remains the sole owner after a direct grant",
+                baselineGuardianCount,
+                guardianActivities.size
+            )
+            assertEquals(PACKAGE, getField(blocker, "activeGuardianPackage"))
+            assertEquals(screenRequestId, coordinator.currentOwner()?.screenRequestId)
         } finally {
             blocker.onDestroy()
         }
     }
 
     @Test
-    fun guardianClosedWithCancelledReasonPostsDelayedRecheckWithoutSuppressing() {
+    fun cancelledGuardianClosePostsANearTermForegroundRecheck() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         val postedDelays = mutableListOf<Long>()
         val blocker = AppRuleBlocker().apply {
@@ -1719,7 +1634,6 @@ class AppRuleBlockerRecheckTest {
         assertEquals(null, getField(blocker, "activeGuardianPackage"))
         assertEquals(5000L, getField(blocker, "lastShownAt"))
         assertEquals(listOf(300L), postedDelays)
-        assertEquals(null, getField(blocker, "pendingGrantedPackage"))
         blocker.onDestroy()
     }
 

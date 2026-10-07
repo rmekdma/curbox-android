@@ -92,7 +92,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var pendingApprovalCheckAction: String? = null
     private var pendingApprovalCheckId: String? = null
     private var confirmationServiceConnectionId: String? = null
-    private var legacyOperationId: String? = null
     private var approvalTestReceiverRegistered = false
 
     private data class ApprovalWriteFailureGate(val id: String)
@@ -587,7 +586,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
         grantPickerLoading = false
         closeReason = REASON_INTERRUPTED
         guardianClosedBroadcastSent = false
-        legacyOperationId = null
         selectedRuleId = denials.first().ruleId
         render()
         testLog(
@@ -1417,34 +1415,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private fun isConfirmationUiBlocking(): Boolean =
         confirmationChecking || confirmationFailed
 
-    private fun beginLegacyOperation(): String? {
-        if (!canHandleCallbacks() || isConfirmationUiBlocking()) return null
-        val operationId = UUID.randomUUID().toString()
-        legacyOperationId = operationId
-        sendBroadcast(
-            Intent(INTENT_ACTION_LEGACY_STARTED)
-                .setPackage(packageName)
-                .putExtra(EXTRA_GUARDIAN_PACKAGE, targetPackageName)
-                .putExtra(EXTRA_SCREEN_REQUEST_ID, screenRequestId)
-                .putExtra(EXTRA_OPERATION_ID, operationId)
-                .putExtra(EXTRA_SERVICE_CONNECTION_ID, registeredServiceConnectionId.orEmpty())
-        )
-        return operationId
-    }
-
-    private fun cancelLegacyOperation(operationId: String) {
-        if (legacyOperationId != operationId) return
-        sendBroadcast(
-            Intent(INTENT_ACTION_LEGACY_CANCELLED)
-                .setPackage(packageName)
-                .putExtra(EXTRA_GUARDIAN_PACKAGE, targetPackageName)
-                .putExtra(EXTRA_SCREEN_REQUEST_ID, screenRequestId)
-                .putExtra(EXTRA_OPERATION_ID, operationId)
-                .putExtra(EXTRA_SERVICE_CONNECTION_ID, registeredServiceConnectionId.orEmpty())
-        )
-        legacyOperationId = null
-    }
-
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
@@ -1521,7 +1491,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     }
                 }
                 .putExtra(EXTRA_CLOSE_REASON, closeReason)
-                .putExtra(EXTRA_OPERATION_ID, legacyOperationId)
         )
     }
 
@@ -1533,16 +1502,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         startActivity(intent)
         finishAffinity()
-    }
-
-    private fun finishAndLaunchLegacy(operationId: String) {
-        if (!canHandleCallbacks()) return
-        closeReason = REASON_GRANTED
-        legacyOperationId = operationId
-        targetPackageName.takeIf(String::isNotBlank)?.let { packageName ->
-            packageManager.getLaunchIntentForPackage(packageName)?.let(::startActivity)
-        }
-        finish()
     }
 
     private fun toast(message: Int) {
@@ -1607,10 +1566,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
         const val INTENT_ACTION_STATE_REQUEST = "neth.iecal.curbox.guardian.approval.state_request"
         const val INTENT_ACTION_SCREEN_REGISTERED =
             "neth.iecal.curbox.guardian.approval.screen_registered"
-        const val INTENT_ACTION_DIRECT_GRANT_STORED =
-            "neth.iecal.curbox.guardian.approval.direct_grant_stored"
-        const val INTENT_ACTION_DIRECT_CHECK_RETRY =
-            "neth.iecal.curbox.guardian.approval.direct_check_retry"
         const val INTENT_ACTION_APPROVAL_STORED =
             "neth.iecal.curbox.guardian.approval.stored"
         const val INTENT_ACTION_APPROVAL_CHECK_RETRY =
@@ -1619,10 +1574,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
             "neth.iecal.curbox.guardian.approval.recover"
         const val INTENT_ACTION_CONFIRMATION_RESULT =
             "neth.iecal.curbox.guardian.approval.confirmation_result"
-        const val INTENT_ACTION_LEGACY_STARTED =
-            "neth.iecal.curbox.guardian.approval.legacy_started"
-        const val INTENT_ACTION_LEGACY_CANCELLED =
-            "neth.iecal.curbox.guardian.approval.legacy_cancelled"
         const val EXTRA_GUARDIAN_PACKAGE = "guardian_package"
         const val EXTRA_CLOSE_REASON = "guardian_close_reason"
         const val EXTRA_OPERATION_ID = "guardian_operation_id"
@@ -1645,7 +1596,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
         const val APPROVAL_KIND_DIRECT = "direct_grant"
         const val APPROVAL_KIND_ACCUMULATED = "accumulated_grant"
         const val APPROVAL_KIND_SKIP = "rule_skip"
-        const val REASON_GRANTED = "granted"
         const val REASON_CANCELLED = "cancelled"
         const val REASON_INTERRUPTED = "interrupted"
         const val REASON_CONFIRMED = "confirmed"

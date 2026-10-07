@@ -31,7 +31,7 @@ Broadcast actions use companion constants (e.g. `AppBlocker.INTENT_ACTION_REFRES
 
 ## User-facing blocking screens
 
-User-facing lock screens route through `ui/activity/WarningActivity` with the corresponding `Constants.WARNING_SCREEN_MODE_*` value. App rule guardian approvals are the exception: `AppRuleBlocker` opens `GuardianApprovalActivity` directly so a single rejection produces only one lock screen.
+User-facing lock screens route through `ui/activity/WarningActivity` with the corresponding `Constants.WARNING_SCREEN_MODE_*` value. App rule guardian approvals are the exception: `AppRuleBlocker` opens `GuardianApprovalActivity` directly so a single rejection produces only one lock screen. Direct grants, accumulated approvals, and rule skips all use the same service confirmation flow before the target app can launch.
 
 ## Service protection
 

@@ -21,48 +21,44 @@ class GuardianApprovalCoordinatorTest {
     fun timeoutFencesLateResultAndRetryReusesReceiptWithANewCheckIdentity() {
         val coordinator = GuardianApprovalCoordinator()
         assertTrue(coordinator.openScreen("screen-1", TARGET_PACKAGE, LifecycleGeneration(3L)))
-        assertTrue(coordinator.beginDirectCheck("screen-1", "grant-1", "check-1", receipt))
-        assertFalse(coordinator.beginDirectCheck("screen-1", "grant-1", "check-1", receipt))
+        val workReceipt = GuardianApprovalWorkReceipt.Grant(
+            receipt,
+            GuardianApprovalGrantOrigin.DIRECT,
+            0L
+        )
+        assertTrue(coordinator.beginConfirmation("screen-1", "grant-1", "check-1", workReceipt))
+        assertFalse(coordinator.beginConfirmation("screen-1", "grant-1", "check-1", workReceipt))
 
-        val expiredCheck = GuardianApprovalCoordinator.DirectCheckIdentity(
+        val expiredCheck = GuardianApprovalCoordinator.CheckIdentity(
             screenRequestId = "screen-1",
             operationId = "grant-1",
             checkId = "check-1",
             lifecycleGeneration = LifecycleGeneration(3L)
         )
         assertFalse(
-            coordinator.timeOutDirectCheck(
+            coordinator.timeOutConfirmation(
                 expiredCheck.copy(lifecycleGeneration = LifecycleGeneration(2L))
             )
         )
-        assertTrue(coordinator.timeOutDirectCheck(expiredCheck))
-        assertFalse(coordinator.completeDirectCheck(expiredCheck))
-        assertTrue(coordinator.retryDirectCheck("screen-1", "grant-1", "check-2"))
+        assertTrue(coordinator.timeOutConfirmation(expiredCheck))
+        assertFalse(coordinator.completeConfirmation(expiredCheck))
+        assertTrue(coordinator.retryConfirmation("screen-1", "grant-1", "check-2"))
 
         val current = coordinator.currentOwner()
         assertEquals("grant-1", (current?.operation as GuardianApprovalCoordinator.Operation.Confirmation).operationId)
         assertEquals("check-2", (current.operation as GuardianApprovalCoordinator.Operation.Confirmation).checkId)
         assertEquals(
-            GuardianApprovalWorkReceipt.Grant(
-                receipt,
-                GuardianApprovalGrantOrigin.DIRECT,
-                0L
-            ),
+            workReceipt,
             (current.operation as GuardianApprovalCoordinator.Operation.Confirmation).receipt
         )
-        assertFalse(coordinator.completeDirectCheck(expiredCheck))
+        assertFalse(coordinator.completeConfirmation(expiredCheck))
         assertEquals(
             GuardianApprovalCoordinator.ConfirmationPhase.CHECKING,
             (coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Confirmation).phase
         )
         assertTrue(
-            coordinator.completeDirectCheck(
-                GuardianApprovalCoordinator.DirectCheckIdentity(
-                    screenRequestId = "screen-1",
-                    operationId = "grant-1",
-                    checkId = "check-2",
-                    lifecycleGeneration = LifecycleGeneration(3L)
-                )
+            coordinator.completeConfirmation(
+                expiredCheck.copy(checkId = "check-2")
             )
         )
     }
@@ -71,11 +67,25 @@ class GuardianApprovalCoordinatorTest {
     fun homeCancellationPreventsLateAllowFromCompletingTheScreenRequest() {
         val coordinator = GuardianApprovalCoordinator()
         assertTrue(coordinator.openScreen("screen-2", TARGET_PACKAGE, LifecycleGeneration(4L)))
-        assertTrue(coordinator.beginDirectCheck("screen-2", "grant-2", "check-1", receipt))
+        val workReceipt = GuardianApprovalWorkReceipt.Grant(
+            receipt,
+            GuardianApprovalGrantOrigin.DIRECT,
+            4L
+        )
+        assertTrue(coordinator.beginConfirmation("screen-2", "grant-2", "check-1", workReceipt))
 
         assertTrue(coordinator.closeScreen("screen-2"))
 
-        assertFalse(coordinator.completeDirectCheck("screen-2", "grant-2", "check-1"))
+        assertFalse(
+            coordinator.completeConfirmation(
+                GuardianApprovalCoordinator.CheckIdentity(
+                    "screen-2",
+                    "grant-2",
+                    "check-1",
+                    LifecycleGeneration(4L)
+                )
+            )
+        )
         assertNull(coordinator.currentOwner())
     }
 
@@ -156,30 +166,41 @@ class GuardianApprovalCoordinatorTest {
     }
 
     @Test
-    fun lateLegacyCompletionCannotReplaceOrCloseANewerDirectOperation() {
+    fun lateConfirmationCannotReplaceOrCloseANewerApprovalOperation() {
         val coordinator = GuardianApprovalCoordinator()
         assertTrue(coordinator.openScreen("screen-3", TARGET_PACKAGE, LifecycleGeneration(5L)))
-        assertTrue(coordinator.beginLegacyOperation("screen-3", "legacy-1"))
-        assertTrue(coordinator.beginDirectCheck("screen-3", "grant-3", "check-1", receipt))
+        val directReceipt = GuardianApprovalWorkReceipt.Grant(
+            receipt,
+            GuardianApprovalGrantOrigin.DIRECT,
+            5L
+        )
+        assertTrue(coordinator.beginConfirmation("screen-3", "grant-3", "check-1", directReceipt))
+        val oldCheck = GuardianApprovalCoordinator.CheckIdentity(
+            "screen-3",
+            "grant-3",
+            "check-1",
+            LifecycleGeneration(5L)
+        )
+        assertTrue(coordinator.completeConfirmation(oldCheck))
 
-        assertFalse(coordinator.completeLegacyOperation("screen-3", "legacy-1"))
+        val accumulatedReceipt = GuardianApprovalWorkReceipt.Grant(
+            receipt.copy(grantedAtMs = 20L),
+            GuardianApprovalGrantOrigin.ACCUMULATED_POOL,
+            5L
+        )
+        assertTrue(
+            coordinator.beginConfirmation(
+                "screen-3",
+                "grant-4",
+                "check-2",
+                accumulatedReceipt
+            )
+        )
+        assertFalse(coordinator.completeConfirmation(oldCheck))
 
         val current = coordinator.currentOwner()
         assertEquals("screen-3", current?.screenRequestId)
-        assertEquals("grant-3", (current?.operation as GuardianApprovalCoordinator.Operation.Confirmation).operationId)
-    }
-
-    @Test
-    fun aLegacyApprovalCanTakeOverAfterDirectDenialAndFinishOnlyItsOwnRequest() {
-        val coordinator = GuardianApprovalCoordinator()
-        assertTrue(coordinator.openScreen("screen-4", TARGET_PACKAGE, LifecycleGeneration(6L)))
-        assertTrue(coordinator.beginDirectCheck("screen-4", "grant-4", "check-1", receipt))
-        assertTrue(coordinator.completeDirectCheck("screen-4", "grant-4", "check-1"))
-
-        assertTrue(coordinator.beginLegacyOperation("screen-4", "legacy-2"))
-        assertFalse(coordinator.completeLegacyOperation("screen-4", "legacy-old"))
-        assertTrue(coordinator.completeLegacyOperation("screen-4", "legacy-2"))
-        assertNull(coordinator.currentOwner())
+        assertEquals("grant-4", (current?.operation as GuardianApprovalCoordinator.Operation.Confirmation).operationId)
     }
 
     @Test
@@ -242,7 +263,6 @@ class GuardianApprovalCoordinatorTest {
 
         val current = coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Confirmation
         assertEquals(receipt, current.receipt)
-        assertFalse(coordinator.completeLegacyOperation("screen-6", "skip-1"))
         val check = GuardianApprovalCoordinator.CheckIdentity(
             screenRequestId = "screen-6",
             operationId = "skip-1",

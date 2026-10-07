@@ -563,7 +563,6 @@ class GuardianApprovalActivityLifecycleTest {
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
-                addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
@@ -750,7 +749,7 @@ class GuardianApprovalActivityLifecycleTest {
                 scenario.onActivity { activity ->
                     assertViewVisibility(activity, R.id.approval_confirmation_retry, android.view.View.GONE)
                 }
-                assertTrue("a matching generic GRANTED close must not be sent", requests.isEmpty())
+                assertTrue("a remaining denial must not submit another approval check", requests.isEmpty())
             }
         } finally {
             try {
@@ -947,7 +946,6 @@ class GuardianApprovalActivityLifecycleTest {
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
                 addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
-                addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
@@ -1136,7 +1134,7 @@ class GuardianApprovalActivityLifecycleTest {
                 )
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
                 scenario.onActivity { activity -> assertDenialReason(activity, "Updated test rule") }
-                assertTrue("an accumulated grant must not use the legacy close route", requests.isEmpty())
+                assertTrue("a superseded receipt must not submit another confirmation check", requests.isEmpty())
                 val afterRetry = runBlocking { dataStore.settings.first() }
                 assertEquals(supersedingSettings.appRuleRolloverState, afterRetry.appRuleRolloverState)
                 assertEquals(supersedingSettings.appRuleOverrideState, afterRetry.appRuleOverrideState)

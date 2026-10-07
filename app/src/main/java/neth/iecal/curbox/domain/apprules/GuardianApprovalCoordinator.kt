@@ -1,7 +1,5 @@
 package neth.iecal.curbox.domain.apprules
 
-import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
-import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 
 /** Owns one guardian screen request and the operation currently allowed to complete it. */
@@ -19,8 +17,6 @@ class GuardianApprovalCoordinator {
             val receipt: GuardianApprovalWorkReceipt,
             val phase: ConfirmationPhase
         ) : Operation
-
-        data class Legacy(val operationId: String) : Operation
     }
 
     data class Owner(
@@ -36,21 +32,6 @@ class GuardianApprovalCoordinator {
         val checkId: String,
         val lifecycleGeneration: LifecycleGeneration
     )
-
-    /** Compatibility identity for callers from the direct-grant flow. */
-    data class DirectCheckIdentity(
-        val screenRequestId: String,
-        val operationId: String,
-        val checkId: String,
-        val lifecycleGeneration: LifecycleGeneration
-    ) {
-        fun asCheckIdentity() = CheckIdentity(
-            screenRequestId,
-            operationId,
-            checkId,
-            lifecycleGeneration
-        )
-    }
 
     private val lock = Any()
     private var owner: Owner? = null
@@ -166,102 +147,6 @@ class GuardianApprovalCoordinator {
 
     fun completeConfirmation(identity: CheckIdentity): Boolean =
         updateConfirmationPhase(identity, ConfirmationPhase.FINISHED)
-
-    fun beginDirectCheck(
-        screenRequestId: String,
-        operationId: String,
-        checkId: String,
-        receipt: GuardianApprovalGrantReceipt
-    ): Boolean = beginConfirmation(
-        screenRequestId,
-        operationId,
-        checkId,
-        GuardianApprovalWorkReceipt.Grant(
-            grant = receipt,
-            origin = GuardianApprovalGrantOrigin.DIRECT,
-            useDayGenerationStartedAtMs = 0L
-        )
-    )
-
-    fun retryDirectCheck(
-        screenRequestId: String,
-        operationId: String,
-        checkId: String
-    ): Boolean = retryConfirmation(screenRequestId, operationId, checkId)
-
-    fun timeOutDirectCheck(
-        screenRequestId: String,
-        operationId: String,
-        checkId: String
-    ): Boolean {
-        val generation = currentOwner()?.lifecycleGeneration ?: return false
-        return updateConfirmationPhase(
-            CheckIdentity(
-                screenRequestId,
-                operationId,
-                checkId,
-                generation
-            ),
-            ConfirmationPhase.TIMED_OUT
-        )
-    }
-
-    fun timeOutDirectCheck(identity: DirectCheckIdentity): Boolean =
-        timeOutConfirmation(identity.asCheckIdentity())
-
-    fun completeDirectCheck(
-        screenRequestId: String,
-        operationId: String,
-        checkId: String
-    ): Boolean {
-        val generation = currentOwner()?.lifecycleGeneration ?: return false
-        return updateConfirmationPhase(
-            CheckIdentity(
-                screenRequestId,
-                operationId,
-                checkId,
-                generation
-            ),
-            ConfirmationPhase.FINISHED
-        )
-    }
-
-    fun completeDirectCheck(identity: DirectCheckIdentity): Boolean =
-        completeConfirmation(identity.asCheckIdentity())
-
-    fun beginLegacyOperation(screenRequestId: String, operationId: String): Boolean =
-        synchronized(lock) {
-            val current = owner ?: return@synchronized false
-            if (current.screenRequestId != screenRequestId || operationId.isBlank()) {
-                return@synchronized false
-            }
-            val confirmation = current.operation as? Operation.Confirmation
-            if (confirmation?.phase == ConfirmationPhase.CHECKING) return@synchronized false
-            owner = current.copy(operation = Operation.Legacy(operationId))
-            true
-        }
-
-    fun cancelLegacyOperation(screenRequestId: String, operationId: String): Boolean =
-        synchronized(lock) {
-            val current = owner ?: return@synchronized false
-            val legacy = current.operation as? Operation.Legacy ?: return@synchronized false
-            if (current.screenRequestId != screenRequestId || legacy.operationId != operationId) {
-                return@synchronized false
-            }
-            owner = current.copy(operation = null)
-            true
-        }
-
-    fun completeLegacyOperation(screenRequestId: String, operationId: String): Boolean =
-        synchronized(lock) {
-            val current = owner ?: return@synchronized false
-            val legacy = current.operation as? Operation.Legacy ?: return@synchronized false
-            if (current.screenRequestId != screenRequestId || legacy.operationId != operationId) {
-                return@synchronized false
-            }
-            owner = null
-            true
-        }
 
     fun closeScreen(screenRequestId: String): Boolean = synchronized(lock) {
         val current = owner ?: return@synchronized false
