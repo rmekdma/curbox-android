@@ -21,6 +21,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.DecisionOutcome
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -79,12 +80,14 @@ class AppRuleBlockerCoherentOutcomeTest {
         }
 
         try {
-            val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            val event = AccessibilityFrameworkTestObjects.createEvent(
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            )
             try {
                 event.packageName = TARGET_PACKAGE
                 blocker.doAppRuleCheck(event)
             } finally {
-                event.recycle()
+                AccessibilityFrameworkTestObjects.releaseEvent(event)
             }
 
             assertTrue("the worker must publish the enforcement result", awaitCondition {

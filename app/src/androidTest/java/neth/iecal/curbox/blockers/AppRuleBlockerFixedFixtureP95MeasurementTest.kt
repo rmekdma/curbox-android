@@ -22,6 +22,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.DecisionOutcome
 import neth.iecal.curbox.domain.apprules.ObservationKind
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -281,20 +282,24 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
             }
 
             activeFixturePackage = PACKAGE_ALLOW
-            val allowEvent = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            val allowEvent = AccessibilityFrameworkTestObjects.createEvent(
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            )
             allowEvent.packageName = PACKAGE_ALLOW
             instrumentation.runOnMainSync {
                 blocker.doAppRuleCheck(allowEvent)
             }
-            allowEvent.recycle()
+            AccessibilityFrameworkTestObjects.releaseEvent(allowEvent)
 
             activeFixturePackage = PACKAGE_DENY
-            val denyEvent = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            val denyEvent = AccessibilityFrameworkTestObjects.createEvent(
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            )
             denyEvent.packageName = PACKAGE_DENY
             instrumentation.runOnMainSync {
                 blocker.doAppRuleCheck(denyEvent)
             }
-            denyEvent.recycle()
+            AccessibilityFrameworkTestObjects.releaseEvent(denyEvent)
 
             assertTrue("Sanity phase must reach decision outcome sink", sanityLatch.await(5, TimeUnit.SECONDS))
             val sanityAllow = sanityAllowOutcomeRef.get()?.packageDecisions?.firstOrNull { it.packageName == PACKAGE_ALLOW }
@@ -348,7 +353,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
         var validWarmups = 0
         var validMeasuredAllow = 0
         var validMeasuredDeny = 0
-        var aborted = false
         var abortReason: String? = null
 
         fun currentPhase(): String = if (validWarmups < WARMUP_COUNT) "WARMUP" else "MEASURED"
@@ -362,14 +366,12 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
             }
         }
 
-        while (!aborted && (validWarmups < WARMUP_COUNT || (validMeasuredAllow + validMeasuredDeny) < TOTAL_MEASURED)) {
+        while (validWarmups < WARMUP_COUNT || (validMeasuredAllow + validMeasuredDeny) < TOTAL_MEASURED) {
             if (attemptIndex >= LEDGER_CAPACITY) {
-                aborted = true
                 abortReason = "ABORT_LEDGER_CAPACITY"
                 break
             }
             if (exclusionCount >= EXCLUSION_CAP) {
-                aborted = true
                 abortReason = "ABORT_EXCLUSION_CAP_REACHED"
                 break
             }
@@ -382,7 +384,9 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
             slot.fixtureLabel = fixtureLabel
             activeSlotRef.set(slot)
 
-            val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            val event = AccessibilityFrameworkTestObjects.createEvent(
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            )
             event.packageName = fixturePackage
 
             instrumentation.runOnMainSync {
@@ -401,12 +405,11 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                     slot.callbackReturnPresent = true
                     slot.callbackExitKind = "EXCEPTION"
                 } finally {
-                    event.recycle()
+                    AccessibilityFrameworkTestObjects.releaseEvent(event)
                 }
             }
 
             if (unverifiedIngressDetected.get() || unexpectedRecheckDetected.get()) {
-                aborted = true
                 abortReason = "ABORT_UNEXPECTED_INGRESS"
                 slot.terminalState = "ABORT_UNEXPECTED_INGRESS"
                 break
@@ -426,7 +429,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                     !hasReturn -> "TIMEOUT_MISSING_CALLBACK_RETURN"
                     else -> "TIMEOUT_MISSING_SELECTED_END"
                 }
-                aborted = true
                 abortReason = "ABORT_OBSERVATION_DEADLINE"
                 break
             }
@@ -436,7 +438,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                 slot.exclusionReason = "CALLBACK_EXIT_" + slot.callbackExitKind
                 exclusionCount++
                 if (exclusionCount >= EXCLUSION_CAP) {
-                    aborted = true
                     abortReason = "ABORT_EXCLUSION_CAP_REACHED"
                     break
                 }
@@ -449,7 +450,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                 slot.exclusionReason = "CLOCK_ORDER_VIOLATION"
                 exclusionCount++
                 if (exclusionCount >= EXCLUSION_CAP) {
-                    aborted = true
                     abortReason = "ABORT_EXCLUSION_CAP_REACHED"
                     break
                 }
@@ -467,7 +467,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                 slot.exclusionReason = "EXPECTED_${expectedDecision}_BUT_GOT_${slot.decision}"
                 exclusionCount++
                 if (exclusionCount >= EXCLUSION_CAP) {
-                    aborted = true
                     abortReason = "ABORT_EXCLUSION_CAP_REACHED"
                     break
                 }
@@ -496,7 +495,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                 slot.exclusionReason = "QUIESCENCE_FAILED_OR_TIMEOUT"
                 exclusionCount++
                 if (exclusionCount >= EXCLUSION_CAP) {
-                    aborted = true
                     abortReason = "ABORT_RECOVERY_NOT_QUIESCENT"
                     break
                 }

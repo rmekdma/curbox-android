@@ -18,6 +18,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import org.junit.Assert.assertEquals
@@ -337,12 +338,14 @@ class AppRuleBlockerVirtualDozeWakeRedTest {
     }
 
     private fun sendWindowEvent(blocker: AppRuleBlocker) {
-        val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+        val event = AccessibilityFrameworkTestObjects.createEvent(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        )
         try {
             event.packageName = TARGET_PACKAGE
             blocker.doAppRuleCheck(event)
         } finally {
-            event.recycle()
+            AccessibilityFrameworkTestObjects.releaseEvent(event)
         }
     }
 

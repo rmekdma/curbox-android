@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.SystemClock
-import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import androidx.test.espresso.Espresso.onView
@@ -15,7 +14,6 @@ import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.action.ViewActions.replaceText
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.RootMatchers.isPlatformPopup
-import androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
@@ -388,7 +386,7 @@ class GuardianApprovalActivityLifecycleTest {
                 onView(withText(grantRuleName))
                     .inRoot(isPlatformPopup())
                     .perform(click())
-                onView(isAssignableFrom(EditText::class.java))
+                onView(withId(R.id.additional_minutes_input))
                     .inRoot(isDialog())
                     .perform(replaceText("5"))
                     .check(matches(withText("5")))
@@ -1416,7 +1414,7 @@ class GuardianApprovalActivityLifecycleTest {
     ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val deadline = SystemClock.uptimeMillis() + timeoutMs
-        var lastFailure: Throwable? = null
+        var lastFailure: Throwable?
         do {
             instrumentation.waitForIdleSync()
             try {

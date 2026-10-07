@@ -22,6 +22,7 @@ import neth.iecal.curbox.domain.apprules.AppUsageTrackingPolicy
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.ForegroundUsageCheckpoint
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
 import neth.iecal.curbox.trackers.AppUsageTracker
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -120,7 +121,7 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
             } catch (error: Throwable) {
                 callbackFailure.set(error)
             } finally {
-                event.recycle()
+                AccessibilityFrameworkTestObjects.releaseEvent(event)
                 callbackReturnedAtMs.set(SystemClock.elapsedRealtime())
                 callbackReturned.countDown()
             }
@@ -379,12 +380,14 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
         try {
             block(event)
         } finally {
-            event.recycle()
+            AccessibilityFrameworkTestObjects.releaseEvent(event)
         }
     }
 
     private fun windowEvent(packageName: String): AccessibilityEvent =
-        AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED).apply {
+        AccessibilityFrameworkTestObjects.createEvent(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        ).apply {
             this.packageName = packageName
         }
 

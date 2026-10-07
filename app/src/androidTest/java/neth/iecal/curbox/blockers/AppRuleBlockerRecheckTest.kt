@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleOverrideState
@@ -74,10 +75,12 @@ class AppRuleBlockerRecheckTest {
         val coordinator = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
         coordinator.accept(snapshotWithGlobalDeny())
 
-        val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+        val event = AccessibilityFrameworkTestObjects.createEvent(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        )
         event.packageName = PACKAGE
         blocker.doAppRuleCheck(event)
-        event.recycle()
+        AccessibilityFrameworkTestObjects.releaseEvent(event)
 
         assertTrue(
             "active zero allowance rule must open approval",
@@ -1498,12 +1501,14 @@ class AppRuleBlockerRecheckTest {
             snapshotCoordinator.accept(snapshot)
 
             fun checkPackage() {
-                val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+                val event = AccessibilityFrameworkTestObjects.createEvent(
+                    AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                )
                 try {
                     event.packageName = PACKAGE
                     blocker.doAppRuleCheck(event)
                 } finally {
-                    event.recycle()
+                    AccessibilityFrameworkTestObjects.releaseEvent(event)
                 }
             }
 
@@ -3281,10 +3286,12 @@ class AppRuleBlockerRecheckTest {
     }
 
     private fun sendWindowEvent(blocker: AppRuleBlocker, packageName: String = PACKAGE) {
-        val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+        val event = AccessibilityFrameworkTestObjects.createEvent(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        )
         event.packageName = packageName
         blocker.doAppRuleCheck(event)
-        event.recycle()
+        AccessibilityFrameworkTestObjects.releaseEvent(event)
     }
 
     private fun awaitCondition(condition: () -> Boolean): Boolean {

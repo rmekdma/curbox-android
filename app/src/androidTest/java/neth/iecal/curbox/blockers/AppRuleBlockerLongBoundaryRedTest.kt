@@ -20,6 +20,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulesEvaluation
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import org.junit.Test
@@ -546,12 +547,14 @@ class AppRuleBlockerLongBoundaryRedTest {
     }
 
     private fun sendWindowEvent(blocker: AppRuleBlocker, packageName: String) {
-        val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+        val event = AccessibilityFrameworkTestObjects.createEvent(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        )
         try {
             event.packageName = packageName
             blocker.doAppRuleCheck(event)
         } finally {
-            event.recycle()
+            AccessibilityFrameworkTestObjects.releaseEvent(event)
         }
     }
 
