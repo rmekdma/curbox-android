@@ -92,6 +92,40 @@ function Release-ServiceEvaluationGate([string]$GateId) {
     $script:activeGateId = ""
 }
 
+function Assert-UnconsumedServiceGateCanBeRearmed {
+    $abortedGateId = "$runId-aborted-before-consume"
+    Send-TestBroadcast `
+        -Action "neth.iecal.curbox.blockers.TEST_ARM_GUARDIAN_EVALUATION_GATE" `
+        -GateId $abortedGateId `
+        -ExtraArguments "--es guardian_test_ack_package $packageName"
+    [void](Wait-ForGuardianLog `
+        -Pattern "service_gate_armed id=$abortedGateId accepted=true" `
+        -Label "initial unconsumed service gate arm")
+
+    Send-TestBroadcast `
+        -Action "neth.iecal.curbox.blockers.TEST_RELEASE_GUARDIAN_EVALUATION_GATE" `
+        -GateId $abortedGateId
+    [void](Wait-ForGuardianLog `
+        -Pattern "service_gate_released id=$abortedGateId accepted=true consumed=false" `
+        -Label "release of an unconsumed service gate")
+
+    $rearmedGateId = "$runId-immediate-rearm"
+    Send-TestBroadcast `
+        -Action "neth.iecal.curbox.blockers.TEST_ARM_GUARDIAN_EVALUATION_GATE" `
+        -GateId $rearmedGateId `
+        -ExtraArguments "--es guardian_test_ack_package $packageName"
+    [void](Wait-ForGuardianLog `
+        -Pattern "service_gate_armed id=$rearmedGateId accepted=true" `
+        -Label "immediate service gate rearm after abort")
+
+    Send-TestBroadcast `
+        -Action "neth.iecal.curbox.blockers.TEST_RELEASE_GUARDIAN_EVALUATION_GATE" `
+        -GateId $rearmedGateId
+    [void](Wait-ForGuardianLog `
+        -Pattern "service_gate_released id=$rearmedGateId accepted=true consumed=false" `
+        -Label "release of the immediate rearm probe")
+}
+
 function Clear-WriteFailure {
     if (-not $script:writeFailureArmed) { return }
     Send-TestBroadcast `
@@ -374,7 +408,11 @@ try {
     }
     Write-Success "Settings backed up; accessibility service is bound, overlay is allowed, and target app is installed."
 
-    Write-Step "2. Install a one-rule direct-grant fixture through the existing debug DataStore receiver..."
+    Write-Step "2. Verify that an aborted, unused worker gate can be rearmed immediately..."
+    Assert-UnconsumedServiceGateCanBeRearmed
+    Write-Success "The real service released an unconsumed gate and accepted an immediate rearm."
+
+    Write-Step "3. Install a one-rule direct-grant fixture through the existing debug DataStore receiver..."
     $groupId = "guardian-retry-$runId"
     $directRuleId = "guardian-direct-$runId"
     $accumulatedRuleId = "guardian-accumulated-$runId"
@@ -436,7 +474,7 @@ try {
 
     Invoke-TestDeviceShell -Command "input keyevent 3"
     Start-Sleep -Milliseconds 800
-    Write-Step "3. Exercise the accumulated-pool receipt through the same service and Activity path..."
+    Write-Step "4. Exercise the accumulated-pool receipt through the same service and Activity path..."
     $poolState = [PSCustomObject]@{
         pools = [PSCustomObject]@{
             $accumulatedRuleId = [PSCustomObject]@{
@@ -490,7 +528,7 @@ try {
 
     Invoke-TestDeviceShell -Command "input keyevent 3"
     Start-Sleep -Milliseconds 800
-    Write-Step "4. Exercise the skip receipt after the skipped rule is superseded..."
+    Write-Step "5. Exercise the skip receipt after the skipped rule is superseded..."
     $skipRule = New-GuardianRule -RuleId $skipRuleId -RuleName "E2E skip rule" -GroupId $groupId
     $skipSnapshot = New-GuardianSnapshot -GroupId $groupId -Rules @($skipRule)
     Inject-TestAppRules -AppRuleSnapshot $skipSnapshot -PreserveOverrides -PackageName $packageName

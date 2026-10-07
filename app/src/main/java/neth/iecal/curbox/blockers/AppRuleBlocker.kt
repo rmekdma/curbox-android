@@ -148,9 +148,11 @@ private object GuardianApprovalEvaluationTestGates {
     }
 
     fun release(id: String): GuardianApprovalEvaluationTestGate? = synchronized(lock) {
-        gate?.takeIf {
+        val current = gate?.takeIf {
             it.id == id && it.expiresAtElapsedMs > SystemClock.elapsedRealtime()
-        }
+        } ?: return@synchronized null
+        if (!current.consumed) gate = null
+        current
     }
 
     fun takePending(
@@ -293,6 +295,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE -> {
                     val gate = GuardianApprovalEvaluationTestGates.release(gateId) ?: return
                     gate.released.complete(Unit)
+                    Log.i(
+                        GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                        "service_gate_released id=$gateId accepted=true consumed=${gate.consumed} pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this@AppRuleBlocker)}"
+                    )
                     sendGuardianEvaluationTestGateAcknowledgement(
                         action = INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE,
                         gateId = gateId,
