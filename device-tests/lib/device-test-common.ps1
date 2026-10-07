@@ -351,10 +351,13 @@ function Inject-TestAppRules(
     $AppRuleSnapshot,
     [string]$PackageName = "neth.iecal.curbox.debug",
     [long]$UsageGenerationStartedAtMs = 0,
-    $AppRuleRolloverState = $null
+    $AppRuleRolloverState = $null,
+    [switch]$PreserveOverrides
 ) {
-    adb shell "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName" | Out-Null
-    Start-Sleep -Milliseconds 500
+    if (-not $PreserveOverrides) {
+        Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName"
+        Start-Sleep -Milliseconds 500
+    }
 
     if ($UsageGenerationStartedAtMs -gt 0) {
         Set-DeviceUsageGeneration -GenerationStartedAtMs $UsageGenerationStartedAtMs -PackageName $PackageName | Out-Null
@@ -375,10 +378,10 @@ function Inject-TestAppRules(
     $shScript = "CONTENT=`$(cat /data/local/tmp/app_rules_inject.json)`nam broadcast -a neth.iecal.curbox.action.APPLY_TEST_APP_RULES -p $PackageName --es extra_app_rules_json `"`$CONTENT`"`n"
     Push-TempStringToDevice -Content $shScript -RemotePath "/data/local/tmp/inject.sh"
 
-    adb shell "chmod 755 /data/local/tmp/inject.sh; /data/local/tmp/inject.sh" | Out-Null
-    adb shell "rm -f /data/local/tmp/app_rules_inject.json /data/local/tmp/inject.sh" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
+    Invoke-TestDeviceShell -Command "chmod 755 /data/local/tmp/inject.sh; /data/local/tmp/inject.sh"
+    Invoke-TestDeviceShell -Command "rm -f /data/local/tmp/app_rules_inject.json /data/local/tmp/inject.sh"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName"
     Start-Sleep -Seconds 1
 }
 

@@ -516,6 +516,29 @@ mCurrentFocus=Window{af23a46 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.act
         }
     }
 
+    Context "Inject-TestAppRules" {
+        It "preserves existing guardian overrides when applying a changed snapshot" {
+            $script:injectedRuleCommands = @()
+            $script:DeviceTestShellHandler = {
+                param($Command)
+                $script:injectedRuleCommands += $Command
+            }
+            $script:DeviceTestTempStringPushHandler = {
+                param($Content, $RemotePath)
+                $script:injectedRuleCommands += "push:$RemotePath"
+                $script:injectedRuleCommands += $Content
+            }
+            $snapshot = [PSCustomObject]@{ appGroups = @(); appRules = @() }
+
+            Inject-TestAppRules -AppRuleSnapshot $snapshot -PreserveOverrides
+
+            ($script:injectedRuleCommands -join "`n") | Should Not Match "CLEAR_TEST_APP_RULE_OVERRIDES"
+            ($script:injectedRuleCommands -join "`n") | Should Match "APPLY_TEST_APP_RULES"
+            ($script:injectedRuleCommands -join "`n") | Should Match "refresh.app_rules"
+            ($script:injectedRuleCommands -join "`n") | Should Match "refresh.appblocker"
+        }
+    }
+
     Context "Get-DeviceTimeInfo" {
         It "parses date string correctly and calculates minutes and remaining seconds" {
             $info = Get-DeviceTimeInfo -DateString "14 30 15"

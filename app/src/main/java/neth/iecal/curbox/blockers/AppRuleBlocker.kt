@@ -11,11 +11,13 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import androidx.annotation.VisibleForTesting
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,6 +32,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import neth.iecal.curbox.Constants
 import neth.iecal.curbox.BuildConfig
 import neth.iecal.curbox.CrashLogger
@@ -114,6 +117,71 @@ import java.util.UUID
 @JvmInline
 private value class AppRuleWorkerInstanceToken(val value: Long)
 
+private class GuardianApprovalEvaluationTestGate(
+    val id: String,
+    val acknowledgementPackage: String,
+    val expiresAtElapsedMs: Long
+) {
+    val released = CompletableDeferred<Unit>()
+    var consumed = false
+    var operationId: String? = null
+    var checkId: String? = null
+}
+
+/** Shares the DEBUG test gate across overlapping AppBlockerService feature instances. */
+private object GuardianApprovalEvaluationTestGates {
+    const val TIMEOUT_MS = 60_000L
+
+    private val lock = Any()
+    private var gate: GuardianApprovalEvaluationTestGate? = null
+
+    fun arm(id: String, acknowledgementPackage: String): Boolean = synchronized(lock) {
+        if (gate?.expiresAtElapsedMs?.let { it > SystemClock.elapsedRealtime() } == true) {
+            return@synchronized false
+        }
+        gate = GuardianApprovalEvaluationTestGate(
+            id = id,
+            acknowledgementPackage = acknowledgementPackage,
+            expiresAtElapsedMs = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        )
+        true
+    }
+
+    fun release(id: String): GuardianApprovalEvaluationTestGate? = synchronized(lock) {
+        gate?.takeIf {
+            it.id == id && it.expiresAtElapsedMs > SystemClock.elapsedRealtime()
+        }
+    }
+
+    fun takePending(
+        operationId: String,
+        checkId: String
+    ): GuardianApprovalEvaluationTestGate? = synchronized(lock) {
+        val current = gate?.takeIf {
+            !it.consumed && it.expiresAtElapsedMs > SystemClock.elapsedRealtime()
+        } ?: gate?.takeIf {
+            it.consumed && it.expiresAtElapsedMs > SystemClock.elapsedRealtime() &&
+                it.operationId == operationId && it.checkId == checkId
+        }
+        if (current == null) {
+            if (gate?.expiresAtElapsedMs?.let { it <= SystemClock.elapsedRealtime() } == true) {
+                gate = null
+            }
+            return@synchronized null
+        }
+        if (!current.consumed) {
+            current.consumed = true
+            current.operationId = operationId
+            current.checkId = checkId
+        }
+        current
+    }
+
+    fun finish(completed: GuardianApprovalEvaluationTestGate) = synchronized(lock) {
+        if (gate === completed) gate = null
+    }
+}
+
 /** Enforces the new atomic app-rule snapshot without changing the legacy blocker. */
 class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     companion object {
@@ -136,6 +204,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             "neth.iecal.curbox.blockers.EXTRA_SCHEDULER_PACKAGE"
         private const val EXTRA_SCHEDULER_TOKEN =
             "neth.iecal.curbox.blockers.EXTRA_SCHEDULER_TOKEN"
+        internal const val INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE =
+            "neth.iecal.curbox.blockers.TEST_ARM_GUARDIAN_EVALUATION_GATE"
+        internal const val INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE =
+            "neth.iecal.curbox.blockers.TEST_RELEASE_GUARDIAN_EVALUATION_GATE"
+        internal const val INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED =
+            "neth.iecal.curbox.blockers.TEST_GUARDIAN_EVALUATION_GATE_REACHED"
+        internal const val EXTRA_TEST_GATE_ID = "guardian_test_gate_id"
+        internal const val EXTRA_TEST_ACK_PACKAGE = "guardian_test_ack_package"
+        internal const val EXTRA_TEST_OPERATION_ID = "guardian_test_operation_id"
+        internal const val EXTRA_TEST_CHECK_ID = "guardian_test_check_id"
+        private const val GUARDIAN_APPROVAL_TEST_LOG_TAG = "GuardianApprovalE2E"
 
         internal fun createGuardianApprovalIntent(
             context: Context,
@@ -182,6 +261,48 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     @Volatile private var pendingGrantedPackageTimestampMs = 0L
     private val guardianApprovalCoordinator = GuardianApprovalCoordinator()
     @Volatile private var guardianConfirmationTimeoutJob: Job? = null
+
+    private val guardianEvaluationTestGateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!BuildConfig.DEBUG) return
+            val gateId = intent?.getStringExtra(EXTRA_TEST_GATE_ID)
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?: return
+            when (intent.action) {
+                INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE -> {
+                    val acknowledgementPackage = intent.getStringExtra(EXTRA_TEST_ACK_PACKAGE)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val armed = GuardianApprovalEvaluationTestGates.arm(
+                        id = gateId,
+                        acknowledgementPackage = acknowledgementPackage
+                    )
+                    Log.i(
+                        GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                        "service_gate_armed id=$gateId accepted=$armed pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this@AppRuleBlocker)}"
+                    )
+                    sendGuardianEvaluationTestGateAcknowledgement(
+                        action = INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE,
+                        gateId = gateId,
+                        acknowledgementPackage = acknowledgementPackage,
+                        accepted = armed
+                    )
+                }
+                INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE -> {
+                    val gate = GuardianApprovalEvaluationTestGates.release(gateId) ?: return
+                    gate.released.complete(Unit)
+                    sendGuardianEvaluationTestGateAcknowledgement(
+                        action = INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE,
+                        gateId = gateId,
+                        acknowledgementPackage = gate.acknowledgementPackage,
+                        accepted = true
+                    )
+                }
+            }
+        }
+    }
 
     private fun isPendingGrantedPackage(packageName: String): Boolean {
         val pending = pendingGrantedPackage ?: return false
@@ -633,7 +754,28 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     },
                     unregister = { service.unregisterReceiver(guardianReceiver) }
                 )
-            ),
+            ) + if (BuildConfig.DEBUG) {
+                listOf(
+                    AppRuleReceiverLifecycle.Registration(
+                        register = {
+                            ContextCompat.registerReceiver(
+                                service,
+                                guardianEvaluationTestGateReceiver,
+                                IntentFilter().apply {
+                                    addAction(INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
+                                    addAction(INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
+                                },
+                                ContextCompat.RECEIVER_EXPORTED
+                            )
+                        },
+                        unregister = {
+                            service.unregisterReceiver(guardianEvaluationTestGateReceiver)
+                        }
+                    )
+                )
+            } else {
+                emptyList()
+            },
             isReady = { setupReady }
         )
         receiverLifecycle?.unregister()?.forEach(::logNonFatal)
@@ -2267,7 +2409,19 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             ?.takeIf(String::isNotEmpty)
             ?: return
         val receipt = parseGuardianApprovalReceipt(intent, legacyDirectAction)
+        if (BuildConfig.DEBUG) {
+            Log.i(
+                GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                "service_check_received action=${intent.action} retry=$isRetry operation=$operationId check=$checkId receipt_valid=${receipt != null} pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this)}"
+            )
+        }
         if (receipt == null) {
+            if (BuildConfig.DEBUG) {
+                Log.i(
+                    GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                    "service_check_rejected operation=$operationId check=$checkId reason=invalid_receipt"
+                )
+            }
             sendGuardianConfirmationResult(
                 screenRequestId,
                 operationId,
@@ -2284,14 +2438,33 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             lifecycleGeneration = LifecycleGeneration(connectionGeneration)
         )
         val started = synchronized(runtimeLock) {
-            if (!isReadyForChecks(connectionGeneration) ||
-                activeGuardianPackage != packageName
-            ) return
-            val owner = guardianApprovalCoordinator.currentOwner() ?: return
+            if (!isReadyForChecks(connectionGeneration)) {
+                logGuardianCheckTestRejection(operationId, checkId, "not_ready")
+                return
+            }
+            if (activeGuardianPackage != packageName) {
+                logGuardianCheckTestRejection(
+                    operationId,
+                    checkId,
+                    "inactive_package:${activeGuardianPackage.orEmpty()}"
+                )
+                return
+            }
+            val owner = guardianApprovalCoordinator.currentOwner() ?: run {
+                logGuardianCheckTestRejection(operationId, checkId, "no_owner")
+                return
+            }
             if (owner.packageName != packageName ||
                 owner.screenRequestId != screenRequestId ||
                 owner.lifecycleGeneration != LifecycleGeneration(connectionGeneration)
-            ) return
+            ) {
+                logGuardianCheckTestRejection(
+                    operationId,
+                    checkId,
+                    "owner_mismatch:${owner.screenRequestId}:${owner.packageName}:${owner.lifecycleGeneration.value}"
+                )
+                return
+            }
             val accepted = if (isRetry) {
                 guardianApprovalCoordinator.retryConfirmation(
                     screenRequestId,
@@ -2307,7 +2480,21 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     receipt
                 )
             }
-            if (!accepted) return
+            if (!accepted) {
+                val current = guardianApprovalCoordinator.currentOwner()?.operation
+                logGuardianCheckTestRejection(
+                    operationId,
+                    checkId,
+                    "coordinator_rejected:${current.toString().replace(' ', '_')}"
+                )
+                return
+            }
+            if (BuildConfig.DEBUG) {
+                Log.i(
+                    GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                    "service_check_accepted operation=$operationId check=$checkId retry=$isRetry pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this)}"
+                )
+            }
             guardianConfirmationTimeoutJob?.cancel()
             guardianConfirmationTimeoutJob = scope.launch {
                 try {
@@ -2344,6 +2531,18 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 }
             }
         }
+    }
+
+    private fun logGuardianCheckTestRejection(
+        operationId: String,
+        checkId: String,
+        reason: String
+    ) {
+        if (!BuildConfig.DEBUG) return
+        Log.i(
+            GUARDIAN_APPROVAL_TEST_LOG_TAG,
+            "service_check_rejected operation=$operationId check=$checkId reason=$reason pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this)}"
+        )
     }
 
     private fun parseGuardianApprovalReceipt(
@@ -2472,6 +2671,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         if (!isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken)) return
         scope.launch {
             try {
+                awaitGuardianEvaluationTestGate(outcome)
                 handleGuardianApprovalEvaluation(outcome, workerInstanceToken)
             } catch (error: CancellationException) {
                 throw error
@@ -2482,12 +2682,84 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
     }
 
+    private suspend fun awaitGuardianEvaluationTestGate(
+        outcome: DecisionOutcome.GuardianApprovalEvaluationReady
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val gate = GuardianApprovalEvaluationTestGates.takePending(
+            outcome.request.operationId,
+            outcome.request.checkId
+        )
+        if (gate == null) {
+            Log.i(
+                GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                "service_outcome_gate id=none operation=${outcome.request.operationId} check=${outcome.request.checkId} pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this)}"
+            )
+            return
+        }
+        Log.i(
+            GUARDIAN_APPROVAL_TEST_LOG_TAG,
+            "service_gate_waiting id=${gate.id} operation=${outcome.request.operationId} check=${outcome.request.checkId} pid=${android.os.Process.myPid()} instance=${System.identityHashCode(this)}"
+        )
+        sendGuardianEvaluationTestGateAcknowledgement(
+            action = INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED,
+            gateId = gate.id,
+            acknowledgementPackage = gate.acknowledgementPackage,
+            accepted = true,
+            operationId = outcome.request.operationId,
+            checkId = outcome.request.checkId
+        )
+        try {
+            withTimeoutOrNull(GuardianApprovalEvaluationTestGates.TIMEOUT_MS) {
+                gate.released.await()
+            }
+        } finally {
+            GuardianApprovalEvaluationTestGates.finish(gate)
+        }
+    }
+
+    private fun sendGuardianEvaluationTestGateAcknowledgement(
+        action: String,
+        gateId: String,
+        acknowledgementPackage: String,
+        accepted: Boolean,
+        operationId: String? = null,
+        checkId: String? = null
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val acknowledgement = Intent(action)
+            .setPackage(acknowledgementPackage)
+            .putExtra(EXTRA_TEST_GATE_ID, gateId)
+            .putExtra("guardian_test_gate_accepted", accepted)
+        operationId?.let { acknowledgement.putExtra(EXTRA_TEST_OPERATION_ID, it) }
+        checkId?.let { acknowledgement.putExtra(EXTRA_TEST_CHECK_ID, it) }
+        try {
+            service.sendBroadcast(acknowledgement)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            logNonFatal(error)
+        }
+    }
+
     private suspend fun handleGuardianApprovalEvaluation(
         outcome: DecisionOutcome.GuardianApprovalEvaluationReady,
         workerInstanceToken: AppRuleWorkerInstanceToken
     ) {
         val request = outcome.request
-        if (!isCurrentGuardianApprovalCheck(request)) return
+        if (!isCurrentGuardianApprovalCheck(request)) {
+            if (BuildConfig.DEBUG) {
+                val currentCheck = guardianApprovalCoordinator.currentOwner()
+                    ?.operation as? GuardianApprovalCoordinator.Operation.Confirmation
+                Log.i(
+                    GUARDIAN_APPROVAL_TEST_LOG_TAG,
+                    "service_outcome_ignored operation=${request.operationId} " +
+                        "check=${request.checkId} current_check=${currentCheck?.checkId.orEmpty()} " +
+                        "reason=stale_request"
+                )
+            }
+            return
+        }
         val latestSettings = service.dataStoreManager.settings.first()
         val runtimeMatches = runtimeMatchesSettings(outcome, latestSettings)
         val outcomeStillCurrent = isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken)

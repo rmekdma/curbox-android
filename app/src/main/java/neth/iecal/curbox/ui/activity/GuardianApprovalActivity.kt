@@ -9,6 +9,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import android.os.Bundle
+import android.util.Log
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -24,7 +25,9 @@ import com.google.gson.reflect.TypeToken
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import android.view.View
 import neth.iecal.curbox.CrashLogger
+import neth.iecal.curbox.BuildConfig
 import neth.iecal.curbox.R
+import neth.iecal.curbox.blockers.AppRuleBlocker
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
@@ -42,6 +45,7 @@ import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantQueryFactory
 import java.time.Duration
+import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -81,6 +85,75 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var confirmationChecking = false
     private var confirmationFailed = false
     private var legacyOperationId: String? = null
+    private var approvalTestReceiverRegistered = false
+
+    private data class ApprovalWriteFailureGate(val id: String)
+
+    private val approvalTestGateLock = Any()
+    @Volatile private var approvalWriteFailureGate: ApprovalWriteFailureGate? = null
+    @Volatile private var approvalTestRunId: String? = null
+
+    private val approvalTestReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!BuildConfig.DEBUG) return
+            val action = intent?.action ?: return
+            when (action) {
+                INTENT_ACTION_TEST_ARM_WRITE_FAILURE -> {
+                    val gateId = intent.getStringExtra(EXTRA_TEST_GATE_ID)
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: return
+                    val armed = synchronized(approvalTestGateLock) {
+                        if (approvalWriteFailureGate != null) {
+                            false
+                        } else {
+                            approvalWriteFailureGate = ApprovalWriteFailureGate(gateId)
+                            approvalTestRunId = gateId
+                            true
+                        }
+                    }
+                    if (armed) {
+                        DataStoreManager.guardianApprovalWriteCommitObserverForTest = { settings ->
+                            val consumed = synchronized(approvalTestGateLock) {
+                                approvalWriteFailureGate?.takeIf { it.id == gateId }?.also {
+                                    approvalWriteFailureGate = null
+                                }
+                            }
+                            if (consumed != null) {
+                                testLog(
+                                    "write_committed id=$gateId " +
+                                        "grant_count=${settings.appRuleOverrideState.grants.size} " +
+                                        "skip_count=${settings.appRuleOverrideState.skips.size}"
+                                )
+                                throw IOException("Injected failure after the real DataStore commit")
+                            }
+                        }
+                    }
+                    testLog("write_failure_armed id=$gateId accepted=$armed")
+                }
+                INTENT_ACTION_TEST_CLEAR_WRITE_FAILURE -> {
+                    synchronized(approvalTestGateLock) {
+                        approvalWriteFailureGate = null
+                        approvalTestRunId = null
+                    }
+                    DataStoreManager.guardianApprovalWriteCommitObserverForTest = null
+                    testLog("write_failure_cleared")
+                }
+                AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE,
+                AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE,
+                AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED -> {
+                    if (!intent.hasExtra(EXTRA_TEST_GATE_ACCEPTED)) return
+                    testLog(
+                        "service_gate action=$action " +
+                            "id=${intent.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID)} " +
+                            "accepted=${intent.getBooleanExtra(EXTRA_TEST_GATE_ACCEPTED, false)} " +
+                            "operation=${intent.getStringExtra(AppRuleBlocker.EXTRA_TEST_OPERATION_ID)} " +
+                            "check=${intent.getStringExtra(AppRuleBlocker.EXTRA_TEST_CHECK_ID)}"
+                    )
+                }
+            }
+        }
+    }
 
     private val guardianStateRequestReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -104,6 +177,20 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private val guardianConfirmationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != INTENT_ACTION_CONFIRMATION_RESULT) return
+            if (BuildConfig.DEBUG) {
+                val resultDenials = runCatching {
+                    Gson().fromJson<List<AppRuleGuardianDenial?>>(
+                        intent.getStringExtra(EXTRA_CONFIRMATION_DENIALS).orEmpty(),
+                        object : TypeToken<List<AppRuleGuardianDenial?>>() {}.type
+                    ).orEmpty().filterNotNull().joinToString("|") { "${it.ruleId}:${it.ruleName}" }
+                }.getOrDefault("")
+                testLog(
+                    "result test=${approvalTestRunId ?: "-"} " +
+                        "status=${intent.getStringExtra(EXTRA_CONFIRMATION_STATUS)} " +
+                        "operation=${intent.getStringExtra(EXTRA_OPERATION_ID)} " +
+                        "check=${intent.getStringExtra(EXTRA_CHECK_ID)} denials=$resultDenials"
+                )
+            }
             handleConfirmationResult(intent)
         }
     }
@@ -150,6 +237,21 @@ class GuardianApprovalActivity : AppCompatActivity() {
             IntentFilter(INTENT_ACTION_CONFIRMATION_RESULT),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+        if (BuildConfig.DEBUG) {
+            ContextCompat.registerReceiver(
+                this,
+                approvalTestReceiver,
+                IntentFilter().apply {
+                    addAction(INTENT_ACTION_TEST_ARM_WRITE_FAILURE)
+                    addAction(INTENT_ACTION_TEST_CLEAR_WRITE_FAILURE)
+                    addAction(AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
+                    addAction(AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
+                    addAction(AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED)
+                },
+                ContextCompat.RECEIVER_EXPORTED
+            )
+            approvalTestReceiverRegistered = true
+        }
         selectedRuleId = denials.first().ruleId
         render()
         lifecycleScope.launch {
@@ -327,6 +429,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             readCurrentCandidates = grantQuery::candidates,
             onSubmit = { basis, minutes ->
                 if (canHandleCallbacks() && !grantInProgress) {
+                    testLog("grant_submit rule=${basis.ruleId} minutes=$minutes")
                     grantInProgress = true
                     authenticateThen(
                         ruleId = basis.ruleId,
@@ -529,8 +632,19 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 throw error
             } catch (error: Exception) {
                 logApprovalWriteFailure(error)
+                testLog("grant_write_result status=exception type=${error.javaClass.simpleName}")
                 GuardianExtraTimeGrantWrite.Result.Rejected
             }
+            testLog(
+                "grant_write_result status=" + when (result) {
+                    is GuardianExtraTimeGrantWrite.Result.StoredWithReceipt -> "stored_with_receipt"
+                    is GuardianExtraTimeGrantWrite.Result.Uncertain -> "uncertain"
+                    is GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation -> "needs_reconfirmation"
+                    is GuardianExtraTimeGrantWrite.Result.Unavailable -> "unavailable"
+                    is GuardianExtraTimeGrantWrite.Result.Rejected -> "rejected"
+                    GuardianExtraTimeGrantWrite.Result.Stored -> "stored"
+                }
+            )
             withContext(Dispatchers.Main) {
                 if (!canHandleCallbacks()) return@withContext
                 when (result) {
@@ -690,6 +804,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         confirmationChecking = true
         confirmationFailed = false
         renderConfirmationState()
+        testLogConfirmationRequest(INTENT_ACTION_APPROVAL_STORED, operationId, checkId, receipt)
         sendApprovalConfirmationRequest(
             action = INTENT_ACTION_APPROVAL_STORED,
             operationId = operationId,
@@ -711,6 +826,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         confirmationChecking = true
         confirmationFailed = false
         renderConfirmationState()
+        testLogConfirmationRequest(INTENT_ACTION_APPROVAL_CHECK_RETRY, operationId, checkId, receipt)
         sendApprovalConfirmationRequest(
             action = INTENT_ACTION_APPROVAL_CHECK_RETRY,
             operationId = operationId,
@@ -755,18 +871,59 @@ class GuardianApprovalActivity : AppCompatActivity() {
         sendBroadcast(request)
     }
 
+    private fun testLogConfirmationRequest(
+        action: String,
+        operationId: String,
+        checkId: String,
+        receipt: GuardianApprovalWorkReceipt
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val details = when (receipt) {
+            is GuardianApprovalWorkReceipt.Grant ->
+                "kind=${if (receipt.origin == GuardianApprovalGrantOrigin.DIRECT) APPROVAL_KIND_DIRECT else APPROVAL_KIND_ACCUMULATED} " +
+                    "rule=${receipt.grant.ruleId} use_day=${receipt.grant.useDayId} " +
+                    "generation=${receipt.useDayGenerationStartedAtMs} granted_at=${receipt.grant.grantedAtMs} " +
+                    "granted_millis=${receipt.grant.grantedMillis}"
+            is GuardianApprovalWorkReceipt.RuleSkip ->
+                "kind=$APPROVAL_KIND_SKIP rule=${receipt.ruleId} use_day=${receipt.useDayId} " +
+                    "generation=${receipt.useDayGenerationStartedAtMs} skip_from=${receipt.skipFromMs} " +
+                    "skip_until=${receipt.skipUntilMs}"
+        }
+        testLog(
+            "check_request test=${approvalTestRunId ?: "-"} action=$action " +
+                "operation=$operationId check=$checkId $details"
+        )
+    }
+
+    private fun testLog(message: String) {
+        if (BuildConfig.DEBUG) Log.i(TEST_LOG_TAG, message)
+    }
+
     private fun handleConfirmationResult(result: Intent) {
+        val status = result.getStringExtra(EXTRA_CONFIRMATION_STATUS) ?: return
+        val operationId = result.getStringExtra(EXTRA_OPERATION_ID).orEmpty()
+        val checkId = result.getStringExtra(EXTRA_CHECK_ID).orEmpty()
         if (!canHandleCallbacks() ||
             result.getStringExtra(EXTRA_SCREEN_REQUEST_ID) != screenRequestId ||
-            result.getStringExtra(EXTRA_OPERATION_ID) != confirmationOperationId ||
-            result.getStringExtra(EXTRA_CHECK_ID) != confirmationCheckId
-        ) return
-        val status = result.getStringExtra(EXTRA_CONFIRMATION_STATUS) ?: return
+            operationId != confirmationOperationId ||
+            checkId != confirmationCheckId
+        ) {
+            if (BuildConfig.DEBUG) {
+                testLog(
+                    "ui_result_ignored status=$status operation=$operationId check=$checkId " +
+                        "current_check=${confirmationCheckId.orEmpty()} " +
+                        "current_denials=${denials.joinToString("|") { it.ruleName }} " +
+                        "finishing=$isFinishing"
+                )
+            }
+            return
+        }
         confirmationChecking = false
         when (status) {
             CONFIRMATION_STATUS_FAILED, CONFIRMATION_STATUS_TIMEOUT -> {
                 confirmationFailed = true
                 renderConfirmationState()
+                logConfirmationUiState(status)
             }
             CONFIRMATION_STATUS_REMAINING -> {
                 val latestDenials = runCatching {
@@ -778,6 +935,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 if (latestDenials.isEmpty()) {
                     confirmationFailed = true
                     renderConfirmationState()
+                    logConfirmationUiState(status)
                     return
                 }
                 confirmationFailed = false
@@ -785,12 +943,34 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 selectedRuleId = latestDenials.first().ruleId
                 grantInProgress = false
                 render()
+                logConfirmationUiState(status)
             }
             CONFIRMATION_STATUS_ALLOWED -> {
                 confirmationFailed = false
                 closeReason = REASON_CONFIRMED
                 finish()
             }
+        }
+    }
+
+    private fun logConfirmationUiState(status: String) {
+        if (!BuildConfig.DEBUG || !this::binding.isInitialized) return
+        val retry = binding.approvalConfirmationRetry
+        testLog(
+            "ui_state status=$status operation=${confirmationOperationId.orEmpty()} " +
+                "check=${confirmationCheckId.orEmpty()} retry_visible=${retry.visibility == View.VISIBLE} " +
+                "failed=$confirmationFailed finishing=$isFinishing " +
+                "denials=${denials.joinToString("|") { it.ruleName }}"
+        )
+        retry.post {
+            val location = IntArray(2)
+            retry.getLocationOnScreen(location)
+            testLog(
+                "ui_geometry operation=${confirmationOperationId.orEmpty()} " +
+                    "check=${confirmationCheckId.orEmpty()} retry_left=${location[0]} " +
+                    "retry_top=${location[1]} retry_width=${retry.width} " +
+                    "retry_height=${retry.height} visible=${retry.visibility == View.VISIBLE}"
+            )
         }
     }
 
@@ -875,6 +1055,11 @@ class GuardianApprovalActivity : AppCompatActivity() {
             guardianStateReceiverRegistered = false
         }
         runCatching { unregisterReceiver(guardianConfirmationReceiver) }
+        if (approvalTestReceiverRegistered) {
+            DataStoreManager.guardianApprovalWriteCommitObserverForTest = null
+            runCatching { unregisterReceiver(approvalTestReceiver) }
+            approvalTestReceiverRegistered = false
+        }
         super.onDestroy()
     }
 
@@ -937,6 +1122,14 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val TEST_LOG_TAG = "GuardianApprovalE2E"
+        internal const val INTENT_ACTION_TEST_ARM_WRITE_FAILURE =
+            "neth.iecal.curbox.guardian.TEST_ARM_WRITE_FAILURE"
+        internal const val INTENT_ACTION_TEST_CLEAR_WRITE_FAILURE =
+            "neth.iecal.curbox.guardian.TEST_CLEAR_WRITE_FAILURE"
+        internal const val EXTRA_TEST_GATE_ID = "guardian_test_gate_id"
+        private const val EXTRA_TEST_GATE_ACCEPTED = "guardian_test_gate_accepted"
+
         const val EXTRA_DENIALS = "app_rule_denials_json"
         const val EXTRA_PACKAGE = "launch_package"
         const val EXTRA_SCREEN_REQUEST_ID = "guardian_screen_request_id"
