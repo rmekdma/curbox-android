@@ -10,7 +10,8 @@
 param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
     [string]$TargetActivity = "",
-    [string]$DeviceId = ""
+    [string]$DeviceId = "",
+    [switch]$GateCleanupOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,38 +93,52 @@ function Release-ServiceEvaluationGate([string]$GateId) {
     $script:activeGateId = ""
 }
 
+function Release-UnconsumedServiceGate([string]$GateId) {
+    if ($script:activeGateId -ne $GateId) { return }
+    Send-TestBroadcast `
+        -Action "neth.iecal.curbox.blockers.TEST_RELEASE_GUARDIAN_EVALUATION_GATE" `
+        -GateId $GateId
+    [void](Wait-ForGuardianLog `
+        -Pattern "service_gate_released id=$GateId accepted=true consumed=false" `
+        -Label "cleanup of unconsumed service gate")
+    $script:activeGateId = ""
+}
+
 function Assert-UnconsumedServiceGateCanBeRearmed {
     $abortedGateId = "$runId-aborted-before-consume"
-    Send-TestBroadcast `
-        -Action "neth.iecal.curbox.blockers.TEST_ARM_GUARDIAN_EVALUATION_GATE" `
-        -GateId $abortedGateId `
-        -ExtraArguments "--es guardian_test_ack_package $packageName"
-    [void](Wait-ForGuardianLog `
-        -Pattern "service_gate_armed id=$abortedGateId accepted=true" `
-        -Label "initial unconsumed service gate arm")
-
-    Send-TestBroadcast `
-        -Action "neth.iecal.curbox.blockers.TEST_RELEASE_GUARDIAN_EVALUATION_GATE" `
-        -GateId $abortedGateId
-    [void](Wait-ForGuardianLog `
-        -Pattern "service_gate_released id=$abortedGateId accepted=true consumed=false" `
-        -Label "release of an unconsumed service gate")
+    $abortObserved = $false
+    try {
+        $script:activeGateId = $abortedGateId
+        Send-TestBroadcast `
+            -Action "neth.iecal.curbox.blockers.TEST_ARM_GUARDIAN_EVALUATION_GATE" `
+            -GateId $abortedGateId `
+            -ExtraArguments "--es guardian_test_ack_package $packageName"
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_gate_armed id=$abortedGateId accepted=true" `
+            -Label "initial unconsumed service gate arm")
+        throw "Injected abort after the gate acknowledgement."
+    } catch {
+        if ($_.Exception.Message -ne "Injected abort after the gate acknowledgement.") { throw }
+        $abortObserved = $true
+    } finally {
+        Release-UnconsumedServiceGate -GateId $abortedGateId
+    }
+    if (-not $abortObserved) { throw "The unconsumed service gate abort path was not exercised." }
 
     $rearmedGateId = "$runId-immediate-rearm"
-    Send-TestBroadcast `
-        -Action "neth.iecal.curbox.blockers.TEST_ARM_GUARDIAN_EVALUATION_GATE" `
-        -GateId $rearmedGateId `
-        -ExtraArguments "--es guardian_test_ack_package $packageName"
-    [void](Wait-ForGuardianLog `
-        -Pattern "service_gate_armed id=$rearmedGateId accepted=true" `
-        -Label "immediate service gate rearm after abort")
-
-    Send-TestBroadcast `
-        -Action "neth.iecal.curbox.blockers.TEST_RELEASE_GUARDIAN_EVALUATION_GATE" `
-        -GateId $rearmedGateId
-    [void](Wait-ForGuardianLog `
-        -Pattern "service_gate_released id=$rearmedGateId accepted=true consumed=false" `
-        -Label "release of the immediate rearm probe")
+    try {
+        $script:activeGateId = $rearmedGateId
+        Send-TestBroadcast `
+            -Action "neth.iecal.curbox.blockers.TEST_ARM_GUARDIAN_EVALUATION_GATE" `
+            -GateId $rearmedGateId `
+            -ExtraArguments "--es guardian_test_ack_package $packageName"
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_gate_armed id=$rearmedGateId accepted=true" `
+            -Label "immediate service gate rearm after abort")
+        Release-UnconsumedServiceGate -GateId $rearmedGateId
+    } finally {
+        Release-UnconsumedServiceGate -GateId $rearmedGateId
+    }
 }
 
 function Clear-WriteFailure {
@@ -411,6 +426,7 @@ try {
     Write-Step "2. Verify that an aborted, unused worker gate can be rearmed immediately..."
     Assert-UnconsumedServiceGateCanBeRearmed
     Write-Success "The real service released an unconsumed gate and accepted an immediate rearm."
+    if ($GateCleanupOnly) { return }
 
     Write-Step "3. Install a one-rule direct-grant fixture through the existing debug DataStore receiver..."
     $groupId = "guardian-retry-$runId"
