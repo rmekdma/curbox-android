@@ -20,6 +20,8 @@ import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.matcher.ViewMatchers.Visibility
+import androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -32,9 +34,12 @@ import neth.iecal.curbox.data.models.AppRuleGuardianDenial
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.GatedSettingsField
+import neth.iecal.curbox.data.models.RuleRolloverPool
+import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantCandidate
 import neth.iecal.curbox.utils.DataStoreManager
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.GuardianSessionRegistry
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -47,6 +52,7 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
@@ -359,6 +365,318 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
+    fun skipUsesSharedConfirmationAndRetryDoesNotWriteAnotherSkip() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val dataStore = DataStoreManager(context)
+        val originalSettings = runBlocking { dataStore.settings.first() }
+        assumeTrue("This UI test requires an unset guardian PIN", !originalSettings.guardianAuthConfig.isConfigured)
+        val ruleId = "approval-skip-${java.util.UUID.randomUUID()}"
+        val requests = LinkedBlockingQueue<Intent>()
+        val requestReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                intent?.let(requests::offer)
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            requestReceiver,
+            IntentFilter().apply {
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(ruleId = ruleId, ruleName = "Usage")
+            ).use { scenario ->
+                onView(withId(R.id.approval_skip_rule)).perform(click())
+                onView(withText(R.string.guardian_skip_15_minutes))
+                    .inRoot(isDialog())
+                    .perform(click())
+
+                val persisted = awaitOverrideState(context) {
+                    it.skips.any { skip -> skip.ruleId == ruleId }
+                }
+                val stored = requests.poll(5, TimeUnit.SECONDS)
+                    ?: error("The skip operation did not start the shared confirmation check")
+                assertEquals(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED, stored.action)
+                assertEquals(
+                    GuardianApprovalActivity.APPROVAL_KIND_SKIP,
+                    stored.getStringExtra(GuardianApprovalActivity.EXTRA_APPROVAL_KIND)
+                )
+                assertEquals(ruleId, stored.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID))
+                assertEquals(1, persisted.skips.count { it.ruleId == ruleId })
+                assertFalse(persisted.grants.any { it.ruleId == ruleId })
+                val operationId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+                val screenRequestId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                val firstCheckId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                assertTrue(stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_UNTIL_MS, 0L) >
+                    stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, Long.MAX_VALUE))
+                awaitDisplayed(R.id.approval_confirmation_progress)
+
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, firstCheckId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+                        )
+                )
+                awaitDisplayed(R.id.approval_confirmation_retry)
+                onView(withId(R.id.approval_confirmation_retry)).perform(click())
+
+                val retry = requests.poll(5, TimeUnit.SECONDS)
+                    ?: error("The skip check retry was not sent")
+                assertEquals(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY, retry.action)
+                assertEquals(operationId, retry.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID))
+                assertEquals(screenRequestId, retry.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID))
+                assertTrue(firstCheckId != retry.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID))
+                assertEquals(
+                    stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, -1L),
+                    retry.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, -2L)
+                )
+                assertEquals(
+                    stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_UNTIL_MS, -1L),
+                    retry.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_UNTIL_MS, -2L)
+                )
+                assertEquals(
+                    persisted,
+                    awaitOverrideState(context) { it.skips.any { skip -> skip.ruleId == ruleId } }
+                )
+
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CHECK_ID,
+                            retry.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_REMAINING
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_DENIALS,
+                            com.google.gson.Gson().toJson(
+                                listOf(
+                                    AppRuleGuardianDenial(
+                                        ruleId = "night",
+                                        ruleName = "Night rule",
+                                        reason = "Night restriction"
+                                    )
+                                )
+                            )
+                        )
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity -> assertDenialReason(activity, "Night rule") }
+                onView(withId(R.id.approval_confirmation_retry))
+                    .check(matches(withEffectiveVisibility(Visibility.GONE)))
+                assertTrue("a matching generic GRANTED close must not be sent", requests.isEmpty())
+            }
+        } finally {
+            assertTrue(
+                "The preexisting guardian override state must be restored",
+                runBlocking {
+                    dataStore.writeAppRuleOverrideState("", originalSettings.appRuleOverrideState)
+                }
+            )
+            context.unregisterReceiver(requestReceiver)
+        }
+    }
+
+    @Test
+    fun accumulatedGrantUsesSharedConfirmationAndRetryDoesNotDeductThePoolAgain() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val dataStore = DataStoreManager(context)
+        val initialSettings = runBlocking { dataStore.settings.first() }
+        assumeTrue("This UI test requires an unset guardian PIN", !initialSettings.guardianAuthConfig.isConfigured)
+        val delayConfig = initialSettings.settingsChangeDelayConfig2
+        val hasPendingAppRuleEdit = delayConfig.pendingChanges.any {
+            it.field == GatedSettingsField.APP_RULES.name
+        }
+        assumeTrue(
+            "This UI test requires immediate app-rule writes",
+            !hasPendingAppRuleEdit &&
+                (!delayConfig.isEnabled || delayConfig.delayMinutes == 0) &&
+                (!delayConfig.requireTamperProtectionOff || !initialSettings.antiUninstallConfig2.isEnabled)
+        )
+        val originalSnapshot = initialSettings.appRuleSnapshot
+        val ruleId = "approval-accumulated-${java.util.UUID.randomUUID()}"
+        val originalPool = initialSettings.appRuleRolloverState.pools[ruleId]
+        val rule = AppRule(
+            id = ruleId,
+            name = "Accumulated test rule",
+            isActive = true,
+            weekdays = (0..6).toSet(),
+            allowedMinutes = 0L,
+            rolloverEnabled = true,
+            unlockDays = (0..6).toSet(),
+            guardianExtraTimeAllowed = true
+        )
+        val seededSnapshot = originalSnapshot.copy(
+            appRules = originalSnapshot.appRules + rule
+        ).normalized()
+        val requests = LinkedBlockingQueue<Intent>()
+        val requestReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                intent?.let(requests::offer)
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            requestReceiver,
+            IntentFilter().apply {
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_LEGACY_STARTED)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        try {
+            assertTrue(runBlocking { dataStore.updateAppRuleSnapshot(seededSnapshot) })
+            val seededSettings = runBlocking {
+                withTimeout(5_000L) {
+                    dataStore.settings.first { it.appRuleSnapshot == seededSnapshot }
+                }
+            }
+            assertTrue(
+                "The accumulated grant fixture pool must be written",
+                runBlocking {
+                    dataStore.writeManualAppRuleRolloverPool(
+                        ruleId = ruleId,
+                        accumulatedMinutes = 20L,
+                        basedOn = seededSettings
+                    )
+                }
+            )
+            val useDayId = ConfigurableUseDayCalculator(
+                resetTime = seededSettings.useDayResetTime
+            ).idAt(System.currentTimeMillis())
+
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(ruleId = ruleId, ruleName = "Accumulated test rule")
+            ).use { scenario ->
+                awaitDisplayed(R.id.approval_use_accumulated_time)
+                onView(withId(R.id.approval_use_accumulated_time)).perform(click())
+                awaitDisplayed(R.id.accumulated_minutes_input, inDialog = true)
+                onView(withText(R.string.guardian_apply))
+                    .inRoot(isDialog())
+                    .perform(click())
+
+                val storedSettings = runBlocking {
+                    withTimeout(5_000L) {
+                        dataStore.settings.first { settings ->
+                            settings.appRuleRolloverState.pools[ruleId]?.accumulatedMinutes == 0L &&
+                                settings.appRuleOverrideState.grants.any {
+                                    it.ruleId == ruleId && it.isFromAccumulatedPool
+                                }
+                        }
+                    }
+                }
+                val stored = requests.poll(5, TimeUnit.SECONDS)
+                    ?: error("The accumulated grant did not start the shared confirmation check")
+                assertEquals(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED, stored.action)
+                assertEquals(
+                    GuardianApprovalActivity.APPROVAL_KIND_ACCUMULATED,
+                    stored.getStringExtra(GuardianApprovalActivity.EXTRA_APPROVAL_KIND)
+                )
+                assertEquals(ruleId, stored.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID))
+                assertEquals(useDayId, stored.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID))
+                assertEquals(20L, storedSettings.appRuleOverrideState.grants
+                    .single { it.ruleId == ruleId }
+                    .grantedMillis / 60_000L)
+                val operationId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+                val screenRequestId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                val firstCheckId = stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                awaitDisplayed(R.id.approval_confirmation_progress)
+
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, firstCheckId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+                        )
+                )
+                awaitDisplayed(R.id.approval_confirmation_retry)
+                onView(withId(R.id.approval_confirmation_retry)).perform(click())
+
+                val retry = requests.poll(5, TimeUnit.SECONDS)
+                    ?: error("The accumulated check retry was not sent")
+                assertEquals(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY, retry.action)
+                assertEquals(operationId, retry.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID))
+                assertTrue(firstCheckId != retry.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID))
+                assertEquals(
+                    stored.getLongExtra(GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS, -1L),
+                    retry.getLongExtra(GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS, -2L)
+                )
+                val afterRetry = runBlocking { dataStore.settings.first() }
+                assertEquals(storedSettings.appRuleRolloverState, afterRetry.appRuleRolloverState)
+                assertEquals(storedSettings.appRuleOverrideState, afterRetry.appRuleOverrideState)
+
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CHECK_ID,
+                            retry.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_REMAINING
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_DENIALS,
+                            com.google.gson.Gson().toJson(
+                                listOf(
+                                    AppRuleGuardianDenial(
+                                        ruleId = "night",
+                                        ruleName = "Night rule",
+                                        reason = "Night restriction"
+                                    )
+                                )
+                            )
+                        )
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity -> assertDenialReason(activity, "Night rule") }
+                onView(withId(R.id.approval_confirmation_retry))
+                    .check(matches(withEffectiveVisibility(Visibility.GONE)))
+                assertTrue("an accumulated grant must not use the legacy close route", requests.isEmpty())
+            }
+        } finally {
+            val currentSettings = runBlocking { dataStore.settings.first() }
+            runBlocking {
+                dataStore.writeManualAppRuleRolloverPool(
+                    ruleId = ruleId,
+                    accumulatedMinutes = 0L,
+                    basedOn = currentSettings
+                )
+                restoreAppRuleSnapshot(context, originalSnapshot)
+                dataStore.writeAppRuleOverrideState(
+                    password = "",
+                    state = initialSettings.appRuleOverrideState
+                )
+                restoreRolloverPool(context, ruleId, originalPool)
+            }
+            context.unregisterReceiver(requestReceiver)
+        }
+    }
+
+    @Test
     fun approvalIsFinishedAfterItLeavesTheForeground() {
         ActivityScenario.launch<GuardianApprovalActivity>(approvalIntent()).use { scenario ->
             if (scenario.state != Lifecycle.State.DESTROYED) {
@@ -509,6 +827,30 @@ class GuardianApprovalActivityLifecycleTest {
             withTimeout(5_000L) {
                 dataStore.settings.first { it.appRuleSnapshot == normalizedSnapshot }
             }
+        }
+    }
+
+    private suspend fun restoreRolloverPool(
+        context: Context,
+        ruleId: String,
+        originalPool: RuleRolloverPool?
+    ) {
+        val manager = DataStoreManager(context)
+        val storeField = DataStoreManager::class.java.getDeclaredField("settingsDataStore").apply {
+            isAccessible = true
+        }
+        @Suppress("UNCHECKED_CAST")
+        val store = storeField.get(manager) as androidx.datastore.core.DataStore<Settings>
+        store.updateData { current ->
+            val pools = current.appRuleRolloverState.pools.toMutableMap()
+            if (originalPool == null) {
+                pools.remove(ruleId)
+            } else {
+                pools[ruleId] = originalPool
+            }
+            current.copy(
+                appRuleRolloverState = current.appRuleRolloverState.copy(pools = pools)
+            )
         }
     }
 

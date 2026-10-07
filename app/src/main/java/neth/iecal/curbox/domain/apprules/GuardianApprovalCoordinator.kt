@@ -1,21 +1,22 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 
 /** Owns one guardian screen request and the operation currently allowed to complete it. */
 class GuardianApprovalCoordinator {
-    enum class DirectCheckPhase {
+    enum class ConfirmationPhase {
         CHECKING,
         FINISHED,
         TIMED_OUT
     }
 
     sealed interface Operation {
-        data class Direct(
+        data class Confirmation(
             val operationId: String,
             val checkId: String,
-            val receipt: GuardianApprovalGrantReceipt,
-            val phase: DirectCheckPhase
+            val receipt: GuardianApprovalWorkReceipt,
+            val phase: ConfirmationPhase
         ) : Operation
 
         data class Legacy(val operationId: String) : Operation
@@ -28,12 +29,27 @@ class GuardianApprovalCoordinator {
         val operation: Operation? = null
     )
 
-    data class DirectCheckIdentity(
+    data class CheckIdentity(
         val screenRequestId: String,
         val operationId: String,
         val checkId: String,
         val lifecycleGeneration: LifecycleGeneration
     )
+
+    /** Compatibility identity for callers from the direct-grant flow. */
+    data class DirectCheckIdentity(
+        val screenRequestId: String,
+        val operationId: String,
+        val checkId: String,
+        val lifecycleGeneration: LifecycleGeneration
+    ) {
+        fun asCheckIdentity() = CheckIdentity(
+            screenRequestId,
+            operationId,
+            checkId,
+            lifecycleGeneration
+        )
+    }
 
     private val lock = Any()
     private var owner: Owner? = null
@@ -55,87 +71,123 @@ class GuardianApprovalCoordinator {
         }
     }
 
-    fun beginDirectCheck(
+    fun beginConfirmation(
         screenRequestId: String,
         operationId: String,
         checkId: String,
-        receipt: GuardianApprovalGrantReceipt
+        receipt: GuardianApprovalWorkReceipt
     ): Boolean = synchronized(lock) {
         val current = owner ?: return@synchronized false
         if (current.screenRequestId != screenRequestId ||
             operationId.isBlank() || checkId.isBlank()
         ) return@synchronized false
-        when (val previous = current.operation) {
-            is Operation.Direct -> {
-                if (previous.phase == DirectCheckPhase.CHECKING) return@synchronized false
-                if (previous.operationId == operationId && previous.checkId == checkId) {
-                    return@synchronized false
-                }
-                if (previous.operationId == operationId && previous.receipt != receipt) {
-                    return@synchronized false
-                }
+        val previous = current.operation as? Operation.Confirmation
+        if (previous != null) {
+            if (previous.phase == ConfirmationPhase.CHECKING) return@synchronized false
+            if (previous.operationId == operationId && previous.checkId == checkId) {
+                return@synchronized false
             }
-            else -> Unit
+            if (previous.operationId == operationId && previous.receipt != receipt) {
+                return@synchronized false
+            }
         }
         owner = current.copy(
-            operation = Operation.Direct(
+            operation = Operation.Confirmation(
                 operationId = operationId,
                 checkId = checkId,
                 receipt = receipt,
-                phase = DirectCheckPhase.CHECKING
+                phase = ConfirmationPhase.CHECKING
             )
         )
         true
     }
+
+    fun retryConfirmation(
+        screenRequestId: String,
+        operationId: String,
+        checkId: String,
+        receipt: GuardianApprovalWorkReceipt? = null
+    ): Boolean = synchronized(lock) {
+        val current = owner ?: return@synchronized false
+        val previous = current.operation as? Operation.Confirmation ?: return@synchronized false
+        if (current.screenRequestId != screenRequestId ||
+            previous.operationId != operationId ||
+            previous.phase == ConfirmationPhase.CHECKING ||
+            checkId.isBlank() || checkId == previous.checkId ||
+            (receipt != null && previous.receipt != receipt)
+        ) return@synchronized false
+        owner = current.copy(
+            operation = previous.copy(
+                checkId = checkId,
+                phase = ConfirmationPhase.CHECKING
+            )
+        )
+        true
+    }
+
+    fun timeOutConfirmation(identity: CheckIdentity): Boolean =
+        updateConfirmationPhase(identity, ConfirmationPhase.TIMED_OUT)
+
+    fun completeConfirmation(identity: CheckIdentity): Boolean =
+        updateConfirmationPhase(identity, ConfirmationPhase.FINISHED)
+
+    fun beginDirectCheck(
+        screenRequestId: String,
+        operationId: String,
+        checkId: String,
+        receipt: GuardianApprovalGrantReceipt
+    ): Boolean = beginConfirmation(
+        screenRequestId,
+        operationId,
+        checkId,
+        GuardianApprovalWorkReceipt.DirectGrant(receipt, useDayGenerationStartedAtMs = 0L)
+    )
 
     fun retryDirectCheck(
         screenRequestId: String,
         operationId: String,
         checkId: String
-    ): Boolean = synchronized(lock) {
-        val current = owner ?: return@synchronized false
-        val previous = current.operation as? Operation.Direct ?: return@synchronized false
-        if (current.screenRequestId != screenRequestId ||
-            previous.operationId != operationId ||
-            previous.phase == DirectCheckPhase.CHECKING ||
-            checkId.isBlank() || checkId == previous.checkId
-        ) return@synchronized false
-        owner = current.copy(
-            operation = previous.copy(
-                checkId = checkId,
-                phase = DirectCheckPhase.CHECKING
-            )
-        )
-        true
-    }
+    ): Boolean = retryConfirmation(screenRequestId, operationId, checkId)
 
     fun timeOutDirectCheck(
         screenRequestId: String,
         operationId: String,
         checkId: String
-    ): Boolean = updateDirectPhase(
-        screenRequestId,
-        operationId,
-        checkId,
-        DirectCheckPhase.TIMED_OUT
-    )
+    ): Boolean {
+        val generation = currentOwner()?.lifecycleGeneration ?: return false
+        return updateConfirmationPhase(
+            CheckIdentity(
+                screenRequestId,
+                operationId,
+                checkId,
+                generation
+            ),
+            ConfirmationPhase.TIMED_OUT
+        )
+    }
 
     fun timeOutDirectCheck(identity: DirectCheckIdentity): Boolean =
-        updateDirectPhase(identity, DirectCheckPhase.TIMED_OUT)
+        timeOutConfirmation(identity.asCheckIdentity())
 
     fun completeDirectCheck(
         screenRequestId: String,
         operationId: String,
         checkId: String
-    ): Boolean = updateDirectPhase(
-        screenRequestId,
-        operationId,
-        checkId,
-        DirectCheckPhase.FINISHED
-    )
+    ): Boolean {
+        val generation = currentOwner()?.lifecycleGeneration ?: return false
+        return updateConfirmationPhase(
+            CheckIdentity(
+                screenRequestId,
+                operationId,
+                checkId,
+                generation
+            ),
+            ConfirmationPhase.FINISHED
+        )
+    }
 
     fun completeDirectCheck(identity: DirectCheckIdentity): Boolean =
-        updateDirectPhase(identity, DirectCheckPhase.FINISHED)
+        completeConfirmation(identity.asCheckIdentity())
 
     fun beginLegacyOperation(screenRequestId: String, operationId: String): Boolean =
         synchronized(lock) {
@@ -143,8 +195,8 @@ class GuardianApprovalCoordinator {
             if (current.screenRequestId != screenRequestId || operationId.isBlank()) {
                 return@synchronized false
             }
-            val direct = current.operation as? Operation.Direct
-            if (direct?.phase == DirectCheckPhase.CHECKING) return@synchronized false
+            val confirmation = current.operation as? Operation.Confirmation
+            if (confirmation?.phase == ConfirmationPhase.CHECKING) return@synchronized false
             owner = current.copy(operation = Operation.Legacy(operationId))
             true
         }
@@ -180,36 +232,19 @@ class GuardianApprovalCoordinator {
 
     fun currentOwner(): Owner? = synchronized(lock) { owner }
 
-    private fun updateDirectPhase(
-        screenRequestId: String,
-        operationId: String,
-        checkId: String,
-        nextPhase: DirectCheckPhase
+    private fun updateConfirmationPhase(
+        identity: CheckIdentity,
+        nextPhase: ConfirmationPhase
     ): Boolean = synchronized(lock) {
         val current = owner ?: return@synchronized false
-        val direct = current.operation as? Operation.Direct ?: return@synchronized false
-        if (current.screenRequestId != screenRequestId ||
-            direct.operationId != operationId ||
-            direct.checkId != checkId ||
-            direct.phase != DirectCheckPhase.CHECKING
-        ) return@synchronized false
-        owner = current.copy(operation = direct.copy(phase = nextPhase))
-        true
-    }
-
-    private fun updateDirectPhase(
-        identity: DirectCheckIdentity,
-        nextPhase: DirectCheckPhase
-    ): Boolean = synchronized(lock) {
-        val current = owner ?: return@synchronized false
-        val direct = current.operation as? Operation.Direct ?: return@synchronized false
+        val confirmation = current.operation as? Operation.Confirmation ?: return@synchronized false
         if (current.screenRequestId != identity.screenRequestId ||
             current.lifecycleGeneration != identity.lifecycleGeneration ||
-            direct.operationId != identity.operationId ||
-            direct.checkId != identity.checkId ||
-            direct.phase != DirectCheckPhase.CHECKING
+            confirmation.operationId != identity.operationId ||
+            confirmation.checkId != identity.checkId ||
+            confirmation.phase != ConfirmationPhase.CHECKING
         ) return@synchronized false
-        owner = current.copy(operation = direct.copy(phase = nextPhase))
+        owner = current.copy(operation = confirmation.copy(phase = nextPhase))
         true
     }
 

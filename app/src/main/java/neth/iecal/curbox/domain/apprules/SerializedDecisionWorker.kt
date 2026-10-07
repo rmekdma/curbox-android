@@ -16,7 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
-import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.UseDayResetTime
@@ -71,7 +71,7 @@ data class GuardianApprovalEvaluationRequest(
     val operationId: String,
     val checkId: String,
     val packageName: String,
-    val grantReceipt: GuardianApprovalGrantReceipt,
+    val approvalReceipt: GuardianApprovalWorkReceipt,
     val capturedAtWallMs: Long,
     val capturedAtElapsedMs: Long
 ) {
@@ -756,8 +756,11 @@ class SerializedDecisionWorker internal constructor(
         }
         if (!isCurrentGuardianApproval(request, accepted)) return
 
-        val confirmationState = if (
-            accepted.runtime.overrideState.grants.any(request.grantReceipt::matches)
+        val confirmationState = if (request.approvalReceipt.isPresentIn(
+                state = accepted.runtime.overrideState,
+                currentUseDayId = useDayId,
+                currentUseDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs
+            )
         ) {
             GuardianApprovalConfirmationState.REFLECTED
         } else {

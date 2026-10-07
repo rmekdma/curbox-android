@@ -25,7 +25,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import android.view.View
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppRuleGuardianDenial
-import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.databinding.ActivityGuardianApprovalBinding
 import neth.iecal.curbox.databinding.DialogGuardianAccumulatedTimeBinding
 import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeFormState
@@ -73,9 +73,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var guardianStateReceiverRegistered = false
     private var closeReason: String = REASON_INTERRUPTED
     private var screenRequestId: String = ""
-    private var directOperationId: String? = null
-    private var directCheckId: String? = null
-    private var directGrantReceipt: GuardianApprovalGrantReceipt? = null
+    private var confirmationOperationId: String? = null
+    private var confirmationCheckId: String? = null
+    private var confirmationReceipt: GuardianApprovalWorkReceipt? = null
     private var confirmationChecking = false
     private var confirmationFailed = false
     private var legacyOperationId: String? = null
@@ -165,9 +165,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
         screenRequestId = intent.getStringExtra(EXTRA_SCREEN_REQUEST_ID)
             ?.takeIf(String::isNotBlank)
             ?: UUID.randomUUID().toString()
-        directOperationId = null
-        directCheckId = null
-        directGrantReceipt = null
+        confirmationOperationId = null
+        confirmationCheckId = null
+        confirmationReceipt = null
         confirmationChecking = false
         confirmationFailed = false
         legacyOperationId = null
@@ -223,7 +223,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         binding.approvalUseAccumulatedTime.setOnClickListener { requestAccumulatedGrant() }
         binding.approvalSkipRule.setOnClickListener { requestSkip() }
         binding.approvalCancel.setOnClickListener { navigateHomeAndFinish() }
-        binding.approvalConfirmationRetry.setOnClickListener { retryDirectConfirmation() }
+        binding.approvalConfirmationRetry.setOnClickListener { retryApprovalConfirmation() }
         binding.approvalCancel.visibility = View.GONE
         renderConfirmationState()
         updateGuardianGrantButton()
@@ -533,9 +533,13 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 when (result) {
                     is GuardianExtraTimeGrantWrite.Result.StoredWithReceipt -> {
                         grantInProgress = false
-                        directOperationId = operationId
-                        directGrantReceipt = result.receipt
-                        beginDirectConfirmation(operationId, result.receipt)
+                        beginApprovalConfirmation(
+                            operationId,
+                            GuardianApprovalWorkReceipt.DirectGrant(
+                                grant = result.receipt,
+                                useDayGenerationStartedAtMs = basis.useDayGenerationStartedAtMs
+                            )
+                        )
                     }
                     GuardianExtraTimeGrantWrite.Result.Stored -> {
                         grantInProgress = false
@@ -565,18 +569,14 @@ class GuardianApprovalActivity : AppCompatActivity() {
         password: String,
         minutes: Long
     ) {
-        val operationId = beginLegacyOperation()
-        if (operationId == null) {
-            grantInProgress = false
-            return
-        }
+        val operationId = UUID.randomUUID().toString()
         lifecycleScope.launch(Dispatchers.IO) {
-            val success = try {
+            val receipt = try {
                 val settings = dataStore.settings.first()
                 val now = System.currentTimeMillis()
                 val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
                 val useDayId = calculator.idAt(now)
-                dataStore.approveAccumulatedTime(
+                dataStore.approveAccumulatedTimeWithReceipt(
                     password = password,
                     ruleId = ruleId,
                     useDayId = useDayId,
@@ -586,14 +586,14 @@ class GuardianApprovalActivity : AppCompatActivity() {
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
-                false
+                null
             }
             withContext(Dispatchers.Main) {
                 if (!canHandleCallbacks()) return@withContext
-                if (success) {
-                    finishAndLaunchLegacy(operationId)
+                if (receipt != null) {
+                    grantInProgress = false
+                    beginApprovalConfirmation(operationId, receipt)
                 } else {
-                    cancelLegacyOperation(operationId)
                     grantInProgress = false
                     toast(R.string.guardian_write_failed)
                 }
@@ -602,13 +602,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun writeSkip(ruleId: String, password: String, option: Int) {
-        val operationId = beginLegacyOperation()
-        if (operationId == null) {
-            grantInProgress = false
-            return
-        }
+        val operationId = UUID.randomUUID().toString()
         lifecycleScope.launch(Dispatchers.IO) {
-            val success = try {
+            val receipt = try {
                 val settings = dataStore.settings.first()
                 val now = System.currentTimeMillis()
                 val calculator = ConfigurableUseDayCalculator(resetTime = settings.useDayResetTime)
@@ -619,20 +615,25 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     1 -> now + Duration.ofMinutes(30).toMillis()
                     else -> nextReset
                 }
-                dataStore.skipAppRuleUntil(
-                    password, ruleId, useDayId, selected, nextReset, now
+                dataStore.skipAppRuleUntilWithReceipt(
+                    password = password,
+                    ruleId = ruleId,
+                    useDayId = useDayId,
+                    selectedUntilMs = selected,
+                    nextResetAtMs = nextReset,
+                    nowMs = now
                 )
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
-                false
+                null
             }
             withContext(Dispatchers.Main) {
                 if (!canHandleCallbacks()) return@withContext
-                if (success) {
-                    finishAndLaunchLegacy(operationId)
+                if (receipt != null) {
+                    grantInProgress = false
+                    beginApprovalConfirmation(operationId, receipt)
                 } else {
-                    cancelLegacyOperation(operationId)
                     grantInProgress = false
                     toast(R.string.guardian_write_failed)
                 }
@@ -640,44 +641,47 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
     }
 
-    private fun beginDirectConfirmation(
+    private fun beginApprovalConfirmation(
         operationId: String,
-        receipt: GuardianApprovalGrantReceipt
+        receipt: GuardianApprovalWorkReceipt
     ) {
+        confirmationOperationId = operationId
+        confirmationReceipt = receipt
         val checkId = UUID.randomUUID().toString()
-        directCheckId = checkId
+        confirmationCheckId = checkId
         confirmationChecking = true
         confirmationFailed = false
         renderConfirmationState()
-        sendDirectConfirmationRequest(
-            action = INTENT_ACTION_DIRECT_GRANT_STORED,
+        sendApprovalConfirmationRequest(
+            action = INTENT_ACTION_APPROVAL_STORED,
             operationId = operationId,
             checkId = checkId,
             receipt = receipt
         )
     }
 
-    private fun retryDirectConfirmation() {
+    private fun retryApprovalConfirmation() {
         if (!canHandleCallbacks() || confirmationChecking) return
-        val operationId = directOperationId ?: return
+        val operationId = confirmationOperationId ?: return
+        val receipt = confirmationReceipt ?: return
         val checkId = UUID.randomUUID().toString()
-        directCheckId = checkId
+        confirmationCheckId = checkId
         confirmationChecking = true
         confirmationFailed = false
         renderConfirmationState()
-        sendDirectConfirmationRequest(
-            action = INTENT_ACTION_DIRECT_CHECK_RETRY,
+        sendApprovalConfirmationRequest(
+            action = INTENT_ACTION_APPROVAL_CHECK_RETRY,
             operationId = operationId,
             checkId = checkId,
-            receipt = directGrantReceipt
+            receipt = receipt
         )
     }
 
-    private fun sendDirectConfirmationRequest(
+    private fun sendApprovalConfirmationRequest(
         action: String,
         operationId: String,
         checkId: String,
-        receipt: GuardianApprovalGrantReceipt?
+        receipt: GuardianApprovalWorkReceipt
     ) {
         val request = Intent(action)
             .setPackage(packageName)
@@ -685,11 +689,26 @@ class GuardianApprovalActivity : AppCompatActivity() {
             .putExtra(EXTRA_SCREEN_REQUEST_ID, screenRequestId)
             .putExtra(EXTRA_OPERATION_ID, operationId)
             .putExtra(EXTRA_CHECK_ID, checkId)
-        receipt?.let {
-            request.putExtra(EXTRA_RECEIPT_RULE_ID, it.ruleId)
-                .putExtra(EXTRA_RECEIPT_USE_DAY_ID, it.useDayId)
-                .putExtra(EXTRA_RECEIPT_GRANTED_AT_MS, it.grantedAtMs)
-                .putExtra(EXTRA_RECEIPT_GRANTED_MILLIS, it.grantedMillis)
+            .putExtra(EXTRA_RECEIPT_USE_DAY_GENERATION, receipt.useDayGenerationStartedAtMs)
+        when (receipt) {
+            is GuardianApprovalWorkReceipt.DirectGrant -> request
+                .putExtra(EXTRA_APPROVAL_KIND, APPROVAL_KIND_DIRECT)
+                .putExtra(EXTRA_RECEIPT_RULE_ID, receipt.grant.ruleId)
+                .putExtra(EXTRA_RECEIPT_USE_DAY_ID, receipt.grant.useDayId)
+                .putExtra(EXTRA_RECEIPT_GRANTED_AT_MS, receipt.grant.grantedAtMs)
+                .putExtra(EXTRA_RECEIPT_GRANTED_MILLIS, receipt.grant.grantedMillis)
+            is GuardianApprovalWorkReceipt.AccumulatedGrant -> request
+                .putExtra(EXTRA_APPROVAL_KIND, APPROVAL_KIND_ACCUMULATED)
+                .putExtra(EXTRA_RECEIPT_RULE_ID, receipt.ruleId)
+                .putExtra(EXTRA_RECEIPT_USE_DAY_ID, receipt.useDayId)
+                .putExtra(EXTRA_RECEIPT_GRANTED_AT_MS, receipt.grantedAtMs)
+                .putExtra(EXTRA_RECEIPT_GRANTED_MILLIS, receipt.grantedMillis)
+            is GuardianApprovalWorkReceipt.RuleSkip -> request
+                .putExtra(EXTRA_APPROVAL_KIND, APPROVAL_KIND_SKIP)
+                .putExtra(EXTRA_RECEIPT_RULE_ID, receipt.ruleId)
+                .putExtra(EXTRA_RECEIPT_USE_DAY_ID, receipt.useDayId)
+                .putExtra(EXTRA_SKIP_FROM_MS, receipt.skipFromMs)
+                .putExtra(EXTRA_SKIP_UNTIL_MS, receipt.skipUntilMs)
         }
         sendBroadcast(request)
     }
@@ -697,8 +716,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private fun handleConfirmationResult(result: Intent) {
         if (!canHandleCallbacks() ||
             result.getStringExtra(EXTRA_SCREEN_REQUEST_ID) != screenRequestId ||
-            result.getStringExtra(EXTRA_OPERATION_ID) != directOperationId ||
-            result.getStringExtra(EXTRA_CHECK_ID) != directCheckId
+            result.getStringExtra(EXTRA_OPERATION_ID) != confirmationOperationId ||
+            result.getStringExtra(EXTRA_CHECK_ID) != confirmationCheckId
         ) return
         val status = result.getStringExtra(EXTRA_CONFIRMATION_STATUS) ?: return
         confirmationChecking = false
@@ -886,6 +905,10 @@ class GuardianApprovalActivity : AppCompatActivity() {
             "neth.iecal.curbox.guardian.approval.direct_grant_stored"
         const val INTENT_ACTION_DIRECT_CHECK_RETRY =
             "neth.iecal.curbox.guardian.approval.direct_check_retry"
+        const val INTENT_ACTION_APPROVAL_STORED =
+            "neth.iecal.curbox.guardian.approval.stored"
+        const val INTENT_ACTION_APPROVAL_CHECK_RETRY =
+            "neth.iecal.curbox.guardian.approval.check_retry"
         const val INTENT_ACTION_CONFIRMATION_RESULT =
             "neth.iecal.curbox.guardian.approval.confirmation_result"
         const val INTENT_ACTION_LEGACY_STARTED =
@@ -900,6 +923,10 @@ class GuardianApprovalActivity : AppCompatActivity() {
         const val EXTRA_RECEIPT_USE_DAY_ID = "guardian_receipt_use_day_id"
         const val EXTRA_RECEIPT_GRANTED_AT_MS = "guardian_receipt_granted_at_ms"
         const val EXTRA_RECEIPT_GRANTED_MILLIS = "guardian_receipt_granted_millis"
+        const val EXTRA_RECEIPT_USE_DAY_GENERATION = "guardian_receipt_use_day_generation"
+        const val EXTRA_APPROVAL_KIND = "guardian_approval_kind"
+        const val EXTRA_SKIP_FROM_MS = "guardian_skip_from_ms"
+        const val EXTRA_SKIP_UNTIL_MS = "guardian_skip_until_ms"
         const val EXTRA_CONFIRMATION_STATUS = "guardian_confirmation_status"
         const val EXTRA_CONFIRMATION_DENIALS = "guardian_confirmation_denials"
         const val EXTRA_CONFIRMATION_STATE = "guardian_confirmation_state"
@@ -907,6 +934,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
         const val CONFIRMATION_STATUS_REMAINING = "remaining"
         const val CONFIRMATION_STATUS_FAILED = "failed"
         const val CONFIRMATION_STATUS_TIMEOUT = "timeout"
+        const val APPROVAL_KIND_DIRECT = "direct_grant"
+        const val APPROVAL_KIND_ACCUMULATED = "accumulated_grant"
+        const val APPROVAL_KIND_SKIP = "rule_skip"
         const val REASON_GRANTED = "granted"
         const val REASON_CANCELLED = "cancelled"
         const val REASON_INTERRUPTED = "interrupted"

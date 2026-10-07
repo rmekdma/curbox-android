@@ -22,6 +22,7 @@ import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDayResetTime
 import org.junit.Assert.assertEquals
@@ -48,7 +49,7 @@ class SerializedDecisionWorkerTest {
             acceptedRuntime = approvalRuntime(
                 revision = RuntimeRevision(5L),
                 useDayId = useDayId,
-                receipt = receipt
+                receipt = GuardianApprovalWorkReceipt.DirectGrant(receipt, 0L)
             )
         )
         try {
@@ -70,7 +71,7 @@ class SerializedDecisionWorkerTest {
                         operationId = "grant-1",
                         checkId = "check-1",
                         packageName = TARGET_PACKAGE,
-                        grantReceipt = receipt,
+                        approvalReceipt = GuardianApprovalWorkReceipt.DirectGrant(receipt, 0L),
                         capturedAtWallMs = wallNow,
                         capturedAtElapsedMs = wallNow
                     )
@@ -125,7 +126,7 @@ class SerializedDecisionWorkerTest {
                         operationId = "grant-2",
                         checkId = "check-2",
                         packageName = TARGET_PACKAGE,
-                        grantReceipt = receipt,
+                        approvalReceipt = GuardianApprovalWorkReceipt.DirectGrant(receipt, 0L),
                         capturedAtWallMs = wallNow,
                         capturedAtElapsedMs = wallNow
                     )
@@ -138,6 +139,100 @@ class SerializedDecisionWorkerTest {
             assertEquals(listOf("usage", "night"), result.evaluation?.denyingRules?.map { it.ruleId })
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun accumulatedGrantAndSkipConfirmTheirOwnEffectsAgainstTheLatestTargetEvaluation() {
+        val wallNow = 2_000L
+        val useDayId = ConfigurableUseDayCalculator().idAt(wallNow)
+        val receipts = listOf(
+            GuardianApprovalWorkReceipt.AccumulatedGrant(
+                ruleId = "usage",
+                useDayId = useDayId,
+                grantedAtMs = 1_500L,
+                grantedMillis = 15 * 60_000L,
+                useDayGenerationStartedAtMs = 7L
+            ),
+            GuardianApprovalWorkReceipt.RuleSkip(
+                ruleId = "usage",
+                useDayId = useDayId,
+                skipFromMs = 1_500L,
+                skipUntilMs = 5_000L,
+                useDayGenerationStartedAtMs = 7L
+            )
+        )
+
+        receipts.forEachIndexed { index, receipt ->
+            val deniedOutcomes = RecordingOutcomeSink()
+            val deniedWorker = worker(
+                repository = RecordingRepository(),
+                sink = deniedOutcomes,
+                acceptedRuntime = approvalRuntime(
+                    revision = RuntimeRevision(20L + index),
+                    useDayId = useDayId,
+                    receipt = receipt,
+                    useDayGenerationStartedAtMs = 7L
+                )
+            )
+            try {
+                assertEquals(
+                    SubmissionResult.ACCEPTED,
+                    deniedWorker.submitGuardianApprovalEvaluation(
+                        guardianApprovalRequest(
+                            sourceOrder = 20L + index,
+                            operationId = "approval-$index",
+                            checkId = "check-denied-$index",
+                            receipt = receipt,
+                            capturedAtMs = wallNow
+                        )
+                    )
+                )
+                assertTrue(deniedOutcomes.awaitGuardianApprovalCount(1))
+                val result = deniedOutcomes.guardianApprovalEvaluations.single()
+                assertEquals(GuardianApprovalEvaluationStatus.COMPLETED, result.status)
+                assertEquals(GuardianApprovalConfirmationState.REFLECTED, result.confirmationState)
+                assertEquals(listOf("night"), result.evaluation?.denyingRules?.map { it.ruleId })
+                assertTrue(
+                    "the target rule's accumulated grant or skip must take effect",
+                    result.evaluation?.evaluations?.single { it.ruleId == "usage" }?.isAllowed == true
+                )
+            } finally {
+                deniedWorker.stop(recoveryStop(LifecycleGeneration(1L)))
+            }
+
+            val allowedOutcomes = RecordingOutcomeSink()
+            val allowedWorker = worker(
+                repository = RecordingRepository(),
+                sink = allowedOutcomes,
+                acceptedRuntime = approvalRuntime(
+                    revision = RuntimeRevision(30L + index),
+                    useDayId = useDayId,
+                    receipt = receipt,
+                    useDayGenerationStartedAtMs = 7L,
+                    nightAllowedMinutes = 1_440L
+                )
+            )
+            try {
+                assertEquals(
+                    SubmissionResult.ACCEPTED,
+                    allowedWorker.submitGuardianApprovalEvaluation(
+                        guardianApprovalRequest(
+                            sourceOrder = 30L + index,
+                            operationId = "approval-$index",
+                            checkId = "check-allowed-$index",
+                            receipt = receipt,
+                            capturedAtMs = wallNow
+                        )
+                    )
+                )
+                assertTrue(allowedOutcomes.awaitGuardianApprovalCount(1))
+                val result = allowedOutcomes.guardianApprovalEvaluations.single()
+                assertEquals(GuardianApprovalConfirmationState.REFLECTED, result.confirmationState)
+                assertTrue("every applicable rule is allowed", result.evaluation?.isAllowed == true)
+            } finally {
+                allowedWorker.stop(recoveryStop(LifecycleGeneration(1L)))
+            }
         }
     }
 
@@ -1490,16 +1585,40 @@ class SerializedDecisionWorkerTest {
     private fun approvalRuntime(
         revision: RuntimeRevision,
         useDayId: String,
-        receipt: GuardianApprovalGrantReceipt?
+        receipt: GuardianApprovalWorkReceipt?,
+        useDayGenerationStartedAtMs: Long = 0L,
+        nightAllowedMinutes: Long = 0L
     ): AcceptedRuleRuntimeSnapshot {
-        val grant = receipt?.let {
-            AppRuleGuardianGrant(
-                ruleId = it.ruleId,
-                useDayId = it.useDayId,
-                grantedAtMs = it.grantedAtMs,
-                grantedMillis = it.grantedMillis
+        val grants = when (receipt) {
+            is GuardianApprovalWorkReceipt.DirectGrant -> listOf(
+                AppRuleGuardianGrant(
+                    ruleId = receipt.grant.ruleId,
+                    useDayId = receipt.grant.useDayId,
+                    grantedAtMs = receipt.grant.grantedAtMs,
+                    grantedMillis = receipt.grant.grantedMillis
+                )
             )
+            is GuardianApprovalWorkReceipt.AccumulatedGrant -> listOf(
+                AppRuleGuardianGrant(
+                    ruleId = receipt.ruleId,
+                    useDayId = receipt.useDayId,
+                    grantedAtMs = receipt.grantedAtMs,
+                    grantedMillis = receipt.grantedMillis,
+                    isFromAccumulatedPool = true
+                )
+            )
+            else -> emptyList()
         }
+        val skips = (receipt as? GuardianApprovalWorkReceipt.RuleSkip)?.let {
+            listOf(
+                neth.iecal.curbox.data.models.AppRuleGuardianSkip(
+                    ruleId = it.ruleId,
+                    useDayId = it.useDayId,
+                    skipFromMs = it.skipFromMs,
+                    skipUntilMs = it.skipUntilMs
+                )
+            )
+        }.orEmpty()
         return AcceptedRuleRuntimeSnapshot(
             runtime = RuleRuntimeSnapshot(
                 snapshot = AppRuleSnapshot(
@@ -1524,16 +1643,18 @@ class SerializedDecisionWorkerTest {
                             name = "Night",
                             weekdays = (0..6).toSet(),
                             scope = AppRuleScope(includeAllApps = true),
-                            allowedMinutes = 0L,
+                            allowedMinutes = nightAllowedMinutes,
                             guardianExtraTimeAllowed = false
                         )
                     )
                 ),
                 resetTime = UseDayResetTime(),
-                useDayGenerationStartedAtMs = 0L,
+                useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
                 overrideState = neth.iecal.curbox.data.models.AppRuleOverrideState(
                     useDayId = useDayId,
-                    grants = listOfNotNull(grant)
+                    useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
+                    grants = grants,
+                    skips = skips
                 ),
                 launchablePackages = setOf(TARGET_PACKAGE),
                 usageTrackingDecision = AppUsageTrackingPolicy.decide(true, true)
@@ -1541,6 +1662,24 @@ class SerializedDecisionWorkerTest {
             runtimeRevision = revision
         )
     }
+
+    private fun guardianApprovalRequest(
+        sourceOrder: Long,
+        operationId: String,
+        checkId: String,
+        receipt: GuardianApprovalWorkReceipt,
+        capturedAtMs: Long
+    ) = GuardianApprovalEvaluationRequest(
+        sourceOrderIdentity = SourceOrderIdentity(sourceOrder),
+        lifecycleGeneration = LifecycleGeneration(1L),
+        screenRequestId = "screen-$operationId",
+        operationId = operationId,
+        checkId = checkId,
+        packageName = TARGET_PACKAGE,
+        approvalReceipt = receipt,
+        capturedAtWallMs = capturedAtMs,
+        capturedAtElapsedMs = capturedAtMs
+    )
 
     private fun runtime(
         allowedMinutes: Long = 0L,

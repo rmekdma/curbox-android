@@ -14,6 +14,7 @@ import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
@@ -34,6 +35,9 @@ import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
 import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.UseDayResetTime
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -50,6 +54,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.CoroutineContext
 
 /** Regression coverage for foreground app-rule checks and their recheck boundaries. */
 @RunWith(AndroidJUnit4::class)
@@ -982,6 +987,192 @@ class AppRuleBlockerRecheckTest {
         )
         assertEquals(null, getField(blocker, "activeGuardianPackage"))
         blocker.onDestroy()
+    }
+
+    @Test
+    fun accumulatedApprovalReceiverKeepsTheReceiptAcrossConfirmationRetry() =
+        assertApprovalReceiverKeepsReceiptAcrossRetry(
+            GuardianApprovalWorkReceipt.AccumulatedGrant(
+                ruleId = "usage",
+                useDayId = "2026-10-07",
+                grantedAtMs = 1_791_360_000_000L,
+                grantedMillis = 15 * 60_000L,
+                useDayGenerationStartedAtMs = 1_791_360_000_000L
+            )
+        )
+
+    @Test
+    fun skipApprovalReceiverKeepsTheReceiptAcrossConfirmationRetry() =
+        assertApprovalReceiverKeepsReceiptAcrossRetry(
+            GuardianApprovalWorkReceipt.RuleSkip(
+                ruleId = "usage",
+                useDayId = "2026-10-07",
+                skipFromMs = 1_791_360_000_000L,
+                skipUntilMs = 1_791_360_900_000L,
+                useDayGenerationStartedAtMs = 1_791_360_000_000L
+            )
+        )
+
+    private fun assertApprovalReceiverKeepsReceiptAcrossRetry(
+        receipt: GuardianApprovalWorkReceipt
+    ) {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val blocker = AppRuleBlocker()
+        val queuedDispatcher = QueuedDispatcher()
+        setField(blocker, "service", service)
+        setField(blocker, "setupReady", true)
+        setField(blocker, "activeGuardianPackage", PACKAGE)
+        setField(blocker, "scope", CoroutineScope(SupervisorJob() + queuedDispatcher))
+        (getField(blocker, "lifecycleGeneration") as AtomicLong).set(1L)
+
+        val screenRequestId = "screen-$PACKAGE"
+        val operationId = "operation-${receipt::class.simpleName}"
+        val firstCheckId = "check-1"
+        val retryCheckId = "check-2"
+        val generation = LifecycleGeneration(1L)
+        val coordinator = getField(blocker, "guardianApprovalCoordinator")
+            as GuardianApprovalCoordinator
+        assertTrue(coordinator.openScreen(screenRequestId, PACKAGE, generation))
+        val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+
+        receiver.onReceive(
+            service,
+            approvalCheckIntent(
+                action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED,
+                screenRequestId = screenRequestId,
+                operationId = operationId,
+                checkId = firstCheckId,
+                receipt = receipt
+            )
+        )
+
+        assertEquals(
+            GuardianApprovalCoordinator.Operation.Confirmation(
+                operationId = operationId,
+                checkId = firstCheckId,
+                receipt = receipt,
+                phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            ),
+            coordinator.currentOwner()?.operation
+        )
+        assertTrue(
+            coordinator.timeOutConfirmation(
+                GuardianApprovalCoordinator.CheckIdentity(
+                    screenRequestId = screenRequestId,
+                    operationId = operationId,
+                    checkId = firstCheckId,
+                    lifecycleGeneration = generation
+                )
+            )
+        )
+
+        receiver.onReceive(
+            service,
+            approvalCheckIntent(
+                action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
+                screenRequestId = screenRequestId,
+                operationId = operationId,
+                checkId = retryCheckId,
+                receipt = receipt
+            )
+        )
+        assertEquals(
+            GuardianApprovalCoordinator.Operation.Confirmation(
+                operationId = operationId,
+                checkId = retryCheckId,
+                receipt = receipt,
+                phase = GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            ),
+            coordinator.currentOwner()?.operation
+        )
+
+        receiver.onReceive(
+            service,
+            approvalCheckIntent(
+                action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
+                screenRequestId = screenRequestId,
+                operationId = operationId,
+                checkId = retryCheckId,
+                receipt = receipt
+            )
+        )
+        assertEquals(
+            "a duplicate retry must not replace or complete the current request",
+            retryCheckId,
+            (coordinator.currentOwner()?.operation as? GuardianApprovalCoordinator.Operation.Confirmation)
+                ?.checkId
+        )
+        blocker.onDestroy()
+    }
+
+    private fun approvalCheckIntent(
+        action: String,
+        screenRequestId: String,
+        operationId: String,
+        checkId: String,
+        receipt: GuardianApprovalWorkReceipt
+    ): Intent = Intent(action)
+        .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, PACKAGE)
+        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
+        .putExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID, operationId)
+        .putExtra(GuardianApprovalActivity.EXTRA_CHECK_ID, checkId)
+        .putExtra(
+            GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_GENERATION,
+            receipt.useDayGenerationStartedAtMs
+        )
+        .apply {
+            when (receipt) {
+                is GuardianApprovalWorkReceipt.DirectGrant -> {
+                    putExtra(
+                        GuardianApprovalActivity.EXTRA_APPROVAL_KIND,
+                        GuardianApprovalActivity.APPROVAL_KIND_DIRECT
+                    )
+                    putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID, receipt.grant.ruleId)
+                    putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID, receipt.grant.useDayId)
+                    putExtra(
+                        GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS,
+                        receipt.grant.grantedAtMs
+                    )
+                    putExtra(
+                        GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_MILLIS,
+                        receipt.grant.grantedMillis
+                    )
+                }
+                is GuardianApprovalWorkReceipt.AccumulatedGrant -> {
+                    putExtra(
+                        GuardianApprovalActivity.EXTRA_APPROVAL_KIND,
+                        GuardianApprovalActivity.APPROVAL_KIND_ACCUMULATED
+                    )
+                    putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID, receipt.ruleId)
+                    putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID, receipt.useDayId)
+                    putExtra(
+                        GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_AT_MS,
+                        receipt.grantedAtMs
+                    )
+                    putExtra(
+                        GuardianApprovalActivity.EXTRA_RECEIPT_GRANTED_MILLIS,
+                        receipt.grantedMillis
+                    )
+                }
+                is GuardianApprovalWorkReceipt.RuleSkip -> {
+                    putExtra(
+                        GuardianApprovalActivity.EXTRA_APPROVAL_KIND,
+                        GuardianApprovalActivity.APPROVAL_KIND_SKIP
+                    )
+                    putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID, receipt.ruleId)
+                    putExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID, receipt.useDayId)
+                    putExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, receipt.skipFromMs)
+                    putExtra(GuardianApprovalActivity.EXTRA_SKIP_UNTIL_MS, receipt.skipUntilMs)
+                }
+            }
+        }
+
+    private class QueuedDispatcher : CoroutineDispatcher() {
+        private val queued = ArrayDeque<Runnable>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            queued.addLast(block)
+        }
     }
 
     @Test

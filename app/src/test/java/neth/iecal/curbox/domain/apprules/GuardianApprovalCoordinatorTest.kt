@@ -1,6 +1,7 @@
 package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -38,13 +39,16 @@ class GuardianApprovalCoordinatorTest {
         assertTrue(coordinator.retryDirectCheck("screen-1", "grant-1", "check-2"))
 
         val current = coordinator.currentOwner()
-        assertEquals("grant-1", (current?.operation as GuardianApprovalCoordinator.Operation.Direct).operationId)
-        assertEquals("check-2", (current.operation as GuardianApprovalCoordinator.Operation.Direct).checkId)
-        assertEquals(receipt, (current.operation as GuardianApprovalCoordinator.Operation.Direct).receipt)
+        assertEquals("grant-1", (current?.operation as GuardianApprovalCoordinator.Operation.Confirmation).operationId)
+        assertEquals("check-2", (current.operation as GuardianApprovalCoordinator.Operation.Confirmation).checkId)
+        assertEquals(
+            GuardianApprovalWorkReceipt.DirectGrant(receipt, 0L),
+            (current.operation as GuardianApprovalCoordinator.Operation.Confirmation).receipt
+        )
         assertFalse(coordinator.completeDirectCheck(expiredCheck))
         assertEquals(
-            GuardianApprovalCoordinator.DirectCheckPhase.CHECKING,
-            (coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Direct).phase
+            GuardianApprovalCoordinator.ConfirmationPhase.CHECKING,
+            (coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Confirmation).phase
         )
         assertTrue(
             coordinator.completeDirectCheck(
@@ -81,7 +85,7 @@ class GuardianApprovalCoordinatorTest {
 
         val current = coordinator.currentOwner()
         assertEquals("screen-3", current?.screenRequestId)
-        assertEquals("grant-3", (current?.operation as GuardianApprovalCoordinator.Operation.Direct).operationId)
+        assertEquals("grant-3", (current?.operation as GuardianApprovalCoordinator.Operation.Confirmation).operationId)
     }
 
     @Test
@@ -95,6 +99,72 @@ class GuardianApprovalCoordinatorTest {
         assertFalse(coordinator.completeLegacyOperation("screen-4", "legacy-old"))
         assertTrue(coordinator.completeLegacyOperation("screen-4", "legacy-2"))
         assertNull(coordinator.currentOwner())
+    }
+
+    @Test
+    fun accumulatedConfirmationRetryKeepsItsEffectAndFencesDuplicateAndLateResults() {
+        val coordinator = GuardianApprovalCoordinator()
+        val receipt = GuardianApprovalWorkReceipt.AccumulatedGrant(
+            ruleId = "usage",
+            useDayId = "2026-10-07",
+            grantedAtMs = 100L,
+            grantedMillis = 15 * 60_000L,
+            useDayGenerationStartedAtMs = 40L
+        )
+        assertTrue(coordinator.openScreen("screen-5", TARGET_PACKAGE, LifecycleGeneration(7L)))
+        assertTrue(coordinator.beginConfirmation("screen-5", "acc-1", "check-1", receipt))
+        assertFalse(coordinator.beginConfirmation("screen-5", "acc-1", "check-1", receipt))
+        assertFalse(
+            coordinator.beginConfirmation(
+                "screen-5",
+                "acc-1",
+                "check-2",
+                receipt.copy(grantedMillis = 30 * 60_000L)
+            )
+        )
+
+        val firstCheck = GuardianApprovalCoordinator.CheckIdentity(
+            screenRequestId = "screen-5",
+            operationId = "acc-1",
+            checkId = "check-1",
+            lifecycleGeneration = LifecycleGeneration(7L)
+        )
+        assertTrue(coordinator.timeOutConfirmation(firstCheck))
+        assertFalse(coordinator.completeConfirmation(firstCheck))
+        assertTrue(coordinator.retryConfirmation("screen-5", "acc-1", "check-2"))
+        assertFalse(coordinator.completeConfirmation(firstCheck))
+        val current = coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Confirmation
+        assertEquals(receipt, current.receipt)
+        assertEquals("check-2", current.checkId)
+        val retry = firstCheck.copy(checkId = "check-2")
+        assertTrue(coordinator.completeConfirmation(retry))
+        assertFalse(coordinator.completeConfirmation(retry))
+    }
+
+    @Test
+    fun skipConfirmationRetainsSkipIdentityInsteadOfBecomingGenericGranted() {
+        val coordinator = GuardianApprovalCoordinator()
+        val receipt = GuardianApprovalWorkReceipt.RuleSkip(
+            ruleId = "night",
+            useDayId = "2026-10-07",
+            skipFromMs = 100L,
+            skipUntilMs = 200L,
+            useDayGenerationStartedAtMs = 40L
+        )
+        assertTrue(coordinator.openScreen("screen-6", TARGET_PACKAGE, LifecycleGeneration(8L)))
+        assertTrue(coordinator.beginConfirmation("screen-6", "skip-1", "check-1", receipt))
+
+        val current = coordinator.currentOwner()?.operation as GuardianApprovalCoordinator.Operation.Confirmation
+        assertEquals(receipt, current.receipt)
+        assertFalse(coordinator.completeLegacyOperation("screen-6", "skip-1"))
+        val check = GuardianApprovalCoordinator.CheckIdentity(
+            screenRequestId = "screen-6",
+            operationId = "skip-1",
+            checkId = "check-1",
+            lifecycleGeneration = LifecycleGeneration(8L)
+        )
+        assertTrue(coordinator.completeConfirmation(check))
+        assertFalse(coordinator.completeConfirmation(check))
     }
 
     companion object {

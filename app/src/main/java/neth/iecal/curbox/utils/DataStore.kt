@@ -24,6 +24,7 @@ import neth.iecal.curbox.data.models.AppRuleRolloverState
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.GatedSettingsField
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.data.models.KeywordBlocker
 import neth.iecal.curbox.data.models.LegacyAppRuleMigration
 import neth.iecal.curbox.data.models.ManualFocusGroup
@@ -478,12 +479,27 @@ class DataStoreManager(private val context: Context) {
         useDayId: String,
         approvedMinutes: Long,
         grantedAtMs: Long = System.currentTimeMillis()
-    ): Boolean {
+    ): Boolean = approveAccumulatedTimeWithReceipt(
+        password = password,
+        ruleId = ruleId,
+        useDayId = useDayId,
+        approvedMinutes = approvedMinutes,
+        grantedAtMs = grantedAtMs
+    ) != null
+
+    /** Writes the accumulated grant once and returns the receipt from that same update result. */
+    suspend fun approveAccumulatedTimeWithReceipt(
+        password: String,
+        ruleId: String,
+        useDayId: String,
+        approvedMinutes: Long,
+        grantedAtMs: Long = System.currentTimeMillis()
+    ): GuardianApprovalWorkReceipt.AccumulatedGrant? {
         if (approvedMinutes <= 0L ||
             approvedMinutes > Long.MAX_VALUE / 60_000L ||
             ruleId.isBlank() ||
             useDayId.isBlank()
-        ) return false
+        ) return null
         val grantedMillis = approvedMinutes * 60_000L
         var expectedRemainingPool = 0L
         val updated = settingsDataStore.updateData { current ->
@@ -519,13 +535,21 @@ class DataStoreManager(private val context: Context) {
                 appRuleOverrideState = nextOverrides
             )
         }
-        return GuardianDataStoreWriteResult.accumulatedGrantWasStored(
+        val stored = GuardianDataStoreWriteResult.accumulatedGrantWasStored(
             settings = updated,
             ruleId = ruleId,
             useDayId = useDayId,
             grantedMillis = grantedMillis,
             grantedAtMs = grantedAtMs.coerceAtLeast(0L),
             expectedRemainingPoolMinutes = expectedRemainingPool
+        )
+        if (!stored) return null
+        return GuardianApprovalWorkReceipt.AccumulatedGrant(
+            ruleId = ruleId,
+            useDayId = useDayId,
+            grantedAtMs = grantedAtMs.coerceAtLeast(0L),
+            grantedMillis = grantedMillis,
+            useDayGenerationStartedAtMs = updated.appRuleOverrideState.useDayGenerationStartedAtMs
         )
     }
 
@@ -536,8 +560,25 @@ class DataStoreManager(private val context: Context) {
         selectedUntilMs: Long,
         nextResetAtMs: Long,
         nowMs: Long = System.currentTimeMillis()
-    ): Boolean {
-        if (ruleId.isBlank() || useDayId.isBlank() || nextResetAtMs <= nowMs) return false
+    ): Boolean = skipAppRuleUntilWithReceipt(
+        password = password,
+        ruleId = ruleId,
+        useDayId = useDayId,
+        selectedUntilMs = selectedUntilMs,
+        nextResetAtMs = nextResetAtMs,
+        nowMs = nowMs
+    ) != null
+
+    /** Writes a rule skip once and returns the receipt from that same update result. */
+    suspend fun skipAppRuleUntilWithReceipt(
+        password: String,
+        ruleId: String,
+        useDayId: String,
+        selectedUntilMs: Long,
+        nextResetAtMs: Long,
+        nowMs: Long = System.currentTimeMillis()
+    ): GuardianApprovalWorkReceipt.RuleSkip? {
+        if (ruleId.isBlank() || useDayId.isBlank() || nextResetAtMs <= nowMs) return null
         val updated = settingsDataStore.updateData { current ->
             if (current.guardianAuthConfig.isConfigured &&
                 !GuardianPassword.verify(password, current.guardianAuthConfig)
@@ -557,12 +598,22 @@ class DataStoreManager(private val context: Context) {
             )
             current.copy(appRuleOverrideState = next)
         }
-        return GuardianDataStoreWriteResult.skipWasStored(
+        val skipFromMs = nowMs.coerceAtLeast(0L)
+        val skipUntilMs = selectedUntilMs.coerceIn(nowMs, nextResetAtMs)
+        val stored = GuardianDataStoreWriteResult.skipWasStored(
             updated,
             ruleId,
             useDayId,
-            nowMs,
-            selectedUntilMs.coerceIn(nowMs, nextResetAtMs)
+            skipFromMs,
+            skipUntilMs
+        )
+        if (!stored) return null
+        return GuardianApprovalWorkReceipt.RuleSkip(
+            ruleId = ruleId,
+            useDayId = useDayId,
+            skipFromMs = skipFromMs,
+            skipUntilMs = skipUntilMs,
+            useDayGenerationStartedAtMs = updated.appRuleOverrideState.useDayGenerationStartedAtMs
         )
     }
 
