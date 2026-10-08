@@ -41,6 +41,8 @@ import neth.iecal.curbox.domain.apprules.GuardianApprovalCoordinator
 import neth.iecal.curbox.domain.apprules.GuardianApprovalConfirmationState
 import neth.iecal.curbox.domain.apprules.GuardianApprovalPolicyFingerprint
 import neth.iecal.curbox.domain.apprules.LifecycleGeneration
+import neth.iecal.curbox.domain.apprules.DecisionOutcome
+import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.GuardianSessionRegistry
@@ -1543,102 +1545,86 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
-    fun policyTighteningDuringLookupInvalidatesAndAcceptsAReissuedOffer() {
+    fun productionInvalidationRefreshesAndReoffersThroughCurrentActivity() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dataStore = DataStoreManager(context)
-        val ruleId = "lookup_policy_${System.nanoTime()}"
+        val ruleId = "service_reoffer_${System.nanoTime()}"
         val originalSettings = runBlocking { dataStore.settings.first() }
-        assumeTrue("The lifecycle test requires an unset guardian password", !originalSettings.guardianAuthConfig.isConfigured)
+        assumeTrue(
+            "The lifecycle test requires an unset guardian password",
+            !originalSettings.guardianAuthConfig.isConfigured
+        )
         val originalPool = originalSettings.appRuleRolloverState.pools[ruleId]
-        val originalSnapshot = seedEligibleGrantRule(context, ruleId, "Lookup policy test")
+        val originalSnapshot = seedEligibleGrantRule(context, ruleId, "Service reoffer test")
         val storedRequests = LinkedBlockingQueue<Intent>()
         val invalidatedOffers = LinkedBlockingQueue<Intent>()
-        val reevaluatedOfferIds = LinkedBlockingQueue<String>()
-        val reevaluatedConfirmations = LinkedBlockingQueue<GuardianApprovalCoordinator.Confirmation>()
-        val serviceCoordinator = AtomicReference<GuardianApprovalCoordinator?>()
-        val serviceCheckIdentity = AtomicReference<GuardianApprovalCoordinator.CheckIdentity?>()
+        val allowedResults = LinkedBlockingQueue<Intent>()
+        val guardianEvaluations = LinkedBlockingQueue<DecisionOutcome.GuardianApprovalEvaluationReady>()
+        val activeRootPackage = AtomicReference("com.example.guardian.test.other")
+        val lookupCount = AtomicInteger()
+        val firstLookupStarted = CountDownLatch(1)
+        val releaseFirstLookup = CountDownLatch(1)
+        val reissuedLookupStarted = CountDownLatch(1)
+        val releaseReissuedLookup = CountDownLatch(1)
+        val service = RecordingGuardianService().apply { attach(context) }
+        val blocker = AppRuleBlocker().apply {
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = activeRootPackage.get())
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(activeRootPackage.get()),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            decisionOutcomeSinkObserver = { outcome ->
+                if (outcome is DecisionOutcome.GuardianApprovalEvaluationReady) {
+                    guardianEvaluations.offer(outcome)
+                }
+            }
+        }
+        var blockerStarted = false
         val requestReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED) {
-                    val screenRequestId = intent.getStringExtra(
-                        GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID
-                    ).orEmpty()
-                    val operationId = intent.getStringExtra(
-                        GuardianApprovalActivity.EXTRA_OPERATION_ID
-                    ).orEmpty()
-                    val checkId = intent.getStringExtra(
-                        GuardianApprovalActivity.EXTRA_CHECK_ID
-                    ).orEmpty()
-                    val receipt = GuardianApprovalWorkReceipt.RuleSkip(
-                        ruleId = intent.getStringExtra(
-                            GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID
-                        ).orEmpty(),
-                        useDayId = intent.getStringExtra(
-                            GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID
-                        ).orEmpty(),
-                        skipFromMs = intent.getLongExtra(
-                            GuardianApprovalActivity.EXTRA_SKIP_FROM_MS,
-                            -1L
-                        ),
-                        skipUntilMs = intent.getLongExtra(
-                            GuardianApprovalActivity.EXTRA_SKIP_UNTIL_MS,
-                            -1L
-                        ),
-                        useDayGenerationStartedAtMs = intent.getLongExtra(
-                            GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_GENERATION,
-                            -1L
-                        )
-                    )
-                    val coordinator = GuardianApprovalCoordinator()
-                    val checkIdentity = GuardianApprovalCoordinator.CheckIdentity(
-                        screenRequestId = screenRequestId,
-                        operationId = operationId,
-                        checkId = checkId,
-                        lifecycleGeneration = LifecycleGeneration(1L)
-                    )
-                    val accepted = coordinator.openScreen(
-                        screenRequestId = screenRequestId,
-                        packageName = intent.getStringExtra(
-                            GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE
-                        ).orEmpty(),
-                        lifecycleGeneration = checkIdentity.lifecycleGeneration
-                    ) && coordinator.beginConfirmation(
-                        screenRequestId = screenRequestId,
-                        operationId = operationId,
-                        checkId = checkId,
-                        receipt = receipt
-                    )
-                    if (accepted) {
-                        serviceCoordinator.set(coordinator)
-                        serviceCheckIdentity.set(checkIdentity)
-                    }
                     storedRequests.offer(intent)
                 }
             }
         }
         val invalidatedReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action != GuardianApprovalActivity.INTENT_ACTION_APPROVAL_OFFER_INVALIDATED) return
-                invalidatedOffers.offer(intent)
-                val coordinator = serviceCoordinator.get() ?: return
-                val checkIdentity = serviceCheckIdentity.get() ?: return
-                val invalidatedOfferId = intent.getStringExtra(
-                    GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID
-                ).orEmpty()
-                // Use the production coordinator to model a serial offer rejection and reissue.
-                if (!coordinator.rejectConfirmationOffer(checkIdentity, invalidatedOfferId)) return
-                val offerId = java.util.UUID.randomUUID().toString()
-                if (!coordinator.offerConfirmation(checkIdentity, offerId)) return
-                coordinator.currentOwner()?.confirmation?.let(reevaluatedConfirmations::offer)
-                reevaluatedOfferIds.offer(offerId)
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_OFFER_INVALIDATED) {
+                    invalidatedOffers.offer(intent)
+                }
             }
         }
-        val lookupStarted = CountDownLatch(1)
-        val releaseLookup = CountDownLatch(1)
+        val confirmationReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                    intent.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                    GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                ) {
+                    allowedResults.offer(intent)
+                }
+            }
+        }
         GuardianApprovalActivity.launchIntentLookupForTest = { packageName ->
-            lookupStarted.countDown()
-            check(releaseLookup.await(10, TimeUnit.SECONDS)) {
-                "the launch-intent lookup gate was not released"
+            when (lookupCount.getAndIncrement()) {
+                0 -> {
+                    firstLookupStarted.countDown()
+                    check(releaseFirstLookup.await(15, TimeUnit.SECONDS)) {
+                        "the initial launch-intent lookup gate was not released"
+                    }
+                }
+                1 -> {
+                    reissuedLookupStarted.countDown()
+                    check(releaseReissuedLookup.await(15, TimeUnit.SECONDS)) {
+                        "the reissued launch-intent lookup gate was not released"
+                    }
+                }
             }
             context.packageManager.getLaunchIntentForPackage(packageName)
         }
@@ -1654,143 +1640,110 @@ class GuardianApprovalActivityLifecycleTest {
             IntentFilter(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_OFFER_INVALIDATED),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+        ContextCompat.registerReceiver(
+            context,
+            confirmationReceiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         try {
+            blocker.setup(service)
+            blockerStarted = true
+            blocker.setupReceivers()
+            val serviceConnectionId = AppRuleBlocker::class.java
+                .getDeclaredField("serviceConnectionId")
+                .apply { isAccessible = true }
+                .get(blocker) as String
+            fakeServiceConnectionId.set(serviceConnectionId)
+
             ActivityScenario.launch<GuardianApprovalActivity>(
                 approvalIntent(
                     ruleId = ruleId,
-                    ruleName = "Lookup policy test",
+                    ruleName = "Service reoffer test",
                     targetPackageName = context.packageName
                 )
             ).use { scenario ->
-                scenario.onActivity { chooseSkipDuration(it, 0) }
-                val stored = storedRequests.poll(5, TimeUnit.SECONDS)
-                    ?: error("The lookup policy test did not store its skip receipt")
+                scenario.onActivity { activity ->
+                    activeRootPackage.set(context.packageName)
+                    chooseSkipDuration(activity, 0)
+                }
+                val stored = storedRequests.poll(10, TimeUnit.SECONDS)
+                    ?: error("The production blocker did not receive the stored approval")
                 val storedOverrides = awaitOverrideState(context) {
                     it.skips.any { skip -> skip.ruleId == ruleId }
                 }
                 assertEquals(1, storedOverrides.skips.count { it.ruleId == ruleId })
 
-                fun allowedOffer(offerId: String, policyFingerprint: String): Intent {
-                    val capturedAtWallClockMs = System.currentTimeMillis()
-                    val capturedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()
-                    return Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
-                        .setPackage(context.packageName)
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
-                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
-                        )
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
-                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
-                        )
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_OPERATION_ID,
-                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
-                        )
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CHECK_ID,
-                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
-                        )
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
-                            GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
-                        )
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
-                            java.time.ZoneId.systemDefault().id
-                        )
-                        .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID, offerId)
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CONFIRMATION_POLICY_FINGERPRINT,
-                            policyFingerprint
-                        )
-                        .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_RUNTIME_REVISION, 9L)
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
-                            capturedAtElapsedRealtimeMs + 30_000L
-                        )
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
-                            capturedAtWallClockMs
-                        )
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
-                            capturedAtElapsedRealtimeMs
-                        )
-                        .putExtra(
-                            GuardianApprovalActivity.EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
-                            Long.MAX_VALUE
-                        )
-                }
-
-                val allowedSettings = runBlocking { dataStore.settings.first() }
-                val allowedSnapshot = allowedSettings.appRuleSnapshot
-                val allowedFingerprint = GuardianApprovalPolicyFingerprint.forSettings(allowedSettings)
-                val coordinator = serviceCoordinator.get()
-                    ?: error("The service adapter did not accept the stored approval")
-                val checkIdentity = serviceCheckIdentity.get()
-                    ?: error("The service adapter did not create the approval check identity")
-                assertEquals(
-                    GuardianApprovalCoordinator.ConfirmationPhase.CHECKING,
-                    coordinator.currentOwner()?.confirmation?.phase
+                assertTrue(
+                    "the production confirmation offer must reach the Activity lookup",
+                    firstLookupStarted.await(10, TimeUnit.SECONDS)
                 )
-                assertTrue(coordinator.offerConfirmation(checkIdentity, "lookup-policy-race"))
-                val stricterSnapshot = allowedSnapshot.copy(
-                    appRules = allowedSnapshot.appRules.map { rule ->
-                        if (rule.id == ruleId) rule.copy(guardianExtraTimeAllowed = false) else rule
+                val initialAllowed = allowedResults.poll(5, TimeUnit.SECONDS)
+                    ?: error("The production blocker did not send its initial allowed result")
+                val initialOfferId = initialAllowed.getStringExtra(
+                    GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID
+                ).orEmpty()
+                assertTrue(initialOfferId.isNotBlank())
+                assertEquals(
+                    stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID),
+                    initialAllowed.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                )
+                val initialEvaluation = guardianEvaluations.poll(5, TimeUnit.SECONDS)
+                    ?: error("The production worker did not publish its initial guardian evaluation")
+                assertEquals(
+                    stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID),
+                    initialEvaluation.request.checkId
+                )
+
+                val beforeRefresh = runBlocking { dataStore.settings.first() }
+                val renamedSnapshot = beforeRefresh.appRuleSnapshot.copy(
+                    appRules = beforeRefresh.appRuleSnapshot.appRules.map { rule ->
+                        if (rule.id == ruleId) rule.copy(name = "Service reoffer refreshed") else rule
                     }
                 ).normalized()
-                context.sendBroadcast(allowedOffer("lookup-policy-race", allowedFingerprint))
-                assertTrue(
-                    "the production launch-intent lookup should reach its controllable gate",
-                    lookupStarted.await(5, TimeUnit.SECONDS)
-                )
-                try {
-                    assertTrue(runBlocking { dataStore.updateAppRuleSnapshot(stricterSnapshot) })
-                    runBlocking {
-                        withTimeout(5_000L) {
-                            dataStore.settings.first { it.appRuleSnapshot == stricterSnapshot }
-                        }
+                assertTrue(runBlocking { dataStore.updateAppRuleSnapshot(renamedSnapshot) })
+                runBlocking {
+                    withTimeout(5_000L) {
+                        dataStore.settings.first { it.appRuleSnapshot == renamedSnapshot }
                     }
-                } finally {
-                    releaseLookup.countDown()
                 }
-                GuardianApprovalActivity.launchIntentLookupForTest = null
+                releaseFirstLookup.countDown()
 
-                val invalidated = invalidatedOffers.poll(5, TimeUnit.SECONDS)
-                    ?: error("An offer must be reevaluated when policy tightens during package lookup")
+                val invalidated = invalidatedOffers.poll(10, TimeUnit.SECONDS)
+                    ?: error("The Activity did not return the stale policy offer to the service")
                 assertEquals(
-                    "lookup-policy-race",
+                    initialOfferId,
                     invalidated.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID)
                 )
-                val reevaluatedOfferId = reevaluatedOfferIds.poll(5, TimeUnit.SECONDS)
-                    ?: error("The service reevaluation must issue a new offer id")
-                assertNotEquals(
-                    "a normal reevaluation must issue a fresh offer identity",
-                    invalidated.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID),
-                    reevaluatedOfferId
-                )
-                val reevaluatedConfirmation = reevaluatedConfirmations.poll(5, TimeUnit.SECONDS)
-                    ?: error("The coordinator did not retain a reevaluated offer")
+                val reevaluated = guardianEvaluations.poll(10, TimeUnit.SECONDS)
+                    ?: error("The production invalidation receiver did not refresh the guardian check")
+                assertEquals(initialEvaluation.request.screenRequestId, reevaluated.request.screenRequestId)
+                assertEquals(initialEvaluation.request.operationId, reevaluated.request.operationId)
+                assertEquals(initialEvaluation.request.checkId, reevaluated.request.checkId)
+
+                val reissued = allowedResults.poll(10, TimeUnit.SECONDS)
+                    ?: error("The production runtime refresh did not send a fresh allowed offer")
+                val reissuedOfferId = reissued.getStringExtra(
+                    GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID
+                ).orEmpty()
+                assertTrue(reissuedOfferId.isNotBlank())
+                assertNotEquals(initialOfferId, reissuedOfferId)
                 assertEquals(
-                    GuardianApprovalCoordinator.ConfirmationPhase.OFFERED,
-                    reevaluatedConfirmation.phase
+                    initialEvaluation.request.checkId,
+                    reissued.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
                 )
-                assertEquals(reevaluatedOfferId, reevaluatedConfirmation.offerId)
+                assertTrue(
+                    "the reissued service offer must reach the actual Activity workflow",
+                    reissuedLookupStarted.await(10, TimeUnit.SECONDS)
+                )
                 assertEquals(
-                    "read-only reevaluation must not write another approval",
+                    "read-only service reevaluation must not write another approval",
                     storedOverrides,
                     runBlocking { dataStore.settings.first().appRuleOverrideState }
                 )
-                val reevaluatedSettings = runBlocking { dataStore.settings.first() }
-                context.sendBroadcast(
-                    allowedOffer(
-                        reevaluatedOfferId,
-                        GuardianApprovalPolicyFingerprint.forSettings(reevaluatedSettings)
-                    )
-                )
 
-                val launchDeadline = SystemClock.uptimeMillis() + 5_000L
+                releaseReissuedLookup.countDown()
+                val launchDeadline = SystemClock.uptimeMillis() + 10_000L
                 while (scenario.state != Lifecycle.State.DESTROYED &&
                     SystemClock.uptimeMillis() < launchDeadline
                 ) {
@@ -1798,21 +1751,24 @@ class GuardianApprovalActivityLifecycleTest {
                     SystemClock.sleep(50L)
                 }
                 assertEquals(
-                    "the reissued allowed offer should launch after the policy snapshot is rechecked",
+                    "the real service reoffer should finish the current approval Activity",
                     Lifecycle.State.DESTROYED,
                     scenario.state
                 )
                 assertEquals(
-                    "the normal allowed launch must not write another approval",
                     storedOverrides,
                     runBlocking { dataStore.settings.first().appRuleOverrideState }
                 )
             }
         } finally {
-            releaseLookup.countDown()
+            releaseFirstLookup.countDown()
+            releaseReissuedLookup.countDown()
             GuardianApprovalActivity.launchIntentLookupForTest = null
+            if (blockerStarted) blocker.onDestroy()
+            fakeServiceConnectionId.set("test-service-connection-1")
             context.unregisterReceiver(requestReceiver)
             context.unregisterReceiver(invalidatedReceiver)
+            context.unregisterReceiver(confirmationReceiver)
             restoreAppRuleSnapshot(context, originalSnapshot)
             runBlocking {
                 dataStore.writeAppRuleOverrideState(
@@ -1956,6 +1912,147 @@ class GuardianApprovalActivityLifecycleTest {
         } finally {
             context.unregisterReceiver(requestReceiver)
             context.unregisterReceiver(armedReceiver)
+            restoreAppRuleSnapshot(context, originalSnapshot)
+            runBlocking {
+                dataStore.writeAppRuleOverrideState(
+                    password = "",
+                    state = originalSettings.appRuleOverrideState
+                )
+                restoreRolloverPool(context, ruleId, originalPool)
+            }
+        }
+    }
+
+    @Test
+    fun deadlineOnlyAuthorizationRejectionShowsRetryFailureAndStopsChecking() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val dataStore = DataStoreManager(context)
+        val ruleId = "deadline_only_${System.nanoTime()}"
+        val originalSettings = runBlocking { dataStore.settings.first() }
+        assumeTrue(
+            "The lifecycle test requires an unset guardian password",
+            !originalSettings.guardianAuthConfig.isConfigured
+        )
+        val originalPool = originalSettings.appRuleRolloverState.pools[ruleId]
+        val originalSnapshot = seedEligibleGrantRule(context, ruleId, "Deadline only test")
+        val storedRequests = LinkedBlockingQueue<Intent>()
+        val requestReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED) {
+                    storedRequests.offer(intent)
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            requestReceiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(
+                    ruleId = ruleId,
+                    ruleName = "Deadline only test",
+                    targetPackageName = context.packageName
+                )
+            ).use { scenario ->
+                scenario.onActivity { activity -> chooseSkipDuration(activity, 0) }
+                val stored = storedRequests.poll(5, TimeUnit.SECONDS)
+                    ?: error("The deadline-only test did not store its approval")
+                val storedOverrides = awaitOverrideState(context) {
+                    it.skips.any { skip -> skip.ruleId == ruleId }
+                }
+                assertEquals(1, storedOverrides.skips.count { it.ruleId == ruleId })
+                awaitDisplayed(R.id.approval_confirmation_progress)
+
+                val currentSettings = runBlocking { dataStore.settings.first() }
+                val nowWallClockMs = System.currentTimeMillis()
+                val nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_OPERATION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CHECK_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID,
+                            "deadline-only-authorization-offer"
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_POLICY_FINGERPRINT,
+                            GuardianApprovalPolicyFingerprint.forSettings(currentSettings)
+                        )
+                        .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_RUNTIME_REVISION, 1L)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
+                            nowElapsedRealtimeMs - 1L
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
+                            nowWallClockMs
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
+                            nowElapsedRealtimeMs
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
+                            Long.MAX_VALUE
+                        )
+                )
+
+                awaitDisplayed(R.id.approval_confirmation_retry)
+                scenario.onActivity { activity ->
+                    val checking = activity.javaClass.getDeclaredField("confirmationChecking")
+                        .apply { isAccessible = true }
+                        .getBoolean(activity)
+                    val failed = activity.javaClass.getDeclaredField("confirmationFailed")
+                        .apply { isAccessible = true }
+                        .getBoolean(activity)
+                    assertFalse("deadline rejection must stop the checking state", checking)
+                    assertTrue("deadline rejection must expose retry failure state", failed)
+                    assertFalse(activity.isFinishing)
+                    assertViewVisibility(
+                        activity,
+                        R.id.approval_confirmation_progress,
+                        android.view.View.GONE
+                    )
+                    assertViewVisibility(
+                        activity,
+                        R.id.approval_confirmation_retry,
+                        android.view.View.VISIBLE
+                    )
+                }
+                assertEquals(
+                    "deadline rejection must not write another approval",
+                    storedOverrides,
+                    runBlocking { dataStore.settings.first().appRuleOverrideState }
+                )
+            }
+        } finally {
+            context.unregisterReceiver(requestReceiver)
             restoreAppRuleSnapshot(context, originalSnapshot)
             runBlocking {
                 dataStore.writeAppRuleOverrideState(
@@ -2318,5 +2415,13 @@ class GuardianApprovalActivityLifecycleTest {
             packageName = targetPackageName ?: context.packageName,
             denials = denials
         )
+    }
+
+    private class RecordingGuardianService : BaseBlockingService() {
+        fun attach(context: Context) {
+            attachBaseContext(context)
+        }
+
+        override fun startActivity(intent: Intent) = Unit
     }
 }

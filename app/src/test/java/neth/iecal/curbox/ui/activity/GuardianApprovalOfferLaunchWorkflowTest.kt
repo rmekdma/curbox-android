@@ -47,6 +47,32 @@ class GuardianApprovalOfferLaunchWorkflowTest {
     }
 
     @Test
+    fun activityIdentityChangeDuringLookupStopsBeforeSettingsRead() = runBlocking {
+        val oldLookup = ManualGate<String?>()
+        val host = RecordingHost().apply { lookup = { oldLookup.await() } }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val workflow = GuardianApprovalOfferLaunchWorkflow(scope, host)
+            workflow.accept(request(offerId = "activity-identity-changed"))
+
+            val currentRequestState = host.snapshot.requestState
+            host.snapshot = host.snapshot.copy(
+                requestState = currentRequestState.copy(
+                    identity = currentRequestState.identity.copy(checkId = "replacement-check")
+                )
+            )
+            oldLookup.resume(TARGET_PACKAGE)
+            yield()
+
+            assertEquals(0, host.policyReadCount)
+            assertTrue(host.launchedTargets.isEmpty())
+            assertTrue(host.outcomes.isEmpty())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun syntheticReplacementFencesAnOldPolicyReadFailure() = runBlocking {
         val oldPolicyRead = ManualGate<Result<String>>()
         val host = RecordingHost().apply {
@@ -175,6 +201,51 @@ class GuardianApprovalOfferLaunchWorkflowTest {
             )
             assertEquals(2, host.lookupCount)
             assertEquals(listOf("settings-failure"), host.launchedOfferIds)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun targetPackageChangeDuringSettingsReadStopsBeforeLaunch() = runBlocking {
+        val oldPolicyRead = ManualGate<String>()
+        val host = RecordingHost().apply {
+            readPolicy = { oldPolicyRead.await() }
+        }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val workflow = GuardianApprovalOfferLaunchWorkflow(scope, host)
+            workflow.accept(request(offerId = "target-package-changed"))
+
+            assertEquals(1, host.lookupCount)
+            assertEquals(1, host.policyReadCount)
+            host.snapshot = host.snapshot.copy(
+                requestState = host.snapshot.requestState.copy(
+                    targetPackageName = "replacement.app"
+                )
+            )
+            oldPolicyRead.resume(POLICY_FINGERPRINT)
+            yield()
+
+            assertTrue(host.launchedTargets.isEmpty())
+            assertTrue(host.outcomes.isEmpty())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun deadlineOnlyFirstAuthorizationRejectionReportsDeadlineExpired() {
+        val host = RecordingHost().apply {
+            snapshot = validSnapshot().copy(nowElapsedRealtimeMs = 2_000L)
+        }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            GuardianApprovalOfferLaunchWorkflow(scope, host)
+                .accept(request(offerId = "deadline-only", deadlineElapsedRealtimeMs = 1_000L))
+
+            assertEquals(listOf(GuardianApprovalLaunchOutcome.DeadlineExpired), host.outcomes)
+            assertTrue(host.launchedTargets.isEmpty())
         } finally {
             scope.cancel()
         }
@@ -339,6 +410,7 @@ class GuardianApprovalOfferLaunchWorkflowTest {
             GuardianApprovalLaunchEffectResult.Started
         }
         var lookupCount = 0
+        var policyReadCount = 0
         var effectCount = 0
         val launchedTargets = mutableListOf<String>()
         val launchedOfferIds = mutableListOf<String>()
@@ -354,8 +426,10 @@ class GuardianApprovalOfferLaunchWorkflowTest {
             return lookup(targetPackageName)
         }
 
-        override suspend fun readCurrentPolicyFingerprint(offer: GuardianApprovalLaunchOffer): String =
-            readPolicy(offer.offerId)
+        override suspend fun readCurrentPolicyFingerprint(offer: GuardianApprovalLaunchOffer): String {
+            policyReadCount++
+            return readPolicy(offer.offerId)
+        }
 
         override fun launchIfCurrent(
             request: GuardianApprovalLaunchRequest,
