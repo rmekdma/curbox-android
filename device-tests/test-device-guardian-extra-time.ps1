@@ -609,11 +609,10 @@ try {
         $passedAll = $false
     }
     $skipAfter = Get-DeviceSettings -AsObject
-    $skipCheckTimeSeconds = Get-TestDeviceShellOutput -Command "date +%s"
-    if ($skipCheckTimeSeconds -notmatch '^\d+$') {
-        throw "Could not read device epoch time to verify the skip ledger: $skipCheckTimeSeconds"
+    $skipCheckTimeMs = Get-TestDeviceEpochTimeMs
+    if ($null -eq $skipCheckTimeMs) {
+        throw "Could not read device epoch milliseconds to verify the skip ledger."
     }
-    $skipCheckTimeMs = [long]$skipCheckTimeSeconds * 1000
     $minimumSkipUntilMs = $skipCheckTimeMs
     $skipRecorded = Test-AppRuleSkip `
         -OverrideState $skipAfter.appRuleOverrideState `

@@ -785,8 +785,9 @@ function Invoke-ForegroundOwnershipRegressionCase(
         $gateConsumed = $true
 
         $appliesAtMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() + 3600000
-        Invoke-TestDeviceShell -Command "am start -a neth.iecal.curbox.api.REQUEST_PERMISSION -n $packageName/neth.iecal.curbox.api.ApiPermissionActivity --es android.intent.extra.REFERRER_NAME android-app://curbox.guardian.foreground.test"
-        $overlayFocus = Assert-WindowFocus -ExpectedActivity "ApiPermissionActivity" -PassThru
+        $requesterPackage = "curbox.guardian.foreground.$runId"
+        Invoke-TestDeviceShell -Command "am start -W -a neth.iecal.curbox.api.REQUEST_PERMISSION -n $packageName/neth.iecal.curbox.api.ApiPermissionActivity --es android.intent.extra.REFERRER_NAME android-app://$requesterPackage"
+        $overlayFocus = Wait-ForWindowFocus -ExpectedActivity "ApiPermissionActivity" -TimeoutSeconds 10
         if (-not $overlayFocus.Success) {
             throw "The other translucent Curbox Activity did not take foreground focus. Focus: $($overlayFocus.RawFocus)"
         }
@@ -800,11 +801,18 @@ function Invoke-ForegroundOwnershipRegressionCase(
 
         Release-ServiceEvaluationGate -GateId $gateId
         [void](Wait-ForGuardianLog `
-            -Pattern "ui_result_ignored status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId)) reason=offer_not_current" `
-            -Label "paused approval Activity rejecting the target launch authorization")
-        $overlayFocus = Assert-WindowFocus -ExpectedActivity "ApiPermissionActivity" -PassThru
+            -Pattern "result test=$([regex]::Escape($gateId)) status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId))" `
+            -Label "foreground ownership result for the paused approval Activity")
+        $overlayFocus = Wait-ForWindowFocus -ExpectedActivity "ApiPermissionActivity" -TimeoutSeconds 10
         if (-not $overlayFocus.Success) {
             throw "The target replaced the current Curbox Activity after approval; focus: $($overlayFocus.RawFocus)"
+        }
+        $confirmedTargetLaunch = [regex]::IsMatch(
+            (Get-GuardianApprovalLogs),
+            "(?m)^.*confirmed_target_launch_started screen=$([regex]::Escape($screenRequestId)) operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId))$"
+        )
+        if ($confirmedTargetLaunch) {
+            throw "The paused approval Activity launched its target while ApiPermissionActivity held foreground focus."
         }
 
         Clear-WriteFailure

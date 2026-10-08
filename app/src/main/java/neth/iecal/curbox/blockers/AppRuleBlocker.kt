@@ -404,8 +404,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private val scheduledWakeRegistrations = mutableMapOf<String, ScheduledWakeRegistration>()
     private val latestRecheckPlanSourceOrderByPackage = mutableMapOf<String, SourceOrderIdentity>()
     private var pendingSchedulerWakeGeneration: Long? = null
-    private val pendingSchedulerWakePackages = mutableSetOf<String>()
-    private val pendingSchedulerWakeDueAtByPackage = mutableMapOf<String, Long>()
+    private val pendingSchedulerWakeByPackage = mutableMapOf<String, ScheduledWakeRegistration>()
     private var foregroundEvidenceModule = ForegroundEvidenceModule()
     private var foregroundObservationSource: AndroidForegroundObservationSource? = null
     private var sourceOrderSequencer = AtomicConnectionScopedSourceOrderSequencer()
@@ -605,8 +604,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             setupReady = false
             currentWorkerInstanceToken = null
             latestRecheckPlanSourceOrderByPackage.clear()
-            pendingSchedulerWakePackages.clear()
-            pendingSchedulerWakeDueAtByPackage.clear()
+            pendingSchedulerWakeByPackage.clear()
             pendingSchedulerWakeGeneration = null
             // A reconnect must invalidate work captured by the previous service connection.
             recheckGeneration.incrementAndGet()
@@ -1363,14 +1361,13 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private fun onSchedulerWake(
         expectedGeneration: Long,
         packageName: String? = null,
-        dueAtWallClockMs: Long? = null
+        registration: ScheduledWakeRegistration? = null
     ) {
         val connectionGeneration = synchronized(runtimeLock) {
             if (!isReadyForChecks() || recheckGeneration.get() != expectedGeneration) return
             packageName?.let { key ->
-                pendingSchedulerWakePackages += key
-                dueAtWallClockMs?.let { dueAt ->
-                    pendingSchedulerWakeDueAtByPackage[key] = dueAt
+                registration?.let { pendingWake ->
+                    pendingSchedulerWakeByPackage[key] = pendingWake
                 }
             }
             if (pendingSchedulerWakeGeneration == expectedGeneration) return
@@ -2129,10 +2126,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val scheduledTokensBeforeObservation = synchronized(wakeSchedulerLock) {
             scheduledWakeRegistrations.mapValues { (_, registration) -> registration.token }
         }
-        val pendingWakeDueAtByPackage = synchronized(runtimeLock) {
-            pendingSchedulerWakeDueAtByPackage.toMap()
+        val pendingWakeByPackage = synchronized(runtimeLock) {
+            pendingSchedulerWakeByPackage.toMap()
         }
-        val pendingWakePackages = pendingWakeDueAtByPackage.keys
+        val pendingWakePackages = pendingWakeByPackage.keys
         try {
             val configuredEssentialPackages =
                 readEssentialPackagesForEvaluation(connectionGeneration)
@@ -2195,12 +2192,13 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     outcome.candidatePackage == null &&
                     outcome.followUp == FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
             }
-            val needsRecoveryBoundary = needsObservationRetry ||
-                (hasUnknownOutcome && (
-                    pendingWakePackages.isNotEmpty() ||
-                        (observationBoundary.foregroundEvidenceSuspended &&
-                            suspendedPackage != null)
-                    ))
+            val resolvedPackages = (
+                result.outcomes.filterIsInstance<ForegroundEvidenceOutcome.Visible>() +
+                    result.outcomes.filterIsInstance<ForegroundEvidenceOutcome.NotVisible>()
+                ).mapNotNullTo(mutableSetOf<String>()) { it.packageName }
+            val unknownCandidatePackages = result.outcomes
+                .filterIsInstance<ForegroundEvidenceOutcome.Unknown>()
+                .mapNotNullTo(mutableSetOf<String>()) { it.candidatePackage }
             result.outcomes.forEach { outcome ->
                 if (!isReadyForChecks() || recheckGeneration.get() != generation) return
                 when (outcome) {
@@ -2241,33 +2239,41 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     observationAttempt = observationAttempt + 1
                 )
             } else {
-                if (needsRecoveryBoundary) {
-                    val recoveryPackage = synchronized(runtimeLock) {
-                        if (foregroundEvidenceSuspended) {
-                            suspendedForegroundPackage
-                        } else {
-                            currentForegroundPackage
-                        }
+                val recoveryPackage = synchronized(runtimeLock) {
+                    if (foregroundEvidenceSuspended) {
+                        suspendedForegroundPackage
+                    } else {
+                        currentForegroundPackage
                     }
-                    val recoveryPackages = pendingWakePackages +
+                }
+                val recoveryCandidates = pendingWakePackages + unknownCandidatePackages +
+                    if (unknownCandidatePackages.isEmpty()) {
                         listOfNotNull(recoveryPackage)
+                    } else {
+                        emptyList()
+                    }
+                val recoveryPackages = recoveryCandidates - resolvedPackages
+                val needsRecoveryBoundary = hasUnknownOutcome && recoveryPackages.isNotEmpty()
+                if (needsRecoveryBoundary) {
                     val recoveryDueAt = safeWallClockAdd(
                         observationWallClockMs(),
                         UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS
                     )
                     recoveryPackages.forEach { packageName ->
-                        scheduleRecheckAtWallClock(
+                        scheduleRecoveryRecheckIfUnchanged(
                             packageName = packageName,
-                            dueAtWallClockMs = recoveryDueAt
+                            dueAtWallClockMs = recoveryDueAt,
+                            expectedToken = scheduledTokensBeforeObservation[packageName],
+                            connectionGeneration = connectionGeneration,
+                            observationGeneration = observationGeneration
                         )
                     }
                 }
                 if (pendingWakePackages.isNotEmpty()) {
                     synchronized(runtimeLock) {
-                        pendingWakeDueAtByPackage.forEach { (packageName, dueAtWallClockMs) ->
-                            if (pendingSchedulerWakeDueAtByPackage[packageName] == dueAtWallClockMs) {
-                                pendingSchedulerWakeDueAtByPackage.remove(packageName)
-                                pendingSchedulerWakePackages.remove(packageName)
+                        pendingWakeByPackage.forEach { (packageName, registration) ->
+                            if (pendingSchedulerWakeByPackage[packageName] == registration) {
+                                pendingSchedulerWakeByPackage.remove(packageName)
                             }
                         }
                     }
@@ -2302,7 +2308,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             onSchedulerWake(
                 expectedGeneration = recheckGeneration.get(),
                 packageName = key,
-                dueAtWallClockMs = registration.dueAtWallClockMs
+                registration = registration
             )
         }
     }
@@ -3529,8 +3535,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             currentForegroundPackage = null
             currentForegroundEvidenceAtElapsedMs = 0L
             foregroundEvidenceSuspended = true
-            pendingSchedulerWakePackages.clear()
-            pendingSchedulerWakeDueAtByPackage.clear()
+            pendingSchedulerWakeByPackage.clear()
             pendingSchedulerWakeGeneration = null
             packageName
         }
@@ -4010,7 +4015,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             }
             isReadyForChecks(connectionGeneration) &&
                 recheckGeneration.get() == observationGeneration &&
-                pendingSchedulerWakeDueAtByPackage.isNotEmpty()
+                pendingSchedulerWakeByPackage.isNotEmpty()
         }
         if (shouldRearmPendingWake) {
             rearmPendingSchedulerWakeAfterPostFailure(
@@ -4025,16 +4030,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         connectionGeneration: Long,
         observationGeneration: Long
     ) {
-        val pendingDueTimes = synchronized(runtimeLock) {
+        val pendingWakes = synchronized(runtimeLock) {
             if (!isReadyForChecks(connectionGeneration) ||
                 recheckGeneration.get() != observationGeneration
             ) return
-            pendingSchedulerWakeDueAtByPackage.toMap()
+            pendingSchedulerWakeByPackage.toMap()
         }
-        if (pendingDueTimes.isEmpty()) return
+        if (pendingWakes.isEmpty()) return
 
         val nowWallClockMs = observationWallClockMs()
-        pendingDueTimes.forEach { (packageName, originalDueAtWallClockMs) ->
+        pendingWakes.forEach { (packageName, wakeRegistration) ->
+            val originalDueAtWallClockMs = wakeRegistration.dueAtWallClockMs
             val nextDueAtWallClockMs = if (originalDueAtWallClockMs > nowWallClockMs) {
                 originalDueAtWallClockMs
             } else {
@@ -4058,9 +4064,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 logNonFatal(error)
             }
             synchronized(runtimeLock) {
-                if (pendingSchedulerWakeDueAtByPackage[packageName] == originalDueAtWallClockMs) {
-                    pendingSchedulerWakeDueAtByPackage.remove(packageName)
-                    pendingSchedulerWakePackages.remove(packageName)
+                if (pendingSchedulerWakeByPackage[packageName] == wakeRegistration) {
+                    pendingSchedulerWakeByPackage.remove(packageName)
                 }
             }
         }
@@ -4149,6 +4154,31 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     ) {
         synchronized(wakeSchedulerLock) {
             scheduleRecheckAtWallClockLocked(packageName, dueAtWallClockMs)
+        }
+    }
+
+    /**
+     * Recovery uses a captured observation. Keep a plan published while that observation was
+     * running, and only replace the exact registration that the observation started with.
+     */
+    private fun scheduleRecoveryRecheckIfUnchanged(
+        packageName: String,
+        dueAtWallClockMs: Long,
+        expectedToken: Long?,
+        connectionGeneration: Long,
+        observationGeneration: Long
+    ) {
+        synchronized(wakeSchedulerLock) {
+            if (!isReadyForChecks(connectionGeneration) ||
+                recheckGeneration.get() != observationGeneration
+            ) return
+            val currentToken = scheduledWakeRegistrations[packageName]?.token
+            // An already registered boundary can still wake on its own. When the observation
+            // started with a plan, do not refresh it or resurrect it if it was cancelled while
+            // the observation ran. When no plan existed, only install recovery if none appeared.
+            if (expectedToken == null && currentToken == null) {
+                scheduleRecheckAtWallClockLocked(packageName, dueAtWallClockMs)
+            }
         }
     }
 

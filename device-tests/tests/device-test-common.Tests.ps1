@@ -351,6 +351,53 @@ mCurrentFocus=Window{af23a46 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.act
         }
     }
 
+    Context "Get-TestDeviceEpochTimeMs" {
+        It "reads millisecond precision from the device clock" {
+            $script:receivedShellCommand = $null
+            $script:DeviceTestShellOutputHandler = {
+                param($Command)
+                $script:receivedShellCommand = $Command
+                return "1791473390142"
+            }
+
+            (Get-TestDeviceEpochTimeMs) | Should Be ([long]1791473390142)
+            $script:receivedShellCommand | Should Be "date +%s%3N"
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+
+        It "returns null when the device does not return millisecond epoch time" {
+            $script:DeviceTestShellOutputHandler = { param($Command) return "1791473390" }
+
+            (Get-TestDeviceEpochTimeMs) | Should Be $null
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+    }
+
+    Context "Wait-ForWindowFocus" {
+        It "polls until the requested activity has focus" {
+            $script:focusResponses = @(
+                "mCurrentFocus=Window{1 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.activity.GuardianApprovalActivity}",
+                "mCurrentFocus=Window{2 u0 neth.iecal.curbox.debug/neth.iecal.curbox.api.ApiPermissionActivity}"
+            )
+            $script:focusResponseIndex = 0
+            $script:DeviceTestShellOutputHandler = {
+                param($Command)
+                $response = $script:focusResponses[$script:focusResponseIndex]
+                $script:focusResponseIndex++
+                return $response
+            }
+
+            $focus = Wait-ForWindowFocus `
+                -ExpectedActivity "ApiPermissionActivity" `
+                -TimeoutSeconds 1 `
+                -PollIntervalMilliseconds 1
+
+            $focus.Success | Should Be $true
+            $script:focusResponseIndex | Should Be 2
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+    }
+
     Context "Get-DeviceAccessibilityRestoreCommands" {
         It "restores the captured secure settings exactly" {
             $state = [PSCustomObject]@{

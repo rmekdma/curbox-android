@@ -3836,6 +3836,240 @@ class AppRuleBlockerRecheckTest {
     }
 
     @Test
+    fun olderWakeCleanupRetainsNewerSameDueWakeForTheSamePackage() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val wallClockMs = 1_000_000L
+        val elapsedRealtimeMs = 5_000L
+        val dueAtWallClockMs = wallClockMs + 1_000L
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = wallClockMs,
+            initialElapsedRealtimeMs = elapsedRealtimeMs
+        )
+        val queued = ArrayDeque<Runnable>()
+        var replacementToken = Long.MIN_VALUE
+        var replacementDueAtWallClockMs = Long.MIN_VALUE
+        lateinit var blocker: AppRuleBlocker
+        blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
+            wallClockMsProvider = { fakeScheduler.currentWallClockMs }
+            elapsedRealtimeMsProvider = { fakeScheduler.currentElapsedRealtimeMs }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                if (replacementToken == Long.MIN_VALUE) {
+                    invokePrivate(
+                        blocker,
+                        "scheduleRecheckAtWallClock",
+                        PACKAGE,
+                        dueAtWallClockMs
+                    )
+                    replacementToken = scheduledAlarmToken(blocker)
+                    replacementDueAtWallClockMs =
+                        fakeScheduler.getScheduled(PACKAGE)?.dueAtWallClockMs
+                            ?: error("the replacement alarm must remain scheduled before delivery")
+                    blocker.onWakeFromScheduler(PACKAGE, replacementToken)
+                }
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(PACKAGE),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                queued.addLast(runnable)
+                true
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+
+        invokePrivate(blocker, "scheduleRecheckAtWallClock", PACKAGE, dueAtWallClockMs)
+        val originalToken = scheduledAlarmToken(blocker)
+        val originalDueAtWallClockMs = fakeScheduler.getScheduled(PACKAGE)?.dueAtWallClockMs
+        assertTrue(fakeScheduler.triggerWake(PACKAGE))
+        assertEquals(1, queued.size)
+
+        queued.removeFirst().run()
+
+        assertTrue("the test must publish a replacement alarm", replacementToken != originalToken)
+        assertEquals(
+            "the replacement has the same deadline as the consumed wake",
+            originalDueAtWallClockMs,
+            replacementDueAtWallClockMs
+        )
+        assertTrue(
+            "cleanup for the older wake must retain a newer wake with the same package and due time",
+            pendingSchedulerWakePackages(blocker).contains(PACKAGE)
+        )
+        assertEquals("the newer wake also queued its own observation", 1, queued.size)
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun notVisiblePackageIsNotRearmedForAnotherUnknownApplicationSlot() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = 1_000_000L,
+            initialElapsedRealtimeMs = 5_000L
+        )
+        val queued = ArrayDeque<Runnable>()
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
+            wallClockMsProvider = { fakeScheduler.currentWallClockMs }
+            elapsedRealtimeMsProvider = { fakeScheduler.currentElapsedRealtimeMs }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = OTHER_PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = emptySet(),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = true,
+                    applicationWindowCount = 1
+                )
+            }
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                queued.addLast(runnable)
+                true
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+        setField(blocker, "currentForegroundPackage", PACKAGE)
+        val evidenceModule = getField(blocker, "foregroundEvidenceModule")!!
+        evidenceModule.javaClass.getDeclaredField("lastRealSignal").apply {
+            isAccessible = true
+            set(
+                evidenceModule,
+                SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = PACKAGE,
+                    eventWallMs = fakeScheduler.currentWallClockMs,
+                    eventElapsedMs = fakeScheduler.currentElapsedRealtimeMs
+                )
+            )
+        }
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        assertTrue(fakeScheduler.triggerWake(PACKAGE))
+        repeat(4) { queued.removeFirst().run() }
+
+        assertFalse(
+            "NotVisible evidence for the pending package must cancel its wake even when another window slot is unknown",
+            fakeScheduler.hasScheduled(PACKAGE)
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
+    fun visiblePackagePlanIsNotOverwrittenForAnotherUnknownApplicationSlot() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val fakeScheduler = FakeWakeScheduler(
+            initialWallClockMs = 1_000_000L,
+            initialElapsedRealtimeMs = 5_000L
+        )
+        val queued = ArrayDeque<Runnable>()
+        var replacementToken = Long.MIN_VALUE
+        var otherReplacementToken = Long.MIN_VALUE
+        val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
+            wallClockMsProvider = { fakeScheduler.currentWallClockMs }
+            elapsedRealtimeMsProvider = { fakeScheduler.currentElapsedRealtimeMs }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            activeWindowSnapshotProvider = {
+                if (replacementToken == Long.MIN_VALUE) {
+                    invokePrivate(
+                        this,
+                        "scheduleRecheckAtWallClock",
+                        PACKAGE,
+                        fakeScheduler.currentWallClockMs + 7_000L
+                    )
+                    replacementToken = scheduledAlarmToken(this)
+                    invokePrivate(
+                        this,
+                        "scheduleRecheckAtWallClock",
+                        OTHER_PACKAGE,
+                        fakeScheduler.currentWallClockMs + 9_000L
+                    )
+                    otherReplacementToken = scheduledAlarmToken(this, OTHER_PACKAGE)
+                }
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = emptySet(),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = true,
+                    applicationWindowCount = 1
+                )
+            }
+            visibleApplicationCheckPostDelayed = { runnable, _ ->
+                queued.addLast(runnable)
+                true
+            }
+        }
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE, OTHER_PACKAGE))
+        setField(blocker, "currentForegroundPackage", PACKAGE)
+        val evidenceModule = getField(blocker, "foregroundEvidenceModule")!!
+        evidenceModule.javaClass.getDeclaredField("lastRealSignal").apply {
+            isAccessible = true
+            set(
+                evidenceModule,
+                SignalFact(
+                    kind = ObservationKind.REAL_EVENT,
+                    eventPackage = PACKAGE,
+                    eventWallMs = fakeScheduler.currentWallClockMs,
+                    eventElapsedMs = fakeScheduler.currentElapsedRealtimeMs
+                )
+            )
+        }
+
+        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+        invokePrivate(blocker, "scheduleRecheck", OTHER_PACKAGE, 1_000L, 20_000L, 0L)
+        assertTrue(fakeScheduler.triggerWake(PACKAGE))
+        assertTrue(fakeScheduler.triggerWake(OTHER_PACKAGE))
+        repeat(4) { queued.removeFirst().run() }
+
+        assertTrue("the observation must install a replacement worker plan", replacementToken != Long.MIN_VALUE)
+        assertEquals(
+            "a Visible result must not let an unrelated unknown window overwrite the new plan",
+            replacementToken,
+            scheduledAlarmToken(blocker)
+        )
+        assertTrue("an unresolved pending package must keep its new worker plan", otherReplacementToken != Long.MIN_VALUE)
+        assertEquals(
+            "fallback recovery must not replace a plan installed during observation",
+            otherReplacementToken,
+            scheduledAlarmToken(blocker, OTHER_PACKAGE)
+        )
+        assertEquals(
+            fakeScheduler.currentWallClockMs + 7_000L,
+            fakeScheduler.getScheduled(PACKAGE)?.dueAtWallClockMs
+        )
+        assertEquals(
+            fakeScheduler.currentWallClockMs + 9_000L,
+            fakeScheduler.getScheduled(OTHER_PACKAGE)?.dueAtWallClockMs
+        )
+        blocker.onDestroy()
+    }
+
+    @Test
     fun staleNotVisibleCancellationCannotRemoveReplacementRegistration() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         var wallClockMs = 1_000_000L
@@ -4574,6 +4808,11 @@ class AppRuleBlockerRecheckTest {
         val scheduler = blocker.wakeScheduler as? FakeWakeScheduler ?: return emptySet()
         return scheduler.scheduledKeys()
     }
+
+    private fun pendingSchedulerWakePackages(blocker: AppRuleBlocker): Set<String> =
+        (getField(blocker, "pendingSchedulerWakeByPackage") as Map<*, *>).keys
+            .filterIsInstance<String>()
+            .toSet()
 
     private fun scheduledAlarmToken(
         blocker: AppRuleBlocker,

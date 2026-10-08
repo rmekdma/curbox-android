@@ -170,6 +170,14 @@ function Get-TestDeviceShellOutput([string]$Command) {
     return (adb shell $Command | Out-String).TrimEnd()
 }
 
+function Get-TestDeviceEpochTimeMs {
+    $timestamp = Get-TestDeviceShellOutput -Command "date +%s%3N"
+    if ($timestamp -notmatch '^\d{13}$') {
+        return $null
+    }
+    return [long]$timestamp
+}
+
 function Push-TestDeviceFile([string]$LocalPath, [string]$RemotePath) {
     if ($script:DeviceTestFilePushHandler -is [scriptblock]) {
         & $script:DeviceTestFilePushHandler $LocalPath $RemotePath | Out-Null
@@ -647,9 +655,9 @@ function Select-TestRulePickerOption([string]$CurrentUi, $CandidateOptions, [str
 }
 
 function Assert-WindowFocus([string]$ExpectedActivity, [switch]$PassThru) {
-    $windowFocus = adb shell "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
+    $windowFocus = Get-TestDeviceShellOutput -Command "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'"
     if (-not $windowFocus -or $windowFocus.Trim() -eq "") {
-        $windowFocus = adb shell "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
+        $windowFocus = Get-TestDeviceShellOutput -Command "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"
     }
     $isMatch = $windowFocus -match $ExpectedActivity
     if (-not $isMatch -and -not $PassThru) {
@@ -662,6 +670,20 @@ function Assert-WindowFocus([string]$ExpectedActivity, [switch]$PassThru) {
         }
     }
     return $isMatch
+}
+
+function Wait-ForWindowFocus(
+    [string]$ExpectedActivity,
+    [int]$TimeoutSeconds = 5,
+    [int]$PollIntervalMilliseconds = 200
+) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $focus = Assert-WindowFocus -ExpectedActivity $ExpectedActivity -PassThru
+    while (-not $focus.Success -and $watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        Start-Sleep -Milliseconds $PollIntervalMilliseconds
+        $focus = Assert-WindowFocus -ExpectedActivity $ExpectedActivity -PassThru
+    }
+    return $focus
 }
 
 function New-GuardianPinAuthConfig(
