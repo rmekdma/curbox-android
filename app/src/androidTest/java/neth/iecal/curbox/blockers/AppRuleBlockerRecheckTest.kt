@@ -1441,6 +1441,196 @@ class AppRuleBlockerRecheckTest {
         }
     }
 
+    @Test
+    fun failedAllowedSendCleansPermitBeforeFailedAndAcceptsNextCheck() {
+        val fixture = createConfirmationHostFixture(includeRemainingRule = false)
+        try {
+            val gateArmed = fixture.service.expectBroadcast {
+                it.action == AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE &&
+                    it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == fixture.gateId
+            }
+            val gateReached = fixture.service.expectBroadcast {
+                it.action == AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED &&
+                    it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == fixture.gateId
+            }
+            val failedResultSent = fixture.service.expectBroadcast {
+                it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                    it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == fixture.checkId &&
+                    it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                    GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+            }
+            val failedCheckCleanupObserved = CountDownLatch(1)
+            val failedResultSendReturned = CountDownLatch(1)
+            val permitBaseline = AtomicReference<ExternalEffectSnapshot?>()
+            val allowedAttempt = AtomicReference<ExternalEffectSnapshot?>()
+            val cleanupAtFailure = AtomicReference<ExternalEffectSnapshot?>()
+            val retryCheckId = "guardian-host-retry-${java.util.UUID.randomUUID()}"
+            val retryAllowedResult = fixture.service.expectBroadcast {
+                it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                    it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == retryCheckId &&
+                    it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                    GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+            }
+            fixture.service.sendBroadcastObserver = { intent ->
+                if (intent.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                    intent.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == fixture.checkId
+                ) {
+                    when (intent.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS)) {
+                        GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED ->
+                            allowedAttempt.set(fixture.externalEffectSnapshot())
+                        GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED -> {
+                            cleanupAtFailure.set(fixture.externalEffectSnapshot())
+                            failedCheckCleanupObserved.countDown()
+                        }
+                    }
+                }
+            }
+            fixture.service.sendBroadcastCompletionObserver = { intent ->
+                if (intent.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                    intent.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == fixture.checkId &&
+                    intent.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                    GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+                ) {
+                    failedResultSendReturned.countDown()
+                }
+            }
+            fixture.service.failNextConfirmationStatus =
+                GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+
+            fixture.armOutcomeGate()
+            assertTrue(
+                gateArmed.awaitBroadcast("worker outcome gate arm")
+                    .getBooleanExtra("guardian_test_gate_accepted", false)
+            )
+            fixture.openScreenAndSubmitCheck()
+            val reached = gateReached.awaitBroadcast("worker outcome gate reach")
+            assertTrue(reached.getBooleanExtra("guardian_test_gate_accepted", false))
+            assertEquals(fixture.operationId, reached.getStringExtra(AppRuleBlocker.EXTRA_TEST_OPERATION_ID))
+            assertEquals(fixture.checkId, reached.getStringExtra(AppRuleBlocker.EXTRA_TEST_CHECK_ID))
+            assertTrue(
+                "the actual serialized worker did not publish this guardian evaluation",
+                fixture.workerOutcomePublished.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            permitBaseline.set(fixture.externalEffectSnapshot())
+            val outcome = checkNotNull(fixture.workerOutcome.get())
+            assertEquals(fixture.targetPackage, outcome.request.packageName)
+            assertEquals(fixture.operationId, outcome.request.operationId)
+            assertEquals(fixture.checkId, outcome.request.checkId)
+            assertTrue(
+                "the current target evaluation must allow the app",
+                outcome.evaluation?.isAllowed == true
+            )
+
+            fixture.releaseOutcomeGate()
+            val failedResult = failedResultSent.awaitBroadcast("FAILED after ALLOWED send failure")
+            assertTrue(
+                "the cleanup state was not observed at the FAILED send",
+                failedCheckCleanupObserved.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "the FAILED broadcast did not return before the retry",
+                failedResultSendReturned.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertEquals(
+                fixture.screenRequestId,
+                failedResult.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+            )
+            assertEquals(
+                fixture.serviceConnectionId,
+                failedResult.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+            )
+            assertEquals(
+                fixture.operationId,
+                failedResult.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+            )
+            assertEquals(
+                fixture.checkId,
+                failedResult.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+            )
+            assertEquals(fixture.context.packageName, failedResult.`package`)
+            assertEquals(
+                GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED,
+                failedResult.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS)
+            )
+            assertEquals(null, fixture.service.failNextConfirmationStatus)
+            assertEquals(
+                listOf(
+                    GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED,
+                    GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
+                ),
+                fixture.service.sentBroadcasts.filter {
+                    it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                        it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == fixture.checkId
+                }.map { it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) }
+            )
+            val baseline = checkNotNull(permitBaseline.get())
+            val allowedSend = checkNotNull(allowedAttempt.get())
+            val failureSnapshot = checkNotNull(cleanupAtFailure.get())
+            val allowedPermit = allowedSend.pendingPermits - baseline.pendingPermits
+            assertEquals("the ALLOWED handler should reserve one fresh permit", 1, allowedPermit.size)
+            assertTrue(
+                "the failed permit remained pending when FAILED was sent",
+                allowedPermit.none { it in failureSnapshot.pendingPermits }
+            )
+            assertTrue(
+                "FAILED must not inherit a permit created by the failed ALLOWED send",
+                failureSnapshot.pendingPermits.all { it in baseline.pendingPermits }
+            )
+            assertTrue(
+                "the failed ALLOWED call's in-flight count was not drained before FAILED",
+                failureSnapshot.inFlightCallbackCount <= allowedSend.inFlightCallbackCount - 1
+            )
+            val failedOwner = checkNotNull(failureSnapshot.owner)
+            assertEquals(fixture.screenRequestId, failedOwner.screenRequestId)
+            assertEquals(fixture.targetPackage, failedOwner.packageName)
+            assertEquals(fixture.operationId, failedOwner.confirmation?.operationId)
+            assertEquals(fixture.checkId, failedOwner.confirmation?.checkId)
+            assertEquals(
+                GuardianApprovalCoordinator.ConfirmationPhase.FINISHED,
+                failedOwner.confirmation?.phase
+            )
+
+            fixture.submitCheck(
+                action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
+                checkId = retryCheckId
+            )
+            val retryResult = retryAllowedResult.awaitBroadcast("follow-up ALLOWED result")
+            assertEquals(
+                fixture.screenRequestId,
+                retryResult.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+            )
+            assertEquals(
+                fixture.operationId,
+                retryResult.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+            )
+            assertEquals(
+                retryCheckId,
+                retryResult.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+            )
+            assertEquals(
+                fixture.serviceConnectionId,
+                retryResult.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+            )
+            assertEquals(
+                GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED,
+                retryResult.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS)
+            )
+            val currentConfirmation = checkNotNull(
+                (getField(fixture.blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                    .currentOwner()?.confirmation
+            )
+            assertEquals(GuardianApprovalCoordinator.ConfirmationPhase.OFFERED, currentConfirmation.phase)
+            assertEquals(retryCheckId, currentConfirmation.checkId)
+            assertTrue(currentConfirmation.offerId.orEmpty().isNotBlank())
+            assertEquals(
+                retryResult.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID),
+                currentConfirmation.offerId
+            )
+        } finally {
+            fixture.close()
+        }
+    }
+
     private fun createConfirmationHostFixture(
         includeRemainingRule: Boolean
     ): ConfirmationHostFixture {
@@ -3618,6 +3808,7 @@ class AppRuleBlockerRecheckTest {
         val sentBroadcasts = CopyOnWriteArrayList<Intent>()
         var startActivityObserver: ((Intent) -> Unit)? = null
         var sendBroadcastObserver: ((Intent) -> Unit)? = null
+        var sendBroadcastCompletionObserver: ((Intent) -> Unit)? = null
         var windowsReads = 0
         var visibleWindows: List<AccessibilityWindowInfo> = emptyList()
         @Volatile var failNextConfirmationStatus: String? = null
@@ -3643,22 +3834,26 @@ class AppRuleBlockerRecheckTest {
                 if (expectation.isSatisfied) broadcastExpectations.remove(expectation)
             }
             sendBroadcastObserver?.invoke(recorded)
-            val shouldFail = synchronized(this) {
-                if (intent.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
-                    failNextConfirmationStatus == intent.getStringExtra(
-                        GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS
-                    )
-                ) {
-                    failNextConfirmationStatus = null
-                    true
-                } else {
-                    false
+            try {
+                val shouldFail = synchronized(this) {
+                    if (intent.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                        failNextConfirmationStatus == intent.getStringExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS
+                        )
+                    ) {
+                        failNextConfirmationStatus = null
+                        true
+                    } else {
+                        false
+                    }
                 }
+                if (shouldFail) {
+                    throw IllegalStateException("Injected confirmation broadcast failure")
+                }
+                super.sendBroadcast(intent)
+            } finally {
+                sendBroadcastCompletionObserver?.invoke(recorded)
             }
-            if (shouldFail) {
-                throw IllegalStateException("Injected confirmation broadcast failure")
-            }
-            super.sendBroadcast(intent)
         }
 
         override fun getWindows(): MutableList<AccessibilityWindowInfo> {
@@ -3691,6 +3886,15 @@ class AppRuleBlockerRecheckTest {
             }
             return checkNotNull(result.get())
         }
+    }
+
+    private data class ExternalEffectSnapshot(
+        val pendingPermits: Set<Any>,
+        val inFlightCallbackCount: Int,
+        val owner: GuardianApprovalCoordinator.Owner?
+    ) {
+        val pendingPermitCount: Int
+            get() = pendingPermits.size
     }
 
     private inner class ConfirmationHostFixture(
@@ -3734,15 +3938,37 @@ class AppRuleBlockerRecheckTest {
                     connectionId = serviceConnectionId
                 )
             )
+            submitCheck(
+                action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED,
+                checkId = checkId
+            )
+        }
+
+        fun submitCheck(action: String, checkId: String) {
             sendTestBroadcast(
                 approvalCheckIntent(
-                    action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED,
+                    action = action,
                     screenRequestId = screenRequestId,
                     operationId = operationId,
                     checkId = checkId,
                     receipt = receipt,
                     connectionId = serviceConnectionId
                 )
+            )
+        }
+
+        fun externalEffectSnapshot(): ExternalEffectSnapshot = synchronized(
+            getField(blocker, "runtimeLock") as Any
+        ) {
+            ExternalEffectSnapshot(
+                pendingPermits = (getField(blocker, "pendingExternalEffects") as Set<*>)
+                    .filterNotNull()
+                    .toSet(),
+                inFlightCallbackCount =
+                    (getField(blocker, "inFlightCallbacks") as java.util.concurrent.atomic.AtomicInteger)
+                        .get(),
+                owner = (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                    .currentOwner()
             )
         }
 
