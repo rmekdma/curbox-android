@@ -1469,6 +1469,13 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
+            val launchIntent = lookupTargetLaunchIntent()
+            if (!isCurrentGuardianOfferAttempt(offer)) return@launch
+            if (launchIntent == null) {
+                notifyGuardianLaunchFailed(offer.identity)
+                return@launch
+            }
+
             val currentPolicyFingerprint = try {
                 withContext(Dispatchers.IO) {
                     if (BuildConfig.DEBUG && policyReadFailureForTest) {
@@ -1481,9 +1488,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 throw error
             } catch (error: Exception) {
                 CrashLogger(applicationContext).logNonFatalError(error)
-                if (canHandleCallbacks() && confirmationChecking &&
-                    confirmationOfferValidationId == offer.offerId
-                ) {
+                if (isCurrentGuardianOfferAttempt(offer)) {
                     confirmationOfferValidationId = null
                     confirmationChecking = false
                     confirmationFailed = true
@@ -1493,7 +1498,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 }
                 return@launch
             }
-            if (confirmationOfferValidationId != offer.offerId) return@launch
+            if (!isCurrentGuardianOfferAttempt(offer)) return@launch
             val displayUnlocked = getSystemService(KeyguardManager::class.java)
                 ?.isKeyguardLocked == false
             val currentZoneId = ZoneId.systemDefault().id
@@ -1550,13 +1555,14 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 return@launch
             }
 
-            launchConfirmedTargetIfCurrent(offer, currentPolicyFingerprint)
+            launchConfirmedTargetIfCurrent(offer, currentPolicyFingerprint, launchIntent)
         }
     }
 
     private fun launchConfirmedTargetIfCurrent(
         offer: GuardianApprovalLaunchOffer,
-        currentPolicyFingerprint: String
+        currentPolicyFingerprint: String,
+        launchIntent: Intent
     ) {
         val expectedIdentity = offer.identity
         val currentIdentity = GuardianApprovalExecutionIdentity(
@@ -1596,17 +1602,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 confirmationOfferValidationId = null
                 notifyGuardianOfferInvalidated(offer)
             }
-            return
-        }
-        val launchIntent = try {
-            packageManager.getLaunchIntentForPackage(targetPackageName)
-                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        } catch (error: Exception) {
-            CrashLogger(applicationContext).logNonFatalError(error)
-            null
-        }
-        if (launchIntent == null) {
-            notifyGuardianLaunchFailed(expectedIdentity)
             return
         }
         val finalZoneId = ZoneId.systemDefault().id
@@ -1664,6 +1659,30 @@ class GuardianApprovalActivity : AppCompatActivity() {
             notifyGuardianLaunchFailed(expectedIdentity)
         }
     }
+
+    private suspend fun lookupTargetLaunchIntent(): Intent? = try {
+        withContext(Dispatchers.IO) {
+            val testLookup = launchIntentLookupForTest.takeIf { BuildConfig.DEBUG }
+            val launchIntent = testLookup?.invoke(targetPackageName)
+                ?: packageManager.getLaunchIntentForPackage(targetPackageName)
+            launchIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        CrashLogger(applicationContext).logNonFatalError(error)
+        null
+    }
+
+    private fun isCurrentGuardianOfferAttempt(offer: GuardianApprovalLaunchOffer): Boolean =
+        canHandleCallbacks() && confirmationChecking &&
+            confirmationOfferValidationId == offer.offerId &&
+            offer.identity == GuardianApprovalExecutionIdentity(
+                screenRequestId = screenRequestId,
+                operationId = confirmationOperationId.orEmpty(),
+                checkId = confirmationCheckId.orEmpty(),
+                serviceConnectionId = registeredServiceConnectionId.orEmpty()
+            )
 
     private fun notifyGuardianLaunchFailed(identity: GuardianApprovalExecutionIdentity) {
         sendBroadcast(
@@ -1841,6 +1860,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     companion object {
+        @Volatile internal var launchIntentLookupForTest: ((String) -> Intent?)? = null
+
         private const val TEST_LOG_TAG = "GuardianApprovalE2E"
         private const val STATE_SCREEN_REQUEST_ID = "guardian_state_screen_request_id"
         private const val STATE_TARGET_PACKAGE = "guardian_state_target_package"

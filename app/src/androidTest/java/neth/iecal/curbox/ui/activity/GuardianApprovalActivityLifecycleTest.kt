@@ -1540,6 +1540,202 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
+    fun policyTightenedDuringLaunchIntentLookupRejectsTheAllowedOffer() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val dataStore = DataStoreManager(context)
+        val ruleId = "lookup_policy_${System.nanoTime()}"
+        val originalSettings = runBlocking { dataStore.settings.first() }
+        assumeTrue("The lifecycle test requires an unset guardian password", !originalSettings.guardianAuthConfig.isConfigured)
+        val originalPool = originalSettings.appRuleRolloverState.pools[ruleId]
+        val originalSnapshot = seedEligibleGrantRule(context, ruleId, "Lookup policy test")
+        val storedRequests = LinkedBlockingQueue<Intent>()
+        val invalidatedOffers = LinkedBlockingQueue<Intent>()
+        val requestReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED) {
+                    storedRequests.offer(intent)
+                }
+            }
+        }
+        val invalidatedReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_OFFER_INVALIDATED) {
+                    invalidatedOffers.offer(intent)
+                }
+            }
+        }
+        val lookupStarted = CountDownLatch(1)
+        val releaseLookup = CountDownLatch(1)
+        GuardianApprovalActivity.launchIntentLookupForTest = { packageName ->
+            lookupStarted.countDown()
+            check(releaseLookup.await(10, TimeUnit.SECONDS)) {
+                "the launch-intent lookup gate was not released"
+            }
+            context.packageManager.getLaunchIntentForPackage(packageName)
+        }
+        ContextCompat.registerReceiver(
+            context,
+            requestReceiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        ContextCompat.registerReceiver(
+            context,
+            invalidatedReceiver,
+            IntentFilter(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_OFFER_INVALIDATED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        try {
+            ActivityScenario.launch<GuardianApprovalActivity>(
+                approvalIntent(
+                    ruleId = ruleId,
+                    ruleName = "Lookup policy test",
+                    targetPackageName = context.packageName
+                )
+            ).use { scenario ->
+                scenario.onActivity { chooseSkipDuration(it, 0) }
+                val stored = storedRequests.poll(5, TimeUnit.SECONDS)
+                    ?: error("The lookup policy test did not store its skip receipt")
+                val storedOverrides = awaitOverrideState(context) {
+                    it.skips.any { skip -> skip.ruleId == ruleId }
+                }
+                assertEquals(1, storedOverrides.skips.count { it.ruleId == ruleId })
+
+                fun allowedOffer(offerId: String, policyFingerprint: String): Intent {
+                    val capturedAtWallClockMs = System.currentTimeMillis()
+                    val capturedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()
+                    return Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_OPERATION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CHECK_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
+                        )
+                        .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID, offerId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_POLICY_FINGERPRINT,
+                            policyFingerprint
+                        )
+                        .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_RUNTIME_REVISION, 9L)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
+                            capturedAtElapsedRealtimeMs + 30_000L
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
+                            capturedAtWallClockMs
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
+                            capturedAtElapsedRealtimeMs
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
+                            Long.MAX_VALUE
+                        )
+                }
+
+                val allowedSettings = runBlocking { dataStore.settings.first() }
+                val allowedSnapshot = allowedSettings.appRuleSnapshot
+                val allowedFingerprint = GuardianApprovalPolicyFingerprint.forSettings(allowedSettings)
+                val stricterSnapshot = allowedSnapshot.copy(
+                    appRules = allowedSnapshot.appRules.map { rule ->
+                        if (rule.id == ruleId) rule.copy(guardianExtraTimeAllowed = false) else rule
+                    }
+                ).normalized()
+                context.sendBroadcast(allowedOffer("lookup-policy-race", allowedFingerprint))
+                assertTrue(
+                    "the production launch-intent lookup should reach its controllable gate",
+                    lookupStarted.await(5, TimeUnit.SECONDS)
+                )
+                try {
+                    assertTrue(runBlocking { dataStore.updateAppRuleSnapshot(stricterSnapshot) })
+                    runBlocking {
+                        withTimeout(5_000L) {
+                            dataStore.settings.first { it.appRuleSnapshot == stricterSnapshot }
+                        }
+                    }
+                } finally {
+                    releaseLookup.countDown()
+                }
+
+                val invalidated = invalidatedOffers.poll(5, TimeUnit.SECONDS)
+                    ?: error("An offer must be reevaluated when policy tightens during package lookup")
+                assertEquals(
+                    "lookup-policy-race",
+                    invalidated.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID)
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                assertEquals(
+                    "a policy change during lookup must keep the approval Activity visible",
+                    Lifecycle.State.RESUMED,
+                    scenario.state
+                )
+                assertEquals(
+                    "read-only reevaluation must not write another approval",
+                    storedOverrides,
+                    runBlocking { dataStore.settings.first().appRuleOverrideState }
+                )
+
+                GuardianApprovalActivity.launchIntentLookupForTest = null
+                assertTrue(runBlocking { dataStore.updateAppRuleSnapshot(allowedSnapshot) })
+                val currentAllowedSettings = runBlocking { dataStore.settings.first() }
+                val currentAllowedFingerprint = GuardianApprovalPolicyFingerprint.forSettings(currentAllowedSettings)
+                context.sendBroadcast(allowedOffer("current-allowed-offer", currentAllowedFingerprint))
+                val launchDeadline = SystemClock.uptimeMillis() + 5_000L
+                while (scenario.state != Lifecycle.State.DESTROYED &&
+                    SystemClock.uptimeMillis() < launchDeadline
+                ) {
+                    InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                    SystemClock.sleep(50L)
+                }
+                assertEquals(
+                    "a current all-allow offer should launch after its intent and policy are both resolved",
+                    Lifecycle.State.DESTROYED,
+                    scenario.state
+                )
+                assertEquals(
+                    "the normal allowed launch must not write another approval",
+                    storedOverrides,
+                    runBlocking { dataStore.settings.first().appRuleOverrideState }
+                )
+            }
+        } finally {
+            releaseLookup.countDown()
+            GuardianApprovalActivity.launchIntentLookupForTest = null
+            context.unregisterReceiver(requestReceiver)
+            context.unregisterReceiver(invalidatedReceiver)
+            restoreAppRuleSnapshot(context, originalSnapshot)
+            runBlocking {
+                dataStore.writeAppRuleOverrideState(
+                    password = "",
+                    state = originalSettings.appRuleOverrideState
+                )
+                restoreRolloverPool(context, ruleId, originalPool)
+            }
+        }
+    }
+
+    @Test
     fun policyReadFailureKeepsApprovalRetryableWithoutAnotherStoredWrite() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dataStore = DataStoreManager(context)
