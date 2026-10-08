@@ -3064,7 +3064,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 val stillCurrent = isCurrentGuardianApprovalOutcomeLocked(
                     outcome,
                     workerInstanceToken
-                ) && runtimeMatchesSettings(outcome, latestSettings)
+                ) && runtimeMatchesSettings(outcome, latestSettings) &&
+                    isGuardianApprovalEvaluationWindowCurrent(outcome)
                 if (!stillCurrent ||
                     !guardianApprovalCoordinator.offerConfirmation(
                         request.checkIdentity(),
@@ -3085,6 +3086,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                         deadlineElapsedRealtimeMs = deadlineElapsedRealtimeMs,
                         capturedAtWallClockMs = request.capturedAtWallMs,
                         capturedAtElapsedRealtimeMs = request.capturedAtElapsedMs,
+                        evaluationZoneId = outcome.evaluationZoneId,
                         validUntilWallClockMs = outcome.validUntilWallClockMs
                     )
                 }
@@ -3120,6 +3122,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private fun isGuardianApprovalEvaluationWindowCurrent(
         outcome: DecisionOutcome.GuardianApprovalEvaluationReady
     ): Boolean = GuardianApprovalEvaluationWindow.isCurrent(
+        evaluationZoneId = outcome.evaluationZoneId,
+        currentZoneId = java.time.ZoneId.systemDefault().id,
         capturedAtWallClockMs = outcome.request.capturedAtWallMs,
         capturedAtElapsedRealtimeMs = outcome.request.capturedAtElapsedMs,
         validUntilWallClockMs = outcome.validUntilWallClockMs,
@@ -3266,6 +3270,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         deadlineElapsedRealtimeMs: Long? = null,
         capturedAtWallClockMs: Long? = null,
         capturedAtElapsedRealtimeMs: Long? = null,
+        evaluationZoneId: String? = null,
         validUntilWallClockMs: Long? = null
     ): Boolean {
         val result = Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
@@ -3308,6 +3313,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
                 it
             )
+        }
+        evaluationZoneId?.let {
+            result.putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID, it)
         }
         validUntilWallClockMs?.let {
             result.putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS, it)

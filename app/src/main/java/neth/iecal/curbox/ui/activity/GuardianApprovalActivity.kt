@@ -50,6 +50,7 @@ import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantQueryFactory
 import java.time.Duration
+import java.time.ZoneId
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -243,6 +244,10 @@ class GuardianApprovalActivity : AppCompatActivity() {
                                     EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
                                     -1L
                                 )
+                            )
+                            .putExtra(
+                                EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                                intent.getStringExtra(EXTRA_CONFIRMATION_EVALUATION_ZONE_ID).orEmpty()
                             )
                             .putExtra(
                                 EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
@@ -1436,6 +1441,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
                 0L
             ),
+            evaluationZoneId = result.getStringExtra(EXTRA_CONFIRMATION_EVALUATION_ZONE_ID).orEmpty(),
             capturedAtWallClockMs = result.getLongExtra(
                 EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
                 -1L
@@ -1490,6 +1496,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
             if (confirmationOfferValidationId != offer.offerId) return@launch
             val displayUnlocked = getSystemService(KeyguardManager::class.java)
                 ?.isKeyguardLocked == false
+            val currentZoneId = ZoneId.systemDefault().id
             val nowWallClockMs = System.currentTimeMillis()
             val nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
             val canLaunch = GuardianApprovalLaunchAuthorization.canLaunch(
@@ -1504,6 +1511,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
                 windowFocused = hasWindowFocus(),
                 displayUnlocked = displayUnlocked,
+                currentZoneId = currentZoneId,
                 nowWallClockMs = nowWallClockMs,
                 nowElapsedRealtimeMs = nowElapsedRealtimeMs,
                 currentPolicyFingerprint = currentPolicyFingerprint
@@ -1511,14 +1519,16 @@ class GuardianApprovalActivity : AppCompatActivity() {
             if (!canLaunch) {
                 confirmationOfferValidationId = null
                 val policyChanged = currentPolicyFingerprint != offer.policyFingerprint
-                val evaluationWindowExpired = !GuardianApprovalEvaluationWindow.isCurrent(
+                val evaluationWindowInvalid = !GuardianApprovalEvaluationWindow.isCurrent(
+                    evaluationZoneId = offer.evaluationZoneId,
+                    currentZoneId = currentZoneId,
                     capturedAtWallClockMs = offer.capturedAtWallClockMs,
                     capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
                     validUntilWallClockMs = offer.validUntilWallClockMs,
                     nowWallClockMs = nowWallClockMs,
                     nowElapsedRealtimeMs = nowElapsedRealtimeMs
                 )
-                if (confirmationChecking && (policyChanged || evaluationWindowExpired)) {
+                if (confirmationChecking && (policyChanged || evaluationWindowInvalid)) {
                     notifyGuardianOfferInvalidated(offer)
                     return@launch
                 }
@@ -1557,6 +1567,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         )
         val displayUnlocked = getSystemService(KeyguardManager::class.java)
             ?.isKeyguardLocked == false
+        val currentZoneId = ZoneId.systemDefault().id
         val nowWallClockMs = System.currentTimeMillis()
         val nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
         if (!GuardianApprovalLaunchAuthorization.canLaunch(
@@ -1566,12 +1577,15 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
                 windowFocused = hasWindowFocus(),
                 displayUnlocked = displayUnlocked,
+                currentZoneId = currentZoneId,
                 nowWallClockMs = nowWallClockMs,
                 nowElapsedRealtimeMs = nowElapsedRealtimeMs,
                 currentPolicyFingerprint = currentPolicyFingerprint
             )
         ) {
             if (confirmationChecking && !GuardianApprovalEvaluationWindow.isCurrent(
+                    evaluationZoneId = offer.evaluationZoneId,
+                    currentZoneId = currentZoneId,
                     capturedAtWallClockMs = offer.capturedAtWallClockMs,
                     capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
                     validUntilWallClockMs = offer.validUntilWallClockMs,
@@ -1593,6 +1607,44 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         if (launchIntent == null) {
             notifyGuardianLaunchFailed(expectedIdentity)
+            return
+        }
+        val finalZoneId = ZoneId.systemDefault().id
+        val finalNowWallClockMs = System.currentTimeMillis()
+        val finalNowElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        val finalDisplayUnlocked = getSystemService(KeyguardManager::class.java)
+            ?.isKeyguardLocked == false
+        if (!GuardianApprovalLaunchAuthorization.canLaunch(
+                offer = offer,
+                current = GuardianApprovalExecutionIdentity(
+                    screenRequestId = screenRequestId,
+                    operationId = confirmationOperationId.orEmpty(),
+                    checkId = confirmationCheckId.orEmpty(),
+                    serviceConnectionId = registeredServiceConnectionId.orEmpty()
+                ),
+                confirmationPending = confirmationChecking,
+                activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
+                windowFocused = hasWindowFocus(),
+                displayUnlocked = finalDisplayUnlocked,
+                currentZoneId = finalZoneId,
+                nowWallClockMs = finalNowWallClockMs,
+                nowElapsedRealtimeMs = finalNowElapsedRealtimeMs,
+                currentPolicyFingerprint = currentPolicyFingerprint
+            )
+        ) {
+            if (confirmationChecking && !GuardianApprovalEvaluationWindow.isCurrent(
+                    evaluationZoneId = offer.evaluationZoneId,
+                    currentZoneId = finalZoneId,
+                    capturedAtWallClockMs = offer.capturedAtWallClockMs,
+                    capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
+                    validUntilWallClockMs = offer.validUntilWallClockMs,
+                    nowWallClockMs = finalNowWallClockMs,
+                    nowElapsedRealtimeMs = finalNowElapsedRealtimeMs
+                )
+            ) {
+                confirmationOfferValidationId = null
+                notifyGuardianOfferInvalidated(offer)
+            }
             return
         }
         try {
@@ -1882,6 +1934,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
             "guardian_confirmation_runtime_revision"
         const val EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS =
             "guardian_confirmation_deadline_elapsed_realtime_ms"
+        const val EXTRA_CONFIRMATION_EVALUATION_ZONE_ID =
+            "guardian_confirmation_evaluation_zone_id"
         const val EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS =
             "guardian_confirmation_captured_at_wall_clock_ms"
         const val EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS =

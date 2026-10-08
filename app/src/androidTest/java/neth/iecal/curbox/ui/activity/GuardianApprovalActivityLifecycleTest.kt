@@ -643,6 +643,10 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
                         )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
+                        )
                 )
                 scenario.onActivity { activity ->
                     assertViewVisibility(activity, R.id.approval_confirmation_progress, android.view.View.VISIBLE)
@@ -882,6 +886,10 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
                         )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
+                        )
                 )
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
                 scenario.onActivity { activity ->
@@ -1087,6 +1095,10 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
                         )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
+                        )
                 )
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
                 scenario.onActivity { activity -> assertDenialReason(activity, "Accumulated test rule") }
@@ -1142,6 +1154,10 @@ class GuardianApprovalActivityLifecycleTest {
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
                         )
                 )
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
@@ -1266,6 +1282,10 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
                         )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
+                        )
                         .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID, offerId)
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_POLICY_FINGERPRINT,
@@ -1320,6 +1340,10 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
                         )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
+                        )
                         .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID, expiredOfferId)
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_POLICY_FINGERPRINT,
@@ -1360,6 +1384,77 @@ class GuardianApprovalActivityLifecycleTest {
                     runBlocking { dataStore.settings.first().appRuleOverrideState }
                 )
 
+                val missingZoneCapturedAtWallClockMs = System.currentTimeMillis()
+                val missingZoneCapturedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()
+                val missingZoneOfferId = "missing-zone-offer"
+                context.sendBroadcast(
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
+                        .setPackage(context.packageName)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_OPERATION_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CHECK_ID,
+                            stored.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
+                            GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID,
+                            missingZoneOfferId
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_POLICY_FINGERPRINT,
+                            currentPolicyFingerprint
+                        )
+                        .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_RUNTIME_REVISION, 2L)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
+                            missingZoneCapturedAtElapsedRealtimeMs + 5_000L
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
+                            missingZoneCapturedAtWallClockMs
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
+                            missingZoneCapturedAtElapsedRealtimeMs
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
+                            Long.MAX_VALUE
+                        )
+                )
+                val missingZoneInvalidation = invalidatedOffers.poll(5, TimeUnit.SECONDS)
+                    ?: error("An allowed offer without its evaluation zone must be reevaluated")
+                assertEquals(
+                    missingZoneOfferId,
+                    missingZoneInvalidation.getStringExtra(
+                        GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID
+                    )
+                )
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity ->
+                    assertFalse("an offer without a zone must not finish the approval screen", activity.isFinishing)
+                    assertDenialReason(activity, "Policy offer test")
+                }
+                assertEquals(
+                    "missing-zone reevaluation must not write another approval",
+                    policyChangedOverrides,
+                    runBlocking { dataStore.settings.first().appRuleOverrideState }
+                )
+
                 val launchCapturedAtWallClockMs = System.currentTimeMillis()
                 val launchCapturedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()
                 context.sendBroadcast(
@@ -1384,6 +1479,10 @@ class GuardianApprovalActivityLifecycleTest {
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
                         )
                         .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID, "current-policy-offer")
                         .putExtra(
@@ -1526,6 +1625,10 @@ class GuardianApprovalActivityLifecycleTest {
                         .putExtra(
                             GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS,
                             GuardianApprovalActivity.CONFIRMATION_STATUS_ALLOWED
+                        )
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_EVALUATION_ZONE_ID,
+                            java.time.ZoneId.systemDefault().id
                         )
                         .putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_OFFER_ID, "policy-read-failure-offer")
                         .putExtra(

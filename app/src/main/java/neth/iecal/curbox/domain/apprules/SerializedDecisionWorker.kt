@@ -165,6 +165,7 @@ sealed class DecisionOutcome {
         val request: GuardianApprovalEvaluationRequest,
         val acceptedRuntimeRevision: RuntimeRevision,
         val status: GuardianApprovalEvaluationStatus,
+        val evaluationZoneId: String = "",
         val validUntilWallClockMs: Long = Long.MAX_VALUE,
         val confirmationState: GuardianApprovalConfirmationState? = null,
         val evaluation: AppRulesEvaluation? = null,
@@ -783,6 +784,7 @@ class SerializedDecisionWorker internal constructor(
             request = request,
             accepted = accepted,
             status = GuardianApprovalEvaluationStatus.COMPLETED,
+            evaluationZoneId = calculator.zone.id,
             validUntilWallClockMs = validUntilWallClockMs,
             confirmationState = confirmationState,
             evaluation = evaluation
@@ -824,6 +826,7 @@ class SerializedDecisionWorker internal constructor(
         request: GuardianApprovalEvaluationRequest,
         accepted: AcceptedRuleRuntimeSnapshot,
         status: GuardianApprovalEvaluationStatus,
+        evaluationZoneId: String = "",
         validUntilWallClockMs: Long = Long.MAX_VALUE,
         confirmationState: GuardianApprovalConfirmationState? = null,
         evaluation: AppRulesEvaluation? = null
@@ -842,6 +845,7 @@ class SerializedDecisionWorker internal constructor(
                         request = request,
                         acceptedRuntimeRevision = accepted.runtimeRevision,
                         status = status,
+                        evaluationZoneId = evaluationZoneId,
                         validUntilWallClockMs = validUntilWallClockMs,
                         confirmationState = confirmationState,
                         evaluation = evaluation,

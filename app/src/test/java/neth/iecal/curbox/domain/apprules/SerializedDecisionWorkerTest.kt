@@ -171,6 +171,7 @@ class SerializedDecisionWorkerTest {
             assertTrue(outcomes.awaitGuardianApprovalCount(1))
             val result = outcomes.guardianApprovalEvaluations.single()
             assertTrue("the grant keeps the current policy allowed", result.evaluation?.isAllowed == true)
+            assertEquals("the offer carries the zone used by the evaluation", zone.id, result.evaluationZoneId)
             assertEquals(
                 "an all-allow result must expire when its scheduled restriction starts",
                 capturedAt + 30 * 60_000L,
@@ -232,6 +233,7 @@ class SerializedDecisionWorkerTest {
             assertTrue(outcomes.awaitGuardianApprovalCount(1))
             val result = outcomes.guardianApprovalEvaluations.single()
             assertTrue("the current grant keeps evaluation allowed", result.evaluation?.isAllowed == true)
+            assertEquals("the offer carries the zone used by the evaluation", zone.id, result.evaluationZoneId)
             assertEquals(
                 "an allowed result must expire before a use-day reset supersedes its receipt",
                 capturedAt + 30 * 60_000L,
@@ -288,6 +290,7 @@ class SerializedDecisionWorkerTest {
             assertTrue(outcomes.awaitGuardianApprovalCount(1))
             val result = outcomes.guardianApprovalEvaluations.single()
             assertTrue("the current skip keeps evaluation allowed", result.evaluation?.isAllowed == true)
+            assertEquals("the offer carries the zone used by the evaluation", zone.id, result.evaluationZoneId)
             assertEquals(
                 "an allowed result must expire when the stored skip ends",
                 skipUntilMs,

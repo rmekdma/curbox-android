@@ -3,13 +3,17 @@ package neth.iecal.curbox.domain.apprules
 /** Keeps an approval result current only until the next policy boundary from its evaluation. */
 object GuardianApprovalEvaluationWindow {
     fun isCurrent(
+        evaluationZoneId: String,
+        currentZoneId: String,
         capturedAtWallClockMs: Long,
         capturedAtElapsedRealtimeMs: Long,
         validUntilWallClockMs: Long,
         nowWallClockMs: Long,
         nowElapsedRealtimeMs: Long
     ): Boolean {
-        if (capturedAtWallClockMs < 0L || capturedAtElapsedRealtimeMs < 0L ||
+        if (evaluationZoneId.isBlank() || currentZoneId.isBlank() ||
+            evaluationZoneId != currentZoneId ||
+            capturedAtWallClockMs < 0L || capturedAtElapsedRealtimeMs < 0L ||
             validUntilWallClockMs < capturedAtWallClockMs ||
             nowWallClockMs < capturedAtWallClockMs ||
             nowElapsedRealtimeMs < capturedAtElapsedRealtimeMs

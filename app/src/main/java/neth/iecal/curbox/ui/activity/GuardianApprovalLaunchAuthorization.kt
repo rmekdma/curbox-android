@@ -15,6 +15,7 @@ internal data class GuardianApprovalLaunchOffer(
     val policyFingerprint: String,
     val runtimeRevision: Long,
     val deadlineElapsedRealtimeMs: Long,
+    val evaluationZoneId: String,
     val capturedAtWallClockMs: Long,
     val capturedAtElapsedRealtimeMs: Long,
     val validUntilWallClockMs: Long
@@ -28,6 +29,7 @@ internal object GuardianApprovalLaunchAuthorization {
         activityResumed: Boolean,
         windowFocused: Boolean,
         displayUnlocked: Boolean,
+        currentZoneId: String,
         nowWallClockMs: Long,
         nowElapsedRealtimeMs: Long,
         currentPolicyFingerprint: String
@@ -38,6 +40,8 @@ internal object GuardianApprovalLaunchAuthorization {
         offer.runtimeRevision >= 0L &&
         offer.deadlineElapsedRealtimeMs > nowElapsedRealtimeMs &&
         GuardianApprovalEvaluationWindow.isCurrent(
+            evaluationZoneId = offer.evaluationZoneId,
+            currentZoneId = currentZoneId,
             capturedAtWallClockMs = offer.capturedAtWallClockMs,
             capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
             validUntilWallClockMs = offer.validUntilWallClockMs,
