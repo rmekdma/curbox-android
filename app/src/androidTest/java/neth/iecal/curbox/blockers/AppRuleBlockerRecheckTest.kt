@@ -20,6 +20,7 @@ import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
 import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
 import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
+import neth.iecal.curbox.domain.apprules.AppRuleEvaluation
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides
 import neth.iecal.curbox.domain.apprules.AppRulePackageScopeReader
@@ -1431,7 +1432,10 @@ class AppRuleBlockerRecheckTest {
                 },
                 rows.map { it.totalAllowedMinutes }
             )
-            assertTrue(rows.single().reason.isNotBlank())
+            assertEquals(
+                evaluation.denyingRules.map { fixture.blocker.warningStatusForTest(it) },
+                rows.map { it.reason }
+            )
         } finally {
             fixture.close()
         }
@@ -1577,12 +1581,21 @@ class AppRuleBlockerRecheckTest {
                 }
             }
         } catch (error: Throwable) {
-            blocker.onDestroy()
-            updateGuardianHostTestSettings(context) { current ->
-                current.copy(
-                    appRuleSnapshot = originalSettings.appRuleSnapshot,
-                    appRuleOverrideState = originalSettings.appRuleOverrideState
-                )
+            try {
+                blocker.onDestroy()
+            } catch (cleanupError: Throwable) {
+                if (cleanupError !== error) error.addSuppressed(cleanupError)
+            } finally {
+                try {
+                    updateGuardianHostTestSettings(context) { current ->
+                        current.copy(
+                            appRuleSnapshot = originalSettings.appRuleSnapshot,
+                            appRuleOverrideState = originalSettings.appRuleOverrideState
+                        )
+                    }
+                } catch (restoreError: Throwable) {
+                    if (restoreError !== error) error.addSuppressed(restoreError)
+                }
             }
             throw error
         }
@@ -3756,8 +3769,11 @@ class AppRuleBlockerRecheckTest {
             try {
                 releaseOutcomeGate()
             } finally {
-                blocker.onDestroy()
-                restoreSettings()
+                try {
+                    blocker.onDestroy()
+                } finally {
+                    restoreSettings()
+                }
             }
         }
 
@@ -3829,6 +3845,11 @@ class AppRuleBlockerRecheckTest {
 
     private fun getField(target: Any, name: String): Any? =
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+
+    private fun AppRuleBlocker.warningStatusForTest(evaluation: AppRuleEvaluation): String =
+        javaClass.getDeclaredMethod("warningStatus", AppRuleEvaluation::class.java).apply {
+            isAccessible = true
+        }.invoke(this, evaluation) as String
 
     private fun scheduledKeys(blocker: AppRuleBlocker): Set<String> {
         val scheduler = blocker.wakeScheduler as? FakeWakeScheduler ?: return emptySet()
