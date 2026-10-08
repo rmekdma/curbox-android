@@ -20,6 +20,7 @@ class GuardianApprovalLaunchAuthorizationTest {
                 activityResumed = false,
                 windowFocused = false,
                 displayUnlocked = true,
+                nowWallClockMs = 500L,
                 nowElapsedRealtimeMs = 500L,
                 currentPolicyFingerprint = POLICY_FINGERPRINT
             )
@@ -38,6 +39,7 @@ class GuardianApprovalLaunchAuthorizationTest {
                 activityResumed = true,
                 windowFocused = true,
                 displayUnlocked = true,
+                nowWallClockMs = 500L,
                 nowElapsedRealtimeMs = 500L,
                 currentPolicyFingerprint = POLICY_FINGERPRINT
             )
@@ -57,6 +59,7 @@ class GuardianApprovalLaunchAuthorizationTest {
                 activityResumed = true,
                 windowFocused = true,
                 displayUnlocked = true,
+                nowWallClockMs = 500L,
                 nowElapsedRealtimeMs = 500L,
                 currentPolicyFingerprint = POLICY_FINGERPRINT
             )
@@ -75,6 +78,7 @@ class GuardianApprovalLaunchAuthorizationTest {
                 activityResumed = true,
                 windowFocused = true,
                 displayUnlocked = true,
+                nowWallClockMs = 500L,
                 nowElapsedRealtimeMs = 500L,
                 currentPolicyFingerprint = POLICY_FINGERPRINT
             )
@@ -93,6 +97,7 @@ class GuardianApprovalLaunchAuthorizationTest {
                 activityResumed = true,
                 windowFocused = true,
                 displayUnlocked = true,
+                nowWallClockMs = 500L,
                 nowElapsedRealtimeMs = 500L,
                 currentPolicyFingerprint = "tightened-policy"
             )
@@ -111,7 +116,56 @@ class GuardianApprovalLaunchAuthorizationTest {
                 activityResumed = true,
                 windowFocused = true,
                 displayUnlocked = true,
+                nowWallClockMs = 1_000L,
                 nowElapsedRealtimeMs = 1_000L,
+                currentPolicyFingerprint = POLICY_FINGERPRINT
+            )
+        )
+    }
+
+    @Test
+    fun scheduledPolicyBoundaryExpiresAnOfferEvenWhenSettingsAreUnchanged() {
+        val current = executionIdentity()
+        val offer = launchOffer(identity = current).copy(
+            capturedAtWallClockMs = 1_000L,
+            capturedAtElapsedRealtimeMs = 500L,
+            validUntilWallClockMs = 2_000L
+        )
+
+        assertFalse(
+            GuardianApprovalLaunchAuthorization.canLaunch(
+                offer = offer,
+                current = current,
+                confirmationPending = true,
+                activityResumed = true,
+                windowFocused = true,
+                displayUnlocked = true,
+                nowWallClockMs = 2_000L,
+                nowElapsedRealtimeMs = 900L,
+                currentPolicyFingerprint = POLICY_FINGERPRINT
+            )
+        )
+    }
+
+    @Test
+    fun elapsedBoundaryExpiresAnOfferIfTheWallClockMovesBackwards() {
+        val current = executionIdentity()
+        val offer = launchOffer(identity = current).copy(
+            capturedAtWallClockMs = 1_000L,
+            capturedAtElapsedRealtimeMs = 500L,
+            validUntilWallClockMs = 2_000L
+        )
+
+        assertFalse(
+            GuardianApprovalLaunchAuthorization.canLaunch(
+                offer = offer,
+                current = current,
+                confirmationPending = true,
+                activityResumed = true,
+                windowFocused = true,
+                displayUnlocked = true,
+                nowWallClockMs = 1_500L,
+                nowElapsedRealtimeMs = 1_500L,
                 currentPolicyFingerprint = POLICY_FINGERPRINT
             )
         )
@@ -151,7 +205,10 @@ class GuardianApprovalLaunchAuthorizationTest {
             offerId = "offer-current",
             policyFingerprint = POLICY_FINGERPRINT,
             runtimeRevision = 21L,
-            deadlineElapsedRealtimeMs = 1_000L
+            deadlineElapsedRealtimeMs = 1_000L,
+            capturedAtWallClockMs = 100L,
+            capturedAtElapsedRealtimeMs = 100L,
+            validUntilWallClockMs = Long.MAX_VALUE
         )
 
     private companion object {

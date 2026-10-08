@@ -1,5 +1,7 @@
 package neth.iecal.curbox.ui.activity
 
+import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationWindow
+
 internal data class GuardianApprovalExecutionIdentity(
     val screenRequestId: String,
     val operationId: String,
@@ -12,7 +14,10 @@ internal data class GuardianApprovalLaunchOffer(
     val offerId: String,
     val policyFingerprint: String,
     val runtimeRevision: Long,
-    val deadlineElapsedRealtimeMs: Long
+    val deadlineElapsedRealtimeMs: Long,
+    val capturedAtWallClockMs: Long,
+    val capturedAtElapsedRealtimeMs: Long,
+    val validUntilWallClockMs: Long
 )
 
 internal object GuardianApprovalLaunchAuthorization {
@@ -23,6 +28,7 @@ internal object GuardianApprovalLaunchAuthorization {
         activityResumed: Boolean,
         windowFocused: Boolean,
         displayUnlocked: Boolean,
+        nowWallClockMs: Long,
         nowElapsedRealtimeMs: Long,
         currentPolicyFingerprint: String
     ): Boolean = offer.identity.isComplete() &&
@@ -31,6 +37,13 @@ internal object GuardianApprovalLaunchAuthorization {
         offer.policyFingerprint == currentPolicyFingerprint &&
         offer.runtimeRevision >= 0L &&
         offer.deadlineElapsedRealtimeMs > nowElapsedRealtimeMs &&
+        GuardianApprovalEvaluationWindow.isCurrent(
+            capturedAtWallClockMs = offer.capturedAtWallClockMs,
+            capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
+            validUntilWallClockMs = offer.validUntilWallClockMs,
+            nowWallClockMs = nowWallClockMs,
+            nowElapsedRealtimeMs = nowElapsedRealtimeMs
+        ) &&
         offer.identity == current &&
         confirmationPending &&
         activityResumed &&

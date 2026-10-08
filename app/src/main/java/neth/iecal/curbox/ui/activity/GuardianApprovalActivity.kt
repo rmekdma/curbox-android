@@ -43,6 +43,7 @@ import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantCandidate
 import neth.iecal.curbox.domain.apprules.GuardianApprovalPolicyFingerprint
+import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationWindow
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
@@ -97,6 +98,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var pendingApprovalCheckId: String? = null
     private var confirmationServiceConnectionId: String? = null
     private var approvalTestReceiverRegistered = false
+    @Volatile private var policyReadFailureForTest = false
 
     private data class ApprovalWriteFailureGate(val id: String)
 
@@ -109,6 +111,13 @@ class GuardianApprovalActivity : AppCompatActivity() {
             if (!BuildConfig.DEBUG) return
             val action = intent?.action ?: return
             when (action) {
+                INTENT_ACTION_TEST_FAIL_POLICY_READ -> {
+                    policyReadFailureForTest = true
+                    sendBroadcast(
+                        Intent(INTENT_ACTION_TEST_POLICY_READ_FAILURE_ARMED)
+                            .setPackage(this@GuardianApprovalActivity.packageName)
+                    )
+                }
                 INTENT_ACTION_TEST_ARM_WRITE_FAILURE -> {
                     val gateId = intent.getStringExtra(EXTRA_TEST_GATE_ID)
                         ?.trim()
@@ -219,6 +228,27 @@ class GuardianApprovalActivity : AppCompatActivity() {
                                 intent.getLongExtra(
                                     EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
                                     0L
+                                )
+                            )
+                            .putExtra(
+                                EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
+                                intent.getLongExtra(
+                                    EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
+                                    -1L
+                                )
+                            )
+                            .putExtra(
+                                EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
+                                intent.getLongExtra(
+                                    EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
+                                    -1L
+                                )
+                            )
+                            .putExtra(
+                                EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
+                                intent.getLongExtra(
+                                    EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
+                                    -1L
                                 )
                             )
                     )
@@ -422,6 +452,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     addAction(INTENT_ACTION_TEST_CLEAR_WRITE_FAILURE)
                     addAction(INTENT_ACTION_TEST_SEND_STALE_CLOSED)
                     addAction(INTENT_ACTION_TEST_SEND_CONFIRMATION_RESULT)
+                    addAction(INTENT_ACTION_TEST_FAIL_POLICY_READ)
                     addAction(INTENT_ACTION_TEST_SELECT_APPROVAL_RULE)
                     addAction(AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
                     addAction(AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
@@ -1404,6 +1435,18 @@ class GuardianApprovalActivity : AppCompatActivity() {
             deadlineElapsedRealtimeMs = result.getLongExtra(
                 EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
                 0L
+            ),
+            capturedAtWallClockMs = result.getLongExtra(
+                EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
+                -1L
+            ),
+            capturedAtElapsedRealtimeMs = result.getLongExtra(
+                EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
+                -1L
+            ),
+            validUntilWallClockMs = result.getLongExtra(
+                EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
+                -1L
             )
         )
         if (offer.offerId.isBlank() || confirmationOfferValidationId == offer.offerId) return
@@ -1420,12 +1463,35 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
-            val currentPolicyFingerprint = withContext(Dispatchers.IO) {
-                GuardianApprovalPolicyFingerprint.forSettings(dataStore.settings.first())
+            val currentPolicyFingerprint = try {
+                withContext(Dispatchers.IO) {
+                    if (BuildConfig.DEBUG && policyReadFailureForTest) {
+                        policyReadFailureForTest = false
+                        throw IOException("Injected policy snapshot read failure")
+                    }
+                    GuardianApprovalPolicyFingerprint.forSettings(dataStore.settings.first())
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                CrashLogger(applicationContext).logNonFatalError(error)
+                if (canHandleCallbacks() && confirmationChecking &&
+                    confirmationOfferValidationId == offer.offerId
+                ) {
+                    confirmationOfferValidationId = null
+                    confirmationChecking = false
+                    confirmationFailed = true
+                    renderConfirmationState()
+                    logConfirmationUiState(CONFIRMATION_STATUS_FAILED)
+                    notifyGuardianLaunchFailed(offer.identity)
+                }
+                return@launch
             }
             if (confirmationOfferValidationId != offer.offerId) return@launch
             val displayUnlocked = getSystemService(KeyguardManager::class.java)
                 ?.isKeyguardLocked == false
+            val nowWallClockMs = System.currentTimeMillis()
+            val nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
             val canLaunch = GuardianApprovalLaunchAuthorization.canLaunch(
                 offer = offer,
                 current = GuardianApprovalExecutionIdentity(
@@ -1438,14 +1504,21 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
                 windowFocused = hasWindowFocus(),
                 displayUnlocked = displayUnlocked,
-                nowElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                nowWallClockMs = nowWallClockMs,
+                nowElapsedRealtimeMs = nowElapsedRealtimeMs,
                 currentPolicyFingerprint = currentPolicyFingerprint
             )
             if (!canLaunch) {
                 confirmationOfferValidationId = null
-                if (confirmationChecking &&
-                    currentPolicyFingerprint != offer.policyFingerprint
-                ) {
+                val policyChanged = currentPolicyFingerprint != offer.policyFingerprint
+                val evaluationWindowExpired = !GuardianApprovalEvaluationWindow.isCurrent(
+                    capturedAtWallClockMs = offer.capturedAtWallClockMs,
+                    capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
+                    validUntilWallClockMs = offer.validUntilWallClockMs,
+                    nowWallClockMs = nowWallClockMs,
+                    nowElapsedRealtimeMs = nowElapsedRealtimeMs
+                )
+                if (confirmationChecking && (policyChanged || evaluationWindowExpired)) {
                     notifyGuardianOfferInvalidated(offer)
                     return@launch
                 }
@@ -1484,6 +1557,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
         )
         val displayUnlocked = getSystemService(KeyguardManager::class.java)
             ?.isKeyguardLocked == false
+        val nowWallClockMs = System.currentTimeMillis()
+        val nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
         if (!GuardianApprovalLaunchAuthorization.canLaunch(
                 offer = offer,
                 current = currentIdentity,
@@ -1491,10 +1566,24 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
                 windowFocused = hasWindowFocus(),
                 displayUnlocked = displayUnlocked,
-                nowElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                nowWallClockMs = nowWallClockMs,
+                nowElapsedRealtimeMs = nowElapsedRealtimeMs,
                 currentPolicyFingerprint = currentPolicyFingerprint
             )
-        ) return
+        ) {
+            if (confirmationChecking && !GuardianApprovalEvaluationWindow.isCurrent(
+                    capturedAtWallClockMs = offer.capturedAtWallClockMs,
+                    capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
+                    validUntilWallClockMs = offer.validUntilWallClockMs,
+                    nowWallClockMs = nowWallClockMs,
+                    nowElapsedRealtimeMs = nowElapsedRealtimeMs
+                )
+            ) {
+                confirmationOfferValidationId = null
+                notifyGuardianOfferInvalidated(offer)
+            }
+            return
+        }
         val launchIntent = try {
             packageManager.getLaunchIntentForPackage(targetPackageName)
                 ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -1733,6 +1822,10 @@ class GuardianApprovalActivity : AppCompatActivity() {
             "neth.iecal.curbox.guardian.TEST_SEND_STALE_CLOSED"
         internal const val INTENT_ACTION_TEST_SEND_CONFIRMATION_RESULT =
             "neth.iecal.curbox.guardian.TEST_SEND_CONFIRMATION_RESULT"
+        internal const val INTENT_ACTION_TEST_FAIL_POLICY_READ =
+            "neth.iecal.curbox.guardian.TEST_FAIL_POLICY_READ"
+        internal const val INTENT_ACTION_TEST_POLICY_READ_FAILURE_ARMED =
+            "neth.iecal.curbox.guardian.TEST_POLICY_READ_FAILURE_ARMED"
         internal const val INTENT_ACTION_TEST_SELECT_APPROVAL_RULE =
             "neth.iecal.curbox.guardian.TEST_SELECT_APPROVAL_RULE"
         internal const val EXTRA_TEST_GATE_ID = "guardian_test_gate_id"
@@ -1789,6 +1882,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
             "guardian_confirmation_runtime_revision"
         const val EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS =
             "guardian_confirmation_deadline_elapsed_realtime_ms"
+        const val EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS =
+            "guardian_confirmation_captured_at_wall_clock_ms"
+        const val EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS =
+            "guardian_confirmation_captured_at_elapsed_realtime_ms"
+        const val EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS =
+            "guardian_confirmation_valid_until_wall_clock_ms"
         const val CONFIRMATION_STATUS_ALLOWED = "allowed"
         const val CONFIRMATION_STATUS_REMAINING = "remaining"
         const val CONFIRMATION_STATUS_FAILED = "failed"

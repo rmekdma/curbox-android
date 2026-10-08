@@ -165,6 +165,7 @@ sealed class DecisionOutcome {
         val request: GuardianApprovalEvaluationRequest,
         val acceptedRuntimeRevision: RuntimeRevision,
         val status: GuardianApprovalEvaluationStatus,
+        val validUntilWallClockMs: Long = Long.MAX_VALUE,
         val confirmationState: GuardianApprovalConfirmationState? = null,
         val evaluation: AppRulesEvaluation? = null,
         val denyingRuleNames: Map<String, String> = emptyMap()
@@ -764,10 +765,25 @@ class SerializedDecisionWorker internal constructor(
             runtime = accepted.runtime,
             currentUseDayId = useDayId
         )
+        val validUntilWallClockMs = if (evaluation.isAllowed) {
+            AppRuleRecheckPlanner.nextPlan(
+                snapshot = accepted.runtime.snapshot,
+                evaluation = evaluation,
+                overrideState = accepted.runtime.overrideState,
+                useDayId = useDayId,
+                nowMs = request.capturedAtWallMs,
+                useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
+                zone = calculator.zone,
+                useDayCalculator = calculator
+            )?.dueAtWallClockMs ?: Long.MAX_VALUE
+        } else {
+            Long.MAX_VALUE
+        }
         publishGuardianApprovalEvaluation(
             request = request,
             accepted = accepted,
             status = GuardianApprovalEvaluationStatus.COMPLETED,
+            validUntilWallClockMs = validUntilWallClockMs,
             confirmationState = confirmationState,
             evaluation = evaluation
         )
@@ -808,6 +824,7 @@ class SerializedDecisionWorker internal constructor(
         request: GuardianApprovalEvaluationRequest,
         accepted: AcceptedRuleRuntimeSnapshot,
         status: GuardianApprovalEvaluationStatus,
+        validUntilWallClockMs: Long = Long.MAX_VALUE,
         confirmationState: GuardianApprovalConfirmationState? = null,
         evaluation: AppRulesEvaluation? = null
     ) {
@@ -825,6 +842,7 @@ class SerializedDecisionWorker internal constructor(
                         request = request,
                         acceptedRuntimeRevision = accepted.runtimeRevision,
                         status = status,
+                        validUntilWallClockMs = validUntilWallClockMs,
                         confirmationState = confirmationState,
                         evaluation = evaluation,
                         denyingRuleNames = denyingRuleNames

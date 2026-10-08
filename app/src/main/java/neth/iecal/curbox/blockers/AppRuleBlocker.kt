@@ -92,6 +92,7 @@ import neth.iecal.curbox.domain.apprules.AppRuleRolloverCoordinator
 import neth.iecal.curbox.domain.apprules.GuardianApprovalCoordinator
 import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationRequest
 import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationStatus
+import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationWindow
 import neth.iecal.curbox.domain.apprules.GuardianApprovalPolicyFingerprint
 import neth.iecal.curbox.domain.apprules.SettlementRequest
 import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
@@ -2974,10 +2975,14 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             }
             return
         }
+        if (!isGuardianApprovalEvaluationWindowCurrent(outcome)) {
+            refreshRuntimeForGuardianCheck(request.checkIdentity())
+            return
+        }
         launchGuardianTargetIfCurrent(outcome, workerInstanceToken, latestSettings)
     }
 
-    private fun launchGuardianTargetIfCurrent(
+    private suspend fun launchGuardianTargetIfCurrent(
         outcome: DecisionOutcome.GuardianApprovalEvaluationReady,
         workerInstanceToken: AppRuleWorkerInstanceToken,
         latestSettings: Settings
@@ -2998,29 +3003,53 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         if (!isCurboxRootForeground()) {
             return
         }
+        if (!isGuardianApprovalEvaluationWindowCurrent(outcome)) {
+            refreshRuntimeForGuardianCheck(request.checkIdentity())
+            return
+        }
         val permit = synchronized(runtimeLock) {
             reserveExternalEffectLocked {
                 isCurrentGuardianApprovalOutcomeLocked(outcome, workerInstanceToken) &&
                     isCurrentGuardianApprovalCheckLocked(request) &&
                     legacyDisplayState() == DisplayState.UNLOCKED &&
-                    runtimeMatchesSettings(outcome, latestSettings)
+                    runtimeMatchesSettings(outcome, latestSettings) &&
+                    isGuardianApprovalEvaluationWindowCurrent(outcome)
             }
-        } ?: return
+        }
+        if (permit == null) {
+            if (isCurrentGuardianApprovalCheck(request) &&
+                !isGuardianApprovalEvaluationWindowCurrent(outcome)
+            ) {
+                refreshRuntimeForGuardianCheck(request.checkIdentity())
+            }
+            return
+        }
         if (!startExternalEffect(permit) {
                 isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken) &&
                     isCurrentGuardianApprovalCheck(request) &&
-                    legacyDisplayState() == DisplayState.UNLOCKED
+                    legacyDisplayState() == DisplayState.UNLOCKED &&
+                    isGuardianApprovalEvaluationWindowCurrent(outcome)
             }
-        ) return
+        ) {
+            if (isCurrentGuardianApprovalCheck(request) &&
+                !isGuardianApprovalEvaluationWindowCurrent(outcome)
+            ) {
+                refreshRuntimeForGuardianCheck(request.checkIdentity())
+            }
+            return
+        }
         var authorizationSent = false
         var waitingForConfirmationTimeout = false
         try {
             if (!beginExternalEffectCall(permit) {
                     isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken) &&
                         isCurrentGuardianApprovalCheck(request) &&
-                        legacyDisplayState() == DisplayState.UNLOCKED
+                        legacyDisplayState() == DisplayState.UNLOCKED &&
+                        isGuardianApprovalEvaluationWindowCurrent(outcome)
                 }
-            ) return
+            ) {
+                return
+            }
             if (legacyDisplayState() != DisplayState.UNLOCKED) {
                 failGuardianCheckIfCurrent(request.checkIdentity())
                 return
@@ -3053,7 +3082,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                         offerId = offerId,
                         policyFingerprint = policyFingerprint,
                         runtimeRevision = outcome.acceptedRuntimeRevision.value,
-                        deadlineElapsedRealtimeMs = deadlineElapsedRealtimeMs
+                        deadlineElapsedRealtimeMs = deadlineElapsedRealtimeMs,
+                        capturedAtWallClockMs = request.capturedAtWallMs,
+                        capturedAtElapsedRealtimeMs = request.capturedAtElapsedMs,
+                        validUntilWallClockMs = outcome.validUntilWallClockMs
                     )
                 }
             }
@@ -3065,7 +3097,13 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             completeExternalEffectCall(permit)
             finishExternalEffect(permit)
             if (!authorizationSent && !waitingForConfirmationTimeout) {
-                failGuardianCheckIfCurrent(request.checkIdentity())
+                if (isCurrentGuardianApprovalCheck(request) &&
+                    !isGuardianApprovalEvaluationWindowCurrent(outcome)
+                ) {
+                    refreshRuntimeForGuardianCheck(request.checkIdentity())
+                } else {
+                    failGuardianCheckIfCurrent(request.checkIdentity())
+                }
             }
         }
     }
@@ -3078,6 +3116,16 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             facts.activeRoot.packageName == servicePackageName &&
             facts.displayState == DisplayState.UNLOCKED
     }
+
+    private fun isGuardianApprovalEvaluationWindowCurrent(
+        outcome: DecisionOutcome.GuardianApprovalEvaluationReady
+    ): Boolean = GuardianApprovalEvaluationWindow.isCurrent(
+        capturedAtWallClockMs = outcome.request.capturedAtWallMs,
+        capturedAtElapsedRealtimeMs = outcome.request.capturedAtElapsedMs,
+        validUntilWallClockMs = outcome.validUntilWallClockMs,
+        nowWallClockMs = System.currentTimeMillis(),
+        nowElapsedRealtimeMs = observationElapsedRealtimeMs()
+    )
 
     private fun completeGuardianCheck(request: GuardianApprovalEvaluationRequest): Boolean =
         synchronized(runtimeLock) {
@@ -3215,7 +3263,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         offerId: String? = null,
         policyFingerprint: String? = null,
         runtimeRevision: Long? = null,
-        deadlineElapsedRealtimeMs: Long? = null
+        deadlineElapsedRealtimeMs: Long? = null,
+        capturedAtWallClockMs: Long? = null,
+        capturedAtElapsedRealtimeMs: Long? = null,
+        validUntilWallClockMs: Long? = null
     ): Boolean {
         val result = Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
             .setPackage(service.packageName)
@@ -3245,6 +3296,21 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 GuardianApprovalActivity.EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
                 it
             )
+        }
+        capturedAtWallClockMs?.let {
+            result.putExtra(
+                GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_WALL_CLOCK_MS,
+                it
+            )
+        }
+        capturedAtElapsedRealtimeMs?.let {
+            result.putExtra(
+                GuardianApprovalActivity.EXTRA_CONFIRMATION_CAPTURED_AT_ELAPSED_REALTIME_MS,
+                it
+            )
+        }
+        validUntilWallClockMs?.let {
+            result.putExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS, it)
         }
         confirmationState?.let {
             result.putExtra(

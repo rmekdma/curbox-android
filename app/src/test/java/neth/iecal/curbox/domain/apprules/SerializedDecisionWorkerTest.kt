@@ -6,6 +6,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -19,6 +21,7 @@ import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.ForegroundSession
 import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
@@ -99,6 +102,197 @@ class SerializedDecisionWorkerTest {
             assertEquals(wallNow, repository.persistedSessions().single().endedAtMs)
             assertEquals("an explicit check must not renew visibility or record another launch", 1, repository.launchEvents.size)
             assertEquals("an explicit check must not masquerade as a foreground event", 1, outcomes.evaluations.size)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun guardianApprovalAllowedResultExpiresAtTheNextScheduledRuleBoundary() {
+        val zone = ZoneId.systemDefault()
+        val capturedAt = ZonedDateTime.now(zone)
+            .withHour(10)
+            .withMinute(30)
+            .withSecond(0)
+            .withNano(0)
+            .toInstant()
+            .toEpochMilli()
+        val calculator = ConfigurableUseDayCalculator(zone = zone)
+        val useDayId = calculator.idAt(capturedAt)
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            GuardianApprovalGrantReceipt(
+                ruleId = "usage",
+                useDayId = useDayId,
+                grantedAtMs = capturedAt - 1_000L,
+                grantedMillis = 2 * 60 * 60_000L
+            ),
+            GuardianApprovalGrantOrigin.DIRECT,
+            0L
+        )
+        val acceptedRuntime = approvalRuntime(
+            revision = RuntimeRevision(81L),
+            useDayId = useDayId,
+            receipt = receipt,
+            nightAllowedMinutes = 1_440L
+        ).let { accepted ->
+            val scheduledUsageRule = accepted.runtime.snapshot.appRules
+                .first { it.id == "usage" }
+                .copy(timeRanges = listOf(AppRuleTimeRange(11 * 60, 12 * 60)))
+            accepted.copy(
+                runtime = accepted.runtime.copy(
+                    snapshot = accepted.runtime.snapshot.copy(
+                        appRules = accepted.runtime.snapshot.appRules.map { rule ->
+                            if (rule.id == scheduledUsageRule.id) scheduledUsageRule else rule
+                        }
+                    ),
+                    resetTime = UseDayResetTime(hour = 4, minute = 0)
+                )
+            )
+        }
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = RecordingRepository(),
+            sink = outcomes,
+            acceptedRuntime = acceptedRuntime
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitGuardianApprovalEvaluation(
+                    guardianApprovalRequest(
+                        sourceOrder = 81L,
+                        operationId = "scheduled-boundary",
+                        checkId = "scheduled-boundary-check",
+                        receipt = receipt,
+                        capturedAtMs = capturedAt
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitGuardianApprovalCount(1))
+            val result = outcomes.guardianApprovalEvaluations.single()
+            assertTrue("the grant keeps the current policy allowed", result.evaluation?.isAllowed == true)
+            assertEquals(
+                "an all-allow result must expire when its scheduled restriction starts",
+                capturedAt + 30 * 60_000L,
+                result.validUntilWallClockMs
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun guardianApprovalAllowedResultExpiresAtTheNextUseDayReset() {
+        val zone = ZoneId.systemDefault()
+        val capturedAt = ZonedDateTime.now(zone)
+            .withHour(10)
+            .withMinute(30)
+            .withSecond(0)
+            .withNano(0)
+            .toInstant()
+            .toEpochMilli()
+        val resetTime = UseDayResetTime(hour = 11, minute = 0)
+        val calculator = ConfigurableUseDayCalculator(zone, resetTime)
+        val useDayId = calculator.idAt(capturedAt)
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            GuardianApprovalGrantReceipt(
+                ruleId = "usage",
+                useDayId = useDayId,
+                grantedAtMs = capturedAt - 1_000L,
+                grantedMillis = 2 * 60 * 60_000L
+            ),
+            GuardianApprovalGrantOrigin.DIRECT,
+            0L
+        )
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = RecordingRepository(),
+            sink = outcomes,
+            acceptedRuntime = approvalRuntime(
+                revision = RuntimeRevision(82L),
+                useDayId = useDayId,
+                receipt = receipt,
+                nightAllowedMinutes = 1_440L,
+                resetTime = resetTime
+            )
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitGuardianApprovalEvaluation(
+                    guardianApprovalRequest(
+                        sourceOrder = 82L,
+                        operationId = "reset-boundary",
+                        checkId = "reset-boundary-check",
+                        receipt = receipt,
+                        capturedAtMs = capturedAt
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitGuardianApprovalCount(1))
+            val result = outcomes.guardianApprovalEvaluations.single()
+            assertTrue("the current grant keeps evaluation allowed", result.evaluation?.isAllowed == true)
+            assertEquals(
+                "an allowed result must expire before a use-day reset supersedes its receipt",
+                capturedAt + 30 * 60_000L,
+                result.validUntilWallClockMs
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
+    fun guardianApprovalSkipResultExpiresAtItsExistingSkipBoundary() {
+        val zone = ZoneId.systemDefault()
+        val capturedAt = ZonedDateTime.now(zone)
+            .withHour(10)
+            .withMinute(30)
+            .withSecond(0)
+            .withNano(0)
+            .toInstant()
+            .toEpochMilli()
+        val useDayId = ConfigurableUseDayCalculator(zone).idAt(capturedAt)
+        val skipUntilMs = capturedAt + 15 * 60_000L
+        val receipt = GuardianApprovalWorkReceipt.RuleSkip(
+            ruleId = "usage",
+            useDayId = useDayId,
+            skipFromMs = capturedAt - 1_000L,
+            skipUntilMs = skipUntilMs,
+            useDayGenerationStartedAtMs = 0L
+        )
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = RecordingRepository(),
+            sink = outcomes,
+            acceptedRuntime = approvalRuntime(
+                revision = RuntimeRevision(83L),
+                useDayId = useDayId,
+                receipt = receipt,
+                nightAllowedMinutes = 1_440L
+            )
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitGuardianApprovalEvaluation(
+                    guardianApprovalRequest(
+                        sourceOrder = 83L,
+                        operationId = "skip-boundary",
+                        checkId = "skip-boundary-check",
+                        receipt = receipt,
+                        capturedAtMs = capturedAt
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitGuardianApprovalCount(1))
+            val result = outcomes.guardianApprovalEvaluations.single()
+            assertTrue("the current skip keeps evaluation allowed", result.evaluation?.isAllowed == true)
+            assertEquals(
+                "an allowed result must expire when the stored skip ends",
+                skipUntilMs,
+                result.validUntilWallClockMs
+            )
         } finally {
             worker.stop(recoveryStop(LifecycleGeneration(1L)))
         }
@@ -1772,7 +1966,8 @@ class SerializedDecisionWorkerTest {
         useDayId: String,
         receipt: GuardianApprovalWorkReceipt?,
         useDayGenerationStartedAtMs: Long = 0L,
-        nightAllowedMinutes: Long = 0L
+        nightAllowedMinutes: Long = 0L,
+        resetTime: UseDayResetTime = UseDayResetTime()
     ): AcceptedRuleRuntimeSnapshot {
         val grants = when (receipt) {
             is GuardianApprovalWorkReceipt.Grant -> listOf(
@@ -1825,7 +2020,7 @@ class SerializedDecisionWorkerTest {
                         )
                     )
                 ),
-                resetTime = UseDayResetTime(),
+                resetTime = resetTime,
                 useDayGenerationStartedAtMs = useDayGenerationStartedAtMs,
                 overrideState = neth.iecal.curbox.data.models.AppRuleOverrideState(
                     useDayId = useDayId,
