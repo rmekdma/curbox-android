@@ -396,7 +396,16 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private val lifecycleGeneration = AtomicLong(0L)
     @Volatile private var serviceConnectionId: String = ""
     private val schedulerTokenSequence = AtomicLong(0L)
+    private data class ScheduledWakeRegistration(
+        val token: Long,
+        val dueAtWallClockMs: Long
+    )
+    private val wakeSchedulerLock = Any()
+    private val scheduledWakeRegistrations = mutableMapOf<String, ScheduledWakeRegistration>()
+    private val latestRecheckPlanSourceOrderByPackage = mutableMapOf<String, SourceOrderIdentity>()
     private var pendingSchedulerWakeGeneration: Long? = null
+    private val pendingSchedulerWakePackages = mutableSetOf<String>()
+    private val pendingSchedulerWakeDueAtByPackage = mutableMapOf<String, Long>()
     private var foregroundEvidenceModule = ForegroundEvidenceModule()
     private var foregroundObservationSource: AndroidForegroundObservationSource? = null
     private var sourceOrderSequencer = AtomicConnectionScopedSourceOrderSequencer()
@@ -595,6 +604,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             destroyed = false
             setupReady = false
             currentWorkerInstanceToken = null
+            latestRecheckPlanSourceOrderByPackage.clear()
+            pendingSchedulerWakePackages.clear()
+            pendingSchedulerWakeDueAtByPackage.clear()
+            pendingSchedulerWakeGeneration = null
             // A reconnect must invalidate work captured by the previous service connection.
             recheckGeneration.incrementAndGet()
             pendingNotificationPublication = null
@@ -1240,6 +1253,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         update: RecheckPlanUpdate
     ) {
         val permit = synchronized(runtimeLock) {
+            if (!isCurrentWorkerRecheckBaseLocked(workerInstanceToken, update)) {
+                return@synchronized null
+            }
+            val latestSourceOrder = latestRecheckPlanSourceOrderByPackage[update.packageName]
+            if (latestSourceOrder != null &&
+                update.sourceOrderIdentity.value < latestSourceOrder.value
+            ) {
+                return@synchronized null
+            }
+            latestRecheckPlanSourceOrderByPackage[update.packageName] =
+                update.sourceOrderIdentity
             reserveExternalEffectLocked {
                 isCurrentWorkerRecheckLocked(workerInstanceToken, update)
             }
@@ -1255,17 +1279,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             // Revalidate immediately after the delivery barrier and before scheduler state or
             // registration changes. Destroy can cancel the reserved permit while the observer is
             // blocked.
-            synchronized(runtimeLock) {
-                if (!isCurrentWorkerRecheckLocked(workerInstanceToken, update)) return
-            }
-            val plan = update.plan
-            if (plan == null) {
-                cancelScheduledRecheck(update.packageName)
-            } else {
-                scheduleRecheckAtWallClock(
-                    packageName = update.packageName,
-                    dueAtWallClockMs = plan.dueAtWallClockMs
-                )
+            synchronized(wakeSchedulerLock) {
+                if (!isCurrentWorkerRecheck(workerInstanceToken, update)) return
+                val plan = update.plan
+                if (plan == null) {
+                    cancelScheduledRecheckLocked(update.packageName)
+                } else {
+                    scheduleRecheckAtWallClockLocked(
+                        packageName = update.packageName,
+                        dueAtWallClockMs = plan.dueAtWallClockMs
+                    )
+                }
             }
         } catch (error: CancellationException) {
             throw error
@@ -1284,6 +1308,14 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     private fun isCurrentWorkerRecheckLocked(
+        workerInstanceToken: AppRuleWorkerInstanceToken?,
+        update: RecheckPlanUpdate
+    ): Boolean =
+        isCurrentWorkerRecheckBaseLocked(workerInstanceToken, update) &&
+            latestRecheckPlanSourceOrderByPackage[update.packageName] ==
+                update.sourceOrderIdentity
+
+    private fun isCurrentWorkerRecheckBaseLocked(
         workerInstanceToken: AppRuleWorkerInstanceToken?,
         update: RecheckPlanUpdate
     ): Boolean =
@@ -1328,9 +1360,19 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         onSchedulerWake(recheckGeneration.get())
     }
 
-    private fun onSchedulerWake(expectedGeneration: Long) {
+    private fun onSchedulerWake(
+        expectedGeneration: Long,
+        packageName: String? = null,
+        dueAtWallClockMs: Long? = null
+    ) {
         val connectionGeneration = synchronized(runtimeLock) {
             if (!isReadyForChecks() || recheckGeneration.get() != expectedGeneration) return
+            packageName?.let { key ->
+                pendingSchedulerWakePackages += key
+                dueAtWallClockMs?.let { dueAt ->
+                    pendingSchedulerWakeDueAtByPackage[key] = dueAt
+                }
+            }
             if (pendingSchedulerWakeGeneration == expectedGeneration) return
             pendingSchedulerWakeGeneration = expectedGeneration
             lifecycleGeneration.get()
@@ -2084,6 +2126,13 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val observationBoundary = captureLifecycleBoundary() ?: return
         val connectionGeneration = observationBoundary.connectionGeneration
         val observationGeneration = observationBoundary.recheckGeneration
+        val scheduledTokensBeforeObservation = synchronized(wakeSchedulerLock) {
+            scheduledWakeRegistrations.mapValues { (_, registration) -> registration.token }
+        }
+        val pendingWakeDueAtByPackage = synchronized(runtimeLock) {
+            pendingSchedulerWakeDueAtByPackage.toMap()
+        }
+        val pendingWakePackages = pendingWakeDueAtByPackage.keys
         try {
             val configuredEssentialPackages =
                 readEssentialPackagesForEvaluation(connectionGeneration)
@@ -2138,16 +2187,31 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     }
             }
             val generation = observationGeneration
+            val hasUnknownOutcome = result.outcomes.any { outcome ->
+                outcome is ForegroundEvidenceOutcome.Unknown
+            }
             val needsObservationRetry = result.outcomes.any { outcome ->
                 outcome is ForegroundEvidenceOutcome.Unknown &&
                     outcome.candidatePackage == null &&
                     outcome.followUp == FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
             }
+            val needsRecoveryBoundary = needsObservationRetry ||
+                (hasUnknownOutcome && (
+                    pendingWakePackages.isNotEmpty() ||
+                        (observationBoundary.foregroundEvidenceSuspended &&
+                            suspendedPackage != null)
+                    ))
             result.outcomes.forEach { outcome ->
                 if (!isReadyForChecks() || recheckGeneration.get() != generation) return
                 when (outcome) {
-                    is ForegroundEvidenceOutcome.NotVisible ->
-                        cancelScheduledRecheck(packageName = outcome.packageName)
+                    is ForegroundEvidenceOutcome.NotVisible -> {
+                        scheduledTokensBeforeObservation[outcome.packageName]?.let { token ->
+                            cancelScheduledRecheck(
+                                packageName = outcome.packageName,
+                                expectedToken = token
+                            )
+                        }
+                    }
                     is ForegroundEvidenceOutcome.Visible -> {
                         if (outcome.decisionPermission ==
                                 neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE
@@ -2155,15 +2219,59 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                             dispatchSyntheticCheck(outcome.packageName, observationBoundary)
                         }
                     }
-                    is ForegroundEvidenceOutcome.Unknown -> Unit
+                    is ForegroundEvidenceOutcome.Unknown -> {
+                        if (outcome.decisionPermission ==
+                                neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED
+                        ) {
+                            outcome.candidatePackage?.let { packageName ->
+                                dispatchSyntheticCheck(packageName, observationBoundary)
+                            }
+                        }
+                    }
                 }
             }
-            if (needsObservationRetry && observationAttempt < MAX_VISIBILITY_RETRIES) {
+            val canRetryUnknownVisibility = needsObservationRetry &&
+                !observationBoundary.foregroundEvidenceSuspended &&
+                observationAttempt < MAX_VISIBILITY_RETRIES
+            if (canRetryUnknownVisibility) {
                 postVisibleApplicationCheck(
                     delayMillis = VISIBILITY_RETRY_DELAY_MS * (observationAttempt + 1),
                     connectionGeneration = connectionGeneration,
-                    observationKind = ObservationKind.SYNTHETIC_RECHECK
+                    observationKind = ObservationKind.SYNTHETIC_RECHECK,
+                    observationAttempt = observationAttempt + 1
                 )
+            } else {
+                if (needsRecoveryBoundary) {
+                    val recoveryPackage = synchronized(runtimeLock) {
+                        if (foregroundEvidenceSuspended) {
+                            suspendedForegroundPackage
+                        } else {
+                            currentForegroundPackage
+                        }
+                    }
+                    val recoveryPackages = pendingWakePackages +
+                        listOfNotNull(recoveryPackage)
+                    val recoveryDueAt = safeWallClockAdd(
+                        observationWallClockMs(),
+                        UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS
+                    )
+                    recoveryPackages.forEach { packageName ->
+                        scheduleRecheckAtWallClock(
+                            packageName = packageName,
+                            dueAtWallClockMs = recoveryDueAt
+                        )
+                    }
+                }
+                if (pendingWakePackages.isNotEmpty()) {
+                    synchronized(runtimeLock) {
+                        pendingWakeDueAtByPackage.forEach { (packageName, dueAtWallClockMs) ->
+                            if (pendingSchedulerWakeDueAtByPackage[packageName] == dueAtWallClockMs) {
+                                pendingSchedulerWakeDueAtByPackage.remove(packageName)
+                                pendingSchedulerWakePackages.remove(packageName)
+                            }
+                        }
+                    }
+                }
             }
         } catch (error: CancellationException) {
             return
@@ -2175,10 +2283,27 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     @Suppress("UNUSED_PARAMETER")
     internal fun onWakeFromScheduler(key: String, token: Long) {
         if (!isReadyForChecks()) return
+        val registration = synchronized(wakeSchedulerLock) {
+            val registration = scheduledWakeRegistrations[key] ?: return
+            if (registration.token != token) return
+            scheduledWakeRegistrations.remove(key)
+            try {
+                wakeScheduler?.cancel(key)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+            }
+            registration
+        }
         if (key == SETTLEMENT_WAKE_KEY) {
             onSettlementWake()
         } else {
-            onSchedulerWake(recheckGeneration.get())
+            onSchedulerWake(
+                expectedGeneration = recheckGeneration.get(),
+                packageName = key,
+                dueAtWallClockMs = registration.dueAtWallClockMs
+            )
         }
     }
 
@@ -2227,8 +2352,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val runtime = captureRuleRuntime()
         val nowMs = observationWallClockMs()
         val nextBoundaryMs = ConfigurableUseDayCalculator(resetTime = runtime.resetTime).nextResetBoundaryAfter(nowMs)
-        val token = schedulerTokenSequence.incrementAndGet()
-        wakeScheduler?.schedule(SETTLEMENT_WAKE_KEY, nextBoundaryMs, token)
+        synchronized(wakeSchedulerLock) {
+            scheduleWakeAtWallClockLocked(SETTLEMENT_WAKE_KEY, nextBoundaryMs)
+        }
     }
 
     private val schedulerWakeReceiver = object : BroadcastReceiver() {
@@ -3403,6 +3529,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             currentForegroundPackage = null
             currentForegroundEvidenceAtElapsedMs = 0L
             foregroundEvidenceSuspended = true
+            pendingSchedulerWakePackages.clear()
+            pendingSchedulerWakeDueAtByPackage.clear()
+            pendingSchedulerWakeGeneration = null
             packageName
         }
         cancelScheduledRechecks()
@@ -3771,7 +3900,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     private fun postVisibleApplicationCheck(
         delayMillis: Long = 0L,
         connectionGeneration: Long = lifecycleGeneration.get(),
-        observationKind: ObservationKind = ObservationKind.RECONNECT
+        observationKind: ObservationKind = ObservationKind.RECONNECT,
+        observationAttempt: Int = 0
     ) {
         if (!isReadyForChecks(connectionGeneration)) return
         val observationGeneration = recheckGeneration.get()
@@ -3780,6 +3910,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             connectionGeneration = connectionGeneration,
             observationGeneration = observationGeneration,
             observationKind = observationKind,
+            observationAttempt = observationAttempt,
             postAttempt = 1
         )
     }
@@ -3790,6 +3921,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         connectionGeneration: Long,
         observationGeneration: Long,
         observationKind: ObservationKind,
+        observationAttempt: Int,
         postAttempt: Int
     ) {
         var attempt = postAttempt
@@ -3809,6 +3941,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                         connectionGeneration = connectionGeneration,
                         observationGeneration = observationGeneration,
                         observationKind = observationKind,
+                        observationAttempt = observationAttempt,
                         postAttempt = attemptNumber
                     )
                 } finally {
@@ -3871,9 +4004,64 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             if (armed) return
             attempt++
         }
-        synchronized(runtimeLock) {
+        val shouldRearmPendingWake = synchronized(runtimeLock) {
             if (pendingSchedulerWakeGeneration == observationGeneration) {
                 pendingSchedulerWakeGeneration = null
+            }
+            isReadyForChecks(connectionGeneration) &&
+                recheckGeneration.get() == observationGeneration &&
+                pendingSchedulerWakeDueAtByPackage.isNotEmpty()
+        }
+        if (shouldRearmPendingWake) {
+            rearmPendingSchedulerWakeAfterPostFailure(
+                connectionGeneration = connectionGeneration,
+                observationGeneration = observationGeneration
+            )
+        }
+    }
+
+    /** Keeps a keyed boundary alive when every main-thread post for its scheduler wake fails. */
+    private fun rearmPendingSchedulerWakeAfterPostFailure(
+        connectionGeneration: Long,
+        observationGeneration: Long
+    ) {
+        val pendingDueTimes = synchronized(runtimeLock) {
+            if (!isReadyForChecks(connectionGeneration) ||
+                recheckGeneration.get() != observationGeneration
+            ) return
+            pendingSchedulerWakeDueAtByPackage.toMap()
+        }
+        if (pendingDueTimes.isEmpty()) return
+
+        val nowWallClockMs = observationWallClockMs()
+        pendingDueTimes.forEach { (packageName, originalDueAtWallClockMs) ->
+            val nextDueAtWallClockMs = if (originalDueAtWallClockMs > nowWallClockMs) {
+                originalDueAtWallClockMs
+            } else {
+                safeWallClockAdd(nowWallClockMs, UNKNOWN_VISIBILITY_RECOVERY_DELAY_MS)
+            }
+            try {
+                synchronized(wakeSchedulerLock) {
+                    if (isReadyForChecks(connectionGeneration) &&
+                        recheckGeneration.get() == observationGeneration &&
+                        packageName !in scheduledWakeRegistrations
+                    ) {
+                        scheduleRecheckAtWallClockLocked(
+                            packageName = packageName,
+                            dueAtWallClockMs = nextDueAtWallClockMs
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+            }
+            synchronized(runtimeLock) {
+                if (pendingSchedulerWakeDueAtByPackage[packageName] == originalDueAtWallClockMs) {
+                    pendingSchedulerWakeDueAtByPackage.remove(packageName)
+                    pendingSchedulerWakePackages.remove(packageName)
+                }
             }
         }
     }
@@ -3882,6 +4070,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         connectionGeneration: Long,
         observationGeneration: Long,
         observationKind: ObservationKind,
+        observationAttempt: Int,
         postAttempt: Int
     ) {
         if (!isReadyForChecks(connectionGeneration) ||
@@ -3893,7 +4082,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             }
         }
         try {
-            checkCurrentlyVisibleApplications(observationKind)
+            checkCurrentlyVisibleApplications(observationKind, observationAttempt)
         } catch (_: CancellationException) {
             return
         } catch (error: Throwable) {
@@ -3905,6 +4094,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 connectionGeneration = connectionGeneration,
                 observationGeneration = observationGeneration,
                 observationKind = observationKind,
+                observationAttempt = observationAttempt,
                 postAttempt = postAttempt + 1
             )
         }
@@ -3957,9 +4147,29 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         packageName: String,
         dueAtWallClockMs: Long
     ) {
+        synchronized(wakeSchedulerLock) {
+            scheduleRecheckAtWallClockLocked(packageName, dueAtWallClockMs)
+        }
+    }
+
+    private fun scheduleRecheckAtWallClockLocked(
+        packageName: String,
+        dueAtWallClockMs: Long
+    ) {
         if (!isReadyForChecks() || packageName.isBlank()) return
+        scheduleWakeAtWallClockLocked(packageName, dueAtWallClockMs)
+    }
+
+    private fun scheduleWakeAtWallClockLocked(
+        key: String,
+        dueAtWallClockMs: Long
+    ) {
         val token = schedulerTokenSequence.incrementAndGet()
-        wakeScheduler?.schedule(packageName, dueAtWallClockMs, token)
+        scheduledWakeRegistrations[key] = ScheduledWakeRegistration(
+            token = token,
+            dueAtWallClockMs = dueAtWallClockMs
+        )
+        wakeScheduler?.schedule(key, dueAtWallClockMs, token)
     }
 
     @Suppress("DEPRECATION")
@@ -4236,12 +4446,30 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             packageName != Constants.SYSTEM_UI_PACKAGE_NAME
     }
 
-    private fun cancelScheduledRecheck(packageName: String) {
+    private fun cancelScheduledRecheck(
+        packageName: String,
+        expectedToken: Long? = null
+    ) {
+        synchronized(wakeSchedulerLock) {
+            cancelScheduledRecheckLocked(packageName, expectedToken)
+        }
+    }
+
+    private fun cancelScheduledRecheckLocked(
+        packageName: String,
+        expectedToken: Long? = null
+    ) {
+        val current = scheduledWakeRegistrations[packageName] ?: return
+        if (expectedToken != null && current.token != expectedToken) return
+        scheduledWakeRegistrations.remove(packageName)
         wakeScheduler?.cancel(packageName)
     }
 
     private fun cancelScheduledRechecks() {
-        wakeScheduler?.cancelAll()
+        synchronized(wakeSchedulerLock) {
+            scheduledWakeRegistrations.clear()
+            wakeScheduler?.cancelAll()
+        }
     }
 
     private fun captureLifecycleBoundary(

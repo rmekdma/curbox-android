@@ -78,7 +78,7 @@ class AppRuleBlockerWakeSchedulerWiringTest {
         assertEquals(expectedDueWallClockMs, scheduledWake?.dueAtWallClockMs)
 
         // 2. Cancel recheck and verify scheduler is updated
-        invokePrivate(blocker, "cancelScheduledRecheck", TEST_PACKAGE)
+        invokePrivate(blocker, "cancelScheduledRecheck", TEST_PACKAGE, null)
         assertFalse(fakeScheduler.hasScheduled(TEST_PACKAGE))
 
         blocker.onDestroy()
