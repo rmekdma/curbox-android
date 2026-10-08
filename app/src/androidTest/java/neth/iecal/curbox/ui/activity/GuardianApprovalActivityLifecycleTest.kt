@@ -1649,6 +1649,12 @@ class GuardianApprovalActivityLifecycleTest {
         try {
             blocker.setup(service)
             blockerStarted = true
+            // The attached test service is not a framework-bound AccessibilityService. Use the
+            // deterministic foreground and display providers configured above for this host.
+            AppRuleBlocker::class.java
+                .getDeclaredField("foregroundObservationSource")
+                .apply { isAccessible = true }
+                .set(blocker, null)
             blocker.setupReceivers()
             val serviceConnectionId = AppRuleBlocker::class.java
                 .getDeclaredField("serviceConnectionId")
@@ -1674,9 +1680,17 @@ class GuardianApprovalActivityLifecycleTest {
                 }
                 assertEquals(1, storedOverrides.skips.count { it.ruleId == ruleId })
 
+                val initialOfferReached = firstLookupStarted.await(10, TimeUnit.SECONDS)
+                val observedEvaluation = guardianEvaluations.peek()
+                val evaluationSummary = observedEvaluation?.let {
+                    "status=${it.status}, allowed=${it.evaluation?.isAllowed}, " +
+                        "confirmationState=${it.confirmationState}, " +
+                        "denialCount=${it.evaluation?.denyingRules?.size}"
+                } ?: "no worker evaluation outcome"
                 assertTrue(
-                    "the production confirmation offer must reach the Activity lookup",
-                    firstLookupStarted.await(10, TimeUnit.SECONDS)
+                    "the production confirmation offer must reach the Activity lookup; " +
+                        "observed evaluation: $evaluationSummary",
+                    initialOfferReached
                 )
                 val initialAllowed = allowedResults.poll(5, TimeUnit.SECONDS)
                     ?: error("The production blocker did not send its initial allowed result")
