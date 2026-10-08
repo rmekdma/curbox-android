@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.app.KeyguardManager
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
@@ -1325,14 +1326,15 @@ class GuardianApprovalActivity : AppCompatActivity() {
             }
             return
         }
-        confirmationChecking = false
         when (status) {
             CONFIRMATION_STATUS_FAILED, CONFIRMATION_STATUS_TIMEOUT -> {
+                confirmationChecking = false
                 confirmationFailed = true
                 renderConfirmationState()
                 logConfirmationUiState(status)
             }
             CONFIRMATION_STATUS_REMAINING -> {
+                confirmationChecking = false
                 val latestDenials = runCatching {
                     Gson().fromJson<List<AppRuleGuardianDenial?>>(
                         result.getStringExtra(EXTRA_CONFIRMATION_DENIALS).orEmpty(),
@@ -1353,11 +1355,81 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 logConfirmationUiState(status)
             }
             CONFIRMATION_STATUS_ALLOWED -> {
-                confirmationFailed = false
-                closeReason = REASON_CONFIRMED
-                finish()
+                launchConfirmedTargetIfCurrent(result)
             }
         }
+    }
+
+    private fun launchConfirmedTargetIfCurrent(result: Intent) {
+        val expectedIdentity = GuardianApprovalExecutionIdentity(
+            screenRequestId = result.getStringExtra(EXTRA_SCREEN_REQUEST_ID).orEmpty(),
+            operationId = result.getStringExtra(EXTRA_OPERATION_ID).orEmpty(),
+            checkId = result.getStringExtra(EXTRA_CHECK_ID).orEmpty(),
+            serviceConnectionId = result.getStringExtra(EXTRA_SERVICE_CONNECTION_ID).orEmpty()
+        )
+        val currentIdentity = GuardianApprovalExecutionIdentity(
+            screenRequestId = screenRequestId,
+            operationId = confirmationOperationId.orEmpty(),
+            checkId = confirmationCheckId.orEmpty(),
+            serviceConnectionId = registeredServiceConnectionId.orEmpty()
+        )
+        val displayUnlocked = getSystemService(KeyguardManager::class.java)
+            ?.isKeyguardLocked == false
+        if (!GuardianApprovalLaunchAuthorization.canLaunch(
+                expected = expectedIdentity,
+                current = currentIdentity,
+                activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
+                windowFocused = hasWindowFocus(),
+                displayUnlocked = displayUnlocked
+            )
+        ) {
+            if (BuildConfig.DEBUG) {
+                testLog(
+                    "ui_result_ignored status=$CONFIRMATION_STATUS_ALLOWED " +
+                        "operation=${expectedIdentity.operationId} check=${expectedIdentity.checkId} " +
+                        "reason=approval_not_foreground"
+                )
+            }
+            return
+        }
+        val launchIntent = try {
+            packageManager.getLaunchIntentForPackage(targetPackageName)
+                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } catch (error: Exception) {
+            CrashLogger(applicationContext).logNonFatalError(error)
+            null
+        }
+        if (launchIntent == null) {
+            notifyGuardianLaunchFailed(expectedIdentity)
+            return
+        }
+        try {
+            startActivity(launchIntent)
+            confirmationChecking = false
+            confirmationFailed = false
+            closeReason = REASON_CONFIRMED
+            testLog(
+                "confirmed_target_launch_started screen=$screenRequestId " +
+                    "operation=${expectedIdentity.operationId} check=${expectedIdentity.checkId}"
+            )
+            finish()
+        } catch (error: Exception) {
+            closeReason = REASON_INTERRUPTED
+            CrashLogger(applicationContext).logNonFatalError(error)
+            notifyGuardianLaunchFailed(expectedIdentity)
+        }
+    }
+
+    private fun notifyGuardianLaunchFailed(identity: GuardianApprovalExecutionIdentity) {
+        sendBroadcast(
+            Intent(INTENT_ACTION_APPROVAL_LAUNCH_FAILED)
+                .setPackage(packageName)
+                .putExtra(EXTRA_GUARDIAN_PACKAGE, targetPackageName)
+                .putExtra(EXTRA_SCREEN_REQUEST_ID, identity.screenRequestId)
+                .putExtra(EXTRA_SERVICE_CONNECTION_ID, identity.serviceConnectionId)
+                .putExtra(EXTRA_OPERATION_ID, identity.operationId)
+                .putExtra(EXTRA_CHECK_ID, identity.checkId)
+        )
     }
 
     private fun logConfirmationUiState(status: String) {
@@ -1572,6 +1644,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
             "neth.iecal.curbox.guardian.approval.check_retry"
         const val INTENT_ACTION_APPROVAL_RECOVER =
             "neth.iecal.curbox.guardian.approval.recover"
+        const val INTENT_ACTION_APPROVAL_LAUNCH_FAILED =
+            "neth.iecal.curbox.guardian.approval.launch_failed"
         const val INTENT_ACTION_CONFIRMATION_RESULT =
             "neth.iecal.curbox.guardian.approval.confirmation_result"
         const val EXTRA_GUARDIAN_PACKAGE = "guardian_package"

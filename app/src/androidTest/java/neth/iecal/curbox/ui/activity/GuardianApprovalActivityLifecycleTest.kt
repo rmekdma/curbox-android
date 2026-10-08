@@ -45,6 +45,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -673,11 +674,23 @@ class GuardianApprovalActivityLifecycleTest {
                 }
 
                 val retry = requests.poll(5, TimeUnit.SECONDS)
-                    ?: error("The skip check retry was not sent")
-                assertEquals(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY, retry.action)
+                    ?: error("The skip check retry or recovery was not sent")
+                assertEquals(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER, retry.action)
                 assertEquals(operationId, retry.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID))
                 assertEquals(screenRequestId, retry.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID))
-                assertTrue(firstCheckId != retry.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID))
+                assertEquals(reconnectedId, retry.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID))
+                assertNotEquals(
+                    recovered.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID),
+                    retry.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+                )
+                assertEquals(
+                    stored.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID),
+                    retry.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_RULE_ID)
+                )
+                assertEquals(
+                    stored.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID),
+                    retry.getStringExtra(GuardianApprovalActivity.EXTRA_RECEIPT_USE_DAY_ID)
+                )
                 assertEquals(
                     stored.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, -1L),
                     retry.getLongExtra(GuardianApprovalActivity.EXTRA_SKIP_FROM_MS, -2L)

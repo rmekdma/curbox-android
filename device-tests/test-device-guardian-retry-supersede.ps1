@@ -751,6 +751,85 @@ function Invoke-AmbiguousConfirmationCase(
     Write-Success "$CaseName committed once, timed out, retried the same receipt, showed current denial, and discarded the superseded worker outcome."
 }
 
+function Invoke-ForegroundOwnershipRegressionCase(
+    [string]$RuleId,
+    [string]$RuleName
+) {
+    $gateId = "$runId-foreground-ownership"
+    $gateConsumed = $false
+    try {
+        Start-GuardianApproval -ExpectedRuleName $RuleName
+        Arm-ServiceEvaluationGate -GateId $gateId
+        Arm-WriteFailure -GateId $gateId
+        Tap-ApprovalAction -ResourceId "approval_skip_rule" -Description "Skip this rule for the foreground ownership check"
+        $ui = Wait-For-UI -Pattern 'Skip for 15 minutes|guardian_skip_15_minutes' -TimeoutSeconds 6
+        $clicked = Tap-Node $ui 'text="Skip for 15 minutes"' "Skip for 15 minutes" -Optional
+        if (-not $clicked) {
+            $clicked = Tap-Node $ui 'resource-id="android:id/text1"[^>]*text="Skip for 15 minutes"' "Skip for 15 minutes" -Optional
+        }
+        if (-not $clicked) { throw "Could not select the 15-minute option for the foreground ownership check. UI: $ui" }
+
+        $request = Wait-ForGuardianLog `
+            -Pattern "check_request test=$([regex]::Escape($gateId)) action=neth\.iecal\.curbox\.guardian\.approval\.stored " `
+            -Label "foreground ownership approval check"
+        $screenRequestId = Get-LogValue $request "screen"
+        $operationId = Get-LogValue $request "operation"
+        $checkId = Get-LogValue $request "check"
+        $useDayId = Get-LogValue $request "use_day"
+        if (-not $screenRequestId -or -not $operationId -or -not $checkId -or -not $useDayId) {
+            throw "The foreground ownership check did not carry a complete live identity: $request"
+        }
+        [void](Wait-ForGuardianLog `
+            -Pattern "service_gate action=neth\.iecal\.curbox\.blockers\.TEST_GUARDIAN_EVALUATION_GATE_REACHED id=$([regex]::Escape($gateId)) accepted=true operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId))" `
+            -Label "all-allow outcome held before foreground replacement")
+        $gateConsumed = $true
+
+        $appliesAtMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() + 3600000
+        Invoke-TestDeviceShell -Command "am start -a neth.iecal.curbox.api.REQUEST_PERMISSION -n $packageName/neth.iecal.curbox.api.ApiPermissionActivity --es android.intent.extra.REFERRER_NAME android-app://curbox.guardian.foreground.test"
+        $overlayFocus = Assert-WindowFocus -ExpectedActivity "ApiPermissionActivity" -PassThru
+        if (-not $overlayFocus.Success) {
+            throw "The other translucent Curbox Activity did not take foreground focus. Focus: $($overlayFocus.RawFocus)"
+        }
+        $closedBeforeResult = [regex]::IsMatch(
+            (Get-GuardianApprovalLogs),
+            "(?m)^.*screen_closed screen=$([regex]::Escape($screenRequestId)) package=$([regex]::Escape($TargetPackage)) .*"
+        )
+        if ($closedBeforeResult) {
+            throw "GuardianApprovalActivity closed before the delayed all-allow outcome arrived; the foreground race was not exercised."
+        }
+
+        Release-ServiceEvaluationGate -GateId $gateId
+        [void](Wait-ForGuardianLog `
+            -Pattern "ui_result_ignored status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId)) reason=approval_not_foreground" `
+            -Label "paused approval Activity rejecting the target launch authorization")
+        $overlayFocus = Assert-WindowFocus -ExpectedActivity "ApiPermissionActivity" -PassThru
+        if (-not $overlayFocus.Success) {
+            throw "The target replaced the current Curbox Activity after approval; focus: $($overlayFocus.RawFocus)"
+        }
+
+        Clear-WriteFailure
+        $writeCount = [regex]::Matches((Get-GuardianApprovalLogs), "write_committed id=$([regex]::Escape($gateId)) ")
+        if ($writeCount.Count -ne 1) {
+            throw "The foreground ownership check committed $($writeCount.Count) skip writes; expected exactly one."
+        }
+        $settings = Get-DeviceSettings -PackageName $packageName -AsObject
+        Assert-GuardianLedger -Settings $settings -RuleId $RuleId -Kind "rule_skip" -UseDayId $useDayId
+        Write-Success "A paused approval Activity rejected a current all-allow result while another Curbox Activity held focus; the target stayed behind, and the skip was written once."
+    } finally {
+        if ($script:activeGateId -eq $gateId) {
+            if ($gateConsumed) {
+                Release-ServiceEvaluationGate -GateId $gateId
+            } else {
+                Release-UnconsumedServiceGate -GateId $gateId
+            }
+        }
+        Clear-WriteFailure
+        Invoke-TestDeviceShell -Command "input keyevent 4" | Out-Null
+        Start-Sleep -Milliseconds 250
+        Invoke-TestDeviceShell -Command "input keyevent 3" | Out-Null
+    }
+}
+
 try {
     Write-Step "1. Back up current settings and verify the actual service environment..."
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile -PackageName $packageName
@@ -793,6 +872,7 @@ try {
     $replacementSkipRuleId = "guardian-skip-current-$runId"
     $recreateRuleId = "guardian-recreate-$runId"
     $homeRuleId = "guardian-home-$runId"
+    $foregroundOwnershipRuleId = "guardian-foreground-$runId"
     $generation = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
     $emptyRollover = [PSCustomObject]@{ pools = [PSCustomObject]@{} }
     $directRule = New-GuardianRule -RuleId $directRuleId -RuleName "E2E direct grant" -GroupId $groupId
@@ -1054,9 +1134,25 @@ try {
         throw "The device log does not contain an actual post-commit failure injection."
     }
 
+    Write-Step "8. Keep a second Curbox Activity in front while the current approval becomes all-allow..."
+    $foregroundOwnershipRule = New-GuardianRule `
+        -RuleId $foregroundOwnershipRuleId `
+        -RuleName "E2E foreground ownership rule" `
+        -GroupId $groupId
+    $foregroundOwnershipSnapshot = New-GuardianSnapshot `
+        -GroupId $groupId `
+        -Rules @($foregroundOwnershipRule)
+    Inject-TestAppRules `
+        -AppRuleSnapshot $foregroundOwnershipSnapshot `
+        -PreserveOverrides `
+        -PackageName $packageName
+    Invoke-ForegroundOwnershipRegressionCase `
+        -RuleId $foregroundOwnershipRuleId `
+        -RuleName "E2E foreground ownership rule"
+
     Write-Host "`n==========================================================================" -ForegroundColor Green
     Write-Host ">>> [GUARDIAN RETRY AND SUPERSEDE DEVICE RESULT: PASS] <<<" -ForegroundColor Green
-    Write-Host "Direct, accumulated, and skip receipts survived real :app_blocker_service reconnects without another write. Activity recreation restored pending and completed state, including current denial rows and the selected rule. Home cancellation plus same-package replacement ignored stale CLOSED and ALLOWED events." -ForegroundColor Green
+    Write-Host "Direct, accumulated, and skip receipts survived real :app_blocker_service reconnects without another write. Activity recreation restored pending and completed state, including current denial rows and the selected rule. Home cancellation plus same-package replacement ignored stale CLOSED and ALLOWED events. A paused approval also rejected an all-allow result while another Curbox Activity held foreground focus." -ForegroundColor Green
     Write-Host "==========================================================================`n" -ForegroundColor Green
 } finally {
     if ($displayRotationChanged) {

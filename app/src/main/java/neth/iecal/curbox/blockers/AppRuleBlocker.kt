@@ -745,6 +745,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
             addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
             addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_LAUNCH_FAILED)
         }
         val lifecycle = AppRuleReceiverLifecycle(
             registrations = listOf(
@@ -2283,6 +2284,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     receiveGuardianApprovalCheck(intent, isRetry = false, isRecovery = true)
                     return
                 }
+                GuardianApprovalActivity.INTENT_ACTION_APPROVAL_LAUNCH_FAILED -> {
+                    receiveGuardianLaunchFailure(intent)
+                    return
+                }
                 GuardianApprovalActivity.INTENT_ACTION_OPENED,
                 GuardianApprovalActivity.INTENT_ACTION_CLOSED -> Unit
                 else -> return
@@ -2436,7 +2441,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 )
                 return
             }
-            if (closeReason == GuardianApprovalActivity.REASON_CONFIRMED) return
             guardianApprovalCoordinator.closeScreen(requestId)
             if (activeGuardianPackage == packageName) {
                 activeGuardianPackage = null
@@ -2450,13 +2454,13 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     "screen_closed screen=$requestId package=$packageName reason=$closeReason"
                 )
             }
-            if (closeReason == GuardianApprovalActivity.REASON_CANCELLED) {
-                300L
-            } else {
-                50L
+            when (closeReason) {
+                GuardianApprovalActivity.REASON_CONFIRMED -> null
+                GuardianApprovalActivity.REASON_CANCELLED -> 300L
+                else -> 50L
             }
         }
-        checkDelayMs.let { delay ->
+        checkDelayMs?.let { delay ->
             postVisibleApplicationCheck(
                 delayMillis = delay,
                 observationKind = ObservationKind.REFRESH
@@ -2626,6 +2630,37 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 }
             }
         }
+    }
+
+    private fun receiveGuardianLaunchFailure(intent: Intent) {
+        val packageName = guardianPackage(intent) ?: return
+        val screenRequestId = guardianScreenRequestId(intent) ?: return
+        val operationId = guardianOperationId(intent) ?: return
+        val checkId = intent.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return
+        val incomingConnectionId = guardianServiceConnectionId(intent) ?: return
+        if (incomingConnectionId != serviceConnectionId) return
+        val identity = GuardianApprovalCoordinator.CheckIdentity(
+            screenRequestId = screenRequestId,
+            operationId = operationId,
+            checkId = checkId,
+            lifecycleGeneration = currentLifecycleGeneration()
+        )
+        val current = synchronized(runtimeLock) {
+            val owner = guardianApprovalCoordinator.currentOwner() ?: return
+            val confirmation = owner.confirmation ?: return
+            isReadyForChecks() &&
+                activeGuardianPackage == packageName &&
+                owner.screenRequestId == screenRequestId &&
+                owner.packageName == packageName &&
+                owner.lifecycleGeneration == identity.lifecycleGeneration &&
+                confirmation.operationId == operationId &&
+                confirmation.checkId == checkId &&
+                confirmation.phase == GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+        }
+        if (current) failGuardianCheckIfCurrent(identity)
     }
 
     private fun logGuardianCheckTestRejection(
@@ -2900,19 +2935,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             failGuardianCheckIfCurrent(request.checkIdentity())
             return
         }
-        if (!isGuardianApprovalActivityForeground()) {
+        if (!isCurboxRootForeground()) {
             cancelGuardianExecutionIntent(request)
-            return
-        }
-        val launchIntent = try {
-            service.packageManager.getLaunchIntentForPackage(request.packageName)
-                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        } catch (error: Exception) {
-            logNonFatal(error)
-            null
-        }
-        if (launchIntent == null) {
-            failGuardianCheckIfCurrent(request.checkIdentity())
             return
         }
         val permit = synchronized(runtimeLock) {
@@ -2929,7 +2953,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     legacyDisplayState() == DisplayState.UNLOCKED
             }
         ) return
-        var launched = false
+        var authorizationSent = false
         try {
             if (!beginExternalEffectCall(permit) {
                     isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken) &&
@@ -2938,24 +2962,14 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 }
             ) return
             if (legacyDisplayState() != DisplayState.UNLOCKED ||
-                !isGuardianApprovalActivityForeground() ||
+                !isCurboxRootForeground() ||
                 !isCurrentGuardianApprovalOutcome(outcome, workerInstanceToken) ||
                 !isCurrentGuardianApprovalCheck(request)
             ) {
                 cancelGuardianExecutionIntent(request)
                 return
             }
-            service.startActivity(launchIntent)
-            launched = true
-            synchronized(runtimeLock) {
-                guardianApprovalCoordinator.closeScreen(request.screenRequestId)
-                if (activeGuardianPackage == request.packageName) {
-                    activeGuardianPackage = null
-                }
-                guardianConfirmationTimeoutJob?.cancel()
-                guardianConfirmationTimeoutJob = null
-            }
-            sendGuardianConfirmationResult(
+            authorizationSent = sendGuardianConfirmationResult(
                 request.screenRequestId,
                 request.operationId,
                 request.checkId,
@@ -2969,13 +2983,15 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         } finally {
             completeExternalEffectCall(permit)
             finishExternalEffect(permit)
-            if (!launched) {
+            if (!authorizationSent) {
                 failGuardianCheckIfCurrent(request.checkIdentity())
             }
         }
     }
 
-    private fun isGuardianApprovalActivityForeground(): Boolean {
+    // The root package only confirms Curbox is foreground. The Activity validates its own
+    // request identity and resumed window state before it launches the target.
+    private fun isCurboxRootForeground(): Boolean {
         val facts = captureForegroundFacts(null, ObservationKind.SYNTHETIC_RECHECK)
         return facts.activeRoot.readState == ForegroundReadState.AVAILABLE &&
             facts.activeRoot.packageName == servicePackageName &&
@@ -3130,7 +3146,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         status: String,
         denials: List<AppRuleGuardianDenial> = emptyList(),
         confirmationState: neth.iecal.curbox.domain.apprules.GuardianApprovalConfirmationState? = null
-    ) {
+    ): Boolean {
         val result = Intent(GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT)
             .setPackage(service.packageName)
             .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screenRequestId)
@@ -3153,10 +3169,12 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         try {
             service.sendBroadcast(result)
+            return true
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             logNonFatal(error)
+            return false
         }
     }
 
