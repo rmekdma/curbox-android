@@ -91,7 +91,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var confirmationReceipt: GuardianApprovalWorkReceipt? = null
     private var confirmationChecking = false
     private var confirmationFailed = false
-    private var confirmationOfferValidationId: String? = null
     private var grantInProgressRequestId: String? = null
     private var requestedServiceConnectionId: String? = null
     private var registeredServiceConnectionId: String? = null
@@ -106,6 +105,53 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private val approvalTestGateLock = Any()
     @Volatile private var approvalWriteFailureGate: ApprovalWriteFailureGate? = null
     @Volatile private var approvalTestRunId: String? = null
+
+    private val guardianApprovalOfferLaunchWorkflow by lazy(LazyThreadSafetyMode.NONE) {
+        GuardianApprovalOfferLaunchWorkflow(
+            scope = lifecycleScope,
+            host = object : GuardianApprovalLaunchHost<Intent> {
+                override fun currentRequestState(): GuardianApprovalLaunchRequestState =
+                    currentGuardianApprovalLaunchRequestState()
+
+                override fun currentSnapshot(): GuardianApprovalLaunchSnapshot =
+                    currentGuardianApprovalLaunchSnapshot()
+
+                override suspend fun lookupTargetLaunchIntent(targetPackageName: String): Intent? =
+                    withContext(Dispatchers.IO) {
+                        val testLookup = launchIntentLookupForTest.takeIf { BuildConfig.DEBUG }
+                        val launchIntent = testLookup?.invoke(targetPackageName)
+                            ?: packageManager.getLaunchIntentForPackage(targetPackageName)
+                        launchIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+
+                override suspend fun readCurrentPolicyFingerprint(
+                    offer: GuardianApprovalLaunchOffer
+                ): String = withContext(Dispatchers.IO) {
+                    if (BuildConfig.DEBUG && policyReadFailureForTest) {
+                        policyReadFailureForTest = false
+                        throw IOException("Injected policy snapshot read failure")
+                    }
+                    GuardianApprovalPolicyFingerprint.forSettings(dataStore.settings.first())
+                }
+
+                override fun launchIfCurrent(
+                    request: GuardianApprovalLaunchRequest,
+                    target: Intent,
+                    currentPolicyFingerprint: String
+                ): GuardianApprovalLaunchEffectResult =
+                    launchConfirmedTargetIfCurrent(request, target, currentPolicyFingerprint)
+
+                override fun applyOutcome(
+                    request: GuardianApprovalLaunchRequest,
+                    outcome: GuardianApprovalLaunchOutcome
+                ) = applyGuardianLaunchOutcome(request, outcome)
+
+                override fun logNonFatalError(error: Exception) {
+                    CrashLogger(applicationContext).logNonFatalError(error)
+                }
+            }
+        )
+    }
 
     private val approvalTestReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -318,7 +364,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 if (confirmationChecking && confirmationOperationId != null &&
                     confirmationReceipt != null
                 ) {
-                    confirmationOfferValidationId = null
                     confirmationCheckId = UUID.randomUUID().toString()
                     pendingApprovalCheckAction = INTENT_ACTION_APPROVAL_RECOVER
                     pendingApprovalCheckId = confirmationCheckId
@@ -550,7 +595,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
         confirmationReceipt = receipt
         confirmationChecking = checking
         confirmationFailed = failed
-        confirmationOfferValidationId = null
         confirmationCheckId = if (checking) UUID.randomUUID().toString() else checkId
         requestedServiceConnectionId = state.getString(STATE_REQUESTED_CONNECTION_ID)
         confirmationServiceConnectionId = state.getString(STATE_CONFIRMATION_CONNECTION_ID)
@@ -639,7 +683,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
         confirmationReceipt = null
         confirmationChecking = false
         confirmationFailed = false
-        confirmationOfferValidationId = null
         pendingApprovalCheckAction = null
         pendingApprovalCheckId = null
         confirmationServiceConnectionId = null
@@ -1243,10 +1286,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
         if (!isCurrentScreenRequest(requestId)) return
         confirmationOperationId = operationId
         confirmationReceipt = receipt
-        confirmationOfferValidationId = null
         val checkId = UUID.randomUUID().toString()
         confirmationCheckId = checkId
-        confirmationOfferValidationId = null
         confirmationChecking = true
         confirmationFailed = false
         renderConfirmationState()
@@ -1391,14 +1432,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         when (status) {
             CONFIRMATION_STATUS_FAILED, CONFIRMATION_STATUS_TIMEOUT -> {
-                confirmationOfferValidationId = null
                 confirmationChecking = false
                 confirmationFailed = true
                 renderConfirmationState()
                 logConfirmationUiState(status)
             }
             CONFIRMATION_STATUS_REMAINING -> {
-                confirmationOfferValidationId = null
                 confirmationChecking = false
                 val latestDenials = runCatching {
                     Gson().fromJson<List<AppRuleGuardianDenial?>>(
@@ -1426,13 +1465,12 @@ class GuardianApprovalActivity : AppCompatActivity() {
     }
 
     private fun handleAllowedOffer(result: Intent) {
-        if (!confirmationChecking || !canHandleCallbacks()) return
         val offer = GuardianApprovalLaunchOffer(
             identity = GuardianApprovalExecutionIdentity(
-            screenRequestId = result.getStringExtra(EXTRA_SCREEN_REQUEST_ID).orEmpty(),
-            operationId = result.getStringExtra(EXTRA_OPERATION_ID).orEmpty(),
-            checkId = result.getStringExtra(EXTRA_CHECK_ID).orEmpty(),
-            serviceConnectionId = result.getStringExtra(EXTRA_SERVICE_CONNECTION_ID).orEmpty()
+                screenRequestId = result.getStringExtra(EXTRA_SCREEN_REQUEST_ID).orEmpty(),
+                operationId = result.getStringExtra(EXTRA_OPERATION_ID).orEmpty(),
+                checkId = result.getStringExtra(EXTRA_CHECK_ID).orEmpty(),
+                serviceConnectionId = result.getStringExtra(EXTRA_SERVICE_CONNECTION_ID).orEmpty()
             ),
             offerId = result.getStringExtra(EXTRA_CONFIRMATION_OFFER_ID).orEmpty(),
             policyFingerprint = result.getStringExtra(EXTRA_CONFIRMATION_POLICY_FINGERPRINT).orEmpty(),
@@ -1455,234 +1493,134 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 -1L
             )
         )
-        if (offer.offerId.isBlank() || confirmationOfferValidationId == offer.offerId) return
-        confirmationOfferValidationId = offer.offerId
-        val currentIdentity = GuardianApprovalExecutionIdentity(
-            screenRequestId = screenRequestId,
-            operationId = confirmationOperationId.orEmpty(),
-            checkId = confirmationCheckId.orEmpty(),
-            serviceConnectionId = registeredServiceConnectionId.orEmpty()
+        guardianApprovalOfferLaunchWorkflow.accept(
+            GuardianApprovalLaunchRequest(targetPackageName, offer)
         )
-        if (!confirmationChecking || offer.identity != currentIdentity) {
-            confirmationOfferValidationId = null
-            return
-        }
-
-        lifecycleScope.launch {
-            val launchIntent = lookupTargetLaunchIntent()
-            if (!isCurrentGuardianOfferAttempt(offer)) return@launch
-            if (launchIntent == null) {
-                notifyGuardianLaunchFailed(offer.identity)
-                return@launch
-            }
-
-            val currentPolicyFingerprint = try {
-                withContext(Dispatchers.IO) {
-                    if (BuildConfig.DEBUG && policyReadFailureForTest) {
-                        policyReadFailureForTest = false
-                        throw IOException("Injected policy snapshot read failure")
-                    }
-                    GuardianApprovalPolicyFingerprint.forSettings(dataStore.settings.first())
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                CrashLogger(applicationContext).logNonFatalError(error)
-                if (isCurrentGuardianOfferAttempt(offer)) {
-                    confirmationOfferValidationId = null
-                    confirmationChecking = false
-                    confirmationFailed = true
-                    renderConfirmationState()
-                    logConfirmationUiState(CONFIRMATION_STATUS_FAILED)
-                    notifyGuardianLaunchFailed(offer.identity)
-                }
-                return@launch
-            }
-            if (!isCurrentGuardianOfferAttempt(offer)) return@launch
-            val displayUnlocked = getSystemService(KeyguardManager::class.java)
-                ?.isKeyguardLocked == false
-            val currentZoneId = ZoneId.systemDefault().id
-            val nowWallClockMs = System.currentTimeMillis()
-            val nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
-            val canLaunch = GuardianApprovalLaunchAuthorization.canLaunch(
-                offer = offer,
-                current = GuardianApprovalExecutionIdentity(
-                    screenRequestId = screenRequestId,
-                    operationId = confirmationOperationId.orEmpty(),
-                    checkId = confirmationCheckId.orEmpty(),
-                    serviceConnectionId = registeredServiceConnectionId.orEmpty()
-                ),
-                confirmationPending = confirmationChecking,
-                activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
-                windowFocused = hasWindowFocus(),
-                displayUnlocked = displayUnlocked,
-                currentZoneId = currentZoneId,
-                nowWallClockMs = nowWallClockMs,
-                nowElapsedRealtimeMs = nowElapsedRealtimeMs,
-                currentPolicyFingerprint = currentPolicyFingerprint
-            )
-            if (!canLaunch) {
-                confirmationOfferValidationId = null
-                val policyChanged = currentPolicyFingerprint != offer.policyFingerprint
-                val evaluationWindowInvalid = !GuardianApprovalEvaluationWindow.isCurrent(
-                    evaluationZoneId = offer.evaluationZoneId,
-                    currentZoneId = currentZoneId,
-                    capturedAtWallClockMs = offer.capturedAtWallClockMs,
-                    capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
-                    validUntilWallClockMs = offer.validUntilWallClockMs,
-                    nowWallClockMs = nowWallClockMs,
-                    nowElapsedRealtimeMs = nowElapsedRealtimeMs
-                )
-                if (confirmationChecking && (policyChanged || evaluationWindowInvalid)) {
-                    notifyGuardianOfferInvalidated(offer)
-                    return@launch
-                }
-                if (confirmationChecking &&
-                    SystemClock.elapsedRealtime() >= offer.deadlineElapsedRealtimeMs
-                ) {
-                    confirmationChecking = false
-                    confirmationFailed = true
-                    renderConfirmationState()
-                    logConfirmationUiState(CONFIRMATION_STATUS_TIMEOUT)
-                }
-                if (BuildConfig.DEBUG) {
-                    testLog(
-                        "ui_result_ignored status=$CONFIRMATION_STATUS_ALLOWED " +
-                            "operation=${offer.identity.operationId} check=${offer.identity.checkId} " +
-                            "reason=offer_not_current"
-                    )
-                }
-                return@launch
-            }
-
-            launchConfirmedTargetIfCurrent(offer, currentPolicyFingerprint, launchIntent)
-        }
     }
 
     private fun launchConfirmedTargetIfCurrent(
-        offer: GuardianApprovalLaunchOffer,
-        currentPolicyFingerprint: String,
-        launchIntent: Intent
-    ) {
-        val expectedIdentity = offer.identity
-        val currentIdentity = GuardianApprovalExecutionIdentity(
-            screenRequestId = screenRequestId,
-            operationId = confirmationOperationId.orEmpty(),
-            checkId = confirmationCheckId.orEmpty(),
-            serviceConnectionId = registeredServiceConnectionId.orEmpty()
-        )
-        val displayUnlocked = getSystemService(KeyguardManager::class.java)
-            ?.isKeyguardLocked == false
-        val currentZoneId = ZoneId.systemDefault().id
-        val nowWallClockMs = System.currentTimeMillis()
-        val nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
-        if (!GuardianApprovalLaunchAuthorization.canLaunch(
-                offer = offer,
-                current = currentIdentity,
-                confirmationPending = confirmationChecking,
-                activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
-                windowFocused = hasWindowFocus(),
-                displayUnlocked = displayUnlocked,
-                currentZoneId = currentZoneId,
-                nowWallClockMs = nowWallClockMs,
-                nowElapsedRealtimeMs = nowElapsedRealtimeMs,
-                currentPolicyFingerprint = currentPolicyFingerprint
-            )
-        ) {
-            if (confirmationChecking && !GuardianApprovalEvaluationWindow.isCurrent(
-                    evaluationZoneId = offer.evaluationZoneId,
-                    currentZoneId = currentZoneId,
-                    capturedAtWallClockMs = offer.capturedAtWallClockMs,
-                    capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
-                    validUntilWallClockMs = offer.validUntilWallClockMs,
-                    nowWallClockMs = nowWallClockMs,
-                    nowElapsedRealtimeMs = nowElapsedRealtimeMs
+        request: GuardianApprovalLaunchRequest,
+        launchIntent: Intent,
+        currentPolicyFingerprint: String
+    ): GuardianApprovalLaunchEffectResult {
+        repeat(2) {
+            val snapshot = currentGuardianApprovalLaunchSnapshot()
+            if (!isCurrentGuardianLaunchRequest(request, snapshot.requestState)) {
+                return GuardianApprovalLaunchEffectResult.Rejected
+            }
+            if (!GuardianApprovalLaunchAuthorization.canLaunch(
+                    offer = request.offer,
+                    current = snapshot.requestState.identity,
+                    confirmationPending = snapshot.requestState.confirmationPending,
+                    activityResumed = snapshot.activityResumed,
+                    windowFocused = snapshot.windowFocused,
+                    displayUnlocked = snapshot.displayUnlocked,
+                    currentZoneId = snapshot.currentZoneId,
+                    nowWallClockMs = snapshot.nowWallClockMs,
+                    nowElapsedRealtimeMs = snapshot.nowElapsedRealtimeMs,
+                    currentPolicyFingerprint = currentPolicyFingerprint
                 )
             ) {
-                confirmationOfferValidationId = null
-                notifyGuardianOfferInvalidated(offer)
+                return if (isGuardianEvaluationWindowCurrent(request.offer, snapshot)) {
+                    GuardianApprovalLaunchEffectResult.Rejected
+                } else {
+                    GuardianApprovalLaunchEffectResult.EvaluationWindowInvalid
+                }
             }
-            return
         }
-        val finalZoneId = ZoneId.systemDefault().id
-        val finalNowWallClockMs = System.currentTimeMillis()
-        val finalNowElapsedRealtimeMs = SystemClock.elapsedRealtime()
-        val finalDisplayUnlocked = getSystemService(KeyguardManager::class.java)
-            ?.isKeyguardLocked == false
-        if (!GuardianApprovalLaunchAuthorization.canLaunch(
-                offer = offer,
-                current = GuardianApprovalExecutionIdentity(
-                    screenRequestId = screenRequestId,
-                    operationId = confirmationOperationId.orEmpty(),
-                    checkId = confirmationCheckId.orEmpty(),
-                    serviceConnectionId = registeredServiceConnectionId.orEmpty()
-                ),
-                confirmationPending = confirmationChecking,
-                activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
-                windowFocused = hasWindowFocus(),
-                displayUnlocked = finalDisplayUnlocked,
-                currentZoneId = finalZoneId,
-                nowWallClockMs = finalNowWallClockMs,
-                nowElapsedRealtimeMs = finalNowElapsedRealtimeMs,
-                currentPolicyFingerprint = currentPolicyFingerprint
-            )
-        ) {
-            if (confirmationChecking && !GuardianApprovalEvaluationWindow.isCurrent(
-                    evaluationZoneId = offer.evaluationZoneId,
-                    currentZoneId = finalZoneId,
-                    capturedAtWallClockMs = offer.capturedAtWallClockMs,
-                    capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
-                    validUntilWallClockMs = offer.validUntilWallClockMs,
-                    nowWallClockMs = finalNowWallClockMs,
-                    nowElapsedRealtimeMs = finalNowElapsedRealtimeMs
-                )
-            ) {
-                confirmationOfferValidationId = null
-                notifyGuardianOfferInvalidated(offer)
-            }
-            return
-        }
-        try {
-            startActivity(launchIntent)
-            confirmationChecking = false
-            confirmationOfferValidationId = null
-            confirmationFailed = false
-            closeReason = REASON_CONFIRMED
-            testLog(
-                "confirmed_target_launch_started screen=$screenRequestId " +
-                    "operation=${expectedIdentity.operationId} check=${expectedIdentity.checkId}"
-            )
-            finish()
-        } catch (error: Exception) {
-            closeReason = REASON_INTERRUPTED
-            CrashLogger(applicationContext).logNonFatalError(error)
-            notifyGuardianLaunchFailed(expectedIdentity)
-        }
+
+        startActivity(launchIntent)
+        return GuardianApprovalLaunchEffectResult.Started
     }
 
-    private suspend fun lookupTargetLaunchIntent(): Intent? = try {
-        withContext(Dispatchers.IO) {
-            val testLookup = launchIntentLookupForTest.takeIf { BuildConfig.DEBUG }
-            val launchIntent = testLookup?.invoke(targetPackageName)
-                ?: packageManager.getLaunchIntentForPackage(targetPackageName)
-            launchIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-    } catch (error: CancellationException) {
-        throw error
-    } catch (error: Exception) {
-        CrashLogger(applicationContext).logNonFatalError(error)
-        null
-    }
-
-    private fun isCurrentGuardianOfferAttempt(offer: GuardianApprovalLaunchOffer): Boolean =
-        canHandleCallbacks() && confirmationChecking &&
-            confirmationOfferValidationId == offer.offerId &&
-            offer.identity == GuardianApprovalExecutionIdentity(
+    private fun currentGuardianApprovalLaunchRequestState(): GuardianApprovalLaunchRequestState =
+        GuardianApprovalLaunchRequestState(
+            targetPackageName = targetPackageName,
+            identity = GuardianApprovalExecutionIdentity(
                 screenRequestId = screenRequestId,
                 operationId = confirmationOperationId.orEmpty(),
                 checkId = confirmationCheckId.orEmpty(),
                 serviceConnectionId = registeredServiceConnectionId.orEmpty()
-            )
+            ),
+            callbacksAllowed = canHandleCallbacks() &&
+                requestedServiceConnectionId == registeredServiceConnectionId,
+            confirmationPending = confirmationChecking
+        )
+
+    private fun currentGuardianApprovalLaunchSnapshot(): GuardianApprovalLaunchSnapshot =
+        GuardianApprovalLaunchSnapshot(
+            requestState = currentGuardianApprovalLaunchRequestState(),
+            activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
+            windowFocused = hasWindowFocus(),
+            displayUnlocked = getSystemService(KeyguardManager::class.java)
+                ?.isKeyguardLocked == false,
+            currentZoneId = ZoneId.systemDefault().id,
+            nowWallClockMs = System.currentTimeMillis(),
+            nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        )
+
+    private fun isCurrentGuardianLaunchRequest(
+        request: GuardianApprovalLaunchRequest,
+        state: GuardianApprovalLaunchRequestState = currentGuardianApprovalLaunchRequestState()
+    ): Boolean = state.callbacksAllowed && state.confirmationPending &&
+        state.targetPackageName == request.targetPackageName &&
+        state.identity == request.offer.identity
+
+    private fun isGuardianEvaluationWindowCurrent(
+        offer: GuardianApprovalLaunchOffer,
+        snapshot: GuardianApprovalLaunchSnapshot
+    ): Boolean = GuardianApprovalEvaluationWindow.isCurrent(
+        evaluationZoneId = offer.evaluationZoneId,
+        currentZoneId = snapshot.currentZoneId,
+        capturedAtWallClockMs = offer.capturedAtWallClockMs,
+        capturedAtElapsedRealtimeMs = offer.capturedAtElapsedRealtimeMs,
+        validUntilWallClockMs = offer.validUntilWallClockMs,
+        nowWallClockMs = snapshot.nowWallClockMs,
+        nowElapsedRealtimeMs = snapshot.nowElapsedRealtimeMs
+    )
+
+    private fun applyGuardianLaunchOutcome(
+        request: GuardianApprovalLaunchRequest,
+        outcome: GuardianApprovalLaunchOutcome
+    ) {
+        if (!isCurrentGuardianLaunchRequest(request)) return
+        when (outcome) {
+            GuardianApprovalLaunchOutcome.LookupFailed -> {
+                notifyGuardianLaunchFailed(request.offer.identity)
+            }
+            GuardianApprovalLaunchOutcome.SettingsReadFailed -> {
+                confirmationChecking = false
+                confirmationFailed = true
+                renderConfirmationState()
+                logConfirmationUiState(CONFIRMATION_STATUS_FAILED)
+                notifyGuardianLaunchFailed(request.offer.identity)
+            }
+            GuardianApprovalLaunchOutcome.OfferInvalidated -> {
+                notifyGuardianOfferInvalidated(request.offer)
+            }
+            GuardianApprovalLaunchOutcome.DeadlineExpired -> {
+                confirmationChecking = false
+                confirmationFailed = true
+                renderConfirmationState()
+                logConfirmationUiState(CONFIRMATION_STATUS_TIMEOUT)
+            }
+            GuardianApprovalLaunchOutcome.LaunchStarted -> {
+                confirmationChecking = false
+                confirmationFailed = false
+                closeReason = REASON_CONFIRMED
+                testLog(
+                    "confirmed_target_launch_started screen=${screenRequestId} " +
+                        "operation=${request.offer.identity.operationId} " +
+                        "check=${request.offer.identity.checkId}"
+                )
+                finish()
+            }
+            GuardianApprovalLaunchOutcome.LaunchFailed -> {
+                closeReason = REASON_INTERRUPTED
+                notifyGuardianLaunchFailed(request.offer.identity)
+            }
+        }
+    }
 
     private fun notifyGuardianLaunchFailed(identity: GuardianApprovalExecutionIdentity) {
         sendBroadcast(
