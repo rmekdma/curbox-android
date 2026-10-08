@@ -64,6 +64,56 @@ class GuardianApprovalCoordinatorTest {
     }
 
     @Test
+    fun timedOutCheckCannotIssueAnAllowedOfferAndOfferedCheckCanStillTimeout() {
+        val timedOut = newCheckingCoordinator("screen-offer-timeout", "check-timeout")
+        val timedOutIdentity = checkIdentity("screen-offer-timeout", "check-timeout")
+
+        assertTrue(timedOut.timeOutConfirmation(timedOutIdentity))
+        assertFalse(timedOut.offerConfirmation(timedOutIdentity, "offer-late"))
+        assertEquals(
+            GuardianApprovalCoordinator.ConfirmationPhase.TIMED_OUT,
+            timedOut.currentOwner()?.confirmation?.phase
+        )
+
+        val offered = newCheckingCoordinator("screen-offer", "check-offer")
+        val offeredIdentity = checkIdentity("screen-offer", "check-offer")
+        assertTrue(offered.offerConfirmation(offeredIdentity, "offer-current"))
+        assertFalse(offered.offerConfirmation(offeredIdentity, "offer-duplicate"))
+
+        assertTrue(offered.timeOutConfirmation(offeredIdentity))
+        assertFalse(offered.completeConfirmation(offeredIdentity))
+        assertEquals(
+            GuardianApprovalCoordinator.ConfirmationPhase.TIMED_OUT,
+            offered.currentOwner()?.confirmation?.phase
+        )
+    }
+
+    private fun newCheckingCoordinator(screenRequestId: String, checkId: String) =
+        GuardianApprovalCoordinator().apply {
+            assertTrue(openScreen(screenRequestId, TARGET_PACKAGE, LifecycleGeneration(21L)))
+            assertTrue(
+                beginConfirmation(
+                    screenRequestId,
+                    operationId = "operation-$checkId",
+                    checkId = checkId,
+                    receipt = GuardianApprovalWorkReceipt.Grant(
+                        receipt,
+                        GuardianApprovalGrantOrigin.DIRECT,
+                        21L
+                    )
+                )
+            )
+        }
+
+    private fun checkIdentity(screenRequestId: String, checkId: String) =
+        GuardianApprovalCoordinator.CheckIdentity(
+            screenRequestId,
+            operationId = "operation-$checkId",
+            checkId = checkId,
+            lifecycleGeneration = LifecycleGeneration(21L)
+        )
+
+    @Test
     fun homeCancellationPreventsLateAllowFromCompletingTheScreenRequest() {
         val coordinator = GuardianApprovalCoordinator()
         assertTrue(coordinator.openScreen("screen-2", TARGET_PACKAGE, LifecycleGeneration(4L)))

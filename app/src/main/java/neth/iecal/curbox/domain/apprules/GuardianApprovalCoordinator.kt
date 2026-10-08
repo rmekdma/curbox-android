@@ -6,6 +6,7 @@ import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 class GuardianApprovalCoordinator {
     enum class ConfirmationPhase {
         CHECKING,
+        OFFERED,
         FINISHED,
         TIMED_OUT
     }
@@ -14,7 +15,8 @@ class GuardianApprovalCoordinator {
         val operationId: String,
         val checkId: String,
         val receipt: GuardianApprovalWorkReceipt,
-        val phase: ConfirmationPhase
+        val phase: ConfirmationPhase,
+        val offerId: String? = null
     )
 
     data class Owner(
@@ -99,7 +101,8 @@ class GuardianApprovalCoordinator {
         owner = current.copy(
             confirmation = previous.copy(
                 checkId = checkId,
-                phase = ConfirmationPhase.CHECKING
+                phase = ConfirmationPhase.CHECKING,
+                offerId = null
             )
         )
         true
@@ -138,6 +141,40 @@ class GuardianApprovalCoordinator {
         true
     }
 
+    /** Atomically moves an allowed check to its one-shot UI offer state. */
+    fun offerConfirmation(identity: CheckIdentity, offerId: String): Boolean = synchronized(lock) {
+        val current = owner ?: return@synchronized false
+        val confirmation = current.confirmation ?: return@synchronized false
+        if (!matches(current, confirmation, identity) ||
+            confirmation.phase != ConfirmationPhase.CHECKING || offerId.isBlank()
+        ) return@synchronized false
+        owner = current.copy(
+            confirmation = confirmation.copy(
+                phase = ConfirmationPhase.OFFERED,
+                offerId = offerId
+            )
+        )
+        true
+    }
+
+    /** Reopens a rejected offer as the same read-only check, without changing its receipt. */
+    fun rejectConfirmationOffer(identity: CheckIdentity, offerId: String): Boolean =
+        synchronized(lock) {
+            val current = owner ?: return@synchronized false
+            val confirmation = current.confirmation ?: return@synchronized false
+            if (!matches(current, confirmation, identity) ||
+                confirmation.phase != ConfirmationPhase.OFFERED ||
+                confirmation.offerId != offerId
+            ) return@synchronized false
+            owner = current.copy(
+                confirmation = confirmation.copy(
+                    phase = ConfirmationPhase.CHECKING,
+                    offerId = null
+                )
+            )
+            true
+        }
+
     fun timeOutConfirmation(identity: CheckIdentity): Boolean =
         updateConfirmationPhase(identity, ConfirmationPhase.TIMED_OUT)
 
@@ -159,15 +196,22 @@ class GuardianApprovalCoordinator {
     ): Boolean = synchronized(lock) {
         val current = owner ?: return@synchronized false
         val confirmation = current.confirmation ?: return@synchronized false
-        if (current.screenRequestId != identity.screenRequestId ||
-            current.lifecycleGeneration != identity.lifecycleGeneration ||
-            confirmation.operationId != identity.operationId ||
-            confirmation.checkId != identity.checkId ||
-            confirmation.phase != ConfirmationPhase.CHECKING
+        if (!matches(current, confirmation, identity) ||
+            (confirmation.phase != ConfirmationPhase.CHECKING &&
+                confirmation.phase != ConfirmationPhase.OFFERED)
         ) return@synchronized false
         owner = current.copy(confirmation = confirmation.copy(phase = nextPhase))
         true
     }
+
+    private fun matches(
+        current: Owner,
+        confirmation: Confirmation,
+        identity: CheckIdentity
+    ): Boolean = current.screenRequestId == identity.screenRequestId &&
+        current.lifecycleGeneration == identity.lifecycleGeneration &&
+        confirmation.operationId == identity.operationId &&
+        confirmation.checkId == identity.checkId
 
     companion object {
         const val CONFIRMATION_TIMEOUT_MS = 10_000L

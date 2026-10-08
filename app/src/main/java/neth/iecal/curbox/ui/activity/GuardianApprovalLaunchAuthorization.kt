@@ -7,15 +7,32 @@ internal data class GuardianApprovalExecutionIdentity(
     val serviceConnectionId: String
 )
 
+internal data class GuardianApprovalLaunchOffer(
+    val identity: GuardianApprovalExecutionIdentity,
+    val offerId: String,
+    val policyFingerprint: String,
+    val runtimeRevision: Long,
+    val deadlineElapsedRealtimeMs: Long
+)
+
 internal object GuardianApprovalLaunchAuthorization {
     fun canLaunch(
-        expected: GuardianApprovalExecutionIdentity,
+        offer: GuardianApprovalLaunchOffer,
         current: GuardianApprovalExecutionIdentity,
+        confirmationPending: Boolean,
         activityResumed: Boolean,
         windowFocused: Boolean,
-        displayUnlocked: Boolean
-    ): Boolean = expected.isComplete() &&
-        expected == current &&
+        displayUnlocked: Boolean,
+        nowElapsedRealtimeMs: Long,
+        currentPolicyFingerprint: String
+    ): Boolean = offer.identity.isComplete() &&
+        offer.offerId.isNotBlank() &&
+        offer.policyFingerprint.isNotBlank() &&
+        offer.policyFingerprint == currentPolicyFingerprint &&
+        offer.runtimeRevision >= 0L &&
+        offer.deadlineElapsedRealtimeMs > nowElapsedRealtimeMs &&
+        offer.identity == current &&
+        confirmationPending &&
         activityResumed &&
         windowFocused &&
         displayUnlocked

@@ -800,7 +800,7 @@ function Invoke-ForegroundOwnershipRegressionCase(
 
         Release-ServiceEvaluationGate -GateId $gateId
         [void](Wait-ForGuardianLog `
-            -Pattern "ui_result_ignored status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId)) reason=approval_not_foreground" `
+            -Pattern "ui_result_ignored status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId)) reason=offer_not_current" `
             -Label "paused approval Activity rejecting the target launch authorization")
         $overlayFocus = Assert-WindowFocus -ExpectedActivity "ApiPermissionActivity" -PassThru
         if (-not $overlayFocus.Success) {

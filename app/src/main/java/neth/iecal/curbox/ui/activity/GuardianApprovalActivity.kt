@@ -10,6 +10,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.text.Editable
 import android.text.InputType
@@ -41,6 +42,7 @@ import neth.iecal.curbox.domain.apprules.GuardianAccumulatedTimeValidationError
 import neth.iecal.curbox.domain.apprules.GuardianApprovalSelection
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantCandidate
+import neth.iecal.curbox.domain.apprules.GuardianApprovalPolicyFingerprint
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
@@ -87,6 +89,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private var confirmationReceipt: GuardianApprovalWorkReceipt? = null
     private var confirmationChecking = false
     private var confirmationFailed = false
+    private var confirmationOfferValidationId: String? = null
     private var grantInProgressRequestId: String? = null
     private var requestedServiceConnectionId: String? = null
     private var registeredServiceConnectionId: String? = null
@@ -199,6 +202,25 @@ class GuardianApprovalActivity : AppCompatActivity() {
                             .putExtra(EXTRA_OPERATION_ID, oldOperationId)
                             .putExtra(EXTRA_CHECK_ID, oldCheckId)
                             .putExtra(EXTRA_CONFIRMATION_STATUS, status)
+                            .putExtra(
+                                EXTRA_CONFIRMATION_OFFER_ID,
+                                intent.getStringExtra(EXTRA_CONFIRMATION_OFFER_ID)
+                            )
+                            .putExtra(
+                                EXTRA_CONFIRMATION_POLICY_FINGERPRINT,
+                                intent.getStringExtra(EXTRA_CONFIRMATION_POLICY_FINGERPRINT)
+                            )
+                            .putExtra(
+                                EXTRA_CONFIRMATION_RUNTIME_REVISION,
+                                intent.getLongExtra(EXTRA_CONFIRMATION_RUNTIME_REVISION, -1L)
+                            )
+                            .putExtra(
+                                EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
+                                intent.getLongExtra(
+                                    EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
+                                    0L
+                                )
+                            )
                     )
                     testLog(
                         "test_confirmation_result_sent screen=$oldScreenRequestId " +
@@ -261,6 +283,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 if (confirmationChecking && confirmationOperationId != null &&
                     confirmationReceipt != null
                 ) {
+                    confirmationOfferValidationId = null
                     confirmationCheckId = UUID.randomUUID().toString()
                     pendingApprovalCheckAction = INTENT_ACTION_APPROVAL_RECOVER
                     pendingApprovalCheckId = confirmationCheckId
@@ -491,6 +514,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         confirmationReceipt = receipt
         confirmationChecking = checking
         confirmationFailed = failed
+        confirmationOfferValidationId = null
         confirmationCheckId = if (checking) UUID.randomUUID().toString() else checkId
         requestedServiceConnectionId = state.getString(STATE_REQUESTED_CONNECTION_ID)
         confirmationServiceConnectionId = state.getString(STATE_CONFIRMATION_CONNECTION_ID)
@@ -579,6 +603,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         confirmationReceipt = null
         confirmationChecking = false
         confirmationFailed = false
+        confirmationOfferValidationId = null
         pendingApprovalCheckAction = null
         pendingApprovalCheckId = null
         confirmationServiceConnectionId = null
@@ -1182,8 +1207,10 @@ class GuardianApprovalActivity : AppCompatActivity() {
         if (!isCurrentScreenRequest(requestId)) return
         confirmationOperationId = operationId
         confirmationReceipt = receipt
+        confirmationOfferValidationId = null
         val checkId = UUID.randomUUID().toString()
         confirmationCheckId = checkId
+        confirmationOfferValidationId = null
         confirmationChecking = true
         confirmationFailed = false
         renderConfirmationState()
@@ -1328,12 +1355,14 @@ class GuardianApprovalActivity : AppCompatActivity() {
         }
         when (status) {
             CONFIRMATION_STATUS_FAILED, CONFIRMATION_STATUS_TIMEOUT -> {
+                confirmationOfferValidationId = null
                 confirmationChecking = false
                 confirmationFailed = true
                 renderConfirmationState()
                 logConfirmationUiState(status)
             }
             CONFIRMATION_STATUS_REMAINING -> {
+                confirmationOfferValidationId = null
                 confirmationChecking = false
                 val latestDenials = runCatching {
                     Gson().fromJson<List<AppRuleGuardianDenial?>>(
@@ -1355,18 +1384,98 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 logConfirmationUiState(status)
             }
             CONFIRMATION_STATUS_ALLOWED -> {
-                launchConfirmedTargetIfCurrent(result)
+                handleAllowedOffer(result)
             }
         }
     }
 
-    private fun launchConfirmedTargetIfCurrent(result: Intent) {
-        val expectedIdentity = GuardianApprovalExecutionIdentity(
+    private fun handleAllowedOffer(result: Intent) {
+        if (!confirmationChecking || !canHandleCallbacks()) return
+        val offer = GuardianApprovalLaunchOffer(
+            identity = GuardianApprovalExecutionIdentity(
             screenRequestId = result.getStringExtra(EXTRA_SCREEN_REQUEST_ID).orEmpty(),
             operationId = result.getStringExtra(EXTRA_OPERATION_ID).orEmpty(),
             checkId = result.getStringExtra(EXTRA_CHECK_ID).orEmpty(),
             serviceConnectionId = result.getStringExtra(EXTRA_SERVICE_CONNECTION_ID).orEmpty()
+            ),
+            offerId = result.getStringExtra(EXTRA_CONFIRMATION_OFFER_ID).orEmpty(),
+            policyFingerprint = result.getStringExtra(EXTRA_CONFIRMATION_POLICY_FINGERPRINT).orEmpty(),
+            runtimeRevision = result.getLongExtra(EXTRA_CONFIRMATION_RUNTIME_REVISION, -1L),
+            deadlineElapsedRealtimeMs = result.getLongExtra(
+                EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS,
+                0L
+            )
         )
+        if (offer.offerId.isBlank() || confirmationOfferValidationId == offer.offerId) return
+        confirmationOfferValidationId = offer.offerId
+        val currentIdentity = GuardianApprovalExecutionIdentity(
+            screenRequestId = screenRequestId,
+            operationId = confirmationOperationId.orEmpty(),
+            checkId = confirmationCheckId.orEmpty(),
+            serviceConnectionId = registeredServiceConnectionId.orEmpty()
+        )
+        if (!confirmationChecking || offer.identity != currentIdentity) {
+            confirmationOfferValidationId = null
+            return
+        }
+
+        lifecycleScope.launch {
+            val currentPolicyFingerprint = withContext(Dispatchers.IO) {
+                GuardianApprovalPolicyFingerprint.forSettings(dataStore.settings.first())
+            }
+            if (confirmationOfferValidationId != offer.offerId) return@launch
+            val displayUnlocked = getSystemService(KeyguardManager::class.java)
+                ?.isKeyguardLocked == false
+            val canLaunch = GuardianApprovalLaunchAuthorization.canLaunch(
+                offer = offer,
+                current = GuardianApprovalExecutionIdentity(
+                    screenRequestId = screenRequestId,
+                    operationId = confirmationOperationId.orEmpty(),
+                    checkId = confirmationCheckId.orEmpty(),
+                    serviceConnectionId = registeredServiceConnectionId.orEmpty()
+                ),
+                confirmationPending = confirmationChecking,
+                activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
+                windowFocused = hasWindowFocus(),
+                displayUnlocked = displayUnlocked,
+                nowElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                currentPolicyFingerprint = currentPolicyFingerprint
+            )
+            if (!canLaunch) {
+                confirmationOfferValidationId = null
+                if (confirmationChecking &&
+                    currentPolicyFingerprint != offer.policyFingerprint
+                ) {
+                    notifyGuardianOfferInvalidated(offer)
+                    return@launch
+                }
+                if (confirmationChecking &&
+                    SystemClock.elapsedRealtime() >= offer.deadlineElapsedRealtimeMs
+                ) {
+                    confirmationChecking = false
+                    confirmationFailed = true
+                    renderConfirmationState()
+                    logConfirmationUiState(CONFIRMATION_STATUS_TIMEOUT)
+                }
+                if (BuildConfig.DEBUG) {
+                    testLog(
+                        "ui_result_ignored status=$CONFIRMATION_STATUS_ALLOWED " +
+                            "operation=${offer.identity.operationId} check=${offer.identity.checkId} " +
+                            "reason=offer_not_current"
+                    )
+                }
+                return@launch
+            }
+
+            launchConfirmedTargetIfCurrent(offer, currentPolicyFingerprint)
+        }
+    }
+
+    private fun launchConfirmedTargetIfCurrent(
+        offer: GuardianApprovalLaunchOffer,
+        currentPolicyFingerprint: String
+    ) {
+        val expectedIdentity = offer.identity
         val currentIdentity = GuardianApprovalExecutionIdentity(
             screenRequestId = screenRequestId,
             operationId = confirmationOperationId.orEmpty(),
@@ -1376,22 +1485,16 @@ class GuardianApprovalActivity : AppCompatActivity() {
         val displayUnlocked = getSystemService(KeyguardManager::class.java)
             ?.isKeyguardLocked == false
         if (!GuardianApprovalLaunchAuthorization.canLaunch(
-                expected = expectedIdentity,
+                offer = offer,
                 current = currentIdentity,
+                confirmationPending = confirmationChecking,
                 activityResumed = lifecycle.currentState == Lifecycle.State.RESUMED,
                 windowFocused = hasWindowFocus(),
-                displayUnlocked = displayUnlocked
+                displayUnlocked = displayUnlocked,
+                nowElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                currentPolicyFingerprint = currentPolicyFingerprint
             )
-        ) {
-            if (BuildConfig.DEBUG) {
-                testLog(
-                    "ui_result_ignored status=$CONFIRMATION_STATUS_ALLOWED " +
-                        "operation=${expectedIdentity.operationId} check=${expectedIdentity.checkId} " +
-                        "reason=approval_not_foreground"
-                )
-            }
-            return
-        }
+        ) return
         val launchIntent = try {
             packageManager.getLaunchIntentForPackage(targetPackageName)
                 ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -1406,6 +1509,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         try {
             startActivity(launchIntent)
             confirmationChecking = false
+            confirmationOfferValidationId = null
             confirmationFailed = false
             closeReason = REASON_CONFIRMED
             testLog(
@@ -1429,6 +1533,19 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 .putExtra(EXTRA_SERVICE_CONNECTION_ID, identity.serviceConnectionId)
                 .putExtra(EXTRA_OPERATION_ID, identity.operationId)
                 .putExtra(EXTRA_CHECK_ID, identity.checkId)
+        )
+    }
+
+    private fun notifyGuardianOfferInvalidated(offer: GuardianApprovalLaunchOffer) {
+        sendBroadcast(
+            Intent(INTENT_ACTION_APPROVAL_OFFER_INVALIDATED)
+                .setPackage(packageName)
+                .putExtra(EXTRA_GUARDIAN_PACKAGE, targetPackageName)
+                .putExtra(EXTRA_SCREEN_REQUEST_ID, offer.identity.screenRequestId)
+                .putExtra(EXTRA_SERVICE_CONNECTION_ID, offer.identity.serviceConnectionId)
+                .putExtra(EXTRA_OPERATION_ID, offer.identity.operationId)
+                .putExtra(EXTRA_CHECK_ID, offer.identity.checkId)
+                .putExtra(EXTRA_CONFIRMATION_OFFER_ID, offer.offerId)
         )
     }
 
@@ -1644,6 +1761,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
             "neth.iecal.curbox.guardian.approval.check_retry"
         const val INTENT_ACTION_APPROVAL_RECOVER =
             "neth.iecal.curbox.guardian.approval.recover"
+        const val INTENT_ACTION_APPROVAL_OFFER_INVALIDATED =
+            "neth.iecal.curbox.guardian.approval.offer_invalidated"
         const val INTENT_ACTION_APPROVAL_LAUNCH_FAILED =
             "neth.iecal.curbox.guardian.approval.launch_failed"
         const val INTENT_ACTION_CONFIRMATION_RESULT =
@@ -1663,6 +1782,13 @@ class GuardianApprovalActivity : AppCompatActivity() {
         const val EXTRA_CONFIRMATION_STATUS = "guardian_confirmation_status"
         const val EXTRA_CONFIRMATION_DENIALS = "guardian_confirmation_denials"
         const val EXTRA_CONFIRMATION_STATE = "guardian_confirmation_state"
+        const val EXTRA_CONFIRMATION_OFFER_ID = "guardian_confirmation_offer_id"
+        const val EXTRA_CONFIRMATION_POLICY_FINGERPRINT =
+            "guardian_confirmation_policy_fingerprint"
+        const val EXTRA_CONFIRMATION_RUNTIME_REVISION =
+            "guardian_confirmation_runtime_revision"
+        const val EXTRA_CONFIRMATION_DEADLINE_ELAPSED_REALTIME_MS =
+            "guardian_confirmation_deadline_elapsed_realtime_ms"
         const val CONFIRMATION_STATUS_ALLOWED = "allowed"
         const val CONFIRMATION_STATUS_REMAINING = "remaining"
         const val CONFIRMATION_STATUS_FAILED = "failed"
