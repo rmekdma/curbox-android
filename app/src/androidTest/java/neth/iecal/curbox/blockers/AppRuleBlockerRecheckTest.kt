@@ -47,6 +47,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -56,6 +57,7 @@ import neth.iecal.curbox.data.db.RoomUsageResetRepository
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -1631,6 +1633,402 @@ class AppRuleBlockerRecheckTest {
         }
     }
 
+    @Test
+    fun recoveryAcceptedBeforeTimeoutLockRejectsStaleATimeoutAndKeepsBDeadline() {
+        val fixture = createConfirmationHostFixture(includeRemainingRule = false)
+        val checkA = fixture.checkId
+        val checkB = "guardian-host-recovery-${java.util.UUID.randomUUID()}"
+        val timeoutAReachedBeforeLock = CountDownLatch(1)
+        val timeoutBReachedBeforeLock = CountDownLatch(1)
+        val handledByCheck = ConcurrentHashMap<String, CountDownLatch>()
+        val timeoutObserver: (GuardianApprovalCoordinator.CheckIdentity) -> Unit = { identity ->
+            when (identity.checkId) {
+                checkA -> timeoutAReachedBeforeLock.countDown()
+                checkB -> timeoutBReachedBeforeLock.countDown()
+            }
+        }
+        val outcomeHandledObserver: (GuardianApprovalCoordinator.CheckIdentity) -> Unit = { identity ->
+            handledByCheck.computeIfAbsent(identity.checkId) { CountDownLatch(1) }.countDown()
+        }
+        val timeoutBResult = fixture.service.expectBroadcast {
+            it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == checkB &&
+                it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT
+        }
+        val gateAReached = fixture.service.expectBroadcast {
+            it.action == AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED &&
+                it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == fixture.gateId
+        }
+        val gateBReached = fixture.service.expectBroadcast {
+            it.action == AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED &&
+                it.getStringExtra(AppRuleBlocker.EXTRA_TEST_CHECK_ID) == checkB
+        }
+        try {
+            setField(fixture.blocker, "guardianTimeoutPostDelayObserverForTest", timeoutObserver)
+            setField(
+                fixture.blocker,
+                "guardianOutcomeHandlerFinishedObserverForTest",
+                outcomeHandledObserver
+            )
+            val gateAArmed = fixture.service.expectBroadcast {
+                it.action == AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE &&
+                    it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == fixture.gateId
+            }
+            fixture.armOutcomeGate()
+            assertTrue(
+                gateAArmed.awaitBroadcast("A worker gate arm")
+                    .getBooleanExtra("guardian_test_gate_accepted", false)
+            )
+            fixture.openScreenAndSubmitCheck()
+            val reachedA = gateAReached.awaitBroadcast("A worker gate reach")
+            assertTrue(reachedA.getBooleanExtra("guardian_test_gate_accepted", false))
+            assertEquals(checkA, reachedA.getStringExtra(AppRuleBlocker.EXTRA_TEST_CHECK_ID))
+            val outcomeA = fixture.awaitWorkerOutcome(checkA)
+            assertTrue("A must remain gated before its timeout", outcomeA.evaluation?.isAllowed == true)
+
+            val runtimeLock = getField(fixture.blocker, "runtimeLock") as Any
+            val gateBId = synchronized(runtimeLock) {
+                assertTrue(
+                    "A's production delay did not reach the pre-lock boundary",
+                    timeoutAReachedBeforeLock.await(30_000L, TimeUnit.MILLISECONDS)
+                )
+                assertConfirmation(
+                    fixture,
+                    checkA,
+                    GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+                )
+
+                fixture.receiveCheckSynchronously(
+                    action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
+                    checkId = checkB
+                )
+                assertConfirmation(
+                    fixture,
+                    checkA,
+                    GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+                )
+
+                fixture.receiveCheckSynchronously(
+                    action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER,
+                    checkId = checkB
+                )
+                assertConfirmation(
+                    fixture,
+                    checkB,
+                    GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+                )
+
+                fixture.releaseOutcomeGate(fixture.gateId)
+                val acceptedGateId = fixture.armOutcomeGateWhenAvailable("guardian-host-gate-b")
+                val replacementTimer = getField(fixture.blocker, "guardianConfirmationTimeoutJob")
+                    as kotlinx.coroutines.Job
+                assertTrue("B's replacement timeout job must still be active", replacementTimer.isActive)
+                acceptedGateId
+            }
+
+            val reachedB = gateBReached.awaitBroadcast("B worker gate reach")
+            assertTrue(reachedB.getBooleanExtra("guardian_test_gate_accepted", false))
+            assertEquals(checkB, reachedB.getStringExtra(AppRuleBlocker.EXTRA_TEST_CHECK_ID))
+            assertTrue(
+                "A's stale handler did not finish after its gate was released",
+                handledByCheck.computeIfAbsent(checkA) { CountDownLatch(1) }
+                    .await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            val outcomeB = fixture.awaitWorkerOutcome(checkB)
+            assertEquals(fixture.targetPackage, outcomeB.request.packageName)
+            assertEquals(fixture.operationId, outcomeB.request.operationId)
+            assertTrue(outcomeB.evaluation?.isAllowed == true)
+            assertConfirmation(
+                fixture,
+                checkB,
+                GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            )
+
+            val timeoutResult = timeoutBResult.awaitBroadcast(
+                "B timeout at its own deadline",
+                timeoutMs = 25_000L
+            )
+            assertTimeoutIdentity(fixture, timeoutResult, checkB)
+            assertTrue(
+                "B's timeout delay did not reach its pre-lock signal",
+                timeoutBReachedBeforeLock.await(5_000L, TimeUnit.MILLISECONDS)
+            )
+            fixture.releaseOutcomeGate(gateBId)
+            assertTrue(
+                "B's stale handler did not finish after timeout released its gate",
+                handledByCheck.computeIfAbsent(checkB) { CountDownLatch(1) }
+                    .await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertConfirmation(
+                fixture,
+                checkB,
+                GuardianApprovalCoordinator.ConfirmationPhase.TIMED_OUT
+            )
+            assertEquals(
+                listOf(checkB to GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT),
+                fixture.confirmationResults()
+                    .map { it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) to
+                        it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) }
+            )
+        } finally {
+            try {
+                setField(fixture.blocker, "guardianTimeoutPostDelayObserverForTest", null)
+                setField(fixture.blocker, "guardianOutcomeHandlerFinishedObserverForTest", null)
+            } finally {
+                fixture.close()
+            }
+        }
+    }
+
+    @Test
+    fun timedOutASendMayArriveAfterRetryBWithoutChangingItsDeadline() {
+        val fixture = createConfirmationHostFixture(includeRemainingRule = false)
+        val checkA = fixture.checkId
+        val checkB = "guardian-host-retry-after-timeout-${java.util.UUID.randomUUID()}"
+        val timeoutSendEntered = CountDownLatch(1)
+        val releaseTimeoutSend = CountDownLatch(1)
+        val timeoutASendCompleted = CountDownLatch(1)
+        val bOutcomeAtSink = CountDownLatch(1)
+        val releaseBOutcomeAtSink = CountDownLatch(1)
+        val bOutcomeSinkTimedOut = AtomicBoolean(false)
+        val handledByCheck = ConcurrentHashMap<String, CountDownLatch>()
+        val originalOutcomeSinkObserver = fixture.blocker.decisionOutcomeSinkObserver
+        val outcomeHandledObserver: (GuardianApprovalCoordinator.CheckIdentity) -> Unit = { identity ->
+            handledByCheck.computeIfAbsent(identity.checkId) { CountDownLatch(1) }.countDown()
+        }
+        val timeoutAResult = fixture.service.expectBroadcast {
+            it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == checkA &&
+                it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT
+        }
+        val timeoutBResult = fixture.service.expectBroadcast {
+            it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == checkB &&
+                it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT
+        }
+        val gateAReached = fixture.service.expectBroadcast {
+            it.action == AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED &&
+                it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == fixture.gateId
+        }
+        val gateBReached = fixture.service.expectBroadcast {
+            it.action == AppRuleBlocker.INTENT_ACTION_TEST_GUARDIAN_EVALUATION_GATE_REACHED &&
+                it.getStringExtra(AppRuleBlocker.EXTRA_TEST_CHECK_ID) == checkB
+        }
+        fixture.service.sendBroadcastObserver = { intent ->
+            if (intent.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                intent.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == checkA &&
+                intent.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT
+            ) {
+                timeoutSendEntered.countDown()
+                releaseTimeoutSend.await(30_000L, TimeUnit.MILLISECONDS)
+            }
+        }
+        fixture.service.sendBroadcastCompletionObserver = { intent ->
+            if (intent.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT &&
+                intent.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == checkA &&
+                intent.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT
+            ) {
+                timeoutASendCompleted.countDown()
+            }
+        }
+        try {
+            setField(
+                fixture.blocker,
+                "guardianOutcomeHandlerFinishedObserverForTest",
+                outcomeHandledObserver
+            )
+            fixture.blocker.decisionOutcomeSinkObserver = { outcome ->
+                originalOutcomeSinkObserver?.invoke(outcome)
+                if (outcome is DecisionOutcome.GuardianApprovalEvaluationReady &&
+                    outcome.request.checkId == checkB
+                ) {
+                    bOutcomeAtSink.countDown()
+                    if (!releaseBOutcomeAtSink.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                        bOutcomeSinkTimedOut.set(true)
+                    }
+                }
+            }
+            val gateAArmed = fixture.service.expectBroadcast {
+                it.action == AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE &&
+                    it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == fixture.gateId
+            }
+            fixture.armOutcomeGate()
+            assertTrue(
+                gateAArmed.awaitBroadcast("A worker gate arm")
+                    .getBooleanExtra("guardian_test_gate_accepted", false)
+            )
+            fixture.openScreenAndSubmitCheck()
+            val reachedA = gateAReached.awaitBroadcast("A worker gate reach")
+            assertTrue(reachedA.getBooleanExtra("guardian_test_gate_accepted", false))
+            assertEquals(checkA, reachedA.getStringExtra(AppRuleBlocker.EXTRA_TEST_CHECK_ID))
+            assertTrue(fixture.awaitWorkerOutcome(checkA).evaluation?.isAllowed == true)
+
+            assertTrue(
+                "A's timeout did not reach the recording service outside the lock",
+                timeoutSendEntered.await(30_000L, TimeUnit.MILLISECONDS)
+            )
+            assertTimeoutIdentity(
+                fixture,
+                timeoutAResult.awaitBroadcast("A timeout send entered"),
+                checkA
+            )
+            assertConfirmation(
+                fixture,
+                checkA,
+                GuardianApprovalCoordinator.ConfirmationPhase.TIMED_OUT
+            )
+
+            fixture.receiveCheckSynchronously(
+                action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
+                checkId = checkB
+            )
+            assertConfirmation(
+                fixture,
+                checkB,
+                GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            )
+            val replacementTimer = getField(fixture.blocker, "guardianConfirmationTimeoutJob")
+                as kotlinx.coroutines.Job
+            assertTrue("B's retry timeout job must be active", replacementTimer.isActive)
+
+            // A and B use the single-slot production gate. Hold B at the real outcome sink after
+            // A's gate is released, then install B's gate before allowing handler dispatch.
+            fixture.releaseOutcomeGate(fixture.gateId)
+            assertTrue(
+                "B's actual worker did not reach the outcome sink before production handling",
+                bOutcomeAtSink.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "A's stale worker result did not finish after B became current",
+                handledByCheck.computeIfAbsent(checkA) { CountDownLatch(1) }
+                    .await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertEquals(
+                GuardianApprovalEvaluationStatus.COMPLETED,
+                fixture.awaitWorkerOutcome(checkB).status
+            )
+            assertTrue(fixture.awaitWorkerOutcome(checkB).evaluation?.isAllowed == true)
+            assertConfirmation(
+                fixture,
+                checkB,
+                GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            )
+
+            val gateBId = fixture.armOutcomeGateWhenAvailable("guardian-host-gate-after-timeout")
+            releaseBOutcomeAtSink.countDown()
+            assertFalse("B outcome sink synchronization must release promptly", bOutcomeSinkTimedOut.get())
+
+            val reachedB = gateBReached.awaitBroadcast("B worker gate reach")
+            assertTrue(reachedB.getBooleanExtra("guardian_test_gate_accepted", false))
+            assertEquals(checkB, reachedB.getStringExtra(AppRuleBlocker.EXTRA_TEST_CHECK_ID))
+
+            releaseTimeoutSend.countDown()
+            assertTrue(
+                "A's delayed timeout send did not complete after B became current",
+                timeoutASendCompleted.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            val lateTimeoutA = fixture.confirmationResults().single {
+                it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) == checkA &&
+                    it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) ==
+                    GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT
+            }
+            assertTimeoutIdentity(fixture, lateTimeoutA, checkA)
+            assertConfirmation(
+                fixture,
+                checkB,
+                GuardianApprovalCoordinator.ConfirmationPhase.CHECKING
+            )
+
+            assertEquals(fixture.operationId, fixture.awaitWorkerOutcome(checkB).request.operationId)
+            val timeoutResult = timeoutBResult.awaitBroadcast(
+                "B timeout after late A delivery",
+                timeoutMs = 25_000L
+            )
+            assertTimeoutIdentity(fixture, timeoutResult, checkB)
+            fixture.releaseOutcomeGate(gateBId)
+            assertTrue(
+                "B's held worker result did not finish behind stale fencing",
+                handledByCheck.computeIfAbsent(checkB) { CountDownLatch(1) }
+                    .await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertConfirmation(
+                fixture,
+                checkB,
+                GuardianApprovalCoordinator.ConfirmationPhase.TIMED_OUT
+            )
+            assertEquals(
+                listOf(
+                    checkA to GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT,
+                    checkB to GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT
+                ),
+                fixture.confirmationResults()
+                    .map { it.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID) to
+                        it.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS) }
+            )
+        } finally {
+            releaseTimeoutSend.countDown()
+            releaseBOutcomeAtSink.countDown()
+            try {
+                fixture.blocker.decisionOutcomeSinkObserver = originalOutcomeSinkObserver
+                setField(fixture.blocker, "guardianOutcomeHandlerFinishedObserverForTest", null)
+            } finally {
+                fixture.service.sendBroadcastObserver = null
+                fixture.service.sendBroadcastCompletionObserver = null
+                fixture.close()
+            }
+        }
+    }
+
+    private fun assertConfirmation(
+        fixture: ConfirmationHostFixture,
+        checkId: String,
+        phase: GuardianApprovalCoordinator.ConfirmationPhase
+    ) {
+        val owner = checkNotNull(
+            (getField(fixture.blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                .currentOwner()
+        )
+        val confirmation = checkNotNull(owner.confirmation)
+        assertEquals(fixture.screenRequestId, owner.screenRequestId)
+        assertEquals(fixture.targetPackage, owner.packageName)
+        assertEquals(
+            LifecycleGeneration(
+                (getField(fixture.blocker, "lifecycleGeneration") as AtomicLong).get().coerceAtLeast(1L)
+            ),
+            owner.lifecycleGeneration
+        )
+        assertEquals(fixture.operationId, confirmation.operationId)
+        assertEquals(fixture.receipt, confirmation.receipt)
+        assertEquals(checkId, confirmation.checkId)
+        assertEquals(phase, confirmation.phase)
+    }
+
+    private fun assertTimeoutIdentity(
+        fixture: ConfirmationHostFixture,
+        result: Intent,
+        checkId: String
+    ) {
+        assertEquals(
+            fixture.screenRequestId,
+            result.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+        )
+        assertEquals(fixture.operationId, result.getStringExtra(GuardianApprovalActivity.EXTRA_OPERATION_ID))
+        assertEquals(checkId, result.getStringExtra(GuardianApprovalActivity.EXTRA_CHECK_ID))
+        assertEquals(
+            fixture.serviceConnectionId,
+            result.getStringExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID)
+        )
+        assertEquals(
+            GuardianApprovalActivity.CONFIRMATION_STATUS_TIMEOUT,
+            result.getStringExtra(GuardianApprovalActivity.EXTRA_CONFIRMATION_STATUS)
+        )
+    }
+
     private fun createConfirmationHostFixture(
         includeRemainingRule: Boolean
     ): ConfirmationHostFixture {
@@ -1713,6 +2111,11 @@ class AppRuleBlockerRecheckTest {
         val gateId = "guardian-host-gate-${java.util.UUID.randomUUID()}"
         val workerOutcome = AtomicReference<DecisionOutcome.GuardianApprovalEvaluationReady?>()
         val workerOutcomePublished = CountDownLatch(1)
+        val workerOutcomesByCheckId = ConcurrentHashMap<
+            String,
+            DecisionOutcome.GuardianApprovalEvaluationReady
+        >()
+        val workerOutcomesPublishedByCheckId = ConcurrentHashMap<String, CountDownLatch>()
         val service = RecordingService().also {
             it.attach(context)
             it.lastBackPressTimeStamp = 0L
@@ -1733,10 +2136,16 @@ class AppRuleBlockerRecheckTest {
             keyguardLockedProvider = { false }
             decisionOutcomeSinkObserver = { outcome ->
                 if (outcome is DecisionOutcome.GuardianApprovalEvaluationReady &&
-                    outcome.request.checkId == checkId
+                    outcome.request.operationId == operationId
                 ) {
-                    workerOutcome.set(outcome)
-                    workerOutcomePublished.countDown()
+                    workerOutcomesByCheckId[outcome.request.checkId] = outcome
+                    workerOutcomesPublishedByCheckId
+                        .computeIfAbsent(outcome.request.checkId) { CountDownLatch(1) }
+                        .countDown()
+                    if (outcome.request.checkId == checkId) {
+                        workerOutcome.set(outcome)
+                        workerOutcomePublished.countDown()
+                    }
                 }
             }
         }
@@ -1761,7 +2170,9 @@ class AppRuleBlockerRecheckTest {
                 serviceConnectionId = serviceConnectionId,
                 targetPackage = PACKAGE,
                 workerOutcome = workerOutcome,
-                workerOutcomePublished = workerOutcomePublished
+                workerOutcomePublished = workerOutcomePublished,
+                workerOutcomesByCheckId = workerOutcomesByCheckId,
+                workerOutcomesPublishedByCheckId = workerOutcomesPublishedByCheckId
             ) {
                 updateGuardianHostTestSettings(context) { current ->
                     current.copy(
@@ -3911,14 +4322,20 @@ class AppRuleBlockerRecheckTest {
         val targetPackage: String,
         val workerOutcome: AtomicReference<DecisionOutcome.GuardianApprovalEvaluationReady?>,
         val workerOutcomePublished: CountDownLatch,
+        private val workerOutcomesByCheckId:
+            ConcurrentHashMap<String, DecisionOutcome.GuardianApprovalEvaluationReady>,
+        private val workerOutcomesPublishedByCheckId: ConcurrentHashMap<String, CountDownLatch>,
         private val restoreSettings: () -> Unit
     ) {
-        private var gateArmSent = false
-        private var gateReleased = false
+        private val armedGateIds = linkedSetOf<String>()
+        private val releasedGateIds = linkedSetOf<String>()
         private var closed = false
 
-        fun armOutcomeGate() {
-            gateArmSent = true
+        fun armOutcomeGate(gateId: String = this.gateId): Boolean {
+            val acknowledgement = service.expectBroadcast {
+                it.action == AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE &&
+                    it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == gateId
+            }
             sendTestBroadcast(
                 Intent(AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
                     .putExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID, gateId)
@@ -3927,6 +4344,21 @@ class AppRuleBlockerRecheckTest {
                         context.packageName
                     )
             )
+            val accepted = acknowledgement.awaitBroadcast(
+                "worker outcome gate arm",
+                timeoutMs = 2_000L
+            )
+                .getBooleanExtra("guardian_test_gate_accepted", false)
+            if (accepted) armedGateIds += gateId
+            return accepted
+        }
+
+        fun armOutcomeGateWhenAvailable(baseGateId: String): String {
+            repeat(10) { attempt ->
+                val gateId = "$baseGateId-$attempt"
+                if (armOutcomeGate(gateId)) return gateId
+            }
+            error("The previous worker outcome gate did not finish")
         }
 
         fun openScreenAndSubmitCheck() {
@@ -3957,6 +4389,40 @@ class AppRuleBlockerRecheckTest {
             )
         }
 
+        fun receiveCheckSynchronously(action: String, checkId: String) {
+            invokePrivate(
+                blocker,
+                "receiveGuardianApprovalCheck",
+                approvalCheckIntent(
+                    action = action,
+                    screenRequestId = screenRequestId,
+                    operationId = operationId,
+                    checkId = checkId,
+                    receipt = receipt,
+                    connectionId = serviceConnectionId
+                ),
+                action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
+                action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER
+            )
+        }
+
+        fun awaitWorkerOutcome(
+            checkId: String,
+            timeoutMs: Long = TEST_TIMEOUT_MS
+        ): DecisionOutcome.GuardianApprovalEvaluationReady {
+            val published = workerOutcomesPublishedByCheckId.computeIfAbsent(checkId) {
+                CountDownLatch(1)
+            }
+            check(published.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                "The actual serialized worker did not publish check $checkId"
+            }
+            return checkNotNull(workerOutcomesByCheckId[checkId])
+        }
+
+        fun confirmationResults(): List<Intent> = service.sentBroadcasts.filter {
+            it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT
+        }
+
         fun externalEffectSnapshot(): ExternalEffectSnapshot = synchronized(
             getField(blocker, "runtimeLock") as Any
         ) {
@@ -3972,8 +4438,8 @@ class AppRuleBlockerRecheckTest {
             )
         }
 
-        fun releaseOutcomeGate() {
-            if (!gateArmSent || gateReleased) return
+        fun releaseOutcomeGate(gateId: String = this.gateId) {
+            if (gateId !in armedGateIds || gateId in releasedGateIds) return
             val released = service.expectBroadcast {
                 it.action == AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE &&
                     it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == gateId
@@ -3982,18 +4448,18 @@ class AppRuleBlockerRecheckTest {
                 Intent(AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
                     .putExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID, gateId)
             )
-            gateReleased = true
             val acknowledgement = released.awaitBroadcast("worker outcome gate release")
             check(acknowledgement.getBooleanExtra("guardian_test_gate_accepted", false)) {
                 "the worker outcome gate release was rejected"
             }
+            releasedGateIds += gateId
         }
 
         fun close() {
             if (closed) return
             closed = true
             try {
-                releaseOutcomeGate()
+                armedGateIds.toList().forEach(::releaseOutcomeGate)
             } finally {
                 try {
                     blocker.onDestroy()

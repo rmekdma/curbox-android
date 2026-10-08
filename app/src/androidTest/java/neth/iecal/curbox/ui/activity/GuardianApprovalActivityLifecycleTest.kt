@@ -853,6 +853,7 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
                         )
                 )
+                awaitDisplayed(R.id.approval_confirmation_retry)
                 scenario.onActivity { activity ->
                     assertViewVisibility(activity, R.id.approval_confirmation_retry, android.view.View.VISIBLE)
                 }

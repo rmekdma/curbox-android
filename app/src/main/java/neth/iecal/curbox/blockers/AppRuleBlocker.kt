@@ -561,6 +561,16 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     internal var recheckPlanDeliveryObserver: ((RecheckPlanUpdate) -> Unit)? = null
     /** Passive seam immediately at DecisionOutcomeSink.publish entry before external effects. */
     internal var decisionOutcomeSinkObserver: ((DecisionOutcome) -> Unit)? = null
+    /** DEBUG-only signal after the guardian timeout delay and before its runtimeLock transition. */
+    @VisibleForTesting
+    @Volatile
+    internal var guardianTimeoutPostDelayObserverForTest:
+        ((GuardianApprovalCoordinator.CheckIdentity) -> Unit)? = null
+    /** DEBUG-only completion signal after the real worker outcome handler returns. */
+    @VisibleForTesting
+    @Volatile
+    internal var guardianOutcomeHandlerFinishedObserverForTest:
+        ((GuardianApprovalCoordinator.CheckIdentity) -> Unit)? = null
 
     private var isDefaultWakeScheduler = false
     internal var wakeScheduler: AppRuleWakeScheduler? = wakeScheduler
@@ -2608,6 +2618,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             guardianConfirmationTimeoutJob = scope.launch {
                 try {
                     delay(GuardianApprovalCoordinator.CONFIRMATION_TIMEOUT_MS)
+                    runGuardianApprovalInstrumentationObserver {
+                        guardianTimeoutPostDelayObserverForTest?.invoke(checkIdentity)
+                    }
                     val timedOut = synchronized(runtimeLock) guardianTimeoutLock@ {
                         if (!isReadyForChecks(connectionGeneration)) return@guardianTimeoutLock false
                         guardianApprovalCoordinator.timeOutConfirmation(checkIdentity)
@@ -2853,6 +2866,11 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             try {
                 awaitGuardianEvaluationTestGate(outcome)
                 handleGuardianApprovalEvaluation(outcome, workerInstanceToken)
+                runGuardianApprovalInstrumentationObserver {
+                    guardianOutcomeHandlerFinishedObserverForTest?.invoke(
+                        outcome.request.checkIdentity()
+                    )
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -2915,6 +2933,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         checkId?.let { acknowledgement.putExtra(EXTRA_TEST_CHECK_ID, it) }
         try {
             service.sendBroadcast(acknowledgement)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            logNonFatal(error)
+        }
+    }
+
+    private inline fun runGuardianApprovalInstrumentationObserver(observer: () -> Unit) {
+        if (!BuildConfig.DEBUG) return
+        try {
+            observer()
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
