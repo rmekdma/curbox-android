@@ -13,8 +13,11 @@ import neth.iecal.curbox.domain.apprules.GuardianApprovalConfirmationState
 import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationStatus
 import neth.iecal.curbox.domain.apprules.GuardianApprovalPolicyFingerprint
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
+import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import java.time.Instant
+import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -334,13 +337,29 @@ class AppRuleBlockerGuardianWorkerIntegrationTest {
         val scriptedElapsedRealtimeMs = AtomicLong(android.os.SystemClock.elapsedRealtime())
         val targetId = "guardian-expiring-schedule-denial"
         val dataStore = DataStoreManager(InstrumentationContext.context)
+        val zone = ZoneId.systemDefault()
+        val originalSettings = runBlocking { dataStore.settings.first() }
+        val actualWallClockMs = System.currentTimeMillis()
+        val useDayCalculator = ConfigurableUseDayCalculator(
+            zone,
+            originalSettings.useDayResetTime
+        )
+        val currentUseDayId = useDayCalculator.idAt(actualWallClockMs)
+        // Keep the scripted boundary in the setup-time use day, two hours after its reset.
+        val seededWallClockMs = useDayCalculator.windowFor(currentUseDayId).first +
+            TimeUnit.HOURS.toMillis(2L)
+        val expectedScheduleBoundaryWallMs = AtomicLong()
         val fixture = createConfirmationHostFixture(
-            includeRemainingRule = true
+            includeRemainingRule = true,
+            seededWallClockMs = seededWallClockMs,
+            // Exceed any target usage that can accumulate within this use day.
+            fixtureGrantMillis = TimeUnit.DAYS.toMillis(2L)
         ) { blocker ->
             val initialWallClockMs = blocker.wallClockMsProvider()
             scriptedWallClockMs.set(initialWallClockMs)
-            val localNow = Instant.ofEpochMilli(initialWallClockMs).atZone(ZoneId.systemDefault())
+            val localNow = Instant.ofEpochMilli(initialWallClockMs).atZone(zone)
             val startMinute = localNow.hour * 60
+            val endMinute = startMinute + 60
             val expiringRule = AppRule(
                 id = targetId,
                 name = "Expiring target rule",
@@ -349,10 +368,17 @@ class AppRuleBlockerGuardianWorkerIntegrationTest {
                 timeRanges = listOf(
                     AppRuleTimeRange(
                         startMinute = startMinute,
-                        endMinute = startMinute + 60
+                        endMinute = endMinute
                     )
                 ),
                 allowedMinutes = 0
+            )
+            expectedScheduleBoundaryWallMs.set(
+                LocalDateTime.of(localNow.toLocalDate(), LocalTime.MIDNIGHT)
+                    .plusMinutes(endMinute.toLong())
+                    .atZone(zone)
+                    .toInstant()
+                    .toEpochMilli()
             )
             blocker.wallClockMsProvider = { scriptedWallClockMs.get() }
             blocker.elapsedRealtimeMsProvider = { scriptedElapsedRealtimeMs.get() }
@@ -425,6 +451,11 @@ class AppRuleBlockerGuardianWorkerIntegrationTest {
                 "the denial worker must report a finite future policy boundary",
                 policyBoundaryWallMs > firstOutcome.request.capturedAtWallMs &&
                     policyBoundaryWallMs < Long.MAX_VALUE
+            )
+            assertEquals(
+                "the schedule end must be the earliest fixture policy boundary",
+                expectedScheduleBoundaryWallMs.get(),
+                policyBoundaryWallMs
             )
             val advancedWallClockMs = policyBoundaryWallMs + 1L
             val elapsedAdvanceMs = advancedWallClockMs - firstOutcome.request.capturedAtWallMs

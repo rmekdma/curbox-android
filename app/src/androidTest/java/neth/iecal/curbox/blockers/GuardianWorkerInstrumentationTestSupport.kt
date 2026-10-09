@@ -85,6 +85,8 @@ internal fun assertTimeoutIdentity(
 
 internal fun createConfirmationHostFixture(
     includeRemainingRule: Boolean,
+    seededWallClockMs: Long = System.currentTimeMillis(),
+    fixtureGrantMillis: Long = 60L * 60_000L,
     beforeBlockerSetup: ((AppRuleBlocker) -> Unit)? = null
 ): ConfirmationHostFixture {
     val context = InstrumentationContext.context
@@ -101,25 +103,24 @@ internal fun createConfirmationHostFixture(
     var blocker: AppRuleBlocker? = null
 
     try {
-        val nowMs = System.currentTimeMillis()
+        val nowMs = seededWallClockMs
         val useDayId = ConfigurableUseDayCalculator(
             resetTime = originalSettings.useDayResetTime
         ).idAt(nowMs)
         val ruleId = "guardian-target-allowance"
         val groupId = "guardian-target"
-        val grantMillis = 60L * 60_000L
         val grant = AppRuleGuardianGrant(
             ruleId = ruleId,
             useDayId = useDayId,
             grantedAtMs = nowMs,
-            grantedMillis = grantMillis
+            grantedMillis = fixtureGrantMillis
         )
         val receipt = GuardianApprovalWorkReceipt.Grant(
             grant = GuardianApprovalGrantReceipt(
                 ruleId = ruleId,
                 useDayId = useDayId,
                 grantedAtMs = nowMs,
-                grantedMillis = grantMillis
+                grantedMillis = fixtureGrantMillis
             ),
             origin = GuardianApprovalGrantOrigin.DIRECT,
             useDayGenerationStartedAtMs = originalSettings.useDayGenerationStartedAtMs
@@ -187,7 +188,7 @@ internal fun createConfirmationHostFixture(
             it.lastBackPressTimeStamp = 0L
         }
         blocker = AppRuleBlocker().apply {
-            wallClockMsProvider = { nowMs }
+            wallClockMsProvider = { seededWallClockMs }
             activeWindowSnapshotProvider = {
                 AppRuleBlocker.ActiveWindowSnapshot(packageName = service.packageName)
             }
