@@ -102,6 +102,10 @@ android {
     }
 
     sourceSets {
+        // Deterministic adapters are shared by local and instrumented tests, never production.
+        getByName("test") { java.srcDir("src/testShared/java") }
+        getByName("androidTest") { java.srcDir("src/testShared/java") }
+
         // Cross device sync code shared by the full and playstore flavors.
         // F-Droid never compiles it, so that build stays offline.
         getByName("full") { java.srcDir("src/sync/java") }
