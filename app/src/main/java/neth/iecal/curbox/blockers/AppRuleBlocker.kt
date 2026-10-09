@@ -3288,7 +3288,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         capturedAtWallClockMs = outcome.request.capturedAtWallMs,
         capturedAtElapsedRealtimeMs = outcome.request.capturedAtElapsedMs,
         validUntilWallClockMs = outcome.validUntilWallClockMs,
-        nowWallClockMs = System.currentTimeMillis(),
+        nowWallClockMs = observationWallClockMs(),
         nowElapsedRealtimeMs = observationElapsedRealtimeMs()
     )
 
