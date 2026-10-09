@@ -84,51 +84,51 @@ internal fun assertTimeoutIdentity(
 }
 
 internal fun createConfirmationHostFixture(
-    includeRemainingRule: Boolean
+    includeRemainingRule: Boolean,
+    beforeBlockerSetup: ((AppRuleBlocker) -> Unit)? = null
 ): ConfirmationHostFixture {
     val context = InstrumentationContext.context
     val dataStore = DataStoreManager(context)
     val originalSettings = runBlocking { dataStore.settings.first() }
-    val nowMs = System.currentTimeMillis()
-    val useDayId = ConfigurableUseDayCalculator(
-        resetTime = originalSettings.useDayResetTime
-    ).idAt(nowMs)
-    val ruleId = "guardian-target-allowance"
-    val groupId = "guardian-target"
-    val grantMillis = 60L * 60_000L
-    val grant = AppRuleGuardianGrant(
-        ruleId = ruleId,
-        useDayId = useDayId,
-        grantedAtMs = nowMs,
-        grantedMillis = grantMillis
-    )
-    val receipt = GuardianApprovalWorkReceipt.Grant(
-        grant = GuardianApprovalGrantReceipt(
+    val restoreSettings: () -> Unit = {
+        updateGuardianHostTestSettings(context) { current ->
+            current.copy(
+                appRuleSnapshot = originalSettings.appRuleSnapshot,
+                appRuleOverrideState = originalSettings.appRuleOverrideState
+            )
+        }
+    }
+    var blocker: AppRuleBlocker? = null
+
+    try {
+        val nowMs = System.currentTimeMillis()
+        val useDayId = ConfigurableUseDayCalculator(
+            resetTime = originalSettings.useDayResetTime
+        ).idAt(nowMs)
+        val ruleId = "guardian-target-allowance"
+        val groupId = "guardian-target"
+        val grantMillis = 60L * 60_000L
+        val grant = AppRuleGuardianGrant(
             ruleId = ruleId,
             useDayId = useDayId,
             grantedAtMs = nowMs,
             grantedMillis = grantMillis
-        ),
-        origin = GuardianApprovalGrantOrigin.DIRECT,
-        useDayGenerationStartedAtMs = originalSettings.useDayGenerationStartedAtMs
-    )
-    val rules = buildList {
-        add(
-            AppRule(
-                id = ruleId,
-                name = "Target allowance",
-                weekdays = (0..6).toSet(),
-                startMinute = 0,
-                endMinute = 0,
-                scope = AppRuleScope.forGroup(groupId),
-                allowedMinutes = 0
-            )
         )
-        if (includeRemainingRule) {
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            grant = GuardianApprovalGrantReceipt(
+                ruleId = ruleId,
+                useDayId = useDayId,
+                grantedAtMs = nowMs,
+                grantedMillis = grantMillis
+            ),
+            origin = GuardianApprovalGrantOrigin.DIRECT,
+            useDayGenerationStartedAtMs = originalSettings.useDayGenerationStartedAtMs
+        )
+        val rules = buildList {
             add(
                 AppRule(
-                    id = "guardian-remaining-denial",
-                    name = "Remaining target rule",
+                    id = ruleId,
+                    name = "Target allowance",
                     weekdays = (0..6).toSet(),
                     startMinute = 0,
                     endMinute = 0,
@@ -136,85 +136,98 @@ internal fun createConfirmationHostFixture(
                     allowedMinutes = 0
                 )
             )
+            if (includeRemainingRule) {
+                add(
+                    AppRule(
+                        id = "guardian-remaining-denial",
+                        name = "Remaining target rule",
+                        weekdays = (0..6).toSet(),
+                        startMinute = 0,
+                        endMinute = 0,
+                        scope = AppRuleScope.forGroup(groupId),
+                        allowedMinutes = 0
+                    )
+                )
+            }
         }
-    }
-    val snapshot = AppRuleSnapshot(
-        appGroups = listOf(
-            AppRuleAppGroup(
-                id = groupId,
-                name = "Guardian target",
-                selectedPackages = listOf(GUARDIAN_WORKER_TARGET_PACKAGE)
-            )
-        ),
-        appRules = rules
-    ).normalized()
-    val overrideState = AppRuleOverrideState(
-        useDayId = useDayId,
-        useDayGenerationStartedAtMs = originalSettings.useDayGenerationStartedAtMs,
-        grants = listOf(grant)
-    )
-    val seededSettings = updateGuardianHostTestSettings(context) { current ->
-        current.copy(
-            appRuleSnapshot = snapshot,
-            appRuleOverrideState = overrideState
+        val snapshot = AppRuleSnapshot(
+            appGroups = listOf(
+                AppRuleAppGroup(
+                    id = groupId,
+                    name = "Guardian target",
+                    selectedPackages = listOf(GUARDIAN_WORKER_TARGET_PACKAGE)
+                )
+            ),
+            appRules = rules
+        ).normalized()
+        val overrideState = AppRuleOverrideState(
+            useDayId = useDayId,
+            useDayGenerationStartedAtMs = originalSettings.useDayGenerationStartedAtMs,
+            grants = listOf(grant)
         )
-    }
-    val screenRequestId = "guardian-host-screen-${java.util.UUID.randomUUID()}"
-    val operationId = "guardian-host-operation-${java.util.UUID.randomUUID()}"
-    val checkId = "guardian-host-check-${java.util.UUID.randomUUID()}"
-    val gateId = "guardian-host-gate-${java.util.UUID.randomUUID()}"
-    val workerOutcome = AtomicReference<DecisionOutcome.GuardianApprovalEvaluationReady?>()
-    val workerOutcomePublished = CountDownLatch(1)
-    val workerOutcomesByCheckId = ConcurrentHashMap<
-        String,
-        DecisionOutcome.GuardianApprovalEvaluationReady
-    >()
-    val workerOutcomesPublishedByCheckId = ConcurrentHashMap<String, CountDownLatch>()
-    val service = RecordingService().also {
-        it.attach(context)
-        it.lastBackPressTimeStamp = 0L
-    }
-    val blocker = AppRuleBlocker().apply {
-        wallClockMsProvider = { nowMs }
-        activeWindowSnapshotProvider = {
-            AppRuleBlocker.ActiveWindowSnapshot(packageName = service.packageName)
-        }
-        applicationWindowSnapshotProvider = {
-            AppRuleBlocker.ApplicationWindowSnapshot(
-                packages = setOf(service.packageName),
-                hasApplicationWindow = true,
-                hasUnknownApplicationWindow = false
+        val seededSettings = updateGuardianHostTestSettings(context) { current ->
+            current.copy(
+                appRuleSnapshot = snapshot,
+                appRuleOverrideState = overrideState
             )
         }
-        screenInteractiveProvider = { true }
-        keyguardLockedProvider = { false }
-        decisionOutcomeSinkObserver = { outcome ->
-            if (outcome is DecisionOutcome.GuardianApprovalEvaluationReady &&
-                outcome.request.operationId == operationId
-            ) {
-                workerOutcomesByCheckId[outcome.request.checkId] = outcome
-                workerOutcomesPublishedByCheckId
-                    .computeIfAbsent(outcome.request.checkId) { CountDownLatch(1) }
-                    .countDown()
-                if (outcome.request.checkId == checkId) {
-                    workerOutcome.set(outcome)
-                    workerOutcomePublished.countDown()
+        val screenRequestId = "guardian-host-screen-${java.util.UUID.randomUUID()}"
+        val operationId = "guardian-host-operation-${java.util.UUID.randomUUID()}"
+        val checkId = "guardian-host-check-${java.util.UUID.randomUUID()}"
+        val gateId = "guardian-host-gate-${java.util.UUID.randomUUID()}"
+        val workerOutcome = AtomicReference<DecisionOutcome.GuardianApprovalEvaluationReady?>()
+        val workerOutcomePublished = CountDownLatch(1)
+        val workerOutcomesByCheckId = ConcurrentHashMap<
+            String,
+            DecisionOutcome.GuardianApprovalEvaluationReady
+        >()
+        val workerOutcomesPublishedByCheckId = ConcurrentHashMap<String, CountDownLatch>()
+        val service = RecordingService().also {
+            it.attach(context)
+            it.lastBackPressTimeStamp = 0L
+        }
+        blocker = AppRuleBlocker().apply {
+            wallClockMsProvider = { nowMs }
+            activeWindowSnapshotProvider = {
+                AppRuleBlocker.ActiveWindowSnapshot(packageName = service.packageName)
+            }
+            applicationWindowSnapshotProvider = {
+                AppRuleBlocker.ApplicationWindowSnapshot(
+                    packages = setOf(service.packageName),
+                    hasApplicationWindow = true,
+                    hasUnknownApplicationWindow = false
+                )
+            }
+            screenInteractiveProvider = { true }
+            keyguardLockedProvider = { false }
+            decisionOutcomeSinkObserver = { outcome ->
+                if (outcome is DecisionOutcome.GuardianApprovalEvaluationReady &&
+                    outcome.request.operationId == operationId
+                ) {
+                    workerOutcomesByCheckId[outcome.request.checkId] = outcome
+                    workerOutcomesPublishedByCheckId
+                        .computeIfAbsent(outcome.request.checkId) { CountDownLatch(1) }
+                        .countDown()
+                    if (outcome.request.checkId == checkId) {
+                        workerOutcome.set(outcome)
+                        workerOutcomePublished.countDown()
+                    }
                 }
             }
         }
-    }
-    try {
-        blocker.setup(service)
-        blocker.setupReceivers()
+        val createdBlocker = checkNotNull(blocker)
+        beforeBlockerSetup?.invoke(createdBlocker)
+        createdBlocker.setup(service)
+        createdBlocker.setupReceivers()
         // Setup uses Android's live source. The production outcome handler below still reads
         // these same host gates; this only makes the attached instrumentation service's
         // display and foreground facts deterministic.
-        setField(blocker, "foregroundObservationSource", null)
-        val serviceConnectionId = getField(blocker, "serviceConnectionId") as String
+        setField(createdBlocker, "foregroundObservationSource", null)
+        val serviceConnectionId = getField(createdBlocker, "serviceConnectionId") as String
         return ConfirmationHostFixture(
             context = context,
             service = service,
-            blocker = blocker,
+            blocker = createdBlocker,
             seededSettings = seededSettings,
             receipt = receipt,
             screenRequestId = screenRequestId,
@@ -226,31 +239,19 @@ internal fun createConfirmationHostFixture(
             workerOutcome = workerOutcome,
             workerOutcomePublished = workerOutcomePublished,
             workerOutcomesByCheckId = workerOutcomesByCheckId,
-            workerOutcomesPublishedByCheckId = workerOutcomesPublishedByCheckId
-        ) {
-            updateGuardianHostTestSettings(context) { current ->
-                current.copy(
-                    appRuleSnapshot = originalSettings.appRuleSnapshot,
-                    appRuleOverrideState = originalSettings.appRuleOverrideState
-                )
-            }
-        }
+            workerOutcomesPublishedByCheckId = workerOutcomesPublishedByCheckId,
+            restoreSettings = restoreSettings
+        )
     } catch (error: Throwable) {
         try {
-            blocker.onDestroy()
+            blocker?.onDestroy()
         } catch (cleanupError: Throwable) {
             if (cleanupError !== error) error.addSuppressed(cleanupError)
-        } finally {
-            try {
-                updateGuardianHostTestSettings(context) { current ->
-                    current.copy(
-                        appRuleSnapshot = originalSettings.appRuleSnapshot,
-                        appRuleOverrideState = originalSettings.appRuleOverrideState
-                    )
-                }
-            } catch (restoreError: Throwable) {
-                if (restoreError !== error) error.addSuppressed(restoreError)
-            }
+        }
+        try {
+            restoreSettings()
+        } catch (restoreError: Throwable) {
+            if (restoreError !== error) error.addSuppressed(restoreError)
         }
         throw error
     }
@@ -432,199 +433,199 @@ internal data class ExternalEffectSnapshot(
 }
 
 internal class ConfirmationHostFixture(
-val context: Context,
-val service: RecordingService,
-val blocker: AppRuleBlocker,
-val seededSettings: Settings,
-val receipt: GuardianApprovalWorkReceipt,
-val screenRequestId: String,
-val operationId: String,
-val checkId: String,
-val gateId: String,
-val serviceConnectionId: String,
-val targetPackage: String,
-val workerOutcome: AtomicReference<DecisionOutcome.GuardianApprovalEvaluationReady?>,
-val workerOutcomePublished: CountDownLatch,
-private val workerOutcomesByCheckId:
-    ConcurrentHashMap<String, DecisionOutcome.GuardianApprovalEvaluationReady>,
-private val workerOutcomesPublishedByCheckId: ConcurrentHashMap<String, CountDownLatch>,
-private val restoreSettings: () -> Unit
+    val context: Context,
+    val service: RecordingService,
+    val blocker: AppRuleBlocker,
+    val seededSettings: Settings,
+    val receipt: GuardianApprovalWorkReceipt,
+    val screenRequestId: String,
+    val operationId: String,
+    val checkId: String,
+    val gateId: String,
+    val serviceConnectionId: String,
+    val targetPackage: String,
+    val workerOutcome: AtomicReference<DecisionOutcome.GuardianApprovalEvaluationReady?>,
+    val workerOutcomePublished: CountDownLatch,
+    private val workerOutcomesByCheckId:
+        ConcurrentHashMap<String, DecisionOutcome.GuardianApprovalEvaluationReady>,
+    private val workerOutcomesPublishedByCheckId: ConcurrentHashMap<String, CountDownLatch>,
+    private val restoreSettings: () -> Unit
 ) {
     private val gateIdsToRelease = linkedSetOf<String>()
     private val acceptedGateIds = linkedSetOf<String>()
-private val releasedGateIds = linkedSetOf<String>()
-private var closed = false
+    private val releasedGateIds = linkedSetOf<String>()
+    private var closed = false
 
-fun armOutcomeGate(gateId: String = this.gateId): Boolean {
-            gateIdsToRelease += gateId
-    val acknowledgement = service.expectBroadcast {
-        it.action == AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE &&
-            it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == gateId
+    fun armOutcomeGate(gateId: String = this.gateId): Boolean {
+        gateIdsToRelease += gateId
+        val acknowledgement = service.expectBroadcast {
+            it.action == AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE &&
+                it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == gateId
+        }
+        sendTestBroadcast(
+            Intent(AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
+                .putExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID, gateId)
+                .putExtra(
+                    AppRuleBlocker.EXTRA_TEST_ACK_PACKAGE,
+                    context.packageName
+                )
+        )
+        val accepted = acknowledgement.awaitBroadcast(
+            "worker outcome gate arm",
+            timeoutMs = 2_000L
+        ).getBooleanExtra("guardian_test_gate_accepted", false)
+        if (accepted) acceptedGateIds += gateId
+        return accepted
     }
-    sendTestBroadcast(
-        Intent(AppRuleBlocker.INTENT_ACTION_TEST_ARM_GUARDIAN_EVALUATION_GATE)
-            .putExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID, gateId)
-            .putExtra(
-                AppRuleBlocker.EXTRA_TEST_ACK_PACKAGE,
-                context.packageName
+
+    fun armOutcomeGateWhenAvailable(baseGateId: String): String {
+        repeat(10) { attempt ->
+            val gateId = "$baseGateId-$attempt"
+            if (armOutcomeGate(gateId)) return gateId
+        }
+        error("The previous worker outcome gate did not finish")
+    }
+
+    fun openScreenAndSubmitCheck() {
+        sendTestBroadcast(
+            guardianLifecycleIntent(
+                action = GuardianApprovalActivity.INTENT_ACTION_OPENED,
+                packageName = targetPackage,
+                screenRequestId = screenRequestId,
+                connectionId = serviceConnectionId
             )
-    )
-    val accepted = acknowledgement.awaitBroadcast(
-        "worker outcome gate arm",
-        timeoutMs = 2_000L
-    )
-        .getBooleanExtra("guardian_test_gate_accepted", false)
-            if (accepted) acceptedGateIds += gateId
-    return accepted
-}
-
-fun armOutcomeGateWhenAvailable(baseGateId: String): String {
-    repeat(10) { attempt ->
-        val gateId = "$baseGateId-$attempt"
-        if (armOutcomeGate(gateId)) return gateId
-    }
-    error("The previous worker outcome gate did not finish")
-}
-
-fun openScreenAndSubmitCheck() {
-    sendTestBroadcast(
-        guardianLifecycleIntent(
-            action = GuardianApprovalActivity.INTENT_ACTION_OPENED,
-            packageName = targetPackage,
-            screenRequestId = screenRequestId,
-            connectionId = serviceConnectionId
         )
-    )
-    submitCheck(
-        action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED,
-        checkId = checkId
-    )
-}
-
-fun submitCheck(action: String, checkId: String) {
-    sendTestBroadcast(
-        approvalCheckIntent(
-            action = action,
-            screenRequestId = screenRequestId,
-            operationId = operationId,
-            checkId = checkId,
-            receipt = receipt,
-            connectionId = serviceConnectionId
+        submitCheck(
+            action = GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED,
+            checkId = checkId
         )
-    )
-}
-
-fun receiveCheckSynchronously(action: String, checkId: String) {
-    invokePrivate(
-        blocker,
-        "receiveGuardianApprovalCheck",
-        approvalCheckIntent(
-            action = action,
-            screenRequestId = screenRequestId,
-            operationId = operationId,
-            checkId = checkId,
-            receipt = receipt,
-            connectionId = serviceConnectionId
-        ),
-        action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
-        action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER
-    )
-}
-
-fun awaitWorkerOutcome(
-    checkId: String,
-    timeoutMs: Long = GUARDIAN_WORKER_TEST_TIMEOUT_MS
-): DecisionOutcome.GuardianApprovalEvaluationReady {
-    val published = workerOutcomesPublishedByCheckId.computeIfAbsent(checkId) {
-        CountDownLatch(1)
     }
-    check(published.await(timeoutMs, TimeUnit.MILLISECONDS)) {
-        "The actual serialized worker did not publish check $checkId"
+
+    fun submitCheck(action: String, checkId: String) {
+        sendTestBroadcast(
+            approvalCheckIntent(
+                action = action,
+                screenRequestId = screenRequestId,
+                operationId = operationId,
+                checkId = checkId,
+                receipt = receipt,
+                connectionId = serviceConnectionId
+            )
+        )
     }
-    return checkNotNull(workerOutcomesByCheckId[checkId])
-}
 
-fun confirmationResults(): List<Intent> = service.sentBroadcasts.filter {
-    it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT
-}
+    fun receiveCheckSynchronously(action: String, checkId: String) {
+        invokePrivate(
+            blocker,
+            "receiveGuardianApprovalCheck",
+            approvalCheckIntent(
+                action = action,
+                screenRequestId = screenRequestId,
+                operationId = operationId,
+                checkId = checkId,
+                receipt = receipt,
+                connectionId = serviceConnectionId
+            ),
+            action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY,
+            action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER
+        )
+    }
 
-fun externalEffectSnapshot(): ExternalEffectSnapshot = synchronized(
-    getField(blocker, "runtimeLock") as Any
-) {
-    ExternalEffectSnapshot(
-        pendingPermits = (getField(blocker, "pendingExternalEffects") as Set<*>)
-            .filterNotNull()
-            .toSet(),
-        inFlightCallbackCount =
-            (getField(blocker, "inFlightCallbacks") as java.util.concurrent.atomic.AtomicInteger)
-                .get(),
-        owner = (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
-            .currentOwner()
-    )
-}
+    fun awaitWorkerOutcome(
+        checkId: String,
+        timeoutMs: Long = GUARDIAN_WORKER_TEST_TIMEOUT_MS
+    ): DecisionOutcome.GuardianApprovalEvaluationReady {
+        val published = workerOutcomesPublishedByCheckId.computeIfAbsent(checkId) {
+            CountDownLatch(1)
+        }
+        check(published.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            "The actual serialized worker did not publish check $checkId"
+        }
+        return checkNotNull(workerOutcomesByCheckId[checkId])
+    }
 
-        fun releaseOutcomeGate(
-            gateId: String = this.gateId,
-            requireAccepted: Boolean = gateId in acceptedGateIds
+    fun confirmationResults(): List<Intent> = service.sentBroadcasts.filter {
+        it.action == GuardianApprovalActivity.INTENT_ACTION_CONFIRMATION_RESULT
+    }
+
+    fun externalEffectSnapshot(): ExternalEffectSnapshot = synchronized(
+        getField(blocker, "runtimeLock") as Any
+    ) {
+        ExternalEffectSnapshot(
+            pendingPermits = (getField(blocker, "pendingExternalEffects") as Set<*>)
+                .filterNotNull()
+                .toSet(),
+            inFlightCallbackCount =
+                (getField(blocker, "inFlightCallbacks") as java.util.concurrent.atomic.AtomicInteger)
+                    .get(),
+            owner = (getField(blocker, "guardianApprovalCoordinator") as GuardianApprovalCoordinator)
+                .currentOwner()
+        )
+    }
+
+    fun releaseOutcomeGate(
+        gateId: String = this.gateId,
+        requireAccepted: Boolean = gateId in acceptedGateIds
+    ) {
+        if (gateId !in gateIdsToRelease || gateId in releasedGateIds) return
+        val released = service.expectBroadcast {
+            it.action == AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE &&
+                it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == gateId
+        }
+        sendTestBroadcast(
+            Intent(AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
+                .putExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID, gateId)
+        )
+        val acknowledgement = released.awaitBroadcast("worker outcome gate release")
+        check(
+            !requireAccepted ||
+                acknowledgement.getBooleanExtra("guardian_test_gate_accepted", false)
         ) {
-            if (gateId !in gateIdsToRelease || gateId in releasedGateIds) return
-    val released = service.expectBroadcast {
-        it.action == AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE &&
-            it.getStringExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID) == gateId
+            "the worker outcome gate release was rejected"
+        }
+        releasedGateIds += gateId
     }
-    sendTestBroadcast(
-        Intent(AppRuleBlocker.INTENT_ACTION_TEST_RELEASE_GUARDIAN_EVALUATION_GATE)
-            .putExtra(AppRuleBlocker.EXTRA_TEST_GATE_ID, gateId)
-    )
-    val acknowledgement = released.awaitBroadcast("worker outcome gate release")
-            check(
-                !requireAccepted ||
-                    acknowledgement.getBooleanExtra("guardian_test_gate_accepted", false)
-            ) {
-        "the worker outcome gate release was rejected"
-    }
-    releasedGateIds += gateId
-}
 
-fun close() {
-    if (closed) return
-    closed = true
-            var cleanupError: Throwable? = null
-            fun recordCleanupError(error: Throwable) {
-                val previousError = cleanupError
-                if (previousError == null) {
-                    cleanupError = error
-                } else if (previousError !== error) {
-                    previousError.addSuppressed(error)
-                }
-            }
+    fun close() {
+        if (closed) return
+        closed = true
 
-            gateIdsToRelease.toList().forEach { gateId ->
-                try {
-                    releaseOutcomeGate(
-                        gateId = gateId,
-                        requireAccepted = gateId in acceptedGateIds
-                    )
-                } catch (error: Throwable) {
-                    recordCleanupError(error)
-                }
+        var cleanupError: Throwable? = null
+        fun recordCleanupError(error: Throwable) {
+            val previousError = cleanupError
+            if (previousError == null) {
+                cleanupError = error
+            } else if (previousError !== error) {
+                previousError.addSuppressed(error)
             }
+        }
+
+        gateIdsToRelease.toList().forEach { gateId ->
             try {
-                blocker.onDestroy()
+                releaseOutcomeGate(
+                    gateId = gateId,
+                    requireAccepted = gateId in acceptedGateIds
+                )
             } catch (error: Throwable) {
                 recordCleanupError(error)
             }
-            try {
-                restoreSettings()
-            } catch (error: Throwable) {
-                recordCleanupError(error)
+        }
+        try {
+            blocker.onDestroy()
+        } catch (error: Throwable) {
+            recordCleanupError(error)
+        }
+        try {
+            restoreSettings()
+        } catch (error: Throwable) {
+            recordCleanupError(error)
+        }
+        cleanupError?.let { throw it }
     }
-            cleanupError?.let { throw it }
-}
 
-private fun sendTestBroadcast(intent: Intent) {
-    context.sendBroadcast(intent.setPackage(context.packageName))
-}
+    private fun sendTestBroadcast(intent: Intent) {
+        context.sendBroadcast(intent.setPackage(context.packageName))
+    }
 }
 
 internal object InstrumentationContext {

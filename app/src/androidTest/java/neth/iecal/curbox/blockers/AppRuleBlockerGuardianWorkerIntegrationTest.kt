@@ -2,13 +2,17 @@ package neth.iecal.curbox.blockers
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.gson.Gson
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.domain.apprules.DecisionOutcome
 import neth.iecal.curbox.domain.apprules.GuardianApprovalCoordinator
 import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationStatus
 import neth.iecal.curbox.domain.apprules.GuardianApprovalPolicyFingerprint
 import neth.iecal.curbox.ui.activity.GuardianApprovalActivity
+import neth.iecal.curbox.utils.DataStoreManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,6 +25,39 @@ import java.util.concurrent.atomic.AtomicReference
 /** End-to-end host coverage for the guardian evaluation worker and result handler. */
 @RunWith(AndroidJUnit4::class)
 class AppRuleBlockerGuardianWorkerIntegrationTest {
+    @Test
+    fun fixtureRestoresSettingsWhenSetupFailsAfterSeeding() {
+        val dataStore = DataStoreManager(InstrumentationContext.context)
+        val originalSettings = runBlocking { dataStore.settings.first() }
+        val injectedFailure = IllegalStateException("Injected guardian fixture setup failure")
+        val observedSeededSettings = AtomicBoolean(false)
+
+        val setupFailure = runCatching {
+            createConfirmationHostFixture(includeRemainingRule = false) { _ ->
+                val currentSettings = runBlocking { dataStore.settings.first() }
+                assertEquals(
+                    listOf(GUARDIAN_WORKER_TARGET_PACKAGE),
+                    currentSettings.appRuleSnapshot.appGroups.single().selectedPackages
+                )
+                assertEquals(
+                    "guardian-target-allowance",
+                    currentSettings.appRuleOverrideState.grants.single().ruleId
+                )
+                observedSeededSettings.set(true)
+                throw injectedFailure
+            }
+        }.exceptionOrNull()
+
+        assertSame(injectedFailure, setupFailure)
+        assertTrue(
+            "the fixture must seed settings before the injected setup failure",
+            observedSeededSettings.get()
+        )
+        val restoredSettings = runBlocking { dataStore.settings.first() }
+        assertEquals(originalSettings.appRuleSnapshot, restoredSettings.appRuleSnapshot)
+        assertEquals(originalSettings.appRuleOverrideState, restoredSettings.appRuleOverrideState)
+    }
+
     @Test
     fun actualGuardianWorkerSendsAllowedOfferForAcceptedRequest() {
         val fixture = createConfirmationHostFixture(includeRemainingRule = false)
