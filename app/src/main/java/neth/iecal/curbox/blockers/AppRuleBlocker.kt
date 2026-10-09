@@ -4158,8 +4158,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     /**
-     * Recovery uses a captured observation. Keep a plan published while that observation was
-     * running, and only replace the exact registration that the observation started with.
+     * Recovery fills a gap in the captured observation and never replaces a registration. A
+     * registration present at the snapshot is not refreshed or restored after cancellation, and
+     * a concurrent registration is left untouched. Recovery is installed only when both the
+     * snapshot and current scheduler state have no registration.
      */
     private fun scheduleRecoveryRecheckIfUnchanged(
         packageName: String,
