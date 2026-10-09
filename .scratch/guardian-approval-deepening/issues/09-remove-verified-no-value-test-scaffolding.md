@@ -19,4 +19,4 @@
 - The focused JVM selection passed 4 tests. The full `testFullDebugUnitTest` suite passed 574 tests with 0 failures, 0 errors, and 0 skipped.
 - `assembleFullDebugAndroidTest` compiled and packaged the instrumentation suite. `assembleFullDebug`, `assemblePlaystoreDebug`, and `assembleFdroidDebug` all passed. Device execution was not needed for this test cleanup and was not run.
 - `ExampleInstrumentedTest.kt` was the sole direct assertion comparing `InstrumentationRegistry.getInstrumentation().targetContext.packageName` with `BuildConfig.APPLICATION_ID`. Removing it loses that smoke check; no equivalent replacement assertion is claimed.
-- Review disposition: Standards review found no issues. The Spec review requested an explicit completion acknowledgment, now recorded here as completion metadata; no source correction was needed. Spec reviewer verification of this note is pending.
+- Review disposition: Standards review found no issues. The Spec review requested an explicit completion acknowledgment, now recorded here as completion metadata; the reviewer verified the note and found no remaining issues. No source correction was needed.
