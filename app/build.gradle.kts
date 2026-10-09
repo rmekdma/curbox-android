@@ -78,7 +78,6 @@ android {
         // Everything: sync plus all blocker features.
         create("full") {
             dimension = "version"
-            versionNameSuffix = "-full"
             buildConfigField("Boolean", "FDROID_VARIANT", "false")
             // Staging switch for the FCM push migration. While false, the realtime
             // websocket + poll stay on (no regression) and FCM only adds background
