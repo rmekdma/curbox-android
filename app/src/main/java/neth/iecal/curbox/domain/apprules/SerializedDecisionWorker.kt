@@ -766,20 +766,16 @@ class SerializedDecisionWorker internal constructor(
             runtime = accepted.runtime,
             currentUseDayId = useDayId
         )
-        val validUntilWallClockMs = if (evaluation.isAllowed) {
-            AppRuleRecheckPlanner.nextPlan(
-                snapshot = accepted.runtime.snapshot,
-                evaluation = evaluation,
-                overrideState = accepted.runtime.overrideState,
-                useDayId = useDayId,
-                nowMs = request.capturedAtWallMs,
-                useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
-                zone = calculator.zone,
-                useDayCalculator = calculator
-            )?.dueAtWallClockMs ?: Long.MAX_VALUE
-        } else {
-            Long.MAX_VALUE
-        }
+        val validUntilWallClockMs = AppRuleRecheckPlanner.nextPlan(
+            snapshot = accepted.runtime.snapshot,
+            evaluation = evaluation,
+            overrideState = accepted.runtime.overrideState,
+            useDayId = useDayId,
+            nowMs = request.capturedAtWallMs,
+            useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
+            zone = calculator.zone,
+            useDayCalculator = calculator
+        )?.dueAtWallClockMs ?: Long.MAX_VALUE
         publishGuardianApprovalEvaluation(
             request = request,
             accepted = accepted,

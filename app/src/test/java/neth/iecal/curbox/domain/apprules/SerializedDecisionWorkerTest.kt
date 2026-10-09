@@ -183,6 +183,105 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun guardianApprovalDeniedResultExpiresAtTheNextScheduledRuleBoundary() {
+        val zone = ZoneId.systemDefault()
+        val capturedAt = ZonedDateTime.now(zone)
+            .withHour(10)
+            .withMinute(30)
+            .withSecond(0)
+            .withNano(0)
+            .toInstant()
+            .toEpochMilli()
+        val calculator = ConfigurableUseDayCalculator(zone)
+        val useDayId = calculator.idAt(capturedAt)
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            GuardianApprovalGrantReceipt(
+                ruleId = "usage",
+                useDayId = useDayId,
+                grantedAtMs = capturedAt - 1_000L,
+                grantedMillis = 2 * 60 * 60_000L
+            ),
+            GuardianApprovalGrantOrigin.DIRECT,
+            0L
+        )
+        val accepted = approvalRuntime(
+            revision = RuntimeRevision(84L),
+            useDayId = useDayId,
+            receipt = receipt
+        )
+        val scheduledDenial = accepted.runtime.snapshot.appRules
+            .first { it.id == "night" }
+            .copy(timeRanges = listOf(AppRuleTimeRange(10 * 60, 11 * 60)))
+        val acceptedRuntime = accepted.copy(
+            runtime = accepted.runtime.copy(
+                snapshot = accepted.runtime.snapshot.copy(
+                    appRules = accepted.runtime.snapshot.appRules.map { rule ->
+                        if (rule.id == scheduledDenial.id) scheduledDenial else rule
+                    }
+                )
+            )
+        )
+        val outcomes = RecordingOutcomeSink()
+        val worker = worker(
+            repository = RecordingRepository(),
+            sink = outcomes,
+            acceptedRuntime = acceptedRuntime
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitGuardianApprovalEvaluation(
+                    guardianApprovalRequest(
+                        sourceOrder = 84L,
+                        operationId = "scheduled-denial-boundary",
+                        checkId = "scheduled-denial-boundary-check",
+                        receipt = receipt,
+                        capturedAtMs = capturedAt
+                    )
+                )
+            )
+            assertTrue(outcomes.awaitGuardianApprovalCount(1))
+            val result = outcomes.guardianApprovalEvaluations.single()
+            assertFalse("the scheduled rule must deny during its active window", result.evaluation?.isAllowed ?: true)
+            assertEquals(listOf("night"), result.evaluation?.denyingRules?.map { it.ruleId })
+            assertEquals(zone.id, result.evaluationZoneId)
+
+            val boundary = capturedAt + 30 * 60_000L
+            assertEquals(
+                "a denied result must expire when its scheduled restriction ends",
+                boundary,
+                result.validUntilWallClockMs
+            )
+            assertTrue(
+                "the denied result stays current before the boundary",
+                GuardianApprovalEvaluationWindow.isCurrent(
+                    evaluationZoneId = result.evaluationZoneId,
+                    currentZoneId = zone.id,
+                    capturedAtWallClockMs = capturedAt,
+                    capturedAtElapsedRealtimeMs = capturedAt,
+                    validUntilWallClockMs = result.validUntilWallClockMs,
+                    nowWallClockMs = boundary - 1L,
+                    nowElapsedRealtimeMs = capturedAt + (boundary - capturedAt) - 1L
+                )
+            )
+            assertFalse(
+                "the denied result must be rejected once that boundary passes",
+                GuardianApprovalEvaluationWindow.isCurrent(
+                    evaluationZoneId = result.evaluationZoneId,
+                    currentZoneId = zone.id,
+                    capturedAtWallClockMs = capturedAt,
+                    capturedAtElapsedRealtimeMs = capturedAt,
+                    validUntilWallClockMs = result.validUntilWallClockMs,
+                    nowWallClockMs = boundary,
+                    nowElapsedRealtimeMs = capturedAt + (boundary - capturedAt)
+                )
+            )
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun guardianApprovalAllowedResultExpiresAtTheNextUseDayReset() {
         val zone = ZoneId.systemDefault()
         val capturedAt = ZonedDateTime.now(zone)

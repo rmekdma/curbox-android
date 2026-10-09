@@ -3122,6 +3122,10 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             )
             return
         }
+        if (!isGuardianApprovalEvaluationWindowCurrent(outcome)) {
+            refreshRuntimeForGuardianCheck(request.checkIdentity())
+            return
+        }
         if (!evaluation.isAllowed) {
             val completed = completeGuardianCheck(request)
             if (completed) {
@@ -3134,10 +3138,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     confirmationState = outcome.confirmationState
                 )
             }
-            return
-        }
-        if (!isGuardianApprovalEvaluationWindowCurrent(outcome)) {
-            refreshRuntimeForGuardianCheck(request.checkIdentity())
             return
         }
         launchGuardianTargetIfCurrent(outcome, workerInstanceToken, latestSettings)
