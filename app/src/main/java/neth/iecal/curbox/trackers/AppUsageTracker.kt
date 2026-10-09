@@ -324,7 +324,7 @@ class AppUsageTracker {
         // The UI timestamp is only a delivery hint.  All packages in one command share the
         // service-main acceptance time, so a delayed cross-process broadcast cannot replay an old
         // interval or give packages in the same reset different boundaries.
-        val effectiveAtMs = UsageResetCommandPolicy.acceptedAt(System.currentTimeMillis())
+        val effectiveAtMs = System.currentTimeMillis()
         val generationStartedAtMs = useDayGenerationStartedAtMs
         val useDayId = useDayCalculator.idAt(effectiveAtMs)
         val request = UsageResetRequest(

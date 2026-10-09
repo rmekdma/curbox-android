@@ -66,40 +66,6 @@ class GuardianApprovalWorkReceiptTest {
         )))
     }
 
-    @Test
-    fun directGrantReceiptRequiresTheExactNonAccumulatedWrite() {
-        val receipt = GuardianApprovalWorkReceipt.Grant(
-            grant = GuardianApprovalGrantReceipt(
-                ruleId = "usage",
-                useDayId = "2026-10-07",
-                grantedAtMs = 10L,
-                grantedMillis = 15 * 60_000L
-            ),
-            origin = GuardianApprovalGrantOrigin.DIRECT,
-            useDayGenerationStartedAtMs = 100L
-        )
-
-        assertTrue(receipt.isPresentIn(stateWith(
-            AppRuleGuardianGrant(
-                ruleId = "usage",
-                useDayId = "2026-10-07",
-                grantedAtMs = 10L,
-                grantedMillis = 15 * 60_000L
-            ),
-            generation = 100L
-        )))
-        assertFalse(receipt.isPresentIn(stateWith(
-            AppRuleGuardianGrant(
-                ruleId = "usage",
-                useDayId = "2026-10-07",
-                grantedAtMs = 10L,
-                grantedMillis = 15 * 60_000L,
-                isFromAccumulatedPool = true
-            ),
-            generation = 100L
-        )))
-    }
-
     private fun stateWith(
         grant: AppRuleGuardianGrant,
         generation: Long

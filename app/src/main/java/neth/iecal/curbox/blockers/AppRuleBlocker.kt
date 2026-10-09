@@ -1387,7 +1387,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             .toSet()
         if (normalizedPackages.isEmpty() || !isReadyForChecks()) return false
         val runtime = captureRuleRuntime()
-        val resetAtMs = UsageResetCommandPolicy.acceptedAt(observationWallClockMs())
+        val resetAtMs = observationWallClockMs()
         val request = UsageResetRequest(
             useDayId = ConfigurableUseDayCalculator(resetTime = runtime.resetTime).idAt(resetAtMs),
             generationStartedAtMs = runtime.useDayGenerationStartedAtMs,
