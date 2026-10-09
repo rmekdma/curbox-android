@@ -1,0 +1,4 @@
+GUARDIAN APPROVALS:
+Guardian checks now use the latest rules and app state.
+Apps stay blocked when an approval is interrupted or becomes outdated.
+The lock screen shows rule details from the same check that blocks the app.
