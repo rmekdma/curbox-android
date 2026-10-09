@@ -165,8 +165,8 @@ sealed class DecisionOutcome {
         val request: GuardianApprovalEvaluationRequest,
         val acceptedRuntimeRevision: RuntimeRevision,
         val status: GuardianApprovalEvaluationStatus,
-        val evaluationZoneId: String = "",
-        val validUntilWallClockMs: Long = Long.MAX_VALUE,
+        val evaluationZoneId: String,
+        val validUntilWallClockMs: Long,
         val confirmationState: GuardianApprovalConfirmationState? = null,
         val evaluation: AppRulesEvaluation? = null,
         val denyingRuleNames: Map<String, String> = emptyMap()
@@ -724,11 +724,9 @@ class SerializedDecisionWorker internal constructor(
             runtime = accepted.runtime
         )
         if (!committed) {
-            publishGuardianApprovalEvaluation(
+            publishFailedGuardianApprovalEvaluation(
                 request = request,
-                accepted = accepted,
-                status = GuardianApprovalEvaluationStatus.FAILED,
-                confirmationState = GuardianApprovalConfirmationState.UNCONFIRMED
+                accepted = accepted
             )
             return
         }
@@ -750,11 +748,9 @@ class SerializedDecisionWorker internal constructor(
             null -> return
             is SafeAppRuleEvaluationResult.Success -> result.evaluation
             SafeAppRuleEvaluationResult.RecoverableFailure -> {
-                publishGuardianApprovalEvaluation(
+                publishFailedGuardianApprovalEvaluation(
                     request = request,
-                    accepted = accepted,
-                    status = GuardianApprovalEvaluationStatus.FAILED,
-                    confirmationState = GuardianApprovalConfirmationState.UNCONFIRMED
+                    accepted = accepted
                 )
                 return
             }
@@ -776,10 +772,9 @@ class SerializedDecisionWorker internal constructor(
             zone = calculator.zone,
             useDayCalculator = calculator
         )?.dueAtWallClockMs ?: Long.MAX_VALUE
-        publishGuardianApprovalEvaluation(
+        publishCompletedGuardianApprovalEvaluation(
             request = request,
             accepted = accepted,
-            status = GuardianApprovalEvaluationStatus.COMPLETED,
             evaluationZoneId = calculator.zone.id,
             validUntilWallClockMs = validUntilWallClockMs,
             confirmationState = confirmationState,
@@ -818,18 +813,17 @@ class SerializedDecisionWorker internal constructor(
         }
     }
 
-    private suspend fun publishGuardianApprovalEvaluation(
+    private suspend fun publishCompletedGuardianApprovalEvaluation(
         request: GuardianApprovalEvaluationRequest,
         accepted: AcceptedRuleRuntimeSnapshot,
-        status: GuardianApprovalEvaluationStatus,
-        evaluationZoneId: String = "",
-        validUntilWallClockMs: Long = Long.MAX_VALUE,
-        confirmationState: GuardianApprovalConfirmationState? = null,
-        evaluation: AppRulesEvaluation? = null
+        evaluationZoneId: String,
+        validUntilWallClockMs: Long,
+        confirmationState: GuardianApprovalConfirmationState,
+        evaluation: AppRulesEvaluation
     ) {
         if (!isCurrentGuardianApproval(request, accepted)) return
         val rulesById = accepted.runtime.snapshot.appRules.associateBy { it.id }
-        val denyingRuleNames = evaluation?.denyingRules.orEmpty().associate { denial ->
+        val denyingRuleNames = evaluation.denyingRules.associate { denial ->
             denial.ruleId to (
                 rulesById[denial.ruleId]?.name?.takeIf(String::isNotBlank) ?: denial.ruleId
             )
@@ -840,12 +834,39 @@ class SerializedDecisionWorker internal constructor(
                     DecisionOutcome.GuardianApprovalEvaluationReady(
                         request = request,
                         acceptedRuntimeRevision = accepted.runtimeRevision,
-                        status = status,
+                        status = GuardianApprovalEvaluationStatus.COMPLETED,
                         evaluationZoneId = evaluationZoneId,
                         validUntilWallClockMs = validUntilWallClockMs,
                         confirmationState = confirmationState,
                         evaluation = evaluation,
                         denyingRuleNames = denyingRuleNames
+                    )
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+        }
+    }
+
+    private suspend fun publishFailedGuardianApprovalEvaluation(
+        request: GuardianApprovalEvaluationRequest,
+        accepted: AcceptedRuleRuntimeSnapshot
+    ) {
+        if (!isCurrentGuardianApproval(request, accepted)) return
+        try {
+            runInterruptible {
+                outcomeSink.publish(
+                    DecisionOutcome.GuardianApprovalEvaluationReady(
+                        request = request,
+                        acceptedRuntimeRevision = accepted.runtimeRevision,
+                        status = GuardianApprovalEvaluationStatus.FAILED,
+                        evaluationZoneId = "",
+                        validUntilWallClockMs = Long.MAX_VALUE,
+                        confirmationState = GuardianApprovalConfirmationState.UNCONFIRMED,
+                        evaluation = null,
+                        denyingRuleNames = emptyMap()
                     )
                 )
             }

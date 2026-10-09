@@ -224,6 +224,36 @@ class AppRuleScheduleCompositeTest {
     }
 
     @Test
+    fun recheckPlannerPreservesAnAllowanceDeadlineThatSaturatesAtLongMax() {
+        val evaluation = AppRulesEvaluation(
+            isAllowed = true,
+            denyingRules = emptyList(),
+            evaluations = listOf(
+                AppRuleEvaluation(
+                    ruleId = "long-allowance",
+                    isApplicable = true,
+                    isActive = true,
+                    usedMillis = 0L,
+                    allowanceMillis = Long.MAX_VALUE,
+                    remainingMillis = Long.MAX_VALUE,
+                    isAllowed = true
+                )
+            )
+        )
+
+        val plan = AppRuleRecheckPlanner.nextPlan(
+            snapshot = AppRuleSnapshot(),
+            evaluation = evaluation,
+            overrideState = AppRuleOverrideState(),
+            useDayId = "2026-08-17",
+            nowMs = 10L,
+            zone = zone
+        ) ?: error("a positive allowance must produce a recheck plan")
+
+        assertEquals(Long.MAX_VALUE, plan.dueAtWallClockMs)
+    }
+
+    @Test
     fun recheckPlannerIgnoresSkipBoundariesForUnrelatedRules() {
         val ruleReader = AppRule(
             id = "reader_rule",

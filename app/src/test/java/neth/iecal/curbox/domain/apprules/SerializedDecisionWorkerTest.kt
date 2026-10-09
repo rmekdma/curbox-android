@@ -108,6 +108,64 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun guardianApprovalPersistenceFailurePublishesNoEvaluationFreshnessEvidence() {
+        val repository = CheckpointFailingRepository()
+        val outcomes = RecordingOutcomeSink()
+        val wallNow = 2_000L
+        val useDayId = ConfigurableUseDayCalculator().idAt(wallNow)
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            GuardianApprovalGrantReceipt(
+                ruleId = "usage",
+                useDayId = useDayId,
+                grantedAtMs = 1_500L,
+                grantedMillis = 15 * 60_000L
+            ),
+            GuardianApprovalGrantOrigin.DIRECT,
+            0L
+        )
+        val worker = worker(
+            repository = repository,
+            sink = outcomes,
+            acceptedRuntime = approvalRuntime(
+                revision = RuntimeRevision(7L),
+                useDayId = useDayId,
+                receipt = receipt
+            )
+        )
+        try {
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = wallNow))
+            )
+            assertTrue("the foreground session did not start", outcomes.awaitCount(1))
+            repository.failNextCheckpoint = true
+
+            assertEquals(
+                SubmissionResult.ACCEPTED,
+                worker.submitGuardianApprovalEvaluation(
+                    guardianApprovalRequest(
+                        sourceOrder = 2L,
+                        operationId = "failed-reconcile",
+                        checkId = "failed-reconcile-check",
+                        receipt = receipt,
+                        capturedAtMs = wallNow + 1_000L
+                    )
+                )
+            )
+            assertTrue("the failed guardian evaluation did not finish", outcomes.awaitGuardianApprovalCount(1))
+
+            val result = outcomes.guardianApprovalEvaluations.single()
+            assertEquals(GuardianApprovalEvaluationStatus.FAILED, result.status)
+            assertEquals(GuardianApprovalConfirmationState.UNCONFIRMED, result.confirmationState)
+            assertTrue("a failed result must not carry an evaluation", result.evaluation == null)
+            assertEquals("", result.evaluationZoneId)
+            assertEquals(Long.MAX_VALUE, result.validUntilWallClockMs)
+        } finally {
+            worker.stop(recoveryStop(LifecycleGeneration(1L)))
+        }
+    }
+
+    @Test
     fun guardianApprovalAllowedResultExpiresAtTheNextScheduledRuleBoundary() {
         val zone = ZoneId.systemDefault()
         val capturedAt = ZonedDateTime.now(zone)
@@ -2372,6 +2430,22 @@ class SerializedDecisionWorkerTest {
                 )
                 return id
             }
+        }
+    }
+
+    private class CheckpointFailingRepository : RecordingRepository() {
+        @Volatile var failNextCheckpoint = false
+
+        override suspend fun commitSessionCheckpoint(
+            id: Long,
+            endedAtMs: Long,
+            usage: List<ForegroundUsageCheckpoint>
+        ): Boolean {
+            if (failNextCheckpoint) {
+                failNextCheckpoint = false
+                return false
+            }
+            return super.commitSessionCheckpoint(id, endedAtMs, usage)
         }
     }
 

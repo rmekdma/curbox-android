@@ -49,6 +49,32 @@ class GuardianApprovalLaunchAuthorizationTest {
     }
 
     @Test
+    fun explicitUnboundedEvaluationDeadlineRemainsCurrentAtLaunch() {
+        val current = executionIdentity()
+        val offer = launchOffer(identity = current).copy(
+            deadlineElapsedRealtimeMs = Long.MAX_VALUE,
+            capturedAtWallClockMs = 100L,
+            capturedAtElapsedRealtimeMs = 100L,
+            validUntilWallClockMs = Long.MAX_VALUE
+        )
+
+        assertTrue(
+            GuardianApprovalLaunchAuthorization.canLaunch(
+                offer = offer,
+                current = current,
+                confirmationPending = true,
+                activityResumed = true,
+                windowFocused = true,
+                displayUnlocked = true,
+                currentZoneId = EVALUATION_ZONE_ID,
+                nowWallClockMs = 1_000_000_000L,
+                nowElapsedRealtimeMs = 1_000_000_000L,
+                currentPolicyFingerprint = POLICY_FINGERPRINT
+            )
+        )
+    }
+
+    @Test
     fun lateResultCannotLaunchAfterTheApprovalRequestChanges() {
         val current = executionIdentity(checkId = "current-check")
         val old = executionIdentity(checkId = "old-check")
