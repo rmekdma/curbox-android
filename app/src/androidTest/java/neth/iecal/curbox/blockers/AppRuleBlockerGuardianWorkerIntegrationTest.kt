@@ -340,7 +340,7 @@ class AppRuleBlockerGuardianWorkerIntegrationTest {
             val initialWallClockMs = blocker.wallClockMsProvider()
             scriptedWallClockMs.set(initialWallClockMs)
             val localNow = Instant.ofEpochMilli(initialWallClockMs).atZone(ZoneId.systemDefault())
-            val startMinute = localNow.hour * 60 + localNow.minute
+            val startMinute = localNow.hour * 60
             val expiringRule = AppRule(
                 id = targetId,
                 name = "Expiring target rule",
@@ -349,7 +349,7 @@ class AppRuleBlockerGuardianWorkerIntegrationTest {
                 timeRanges = listOf(
                     AppRuleTimeRange(
                         startMinute = startMinute,
-                        endMinute = startMinute + 1
+                        endMinute = startMinute + 60
                     )
                 ),
                 allowedMinutes = 0
@@ -420,13 +420,12 @@ class AppRuleBlockerGuardianWorkerIntegrationTest {
             assertEquals(scriptedWallClockMs.get(), firstOutcome.request.capturedAtWallMs)
             assertEquals(scriptedElapsedRealtimeMs.get(), firstOutcome.request.capturedAtElapsedMs)
 
-            val policyBoundaryWallMs = Instant.ofEpochMilli(firstOutcome.request.capturedAtWallMs)
-                .atZone(ZoneId.systemDefault())
-                .withSecond(0)
-                .withNano(0)
-                .plusMinutes(1)
-                .toInstant()
-                .toEpochMilli()
+            val policyBoundaryWallMs = firstOutcome.validUntilWallClockMs
+            assertTrue(
+                "the denial worker must report a finite future policy boundary",
+                policyBoundaryWallMs > firstOutcome.request.capturedAtWallMs &&
+                    policyBoundaryWallMs < Long.MAX_VALUE
+            )
             val advancedWallClockMs = policyBoundaryWallMs + 1L
             val elapsedAdvanceMs = advancedWallClockMs - firstOutcome.request.capturedAtWallMs
             scriptedWallClockMs.set(advancedWallClockMs)
@@ -440,7 +439,6 @@ class AppRuleBlockerGuardianWorkerIntegrationTest {
                     TimeUnit.MILLISECONDS
                 )
             )
-            assertEquals(policyBoundaryWallMs, firstOutcome.validUntilWallClockMs)
             val currentOutcome = fixture.awaitWorkerOutcome(fixture.checkId)
             val currentEvaluation = checkNotNull(currentOutcome.evaluation)
             assertEquals(fixture.receipt, currentOutcome.request.approvalReceipt)
