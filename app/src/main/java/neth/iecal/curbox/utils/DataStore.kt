@@ -15,6 +15,7 @@ import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import neth.iecal.curbox.CrashLogger
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppGroup
 import neth.iecal.curbox.data.models.AppGroupEditMode
@@ -23,6 +24,9 @@ import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleRolloverState
 import neth.iecal.curbox.data.models.GuardianAuthConfig
 import neth.iecal.curbox.data.models.GatedSettingsField
+import neth.iecal.curbox.data.models.GuardianApprovalGrantOrigin
+import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.data.models.KeywordBlocker
 import neth.iecal.curbox.data.models.LegacyAppRuleMigration
 import neth.iecal.curbox.data.models.ManualFocusGroup
@@ -303,6 +307,9 @@ class DataStoreManager(private val context: Context) {
         @Volatile
         private var INSTANCE: androidx.datastore.core.DataStore<Settings>? = null
 
+        @Volatile
+        internal var guardianApprovalWriteCommitObserverForTest: (suspend (Settings) -> Unit)? = null
+
         fun getSettingsDataStore(context: Context, gson: Gson): androidx.datastore.core.DataStore<Settings> {
             // Double checked locking: the inner re-check is essential. Without it,
             // two threads racing the first access each build a DataStore for the
@@ -404,22 +411,41 @@ class DataStoreManager(private val context: Context) {
         // Keep a stable identity for this write across DataStore transform retries. The current
         // time used to validate the form must be sampled inside the transform on every attempt.
         val grantedAtMs = GuardianExtraTimeGrantWrite.nextGrantTimestamp()
-        val updated = settingsDataStore.updateData { current ->
-            GuardianExtraTimeGrantWrite.nextSettings(
-                current = current,
-                password = password,
-                basis = basis,
-                durationMinutes = durationMinutes,
-                grantedAtMs = grantedAtMs,
-                transactionNowMs = System.currentTimeMillis()
-            )
+        val receipt = GuardianApprovalGrantReceipt(
+            ruleId = basis.ruleId,
+            useDayId = basis.useDayId,
+            grantedAtMs = grantedAtMs,
+            grantedMillis = durationMinutes * 60_000L
+        )
+        val updated = try {
+            settingsDataStore.updateData { current ->
+                GuardianExtraTimeGrantWrite.nextSettings(
+                    current = current,
+                    password = password,
+                    basis = basis,
+                    durationMinutes = durationMinutes,
+                    grantedAtMs = grantedAtMs,
+                    transactionNowMs = System.currentTimeMillis()
+                )
+            }.also { guardianApprovalWriteCommitObserverForTest?.invoke(it) }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logGuardianApprovalWriteFailure(error)
+            return GuardianExtraTimeGrantWrite.Result.Uncertain(receipt)
         }
-        return GuardianExtraTimeGrantWrite.resultFor(
+        val result = GuardianExtraTimeGrantWrite.resultFor(
             settings = updated,
             basis = basis,
             durationMinutes = durationMinutes,
             grantedAtMs = grantedAtMs,
             currentTimeMs = System.currentTimeMillis()
+        )
+        return GuardianExtraTimeGrantWrite.withReceipt(
+            result = result,
+            basis = basis,
+            durationMinutes = durationMinutes,
+            grantedAtMs = grantedAtMs
         )
     }
 
@@ -434,24 +460,43 @@ class DataStoreManager(private val context: Context) {
         ) return GuardianExtraTimeGrantWrite.Result.Rejected
 
         val grantedAtMs = GuardianExtraTimeGrantWrite.nextGrantTimestamp()
-        val updated = settingsDataStore.updateData { current ->
-            GuardianExtraTimeGrantWrite.nextSettingsFromAuthenticatedSession(
-                current = current,
-                basis = basis,
-                durationMinutes = durationMinutes,
-                grantedAtMs = grantedAtMs,
-                transactionNowMs = System.currentTimeMillis(),
-                sessionAuthenticated = GuardianSessionRegistry.session.isAuthenticated(
-                    current.guardianAuthConfig.isConfigured
+        val receipt = GuardianApprovalGrantReceipt(
+            ruleId = basis.ruleId,
+            useDayId = basis.useDayId,
+            grantedAtMs = grantedAtMs,
+            grantedMillis = durationMinutes * 60_000L
+        )
+        val updated = try {
+            settingsDataStore.updateData { current ->
+                GuardianExtraTimeGrantWrite.nextSettingsFromAuthenticatedSession(
+                    current = current,
+                    basis = basis,
+                    durationMinutes = durationMinutes,
+                    grantedAtMs = grantedAtMs,
+                    transactionNowMs = System.currentTimeMillis(),
+                    sessionAuthenticated = GuardianSessionRegistry.session.isAuthenticated(
+                        current.guardianAuthConfig.isConfigured
+                    )
                 )
-            )
+            }.also { guardianApprovalWriteCommitObserverForTest?.invoke(it) }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logGuardianApprovalWriteFailure(error)
+            return GuardianExtraTimeGrantWrite.Result.Uncertain(receipt)
         }
-        return GuardianExtraTimeGrantWrite.resultFor(
+        val result = GuardianExtraTimeGrantWrite.resultFor(
             settings = updated,
             basis = basis,
             durationMinutes = durationMinutes,
             grantedAtMs = grantedAtMs,
             currentTimeMs = System.currentTimeMillis()
+        )
+        return GuardianExtraTimeGrantWrite.withReceipt(
+            result = result,
+            basis = basis,
+            durationMinutes = durationMinutes,
+            grantedAtMs = grantedAtMs
         )
     }
 
@@ -459,54 +504,79 @@ class DataStoreManager(private val context: Context) {
      * Atomically deducts accumulated minutes from the rule's pool and issues an
      * AppRuleGuardianGrant with isFromAccumulatedPool = true in a single DataStore transaction.
      */
-    suspend fun approveAccumulatedTime(
+    /** Writes the accumulated grant once and returns the receipt from that same update result. */
+    suspend fun approveAccumulatedTimeWithReceipt(
         password: String,
         ruleId: String,
         useDayId: String,
         approvedMinutes: Long,
+        expectedUseDayGenerationStartedAtMs: Long,
         grantedAtMs: Long = System.currentTimeMillis()
-    ): Boolean {
+    ): GuardianApprovalWorkReceipt.Grant? {
         if (approvedMinutes <= 0L ||
             approvedMinutes > Long.MAX_VALUE / 60_000L ||
             ruleId.isBlank() ||
             useDayId.isBlank()
-        ) return false
+        ) return null
         val grantedMillis = approvedMinutes * 60_000L
-        var expectedRemainingPool = 0L
-        val updated = settingsDataStore.updateData { current ->
-            if (current.guardianAuthConfig.isConfigured &&
-                !GuardianPassword.verify(password, current.guardianAuthConfig)
-            ) return@updateData current
-            if (!GuardianDataStoreWriteResult.ruleCanManageExtraTime(current, ruleId)) {
-                return@updateData current
-            }
-
-            val pool = current.appRuleRolloverState.pools[ruleId] ?: return@updateData current
-            if (pool.accumulatedMinutes < approvedMinutes) return@updateData current
-
-            val nextPool = pool.copy(accumulatedMinutes = pool.accumulatedMinutes - approvedMinutes)
-            expectedRemainingPool = nextPool.accumulatedMinutes
-            val nextRolloverState = current.appRuleRolloverState.withPool(nextPool)
-
-            val nextOverrides = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
-                neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
-                    current.appRuleOverrideState,
-                    useDayId,
-                    current.useDayGenerationStartedAtMs
-                ),
+        val receipt = GuardianApprovalWorkReceipt.Grant(
+            grant = GuardianApprovalGrantReceipt(
                 ruleId = ruleId,
                 useDayId = useDayId,
-                grantedMillis = grantedMillis,
-                grantedAtMs = grantedAtMs,
-                useDayGenerationStartedAtMs = current.useDayGenerationStartedAtMs,
-                isFromAccumulatedPool = true
-            )
-            current.copy(
-                appRuleRolloverState = nextRolloverState,
-                appRuleOverrideState = nextOverrides
-            )
+                grantedAtMs = grantedAtMs.coerceAtLeast(0L),
+                grantedMillis = grantedMillis
+            ),
+            origin = GuardianApprovalGrantOrigin.ACCUMULATED_POOL,
+            useDayGenerationStartedAtMs = expectedUseDayGenerationStartedAtMs
+        )
+        var expectedRemainingPool = 0L
+        val updated = try {
+            settingsDataStore.updateData { current ->
+                val transactionNowMs = System.currentTimeMillis()
+                if (current.useDayGenerationStartedAtMs != expectedUseDayGenerationStartedAtMs ||
+                    ConfigurableUseDayCalculator(resetTime = current.useDayResetTime)
+                        .idAt(transactionNowMs) != useDayId
+                ) return@updateData current
+                if (current.guardianAuthConfig.isConfigured &&
+                    !GuardianPassword.verify(password, current.guardianAuthConfig)
+                ) return@updateData current
+                if (!GuardianDataStoreWriteResult.ruleCanManageExtraTime(current, ruleId)) {
+                    return@updateData current
+                }
+
+                val pool = current.appRuleRolloverState.pools[ruleId]
+                    ?: return@updateData current
+                if (pool.accumulatedMinutes < approvedMinutes) return@updateData current
+
+                val nextPool = pool.copy(accumulatedMinutes = pool.accumulatedMinutes - approvedMinutes)
+                expectedRemainingPool = nextPool.accumulatedMinutes
+                val nextRolloverState = current.appRuleRolloverState.withPool(nextPool)
+
+                val nextOverrides = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.grant(
+                    neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
+                        current.appRuleOverrideState,
+                        useDayId,
+                        current.useDayGenerationStartedAtMs
+                    ),
+                    ruleId = ruleId,
+                    useDayId = useDayId,
+                    grantedMillis = grantedMillis,
+                    grantedAtMs = grantedAtMs,
+                    useDayGenerationStartedAtMs = current.useDayGenerationStartedAtMs,
+                    isFromAccumulatedPool = true
+                )
+                current.copy(
+                    appRuleRolloverState = nextRolloverState,
+                    appRuleOverrideState = nextOverrides
+                )
+            }.also { guardianApprovalWriteCommitObserverForTest?.invoke(it) }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logGuardianApprovalWriteFailure(error)
+            return receipt
         }
-        return GuardianDataStoreWriteResult.accumulatedGrantWasStored(
+        val stored = GuardianDataStoreWriteResult.accumulatedGrantWasStored(
             settings = updated,
             ruleId = ruleId,
             useDayId = useDayId,
@@ -514,43 +584,77 @@ class DataStoreManager(private val context: Context) {
             grantedAtMs = grantedAtMs.coerceAtLeast(0L),
             expectedRemainingPoolMinutes = expectedRemainingPool
         )
+        if (!stored) return null
+        return receipt
     }
 
-    suspend fun skipAppRuleUntil(
+    /** Writes a rule skip once and returns the receipt from that same update result. */
+    suspend fun skipAppRuleUntilWithReceipt(
         password: String,
         ruleId: String,
         useDayId: String,
         selectedUntilMs: Long,
         nextResetAtMs: Long,
+        expectedUseDayGenerationStartedAtMs: Long,
         nowMs: Long = System.currentTimeMillis()
-    ): Boolean {
-        if (ruleId.isBlank() || useDayId.isBlank() || nextResetAtMs <= nowMs) return false
-        val updated = settingsDataStore.updateData { current ->
-            if (current.guardianAuthConfig.isConfigured &&
-                !GuardianPassword.verify(password, current.guardianAuthConfig)
-            ) return@updateData current
-            val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.skipUntil(
-                neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
-                    current.appRuleOverrideState,
+    ): GuardianApprovalWorkReceipt.RuleSkip? {
+        if (ruleId.isBlank() || useDayId.isBlank() || nextResetAtMs <= nowMs) return null
+        val skipFromMs = nowMs.coerceAtLeast(0L)
+        val skipUntilMs = selectedUntilMs.coerceIn(nowMs, nextResetAtMs)
+        val receipt = GuardianApprovalWorkReceipt.RuleSkip(
+            ruleId = ruleId,
+            useDayId = useDayId,
+            skipFromMs = skipFromMs,
+            skipUntilMs = skipUntilMs,
+            useDayGenerationStartedAtMs = expectedUseDayGenerationStartedAtMs
+        )
+        val updated = try {
+            settingsDataStore.updateData { current ->
+                val transactionNowMs = System.currentTimeMillis()
+                if (current.useDayGenerationStartedAtMs != expectedUseDayGenerationStartedAtMs ||
+                    ConfigurableUseDayCalculator(resetTime = current.useDayResetTime)
+                        .idAt(transactionNowMs) != useDayId
+                ) return@updateData current
+                if (current.guardianAuthConfig.isConfigured &&
+                    !GuardianPassword.verify(password, current.guardianAuthConfig)
+                ) return@updateData current
+                if (current.appRuleSnapshot.appRules.none { it.id == ruleId && it.isActive }) {
+                    return@updateData current
+                }
+                val next = neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.skipUntil(
+                    neth.iecal.curbox.domain.apprules.AppRuleGuardianOverrides.compact(
+                        current.appRuleOverrideState,
+                        useDayId,
+                        current.useDayGenerationStartedAtMs
+                    ),
+                    ruleId,
                     useDayId,
+                    selectedUntilMs,
+                    nextResetAtMs,
+                    nowMs,
                     current.useDayGenerationStartedAtMs
-                ),
-                ruleId,
-                useDayId,
-                selectedUntilMs,
-                nextResetAtMs,
-                nowMs,
-                current.useDayGenerationStartedAtMs
-            )
-            current.copy(appRuleOverrideState = next)
+                )
+                current.copy(appRuleOverrideState = next)
+            }.also { guardianApprovalWriteCommitObserverForTest?.invoke(it) }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logGuardianApprovalWriteFailure(error)
+            return receipt
         }
-        return GuardianDataStoreWriteResult.skipWasStored(
+        val stored = GuardianDataStoreWriteResult.skipWasStored(
             updated,
             ruleId,
             useDayId,
-            nowMs,
-            selectedUntilMs.coerceIn(nowMs, nextResetAtMs)
+            skipFromMs,
+            skipUntilMs
         )
+        if (!stored) return null
+        return receipt
+    }
+
+    private fun logGuardianApprovalWriteFailure(error: Exception) {
+        CrashLogger(context.applicationContext).logNonFatalError(error)
     }
 
     /** Trusted internal callers use this after an already completed guardian session. */
@@ -1485,6 +1589,12 @@ internal fun Settings.clearGuardianExtraTimeForRules(
 internal object GuardianExtraTimeGrantWrite {
     sealed class Result {
         data object Stored : Result()
+        data class StoredWithReceipt(
+            val receipt: GuardianApprovalGrantReceipt
+        ) : Result()
+        data class Uncertain(
+            val receipt: GuardianApprovalGrantReceipt
+        ) : Result()
         data class NeedsReconfirmation(
             val latestBasis: GuardianExtraTimeGrantBasis
         ) : Result()
@@ -1610,6 +1720,24 @@ internal object GuardianExtraTimeGrantWrite {
         } else {
             Result.Rejected
         }
+    }
+
+    fun withReceipt(
+        result: Result,
+        basis: GuardianExtraTimeGrantBasis,
+        durationMinutes: Long,
+        grantedAtMs: Long
+    ): Result = if (result == Result.Stored) {
+        Result.StoredWithReceipt(
+            GuardianApprovalGrantReceipt(
+                ruleId = basis.ruleId,
+                useDayId = basis.useDayId,
+                grantedAtMs = grantedAtMs,
+                grantedMillis = durationMinutes * 60_000L
+            )
+        )
+    } else {
+        result
     }
 }
 

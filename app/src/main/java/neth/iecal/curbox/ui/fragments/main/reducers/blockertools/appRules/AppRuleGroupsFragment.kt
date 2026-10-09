@@ -305,6 +305,14 @@ class AppRuleGroupsFragment : Fragment() {
                     if (!isAdded || _binding == null) return@withContext
                     when (result) {
                         GuardianExtraTimeGrantWrite.Result.Stored -> Unit
+                        is GuardianExtraTimeGrantWrite.Result.StoredWithReceipt -> Unit
+                        is GuardianExtraTimeGrantWrite.Result.Uncertain -> {
+                            Toast.makeText(
+                                requireContext(),
+                                R.string.guardian_write_uncertain,
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
                         is GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation -> {
                             Toast.makeText(
                                 requireContext(),

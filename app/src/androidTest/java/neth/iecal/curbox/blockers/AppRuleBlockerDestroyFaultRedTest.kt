@@ -25,6 +25,7 @@ import neth.iecal.curbox.domain.apprules.FakeWakeScheduler
 import neth.iecal.curbox.domain.apprules.ForegroundUsageCheckpoint
 import neth.iecal.curbox.domain.apprules.LiveRuleNotificationModel
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
 import neth.iecal.curbox.trackers.AppUsageTracker
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import org.junit.Test
@@ -105,8 +106,7 @@ class AppRuleBlockerDestroyFaultRedTest {
                 latestEvaluation.countDown()
             }
         }
-        blocker.notificationPostObserver = { model ->
-            val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
+        blocker.notificationPostObserver = { _ ->
             if (firstNotification.compareAndSet(true, false)) {
                 oldNotificationEntered.countDown()
                 try {
@@ -746,7 +746,7 @@ class AppRuleBlockerDestroyFaultRedTest {
             snapshot = snapshotWithGlobalDeny(),
             observer = {}
         ).apply {
-            notificationBeforeFrameworkCallObserver = { model ->
+            notificationBeforeFrameworkCallObserver = { _ ->
                 publicationEntered.countDown()
                 publicationRelease.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             }
@@ -1263,7 +1263,7 @@ class AppRuleBlockerDestroyFaultRedTest {
                 }
             }
         ).apply {
-            notificationPostObserver = { model ->
+            notificationPostObserver = { _ ->
                 notificationPostEntered.countDown()
                 try {
                     notificationPostRelease.await()
@@ -1272,9 +1272,9 @@ class AppRuleBlockerDestroyFaultRedTest {
                 }
             }
             notificationUpdateObserver = { model -> notificationPostings += model }
-            recheckPostDelayed = scheduler::post
+            recheckPostDelayed = { runnable, _ -> scheduler.post(runnable) }
             recheckRemoveCallback = scheduler::remove
-            visibleApplicationCheckPostDelayed = visibleCallbacks::post
+            visibleApplicationCheckPostDelayed = { runnable, _ -> visibleCallbacks.post(runnable) }
             visibleApplicationCheckRemoveCallbacks = visibleCallbacks::removeAll
         }
 
@@ -1838,12 +1838,14 @@ class AppRuleBlockerDestroyFaultRedTest {
         )
 
     private fun sendWindowEvent(blocker: AppRuleBlocker, packageName: String) {
-        val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+        val event = AccessibilityFrameworkTestObjects.createEvent(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        )
         try {
             event.packageName = packageName
             blocker.doAppRuleCheck(event)
         } finally {
-            event.recycle()
+            AccessibilityFrameworkTestObjects.releaseEvent(event)
         }
     }
 
@@ -2033,7 +2035,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         val removedCount: Int get() = removedCallbacks.get()
         val deliveredCount: Int get() = deliveredCallbacks.get()
 
-        fun post(runnable: Runnable, _delayMillis: Long): Boolean {
+        fun post(runnable: Runnable): Boolean {
             pending += runnable
             return true
         }

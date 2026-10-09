@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.GuardianApprovalWorkReceipt
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.TimeTools
 import neth.iecal.curbox.utils.UseDayResetTime
@@ -62,6 +63,39 @@ data class DecisionRequest(
     val runtimePublication: RuntimePublication? = null
 )
 
+/** An explicit guardian-target check that does not claim the app is visible. */
+data class GuardianApprovalEvaluationRequest(
+    val sourceOrderIdentity: SourceOrderIdentity,
+    val lifecycleGeneration: LifecycleGeneration,
+    val screenRequestId: String,
+    val operationId: String,
+    val checkId: String,
+    val packageName: String,
+    val approvalReceipt: GuardianApprovalWorkReceipt,
+    val capturedAtWallMs: Long,
+    val capturedAtElapsedMs: Long
+) {
+    init {
+        require(screenRequestId.isNotBlank()) { "approval check must name its screen request" }
+        require(operationId.isNotBlank()) { "approval check must name its grant operation" }
+        require(checkId.isNotBlank()) { "approval check must name its check attempt" }
+        require(packageName.isNotBlank()) { "approval check must name its target package" }
+        require(capturedAtWallMs >= 0L) { "wall time must not be negative" }
+        require(capturedAtElapsedMs >= 0L) { "elapsed time must not be negative" }
+    }
+}
+
+enum class GuardianApprovalConfirmationState {
+    REFLECTED,
+    SUPERSEDED,
+    UNCONFIRMED
+}
+
+enum class GuardianApprovalEvaluationStatus {
+    COMPLETED,
+    FAILED
+}
+
 enum class SubmissionResult {
     ACCEPTED,
     REJECTED_NOT_READY,
@@ -76,11 +110,22 @@ interface DecisionOutcomeSink {
 
 data class PackageDecision(
     val packageName: String,
-    val isAllowed: Boolean,
-    val denyingRuleIds: List<String>
+    val evaluation: AppRulesEvaluation,
+    /** Names from the same accepted snapshot used to produce [evaluation]. */
+    val denyingRuleNames: Map<String, String>
 ) {
+    val isAllowed: Boolean
+        get() = evaluation.isAllowed
+
+    val denyingRuleIds: List<String>
+        get() = evaluation.denyingRules.map { it.ruleId }
+
     init {
         require(packageName.isNotBlank()) { "package decision must name a package" }
+        val expectedDenialIds = evaluation.denyingRules.map { it.ruleId }.toSet()
+        require(denyingRuleNames.keys == expectedDenialIds) {
+            "package decision must include names for exactly its denying rules"
+        }
     }
 }
 
@@ -114,6 +159,17 @@ sealed class DecisionOutcome {
         val accepted: AcceptedRuleRuntimeSnapshot,
         val packageName: String,
         val evaluation: AppRulesEvaluation
+    ) : DecisionOutcome()
+
+    data class GuardianApprovalEvaluationReady(
+        val request: GuardianApprovalEvaluationRequest,
+        val acceptedRuntimeRevision: RuntimeRevision,
+        val status: GuardianApprovalEvaluationStatus,
+        val evaluationZoneId: String,
+        val validUntilWallClockMs: Long,
+        val confirmationState: GuardianApprovalConfirmationState? = null,
+        val evaluation: AppRulesEvaluation? = null,
+        val denyingRuleNames: Map<String, String> = emptyMap()
     ) : DecisionOutcome()
 
     data class RecheckPlanReady(
@@ -244,6 +300,8 @@ class SerializedDecisionWorker internal constructor(
     private sealed interface Work {
         data class Decision(val request: DecisionRequest) : Work
 
+        data class GuardianApproval(val request: GuardianApprovalEvaluationRequest) : Work
+
         data class UsageReset(
             val request: UsageResetRequest,
             val resetAtElapsedMs: Long
@@ -277,6 +335,7 @@ class SerializedDecisionWorker internal constructor(
                 try {
                     when (work) {
                         is Work.Decision -> process(work.request)
+                        is Work.GuardianApproval -> processGuardianApproval(work.request)
                         is Work.UsageReset -> processUsageReset(work)
                         is Work.Settlement -> processSettlement(work)
                     }
@@ -321,6 +380,26 @@ class SerializedDecisionWorker internal constructor(
                 queuedWorkCount.decrementAndGet()
                 SubmissionResult.REJECTED_NOT_READY
             }
+        }
+    }
+
+    /** Queues a target-only rule check behind settings publications in this worker. */
+    fun submitGuardianApprovalEvaluation(
+        request: GuardianApprovalEvaluationRequest
+    ): SubmissionResult = synchronized(stateLock) {
+        if (!accepting.get() || !workerJob.isActive) {
+            accepting.set(false)
+            return@synchronized SubmissionResult.REJECTED_NOT_READY
+        }
+        if (request.lifecycleGeneration != currentLifecycleGeneration) {
+            return@synchronized SubmissionResult.REJECTED_STALE
+        }
+        queuedWorkCount.incrementAndGet()
+        if (requests.trySend(Work.GuardianApproval(request)).isSuccess) {
+            SubmissionResult.ACCEPTED
+        } else {
+            queuedWorkCount.decrementAndGet()
+            SubmissionResult.REJECTED_NOT_READY
         }
     }
 
@@ -544,8 +623,8 @@ class SerializedDecisionWorker internal constructor(
 
         val calculator = ConfigurableUseDayCalculator(resetTime = accepted.runtime.resetTime)
         val useDayId = calculator.idAt(request.observation.capturedAtWallMs)
-        val evaluatedPackages = mutableListOf<Pair<String, AppRulesEvaluation>>()
         val decisions = mutableListOf<PackageDecision>()
+        val rulesById = accepted.runtime.snapshot.appRules.associateBy { it.id }
         for (outcome in evaluable) {
             val packageName = outcome.packageName ?: continue
             if (!isCurrent(request, accepted)) return
@@ -598,21 +677,22 @@ class SerializedDecisionWorker internal constructor(
             }
             if (!isCurrent(request, accepted)) return
 
-            evaluatedPackages += packageName to evaluation
             decisions += PackageDecision(
                 packageName = packageName,
-                isAllowed = evaluation.isAllowed,
-                denyingRuleIds = evaluation.denyingRules.map { it.ruleId }
+                evaluation = evaluation,
+                denyingRuleNames = evaluation.denyingRules.associate { denial ->
+                    denial.ruleId to (rulesById[denial.ruleId]?.name?.takeIf(String::isNotBlank) ?: denial.ruleId)
+                }
             )
         }
         if (!isCurrent(request, accepted)) return
-        evaluatedPackages.forEach { (packageName, evaluation) ->
+        decisions.forEach { decision ->
             if (!isCurrent(request, accepted)) return
             publishRecheckPlan(
                 request = request,
                 accepted = accepted,
-                packageName = packageName,
-                evaluation = evaluation,
+                packageName = decision.packageName,
+                evaluation = decision.evaluation,
                 useDayId = useDayId,
                 calculator = calculator
             )
@@ -626,6 +706,184 @@ class SerializedDecisionWorker internal constructor(
             followUp = evaluable.firstOrNull()?.followUp ?: FollowUpKind.NONE,
             publicationStatus = PublicationStatus.PUBLISHED
         )
+    }
+
+    private suspend fun processGuardianApproval(request: GuardianApprovalEvaluationRequest) {
+        val accepted = synchronized(stateLock) {
+            if (!accepting.get() || request.lifecycleGeneration != currentLifecycleGeneration) {
+                return
+            }
+            currentAcceptedRuntime
+        }
+        if (!isCurrentGuardianApproval(request, accepted)) return
+
+        val committed = sessionPersistence.reconcile(
+            visiblePackages = emptySet(),
+            nowWallMs = request.capturedAtWallMs,
+            nowElapsedMs = request.capturedAtElapsedMs,
+            runtime = accepted.runtime
+        )
+        if (!committed) {
+            publishFailedGuardianApprovalEvaluation(
+                request = request,
+                accepted = accepted
+            )
+            return
+        }
+        if (!isCurrentGuardianApproval(request, accepted)) return
+
+        val calculator = ConfigurableUseDayCalculator(resetTime = accepted.runtime.resetTime)
+        val useDayId = calculator.idAt(request.capturedAtWallMs)
+        val evaluation = when (val result = evaluateRequestSafely(
+            snapshot = accepted.runtime.snapshot,
+            packageName = request.packageName,
+            useDayId = useDayId,
+            nowMs = request.capturedAtWallMs,
+            calculator = calculator,
+            useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
+            availablePackages = accepted.runtime.launchablePackages,
+            essentialExcludedPackages = accepted.runtime.evidencePolicy.essentialPackages,
+            overrides = accepted.runtime.overrideState
+        )) {
+            null -> return
+            is SafeAppRuleEvaluationResult.Success -> result.evaluation
+            SafeAppRuleEvaluationResult.RecoverableFailure -> {
+                publishFailedGuardianApprovalEvaluation(
+                    request = request,
+                    accepted = accepted
+                )
+                return
+            }
+        }
+        if (!isCurrentGuardianApproval(request, accepted)) return
+
+        val confirmationState = resolveGuardianApprovalConfirmationState(
+            request = request,
+            runtime = accepted.runtime,
+            currentUseDayId = useDayId
+        )
+        val validUntilWallClockMs = AppRuleRecheckPlanner.nextPlan(
+            snapshot = accepted.runtime.snapshot,
+            evaluation = evaluation,
+            overrideState = accepted.runtime.overrideState,
+            useDayId = useDayId,
+            nowMs = request.capturedAtWallMs,
+            useDayGenerationStartedAtMs = accepted.runtime.useDayGenerationStartedAtMs,
+            zone = calculator.zone,
+            useDayCalculator = calculator
+        )?.dueAtWallClockMs ?: Long.MAX_VALUE
+        publishCompletedGuardianApprovalEvaluation(
+            request = request,
+            accepted = accepted,
+            evaluationZoneId = calculator.zone.id,
+            validUntilWallClockMs = validUntilWallClockMs,
+            confirmationState = confirmationState,
+            evaluation = evaluation
+        )
+    }
+
+    private fun resolveGuardianApprovalConfirmationState(
+        request: GuardianApprovalEvaluationRequest,
+        runtime: RuleRuntimeSnapshot,
+        currentUseDayId: String
+    ): GuardianApprovalConfirmationState {
+        val receipt = request.approvalReceipt
+        if (receipt.useDayId != currentUseDayId ||
+            receipt.useDayGenerationStartedAtMs != runtime.useDayGenerationStartedAtMs
+        ) return GuardianApprovalConfirmationState.SUPERSEDED
+
+        val currentRule = runtime.snapshot.appRules.firstOrNull { it.id == receipt.ruleId }
+        val effectWasInvalidated = when (receipt) {
+            is GuardianApprovalWorkReceipt.Grant -> currentRule == null ||
+                !currentRule.isActive ||
+                !currentRule.guardianExtraTimeAllowed
+            is GuardianApprovalWorkReceipt.RuleSkip -> currentRule == null || !currentRule.isActive
+        }
+        if (effectWasInvalidated) return GuardianApprovalConfirmationState.SUPERSEDED
+
+        return if (receipt.isPresentIn(
+                state = runtime.overrideState,
+                currentUseDayId = currentUseDayId,
+                currentUseDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs
+            )
+        ) {
+            GuardianApprovalConfirmationState.REFLECTED
+        } else {
+            GuardianApprovalConfirmationState.UNCONFIRMED
+        }
+    }
+
+    private suspend fun publishCompletedGuardianApprovalEvaluation(
+        request: GuardianApprovalEvaluationRequest,
+        accepted: AcceptedRuleRuntimeSnapshot,
+        evaluationZoneId: String,
+        validUntilWallClockMs: Long,
+        confirmationState: GuardianApprovalConfirmationState,
+        evaluation: AppRulesEvaluation
+    ) {
+        if (!isCurrentGuardianApproval(request, accepted)) return
+        val rulesById = accepted.runtime.snapshot.appRules.associateBy { it.id }
+        val denyingRuleNames = evaluation.denyingRules.associate { denial ->
+            denial.ruleId to (
+                rulesById[denial.ruleId]?.name?.takeIf(String::isNotBlank) ?: denial.ruleId
+            )
+        }
+        try {
+            runInterruptible {
+                outcomeSink.publish(
+                    DecisionOutcome.GuardianApprovalEvaluationReady(
+                        request = request,
+                        acceptedRuntimeRevision = accepted.runtimeRevision,
+                        status = GuardianApprovalEvaluationStatus.COMPLETED,
+                        evaluationZoneId = evaluationZoneId,
+                        validUntilWallClockMs = validUntilWallClockMs,
+                        confirmationState = confirmationState,
+                        evaluation = evaluation,
+                        denyingRuleNames = denyingRuleNames
+                    )
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+        }
+    }
+
+    private suspend fun publishFailedGuardianApprovalEvaluation(
+        request: GuardianApprovalEvaluationRequest,
+        accepted: AcceptedRuleRuntimeSnapshot
+    ) {
+        if (!isCurrentGuardianApproval(request, accepted)) return
+        try {
+            runInterruptible {
+                outcomeSink.publish(
+                    DecisionOutcome.GuardianApprovalEvaluationReady(
+                        request = request,
+                        acceptedRuntimeRevision = accepted.runtimeRevision,
+                        status = GuardianApprovalEvaluationStatus.FAILED,
+                        evaluationZoneId = "",
+                        validUntilWallClockMs = Long.MAX_VALUE,
+                        confirmationState = GuardianApprovalConfirmationState.UNCONFIRMED,
+                        evaluation = null,
+                        denyingRuleNames = emptyMap()
+                    )
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+        }
+    }
+
+    private fun isCurrentGuardianApproval(
+        request: GuardianApprovalEvaluationRequest,
+        accepted: AcceptedRuleRuntimeSnapshot
+    ): Boolean = synchronized(stateLock) {
+        accepting.get() &&
+            request.lifecycleGeneration == currentLifecycleGeneration &&
+            accepted.runtimeRevision == currentAcceptedRuntime.runtimeRevision
     }
 
     /**

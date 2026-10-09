@@ -3,13 +3,19 @@ package neth.iecal.curbox.blockers
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
+import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.google.gson.JsonParser
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import neth.iecal.curbox.BuildConfig
+import neth.iecal.curbox.data.db.AppUsageEntity
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.RoomCurrentUseDaySessionRepository
 import neth.iecal.curbox.data.db.RoomUsageResetRepository
@@ -22,6 +28,9 @@ import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.DecisionOutcome
 import neth.iecal.curbox.domain.apprules.ObservationKind
 import neth.iecal.curbox.services.BaseBlockingService
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
+import neth.iecal.curbox.utils.DataStoreManager
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -29,10 +38,12 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.Closeable
 import java.io.File
 import java.io.FileOutputStream
 import java.time.Instant
 import java.time.format.DateTimeFormatter
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -56,9 +67,102 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
         const val TOTAL_MEASURED = 200
         const val LEDGER_CAPACITY = WARMUP_COUNT + TOTAL_MEASURED + EXCLUSION_CAP
 
-        const val EXPECTED_APPLICATION_ID = "neth.iecal.curbox.debug"
         const val EXPECTED_BOUNDARY = "T27-B fixed synthetic callback-to-decision-publication-entry p95"
         const val PROTOCOL_REVISION = "T27-P6"
+
+        val UNRELATED_USAGE_SENTINEL = AppUsageEntity(
+            date = "T27_UNRELATED_SENTINEL",
+            packageName = "com.curbox.t27.synthetic.unrelated",
+            totalTime = 71_000L,
+            hourlyUsage = "1,2,3,4",
+            launchCount = 7,
+            lastUsed = 1_700_000_000_000L
+        )
+    }
+
+    private data class ExternalRunIdentity(
+        val rawDeviceSerial: String,
+        val pseudonymousDeviceId: String,
+        val sourceCommit: String,
+        val harnessCommit: String,
+        val targetApkSha256: String,
+        val instrumentationApkSha256: String
+    )
+
+    private class IsolatedFixtureEnvironment(
+        private val context: Context,
+        private val databaseName: String,
+        val database: AppDatabase,
+        private val dataStoreManager: DataStoreManager,
+        private val settingsBefore: neth.iecal.curbox.data.models.Settings
+    ) : Closeable {
+        var blocker: AppRuleBlocker? = null
+        var teardownCompleted: Boolean = false
+            private set
+        var databaseDisposed: Boolean = false
+            private set
+        private var closed = false
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            var cleanupFailure: Throwable? = null
+
+            fun cleanup(action: () -> Unit) {
+                try {
+                    action()
+                } catch (failure: Throwable) {
+                    val priorFailure = cleanupFailure
+                    if (priorFailure == null) cleanupFailure = failure
+                    else priorFailure.addSuppressed(failure)
+                }
+            }
+
+            cleanup {
+                val currentBlocker = blocker
+                if (currentBlocker == null) {
+                    teardownCompleted = true
+                } else {
+                    val firstDrain = currentBlocker.onDestroyForMeasurement(totalDrainBudgetMs = 30_000L)
+                    val drain = if (firstDrain.completed) {
+                        firstDrain
+                    } else {
+                        currentBlocker.onDestroyForMeasurement(totalDrainBudgetMs = 30_000L)
+                    }
+                    teardownCompleted = drain.completed
+                    check(teardownCompleted) { "Fixture blocker did not quiesce before database disposal" }
+                }
+            }
+            if (!teardownCompleted) {
+                cleanupFailure?.let { throw it }
+                throw IllegalStateException("Fixture blocker did not quiesce before database disposal")
+            }
+            cleanup {
+                val actual = runBlocking {
+                    database.appUsageDao().get(
+                        UNRELATED_USAGE_SENTINEL.date,
+                        UNRELATED_USAGE_SENTINEL.packageName
+                    )
+                }
+                check(actual == UNRELATED_USAGE_SENTINEL) {
+                    "Unrelated usage state changed inside the isolated fixture database"
+                }
+            }
+            cleanup {
+                val settingsAfter = runBlocking { dataStoreManager.settings.first() }
+                check(settingsAfter == settingsBefore) { "Fixture measurement changed Curbox settings" }
+            }
+            cleanup { database.close() }
+            cleanup {
+                context.deleteDatabase(databaseName)
+                check(!context.getDatabasePath(databaseName).exists()) {
+                    "Isolated fixture database was not disposed"
+                }
+                databaseDisposed = true
+            }
+
+            cleanupFailure?.let { throw it }
+        }
     }
 
     private class IngressViolationException(message: String) : RuntimeException(message)
@@ -154,29 +258,207 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
         }
     }
 
+    private fun requireExternalRunIdentity(args: Bundle): ExternalRunIdentity {
+        fun required(name: String): String = args.getString(name)
+            ?.takeIf(String::isNotBlank)
+            ?: throw IllegalArgumentException("Missing required instrumentation argument: $name")
+
+        return ExternalRunIdentity(
+            rawDeviceSerial = required("t27RawDeviceSerial"),
+            pseudonymousDeviceId = required("t27PseudonymousDeviceId"),
+            sourceCommit = required("t27SourceCommit"),
+            harnessCommit = required("t27HarnessCommit"),
+            targetApkSha256 = required("t27TargetApkSha256"),
+            instrumentationApkSha256 = required("t27InstrumentationApkSha256")
+        )
+    }
+
+    private fun createIsolatedFixtureEnvironment(context: Context): IsolatedFixtureEnvironment {
+        val appContext = context.applicationContext
+        val dataStoreManager = DataStoreManager(appContext)
+        val settingsBefore = runBlocking { dataStoreManager.settings.first() }
+        val databaseName = "curbox_t27_fixture_${UUID.randomUUID()}.db"
+        check(!appContext.getDatabasePath(databaseName).exists()) {
+            "Refusing to reuse an existing fixture database"
+        }
+        val database = Room.databaseBuilder(
+            appContext,
+            AppDatabase::class.java,
+            databaseName
+        ).build()
+
+        try {
+            runBlocking {
+                database.appUsageDao().upsert(UNRELATED_USAGE_SENTINEL)
+                check(
+                    database.appUsageDao().get(
+                        UNRELATED_USAGE_SENTINEL.date,
+                        UNRELATED_USAGE_SENTINEL.packageName
+                    ) == UNRELATED_USAGE_SENTINEL
+                ) { "Could not seed unrelated state in isolated fixture database" }
+            }
+            return IsolatedFixtureEnvironment(
+                context = appContext,
+                databaseName = databaseName,
+                database = database,
+                dataStoreManager = dataStoreManager,
+                settingsBefore = settingsBefore
+            )
+        } catch (failure: Throwable) {
+            try {
+                database.close()
+            } catch (closeFailure: Throwable) {
+                failure.addSuppressed(closeFailure)
+            }
+            try {
+                appContext.deleteDatabase(databaseName)
+            } catch (deleteFailure: Throwable) {
+                failure.addSuppressed(deleteFailure)
+            }
+            throw failure
+        }
+    }
+
+    private fun runtimeVariant(): String =
+        BuildConfig.FLAVOR + BuildConfig.BUILD_TYPE.replaceFirstChar { it.titlecase() }
+
+    @Test
+    fun missingExternalRunIdentityIsRejected() {
+        val failure = runCatching { requireExternalRunIdentity(Bundle()) }.exceptionOrNull()
+
+        assertNotNull("Measurement identity must be supplied by the runner", failure)
+        assertTrue(
+            "Failure must name the first required runner argument",
+            failure!!.message.orEmpty().contains("t27RawDeviceSerial")
+        )
+    }
+
+    @Test
+    fun fixtureFailureDrainsWorkerAndDisposesIsolatedDatabase() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val targetContext = instrumentation.targetContext
+        val environment = createIsolatedFixtureEnvironment(targetContext)
+        val primaryFailure = IllegalStateException("injected failure after fixture work")
+
+        val thrown = runCatching {
+            environment.use { isolated ->
+                val service = FixedFixtureMeasurementService().also { it.attach(targetContext) }
+                val sessionRepository = RoomCurrentUseDaySessionRepository(
+                    isolated.database.foregroundSessionDao(),
+                    isolated.database.foregroundLaunchDao(),
+                    isolated.database.appUsageDao(),
+                    isolated.database
+                )
+                val blocker = AppRuleBlocker()
+                isolated.blocker = blocker
+                setField(blocker, "service", service)
+                setField(blocker, "sessionRepository", sessionRepository)
+                setField(blocker, "usageResetRepository", RoomUsageResetRepository(isolated.database))
+                setField(blocker, "enforcement", AppRuleEnforcement(sessionRepository))
+                setField(blocker, "setupReady", true)
+                setField(blocker, "launchablePackages", setOf(PACKAGE_ALLOW, PACKAGE_DENY))
+                blocker.screenInteractiveProvider = { true }
+                blocker.keyguardLockedProvider = { false }
+                blocker.activeWindowSnapshotProvider = {
+                    AppRuleBlocker.ActiveWindowSnapshot(packageName = PACKAGE_ALLOW)
+                }
+                blocker.applicationWindowSnapshotProvider = {
+                    AppRuleBlocker.ApplicationWindowSnapshot(
+                        packages = setOf(PACKAGE_ALLOW),
+                        hasApplicationWindow = true,
+                        hasUnknownApplicationWindow = false
+                    )
+                }
+                val group = AppRuleAppGroup(
+                    id = "T27_FAILURE_DENY_GROUP",
+                    name = "T27 Failure Deny Group",
+                    selectedPackages = listOf(PACKAGE_DENY)
+                )
+                val rule = AppRule(
+                    id = "T27_FAILURE_DENY_RULE",
+                    name = "T27 Failure Deny Rule",
+                    weekdays = (0..6).toSet(),
+                    startMinute = 0,
+                    endMinute = 0,
+                    allowedMinutes = 0,
+                    scope = AppRuleScope.forGroup(group.id)
+                )
+                (getField(blocker, "snapshot") as AppRuleSnapshotCoordinator).accept(
+                    AppRuleSnapshot(appGroups = listOf(group), appRules = listOf(rule))
+                )
+                val outcomeObserved = CountDownLatch(1)
+                blocker.decisionOutcomeSinkObserver = observer@{ outcome ->
+                    val enforcementOutcome = outcome as? DecisionOutcome.EnforcementOutcome
+                        ?: return@observer
+                    if (enforcementOutcome.packageDecisions.any { it.packageName == PACKAGE_ALLOW }) {
+                        outcomeObserved.countDown()
+                    }
+                }
+
+                val event = AccessibilityFrameworkTestObjects.createEvent(
+                    AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                )
+                event.packageName = PACKAGE_ALLOW
+                try {
+                    instrumentation.runOnMainSync {
+                        blocker.doAppRuleCheck(event)
+                    }
+                } finally {
+                    AccessibilityFrameworkTestObjects.releaseEvent(event)
+                }
+                assertTrue("Fixture worker must publish before injected failure", outcomeObserved.await(5, TimeUnit.SECONDS))
+
+                runBlocking {
+                    isolated.database.appUsageDao().upsert(
+                        UNRELATED_USAGE_SENTINEL.copy(totalTime = UNRELATED_USAGE_SENTINEL.totalTime + 1)
+                    )
+                }
+                throw primaryFailure
+            }
+        }.exceptionOrNull()
+
+        assertSame("Cleanup must preserve the fixture failure", primaryFailure, thrown)
+        assertTrue("The cleanup assertion should be suppressed on the original failure", primaryFailure.suppressed.isNotEmpty())
+        assertTrue("Blocker, worker, and effects must drain", environment.teardownCompleted)
+        assertTrue("The isolated database must be deleted", environment.databaseDisposed)
+    }
+
     @Test
     fun measureFixedSyntheticFixtureP95() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
+        val runIdentity = requireExternalRunIdentity(InstrumentationRegistry.getArguments())
         val currentProcess = Application.getProcessName()
 
-        assertEquals(EXPECTED_APPLICATION_ID, currentProcess)
+        assertEquals(BuildConfig.APPLICATION_ID, currentProcess)
         assertFalse(currentProcess.endsWith(":app_blocker_service"))
         assertFalse(currentProcess.endsWith(":crash_handler"))
-
-        val args = InstrumentationRegistry.getArguments()
-        val rawDeviceSerial = args.getString("t27RawDeviceSerial") ?: "T811MA256GB23418064398"
-        val pseudonymousDeviceId = args.getString("t27PseudonymousDeviceId") ?: "T27_DEVICE_01"
-        val sourceCommit = args.getString("t27SourceCommit") ?: "01ab394e7f0a9a419a70067d824ec86dcfd2023a"
-        val harnessCommit = args.getString("t27HarnessCommit") ?: "01ab394e7f0a9a419a70067d824ec86dcfd2023a"
-        val targetApkSha256 = args.getString("t27TargetApkSha256") ?: "d5ae92ebd9973dcab23e763ce03183d912d0520f60d60289325ffaf0ef4d7acd"
-        val instrumentationApkSha256 = args.getString("t27InstrumentationApkSha256") ?: "646d5f830d4260d4dbbfdf3f03c2dd90c02513a62588d4f0f293b1999f0a379b"
 
         val runId = "T27-" + Instant.now().epochSecond + "-" + (1000..9999).random()
         val startedAtUtc = DateTimeFormatter.ISO_INSTANT.format(Instant.now())
 
+        createIsolatedFixtureEnvironment(targetContext).use { environment ->
+            runFixedFixtureMeasurement(
+                instrumentation = instrumentation,
+                targetContext = targetContext,
+                environment = environment,
+                runIdentity = runIdentity,
+                runId = runId,
+                startedAtUtc = startedAtUtc
+            )
+        }
+    }
+
+    private fun runFixedFixtureMeasurement(
+        instrumentation: android.app.Instrumentation,
+        targetContext: Context,
+        environment: IsolatedFixtureEnvironment,
+        runIdentity: ExternalRunIdentity,
+        runId: String,
+        startedAtUtc: String
+    ) {
         val service = FixedFixtureMeasurementService().also { it.attach(targetContext) }
-        val database = AppDatabase.getInstance(targetContext)
+        val database = environment.database
         val sessionRepository = RoomCurrentUseDaySessionRepository(
             database.foregroundSessionDao(),
             database.foregroundLaunchDao(),
@@ -185,6 +467,7 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
         )
         val usageResetRepository = RoomUsageResetRepository(database)
         val blocker = AppRuleBlocker()
+        environment.blocker = blocker
 
         setField(blocker, "service", service)
         setField(blocker, "sessionRepository", sessionRepository)
@@ -281,20 +564,30 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
             }
 
             activeFixturePackage = PACKAGE_ALLOW
-            val allowEvent = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            val allowEvent = AccessibilityFrameworkTestObjects.createEvent(
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            )
             allowEvent.packageName = PACKAGE_ALLOW
-            instrumentation.runOnMainSync {
-                blocker.doAppRuleCheck(allowEvent)
+            try {
+                instrumentation.runOnMainSync {
+                    blocker.doAppRuleCheck(allowEvent)
+                }
+            } finally {
+                AccessibilityFrameworkTestObjects.releaseEvent(allowEvent)
             }
-            allowEvent.recycle()
 
             activeFixturePackage = PACKAGE_DENY
-            val denyEvent = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            val denyEvent = AccessibilityFrameworkTestObjects.createEvent(
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            )
             denyEvent.packageName = PACKAGE_DENY
-            instrumentation.runOnMainSync {
-                blocker.doAppRuleCheck(denyEvent)
+            try {
+                instrumentation.runOnMainSync {
+                    blocker.doAppRuleCheck(denyEvent)
+                }
+            } finally {
+                AccessibilityFrameworkTestObjects.releaseEvent(denyEvent)
             }
-            denyEvent.recycle()
 
             assertTrue("Sanity phase must reach decision outcome sink", sanityLatch.await(5, TimeUnit.SECONDS))
             val sanityAllow = sanityAllowOutcomeRef.get()?.packageDecisions?.firstOrNull { it.packageName == PACKAGE_ALLOW }
@@ -348,7 +641,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
         var validWarmups = 0
         var validMeasuredAllow = 0
         var validMeasuredDeny = 0
-        var aborted = false
         var abortReason: String? = null
 
         fun currentPhase(): String = if (validWarmups < WARMUP_COUNT) "WARMUP" else "MEASURED"
@@ -362,14 +654,12 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
             }
         }
 
-        while (!aborted && (validWarmups < WARMUP_COUNT || (validMeasuredAllow + validMeasuredDeny) < TOTAL_MEASURED)) {
+        while (validWarmups < WARMUP_COUNT || (validMeasuredAllow + validMeasuredDeny) < TOTAL_MEASURED) {
             if (attemptIndex >= LEDGER_CAPACITY) {
-                aborted = true
                 abortReason = "ABORT_LEDGER_CAPACITY"
                 break
             }
             if (exclusionCount >= EXCLUSION_CAP) {
-                aborted = true
                 abortReason = "ABORT_EXCLUSION_CAP_REACHED"
                 break
             }
@@ -382,7 +672,9 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
             slot.fixtureLabel = fixtureLabel
             activeSlotRef.set(slot)
 
-            val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            val event = AccessibilityFrameworkTestObjects.createEvent(
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            )
             event.packageName = fixturePackage
 
             instrumentation.runOnMainSync {
@@ -401,12 +693,11 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                     slot.callbackReturnPresent = true
                     slot.callbackExitKind = "EXCEPTION"
                 } finally {
-                    event.recycle()
+                    AccessibilityFrameworkTestObjects.releaseEvent(event)
                 }
             }
 
             if (unverifiedIngressDetected.get() || unexpectedRecheckDetected.get()) {
-                aborted = true
                 abortReason = "ABORT_UNEXPECTED_INGRESS"
                 slot.terminalState = "ABORT_UNEXPECTED_INGRESS"
                 break
@@ -426,7 +717,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                     !hasReturn -> "TIMEOUT_MISSING_CALLBACK_RETURN"
                     else -> "TIMEOUT_MISSING_SELECTED_END"
                 }
-                aborted = true
                 abortReason = "ABORT_OBSERVATION_DEADLINE"
                 break
             }
@@ -436,7 +726,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                 slot.exclusionReason = "CALLBACK_EXIT_" + slot.callbackExitKind
                 exclusionCount++
                 if (exclusionCount >= EXCLUSION_CAP) {
-                    aborted = true
                     abortReason = "ABORT_EXCLUSION_CAP_REACHED"
                     break
                 }
@@ -449,7 +738,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                 slot.exclusionReason = "CLOCK_ORDER_VIOLATION"
                 exclusionCount++
                 if (exclusionCount >= EXCLUSION_CAP) {
-                    aborted = true
                     abortReason = "ABORT_EXCLUSION_CAP_REACHED"
                     break
                 }
@@ -467,7 +755,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                 slot.exclusionReason = "EXPECTED_${expectedDecision}_BUT_GOT_${slot.decision}"
                 exclusionCount++
                 if (exclusionCount >= EXCLUSION_CAP) {
-                    aborted = true
                     abortReason = "ABORT_EXCLUSION_CAP_REACHED"
                     break
                 }
@@ -496,7 +783,6 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
                 slot.exclusionReason = "QUIESCENCE_FAILED_OR_TIMEOUT"
                 exclusionCount++
                 if (exclusionCount >= EXCLUSION_CAP) {
-                    aborted = true
                     abortReason = "ABORT_RECOVERY_NOT_QUIESCENT"
                     break
                 }
@@ -536,16 +822,16 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
             runId = runId,
             startedAtUtc = startedAtUtc,
             endedAtUtc = endedAtUtc,
-            rawDeviceSerial = rawDeviceSerial,
-            pseudonymousDeviceId = pseudonymousDeviceId,
-            sourceCommit = sourceCommit,
-            harnessCommit = harnessCommit,
+            rawDeviceSerial = runIdentity.rawDeviceSerial,
+            pseudonymousDeviceId = runIdentity.pseudonymousDeviceId,
+            sourceCommit = runIdentity.sourceCommit,
+            harnessCommit = runIdentity.harnessCommit,
             protocolRevision = PROTOCOL_REVISION,
-            appVersion = "v4.0.4-debug",
-            applicationId = EXPECTED_APPLICATION_ID,
-            variant = "fullDebug",
-            targetApkSha256 = targetApkSha256,
-            instrumentationApkSha256 = instrumentationApkSha256,
+            appVersion = BuildConfig.VERSION_NAME,
+            applicationId = BuildConfig.APPLICATION_ID,
+            variant = runtimeVariant(),
+            targetApkSha256 = runIdentity.targetApkSha256,
+            instrumentationApkSha256 = runIdentity.instrumentationApkSha256,
             buildFingerprint = android.os.Build.FINGERPRINT,
             deviceModel = android.os.Build.MODEL,
             androidVersion = android.os.Build.VERSION.RELEASE,
@@ -599,6 +885,25 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
         assertEquals(metadataSha256, sha256Hex(rereadMetadata))
         assertEquals(digestsBytes.size.toLong(), rereadDigests.size.toLong())
         assertEquals(sha256Hex(digestsBytes), sha256Hex(rereadDigests))
+
+        val rereadSampleLines = String(rereadSamples, Charsets.UTF_8)
+            .lineSequence()
+            .filter(String::isNotBlank)
+            .toList()
+        assertEquals(attemptedRows.size, rereadSampleLines.size)
+        rereadSampleLines.forEach { line ->
+            assertTrue(JsonParser.parseString(line).isJsonObject)
+        }
+        val parsedMetadata = JsonParser.parseString(String(rereadMetadata, Charsets.UTF_8)).asJsonObject
+        val parsedDigests = JsonParser.parseString(String(rereadDigests, Charsets.UTF_8)).asJsonObject
+        assertEquals(runId, parsedMetadata.get("runId").asString)
+        assertEquals(BuildConfig.VERSION_NAME, parsedMetadata.get("appVersion").asString)
+        assertEquals(BuildConfig.APPLICATION_ID, parsedMetadata.get("applicationId").asString)
+        assertEquals(runtimeVariant(), parsedMetadata.get("variant").asString)
+        assertEquals(runIdentity.sourceCommit, parsedMetadata.get("sourceCommit").asString)
+        assertEquals(runIdentity.harnessCommit, parsedMetadata.get("harnessCommit").asString)
+        assertEquals(samplesSha256, parsedDigests.get("samplesJsonlSha256").asString)
+        assertEquals(metadataSha256, parsedDigests.get("metadataJsonSha256").asString)
 
         assertNull("Measurement run must not abort: $abortReason", abortReason)
         assertEquals(WARMUP_COUNT, validWarmups)

@@ -351,6 +351,53 @@ mCurrentFocus=Window{af23a46 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.act
         }
     }
 
+    Context "Get-TestDeviceEpochTimeMs" {
+        It "reads millisecond precision from the device clock" {
+            $script:receivedShellCommand = $null
+            $script:DeviceTestShellOutputHandler = {
+                param($Command)
+                $script:receivedShellCommand = $Command
+                return "1791473390142"
+            }
+
+            (Get-TestDeviceEpochTimeMs) | Should Be ([long]1791473390142)
+            $script:receivedShellCommand | Should Be "date +%s%3N"
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+
+        It "returns null when the device does not return millisecond epoch time" {
+            $script:DeviceTestShellOutputHandler = { param($Command) return "1791473390" }
+
+            (Get-TestDeviceEpochTimeMs) | Should Be $null
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+    }
+
+    Context "Wait-ForWindowFocus" {
+        It "polls until the requested activity has focus" {
+            $script:focusResponses = @(
+                "mCurrentFocus=Window{1 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.activity.GuardianApprovalActivity}",
+                "mCurrentFocus=Window{2 u0 neth.iecal.curbox.debug/neth.iecal.curbox.api.ApiPermissionActivity}"
+            )
+            $script:focusResponseIndex = 0
+            $script:DeviceTestShellOutputHandler = {
+                param($Command)
+                $response = $script:focusResponses[$script:focusResponseIndex]
+                $script:focusResponseIndex++
+                return $response
+            }
+
+            $focus = Wait-ForWindowFocus `
+                -ExpectedActivity "ApiPermissionActivity" `
+                -TimeoutSeconds 1 `
+                -PollIntervalMilliseconds 1
+
+            $focus.Success | Should Be $true
+            $script:focusResponseIndex | Should Be 2
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+    }
+
     Context "Get-DeviceAccessibilityRestoreCommands" {
         It "restores the captured secure settings exactly" {
             $state = [PSCustomObject]@{
@@ -513,6 +560,29 @@ mCurrentFocus=Window{af23a46 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.act
             $group.membershipHistory.Count | Should Be 1
             $group.membershipHistory[0].effectiveFromMs | Should Be ([long]::MinValue)
             ($group.membershipHistory[0].selectedPackages -contains "com.test.app") | Should Be $true
+        }
+    }
+
+    Context "Inject-TestAppRules" {
+        It "preserves existing guardian overrides when applying a changed snapshot" {
+            $script:injectedRuleCommands = @()
+            $script:DeviceTestShellHandler = {
+                param($Command)
+                $script:injectedRuleCommands += $Command
+            }
+            $script:DeviceTestTempStringPushHandler = {
+                param($Content, $RemotePath)
+                $script:injectedRuleCommands += "push:$RemotePath"
+                $script:injectedRuleCommands += $Content
+            }
+            $snapshot = [PSCustomObject]@{ appGroups = @(); appRules = @() }
+
+            Inject-TestAppRules -AppRuleSnapshot $snapshot -PreserveOverrides
+
+            ($script:injectedRuleCommands -join "`n") | Should Not Match "CLEAR_TEST_APP_RULE_OVERRIDES"
+            ($script:injectedRuleCommands -join "`n") | Should Match "APPLY_TEST_APP_RULES"
+            ($script:injectedRuleCommands -join "`n") | Should Match "refresh.app_rules"
+            ($script:injectedRuleCommands -join "`n") | Should Match "refresh.appblocker"
         }
     }
 
@@ -756,6 +826,56 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
 
             ($script:accessibilityCommands -contains "settings put secure enabled_accessibility_services neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService") | Should Be $true
             ($script:accessibilityCommands -contains "settings put secure accessibility_enabled 1") | Should Be $true
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+    }
+
+    Context "Disable-AccessibilityService" {
+        It "removes only Curbox and preserves other enabled services" {
+            $serviceName = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
+            $script:secureValues = @{
+                enabled_accessibility_services = "com.example/.Reader:${serviceName}:com.example/.Magnifier"
+                accessibility_enabled = "1"
+            }
+            $script:accessibilityCommands = @()
+            $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+
+            (Disable-AccessibilityService) | Should Be $true
+
+            ($script:accessibilityCommands -contains "settings put secure enabled_accessibility_services com.example/.Reader:com.example/.Magnifier") | Should Be $true
+            @($script:accessibilityCommands | Where-Object { $_ -match "accessibility_enabled" }).Count | Should Be 0
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+
+        It "deletes an empty services value when Curbox is the only enabled service" {
+            $script:secureValues = @{
+                enabled_accessibility_services = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
+                accessibility_enabled = "1"
+            }
+            $script:accessibilityCommands = @()
+            $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+
+            (Disable-AccessibilityService) | Should Be $true
+
+            ($script:accessibilityCommands -contains "settings delete secure enabled_accessibility_services") | Should Be $true
+            @($script:accessibilityCommands | Where-Object { $_ -match "accessibility_enabled" }).Count | Should Be 0
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+
+        It "does not rewrite accessibility settings when Curbox is already disabled" {
+            $script:secureValues = @{
+                enabled_accessibility_services = "com.example/.Reader"
+                accessibility_enabled = "1"
+            }
+            $script:accessibilityCommands = @()
+            $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+
+            (Disable-AccessibilityService) | Should Be $false
+
+            $script:accessibilityCommands.Count | Should Be 0
             $global:DeviceTestUnexpectedAdbCalls | Should Be 0
         }
     }

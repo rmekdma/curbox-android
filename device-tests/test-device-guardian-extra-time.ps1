@@ -30,7 +30,240 @@ if (-not (Test-Path $tmpDir)) {
 }
 
 $backupFile = Join-Path $tmpDir "settings_backup.json"
+$packageName = "neth.iecal.curbox.debug"
 $passedAll = $true
+
+function New-GuardianApprovalRuleSnapshot(
+    [string]$TargetPackage,
+    [string]$GroupId,
+    [string]$UsageRuleId,
+    [string]$NightRuleId = "",
+    [int]$NightStartMinute = 0,
+    [int]$NightEndMinute = 0
+) {
+    $targetGroup = New-TestAppGroup `
+        -GroupId $GroupId `
+        -GroupName "Guardian approval target" `
+        -Packages @($TargetPackage)
+    $usageRule = [PSCustomObject]@{
+        id = $UsageRuleId
+        name = "UsageRule"
+        isActive = $true
+        weekdays = @(0, 1, 2, 3, 4, 5, 6)
+        startMinute = 0
+        endMinute = 0
+        appGroupId = $GroupId
+        allowedMinutes = [long]0
+        usageConditionEnabled = $false
+        usageConditionMinutes = [long]0
+        contributorGroupConditionMinutes = [PSCustomObject]@{}
+        contributorGroupIds = @()
+        earnedAllowanceEnabled = $false
+        rolloverEnabled = $false
+        unlockDays = @()
+        guardianExtraTimeAllowed = $true
+        timeRanges = @([PSCustomObject]@{ startMinute = 0; endMinute = 0 })
+        scope = [PSCustomObject]@{
+            includeAllApps = $false
+            includedGroupIds = @($GroupId)
+            excludedGroupIds = @()
+        }
+    }
+    $rules = @($usageRule)
+    if (-not [string]::IsNullOrWhiteSpace($NightRuleId)) {
+        $rules += [PSCustomObject]@{
+            id = $NightRuleId
+            name = "NightRule"
+            isActive = $true
+            weekdays = @(0, 1, 2, 3, 4, 5, 6)
+            startMinute = 0
+            endMinute = 0
+            appGroupId = $GroupId
+            allowedMinutes = [long]0
+            usageConditionEnabled = $false
+            usageConditionMinutes = [long]0
+            contributorGroupConditionMinutes = [PSCustomObject]@{}
+            contributorGroupIds = @()
+            earnedAllowanceEnabled = $false
+            rolloverEnabled = $false
+            unlockDays = @()
+            guardianExtraTimeAllowed = $false
+            timeRanges = @(
+                [PSCustomObject]@{
+                    startMinute = $NightStartMinute
+                    endMinute = $NightEndMinute
+                }
+            )
+            scope = [PSCustomObject]@{
+                includeAllApps = $true
+                includedGroupIds = @()
+                excludedGroupIds = @()
+            }
+        }
+    }
+    return [PSCustomObject]@{
+        appGroups = @($targetGroup)
+        appRules = $rules
+    }
+}
+
+function Invoke-DirectGuardianGrant([string]$RuleName, [int]$CandidateCount) {
+    $ui = Wait-For-UI "approval_add_time|Change extra time|추가 시간 변경" 8
+    $clicked = Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/approval_add_time"' "Change extra time" -Optional
+    if (-not $clicked) { $clicked = Tap-Node $ui 'text="추가 시간 변경"' "추가 시간" -Optional }
+    if (-not $clicked) { $clicked = Tap-Node $ui 'text="Change extra time"' "Change extra time" }
+    if (-not $clicked) {
+        Write-Fail "Could not open the direct grant form."
+        return $false
+    }
+
+    $ui = Wait-For-UI "current_total" 6
+    $candidates = Get-TestRulePickerOptions -CurrentUi $ui -CandidateCount $CandidateCount
+    if (-not $candidates.Success) {
+        Write-Fail "Could not inspect the $RuleName grant candidates."
+        return $false
+    }
+    $selection = Select-TestRulePickerOption `
+        -CurrentUi $candidates.Ui `
+        -CandidateOptions $candidates.Options `
+        -RuleName $RuleName
+    if (-not $selection.Success) {
+        Write-Fail "Could not select $RuleName for the direct grant."
+        return $false
+    }
+
+    $inputNode = Get-NodeBounds $selection.Ui 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
+    if (-not $inputNode.Found) {
+        Write-Fail "Could not find the direct grant minutes input."
+        return $false
+    }
+    Invoke-TestDeviceShell -Command "input tap $($inputNode.X) $($inputNode.Y)"
+    Start-Sleep -Milliseconds 250
+    Invoke-TestDeviceShell -Command "input text 15"
+    $ui = Dump-UI
+    $applied = Tap-Node $ui 'resource-id="android:id/button1"' "Apply" -Optional
+    if (-not $applied) { $applied = Tap-Node $ui 'text="적용"' "적용" -Optional }
+    if (-not $applied) { $applied = Tap-Node $ui 'text="Apply"' "Apply" }
+    if (-not $applied) { return $false }
+    Start-Sleep -Milliseconds 500
+    return $true
+}
+
+function Send-GuardianTestBroadcast([string]$Action, [string]$ExtraArguments = "") {
+    $command = "am broadcast -a $Action -p $packageName"
+    if ($ExtraArguments) { $command += " $ExtraArguments" }
+    Invoke-TestDeviceShell -Command $command | Out-Null
+}
+
+function Select-GuardianApprovalRule([string]$RuleId) {
+    Send-GuardianTestBroadcast `
+        -Action "neth.iecal.curbox.guardian.TEST_SELECT_APPROVAL_RULE" `
+        -ExtraArguments "--es guardian_test_rule_id $RuleId"
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($watch.Elapsed.TotalSeconds -lt 5) {
+        $logs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
+        if ($logs -match "test_rule_selection instance=\d+ screen=[^ ]+ rule=$([regex]::Escape($RuleId)) accepted=true selected=$([regex]::Escape($RuleId))") {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+function Start-NightApprovalCase(
+    $Fixture,
+    $RolloverState,
+    [string]$UsageRuleId,
+    [long]$GenerationStartedAtMs
+) {
+    Invoke-TestDeviceShell -Command "input keyevent 3"
+    Start-Sleep -Milliseconds 800
+    Inject-TestAppRules `
+        -AppRuleSnapshot $Fixture `
+        -AppRuleRolloverState $RolloverState `
+        -UsageGenerationStartedAtMs $GenerationStartedAtMs
+    Invoke-TestDeviceShell -Command "logcat -c"
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
+
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $activityLine = ""
+    $focus = $null
+    while ($watch.Elapsed.TotalSeconds -lt 15) {
+        $logs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
+        $activityLine = @($logs -split "`r?`n" | Where-Object { $_ -match "activity_created .*denials=" } | Select-Object -Last 1)
+        $focus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+        if ($activityLine -and $focus.Success) { break }
+        Start-Sleep -Milliseconds 300
+    }
+    if (-not $activityLine -or -not $focus -or -not $focus.Success -or
+        $activityLine -notmatch "NightRule" -or $activityLine -notmatch "UsageRule") {
+        throw "The active NightRule and UsageRule did not both reach GuardianApprovalActivity. Activity log: $activityLine; focus: $($focus.RawFocus)"
+    }
+    if (-not (Select-GuardianApprovalRule -RuleId $UsageRuleId)) {
+        throw "GuardianApprovalActivity did not select UsageRule for the approval test."
+    }
+}
+
+function Invoke-AccumulatedGuardianApproval([int]$ExpectedMinutes = 15) {
+    $ui = Wait-For-UI "approval_use_accumulated_time|Use accumulated time|누적 시간 사용" 8
+    $tapped = Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/approval_use_accumulated_time"' "Use accumulated time" -Optional
+    if (-not $tapped) { $tapped = Tap-Node $ui 'text="누적 시간 사용"' "누적 시간 사용" -Optional }
+    if (-not $tapped) { $tapped = Tap-Node $ui 'text="Use accumulated time"' "Use accumulated time" -Optional }
+    if (-not $tapped) { return $false }
+
+    $dialogUi = Wait-For-UI "accumulated_minutes_input|accumulated_total_desc" 8
+    $inputNode = Get-NodeBounds $dialogUi 'resource-id="neth.iecal.curbox.debug:id/accumulated_minutes_input"'
+    if (-not $inputNode.Found) { return $false }
+    $prefilled = $dialogUi -match ('resource-id="neth.iecal.curbox.debug:id/accumulated_minutes_input"[^>]*text="' + $ExpectedMinutes + '"') -or
+        $dialogUi -match ('text="' + $ExpectedMinutes + '"[^>]*resource-id="neth.iecal.curbox.debug:id/accumulated_minutes_input"')
+    if (-not $prefilled) { return $false }
+    $applied = Tap-Node $dialogUi 'resource-id="android:id/button1"' "Apply accumulated time" -Optional
+    if (-not $applied) { $applied = Tap-Node $dialogUi 'text="적용"' "적용" -Optional }
+    if (-not $applied) { $applied = Tap-Node $dialogUi 'text="Apply"' "Apply" -Optional }
+    return $applied
+}
+
+function Invoke-GuardianSkip([string]$RuleId) {
+    if (-not (Select-GuardianApprovalRule -RuleId $RuleId)) { return $false }
+    $ui = Wait-For-UI "approval_skip_rule|Skip this rule|규칙 건너뛰기" 8
+    $tapped = Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/approval_skip_rule"' "Skip this rule" -Optional
+    if (-not $tapped) { $tapped = Tap-Node $ui 'text="규칙 건너뛰기"' "규칙 건너뛰기" -Optional }
+    if (-not $tapped) { $tapped = Tap-Node $ui 'text="Skip this rule"' "Skip this rule" -Optional }
+    if (-not $tapped) { return $false }
+
+    $dialogUi = Wait-For-UI "Skip for 15 minutes|guardian_skip_15_minutes" 8
+    $tapped = Tap-Node $dialogUi 'text="Skip for 15 minutes"' "Skip for 15 minutes" -Optional
+    if (-not $tapped) {
+        $tapped = Tap-Node $dialogUi 'text="15분 동안 건너뛰기"' "15분 동안 건너뛰기" -Optional
+    }
+    if (-not $tapped) {
+        $tapped = Tap-Node $dialogUi 'resource-id="android:id/text1"' "Skip for 15 minutes" -Optional
+    }
+    return $tapped
+}
+
+function Wait-ForGuardianNightDenial([string]$ExpectedKind, [string]$UsageRuleId) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $serviceCheckSeen = $false
+    $requestSeen = $false
+    $remainingLine = ""
+    $focus = $null
+    while ($watch.Elapsed.TotalSeconds -lt 15) {
+        $logs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
+        $serviceCheckSeen = $logs -match "service_check_received action=neth\.iecal\.curbox\.guardian\.approval\.stored .*receipt_valid=true"
+        $requestSeen = $logs -match "check_request test=- action=neth\.iecal\.curbox\.guardian\.approval\.stored .*kind=$([regex]::Escape($ExpectedKind)) rule=$([regex]::Escape($UsageRuleId))"
+        $remainingLine = @($logs -split "`r?`n" | Where-Object { $_ -match "ui_state status=remaining" } | Select-Object -Last 1)
+        $focus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+        if ($serviceCheckSeen -and $requestSeen -and $remainingLine -and
+            $remainingLine -match "denials=NightRule" -and
+            $remainingLine -notmatch "UsageRule" -and $focus.Success) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    Write-Host "[DIAGNOSTIC] serviceCheck=$serviceCheckSeen typedRequest=$requestSeen remaining='$remainingLine' focus='$($focus.RawFocus)'" -ForegroundColor DarkYellow
+    return $false
+}
 
 try {
     Write-Step "1. Backing up device settings.json..."
@@ -212,7 +445,268 @@ try {
         $passedAll = $false
     }
 
-    Write-Step "11. Final Result Summary"
+    Write-Step "11. Preparing direct, accumulated, and skip checks during one active NightRule interval..."
+    Invoke-TestDeviceShell -Command "input keyevent 3"
+    Start-Sleep -Seconds 1
+    $directCaseTime = Get-DeviceTimeInfo
+    if (-not $directCaseTime) { throw "Could not read device time for the active NightRule regression." }
+    if ($directCaseTime.Second -ge 45) {
+        Start-Sleep -Seconds ($directCaseTime.SecondsUntilNextMinute + 2)
+        $directCaseTime = Get-DeviceTimeInfo
+        if (-not $directCaseTime) { throw "Could not reread device time after minute rollover." }
+    }
+    $nightStartMinute = ($directCaseTime.CurrentMinute + 1430) % 1440
+    $nightEndMinute = ($nightStartMinute + 180) % 1440
+    $nightRuleId = "night-direct-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $usageRuleId = "usage-direct-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $groupId = "direct-target-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $nightFixture = New-GuardianApprovalRuleSnapshot `
+        -TargetPackage $TargetPackage `
+        -GroupId $groupId `
+        -UsageRuleId $usageRuleId `
+        -NightRuleId $nightRuleId `
+        -NightStartMinute $nightStartMinute `
+        -NightEndMinute $nightEndMinute
+    $nightActiveMinutes = ($directCaseTime.CurrentMinute - $nightStartMinute + 1440) % 1440
+    if ($nightActiveMinutes -ge 180) {
+        throw "The device clock is outside the NightRule interval prepared for this test."
+    }
+    $emptyRollover = [PSCustomObject]@{ pools = [PSCustomObject]@{} }
+    $directCaseStartTimeMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Start-NightApprovalCase `
+        -Fixture $nightFixture `
+        -RolloverState $emptyRollover `
+        -UsageRuleId $usageRuleId `
+        -GenerationStartedAtMs $directCaseStartTimeMs
+
+    Write-Step "12. Confirming NightRule and UsageRule both deny before the direct grant..."
+    Write-Success "The active NightRule and UsageRule denials both appear before any grant is saved."
+    $beforeDirectSettings = Get-DeviceSettings -AsObject
+    $preexistingDirectGrants = @(
+        $beforeDirectSettings.appRuleOverrideState.grants |
+            Where-Object { $_.ruleId -eq $usageRuleId }
+    )
+    if ($preexistingDirectGrants.Count -ne 0) {
+        Write-Fail "The UsageRule already had a grant before this independent regression case."
+        $passedAll = $false
+    }
+
+    Write-Step "13. Paying only UsageRule while NightRule stays active..."
+    if (Invoke-DirectGuardianGrant -RuleName "UsageRule" -CandidateCount 1) {
+        Write-Success "Saved a direct grant for UsageRule without changing NightRule."
+    } else {
+        Write-Fail "Could not save the direct UsageRule grant."
+        $passedAll = $false
+    }
+    if (Wait-ForGuardianNightDenial -ExpectedKind "direct_grant" -UsageRuleId $usageRuleId) {
+        Write-Success "The direct receipt reached the service; the same screen shows only the latest NightRule denial."
+    } else {
+        Write-Fail "The direct confirmation did not retain the guardian screen with only NightRule remaining."
+        $passedAll = $false
+    }
+    $nightCaseSettings = Get-DeviceSettings -AsObject
+    $nightCaseGrants = @(
+        $nightCaseSettings.appRuleOverrideState.grants |
+            Where-Object { $_.ruleId -eq $usageRuleId }
+    )
+    if ($nightCaseGrants.Count -eq 1 -and $nightCaseGrants[0].grantedMillis -eq 900000 -and
+        -not [bool]$nightCaseGrants[0].isFromAccumulatedPool) {
+        Write-Success "The direct grant belongs only to UsageRule; no rule snapshot refresh was used."
+    } else {
+        Write-Fail "The minimal regression fixture did not persist exactly one 15 minute UsageRule grant."
+        $passedAll = $false
+    }
+
+    Write-Step "14. Granting accumulated time to UsageRule while the same NightRule remains active..."
+    $accumulatedRuleId = "usage-accumulated-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $accumulatedNightRuleId = "night-accumulated-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $accumulatedGroupId = "accumulated-target-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $accumulatedFixture = New-GuardianApprovalRuleSnapshot `
+        -TargetPackage $TargetPackage `
+        -GroupId $accumulatedGroupId `
+        -UsageRuleId $accumulatedRuleId `
+        -NightRuleId $accumulatedNightRuleId `
+        -NightStartMinute $nightStartMinute `
+        -NightEndMinute $nightEndMinute
+    $accumulatedRule = @($accumulatedFixture.appRules | Where-Object { $_.id -eq $accumulatedRuleId })[0]
+    $accumulatedRule.rolloverEnabled = $true
+    $accumulatedRule.unlockDays = @(0, 1, 2, 3, 4, 5, 6)
+    $accumulatedMinutes = 15
+    $accumulatedRollover = [PSCustomObject]@{
+        pools = [PSCustomObject]@{
+            $accumulatedRuleId = (New-RuleRolloverPool `
+                -RuleId $accumulatedRuleId `
+                -AccumulatedMinutes $accumulatedMinutes)
+        }
+    }
+    $accumulatedStartTimeMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Start-NightApprovalCase `
+        -Fixture $accumulatedFixture `
+        -RolloverState $accumulatedRollover `
+        -UsageRuleId $accumulatedRuleId `
+        -GenerationStartedAtMs $accumulatedStartTimeMs
+    $accumulatedBefore = Get-DeviceSettings -AsObject
+    $accumulatedPoolBefore = Get-RuleRolloverPool -SettingsOrRolloverState $accumulatedBefore -RuleId $accumulatedRuleId
+    if ([long]$accumulatedPoolBefore.accumulatedMinutes -ne $accumulatedMinutes) {
+        Write-Fail "The accumulated test pool was not present before approval."
+        $passedAll = $false
+    }
+    if (Invoke-AccumulatedGuardianApproval -ExpectedMinutes $accumulatedMinutes) {
+        Write-Success "Submitted the accumulated pool through the guardian approval screen."
+    } else {
+        Write-Fail "Could not submit the accumulated time approval."
+        $passedAll = $false
+    }
+    if (Wait-ForGuardianNightDenial -ExpectedKind "accumulated_grant" -UsageRuleId $accumulatedRuleId) {
+        Write-Success "The accumulated receipt reached the service and NightRule remained the only denial."
+    } else {
+        Write-Fail "The accumulated approval did not keep NightRule on the guardian screen."
+        $passedAll = $false
+    }
+    $accumulatedAfter = Get-DeviceSettings -AsObject
+    $accumulatedGrants = @(
+        $accumulatedAfter.appRuleOverrideState.grants |
+            Where-Object { $_.ruleId -eq $accumulatedRuleId }
+    )
+    $accumulatedPoolAfter = Get-RuleRolloverPool -SettingsOrRolloverState $accumulatedAfter -RuleId $accumulatedRuleId
+    if ($accumulatedGrants.Count -eq 1 -and
+        $accumulatedGrants[0].grantedMillis -eq ($accumulatedMinutes * 60000) -and
+        [bool]$accumulatedGrants[0].isFromAccumulatedPool -and
+        [long]$accumulatedPoolAfter.accumulatedMinutes -eq 0) {
+        Write-Success "The pool paid exactly one grant to UsageRule and its balance is zero."
+    } else {
+        Write-Fail "The accumulated ledger or pool balance was wrong after confirmation."
+        $passedAll = $false
+    }
+
+    Write-Step "15. Skipping UsageRule while the same NightRule remains active..."
+    $skipRuleId = "usage-skip-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $skipNightRuleId = "night-skip-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $skipGroupId = "skip-target-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $skipFixture = New-GuardianApprovalRuleSnapshot `
+        -TargetPackage $TargetPackage `
+        -GroupId $skipGroupId `
+        -UsageRuleId $skipRuleId `
+        -NightRuleId $skipNightRuleId `
+        -NightStartMinute $nightStartMinute `
+        -NightEndMinute $nightEndMinute
+    $skipStartTimeMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Start-NightApprovalCase `
+        -Fixture $skipFixture `
+        -RolloverState $emptyRollover `
+        -UsageRuleId $skipRuleId `
+        -GenerationStartedAtMs $skipStartTimeMs
+    if (Invoke-GuardianSkip -RuleId $skipRuleId) {
+        Write-Success "Submitted a 15 minute skip for UsageRule."
+    } else {
+        Write-Fail "Could not submit the UsageRule skip."
+        $passedAll = $false
+    }
+    if (Wait-ForGuardianNightDenial -ExpectedKind "rule_skip" -UsageRuleId $skipRuleId) {
+        Write-Success "The skip receipt reached the service and NightRule remained the only denial."
+    } else {
+        Write-Fail "Skipping UsageRule did not keep NightRule on the guardian screen."
+        $passedAll = $false
+    }
+    $skipAfter = Get-DeviceSettings -AsObject
+    $skipCheckTimeMs = Get-TestDeviceEpochTimeMs
+    if ($null -eq $skipCheckTimeMs) {
+        throw "Could not read device epoch milliseconds to verify the skip ledger."
+    }
+    $minimumSkipUntilMs = $skipCheckTimeMs
+    $skipRecorded = Test-AppRuleSkip `
+        -OverrideState $skipAfter.appRuleOverrideState `
+        -RuleId $skipRuleId `
+        -MinSkipUntilMs $minimumSkipUntilMs
+    $skipRecords = @($skipAfter.appRuleOverrideState.skips | Where-Object { $_.ruleId -eq $skipRuleId })
+    $skipIntervalIsActive = $skipRecords.Count -eq 1 -and
+        [long]$skipRecords[0].skipFromMs -le $skipCheckTimeMs -and
+        [long]$skipRecords[0].skipUntilMs -gt $skipCheckTimeMs
+    $skipGrantCount = @($skipAfter.appRuleOverrideState.grants).Count
+    if ($skipRecorded -and $skipIntervalIsActive -and $skipGrantCount -eq 0) {
+        Write-Success "The skip ledger contains only the UsageRule interval; no grant was written."
+    } else {
+        $skipLedger = $skipRecords | ConvertTo-Json -Depth 5 -Compress
+        Write-Fail "The skip ledger did not contain the expected active UsageRule skip. recorded=$skipRecorded active=$skipIntervalIsActive grants=$skipGrantCount expectedRule=$skipRuleId currentDeviceTimeMs=$skipCheckTimeMs ledger=$skipLedger"
+        $passedAll = $false
+    }
+
+    Write-Step "16. Checking the separate all-allow launch path after a real UsageRule denial..."
+    Invoke-TestDeviceShell -Command "input keyevent 3"
+    Start-Sleep -Seconds 1
+    $controlRuleId = "usage-control-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $controlGroupId = "control-target-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $allAllowFixture = New-GuardianApprovalRuleSnapshot `
+        -TargetPackage $TargetPackage `
+        -GroupId $controlGroupId `
+        -UsageRuleId $controlRuleId
+    $allAllowStartTimeMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Inject-TestAppRules `
+        -AppRuleSnapshot $allAllowFixture `
+        -AppRuleRolloverState $emptyRollover `
+        -UsageGenerationStartedAtMs $allAllowStartTimeMs
+    Invoke-TestDeviceShell -Command "logcat -c"
+    Invoke-TestDeviceShell -Command "am force-stop $TargetPackage"
+    Start-TestApp -PackageName $TargetPackage -ActivityName $TargetActivity
+    $controlActivityWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $controlActivityLine = ""
+    $usageOnlyFocus = $null
+    while ($controlActivityWatch.Elapsed.TotalSeconds -lt 15) {
+        $logs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
+        $controlActivityLine = @(
+            $logs -split "`r?`n" |
+                Where-Object { $_ -match "activity_created .*denials=" } |
+                Select-Object -Last 1
+        )
+        $usageOnlyFocus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+        if ($controlActivityLine -and $usageOnlyFocus.Success) { break }
+        Start-Sleep -Milliseconds 300
+    }
+    $controlCaseReady = $controlActivityLine -and
+        $controlActivityLine -match "denials=UsageRule" -and
+        $usageOnlyFocus -and $usageOnlyFocus.Success
+    if ($controlCaseReady) {
+        Write-Success "The control case begins with an actual UsageRule denial before saving its grant."
+    } else {
+        Write-Fail "The all-allow control did not reach GuardianApprovalActivity with a real UsageRule denial. Activity: $controlActivityLine; focus: $($usageOnlyFocus.RawFocus)"
+        $passedAll = $false
+    }
+    $controlGrantSaved = $false
+    if ($controlCaseReady -and (Invoke-DirectGuardianGrant -RuleName "UsageRule" -CandidateCount 1)) {
+        $controlGrantSaved = $true
+        Write-Success "Saved the UsageRule grant in the separate all-allow control."
+    } else {
+        Write-Fail "Could not save the all-allow control grant."
+        $passedAll = $false
+    }
+    $allowedLaunch = $null
+    $allowWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($allowWatch.Elapsed.TotalSeconds -lt 15) {
+        $allowedLaunch = Assert-WindowFocus -ExpectedActivity $TargetPackage -PassThru
+        if ($allowedLaunch.Success) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not ($allowedLaunch -and $allowedLaunch.Success)) {
+        Write-Fail "The all-allow control did not launch the requested app. Focus: $($allowedLaunch.RawFocus)"
+        $passedAll = $false
+    }
+    $allAllowLogs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
+    $allAllowReceiptReceived = $allAllowLogs -match "service_check_received action=neth\.iecal\.curbox\.guardian\.approval\.stored .*receipt_valid=true" -and
+        $allAllowLogs -match "check_request test=- action=neth\.iecal\.curbox\.guardian\.approval\.stored .*kind=direct_grant rule=$([regex]::Escape($controlRuleId))"
+    if ($controlGrantSaved -and $allAllowReceiptReceived -and $allowedLaunch -and $allowedLaunch.Success) {
+        Write-Success "After a valid stored receipt, the fresh all-allow evaluation launches the requested app."
+    } else {
+        Write-Fail "The all-allow control did not complete a stored receipt before the target app was allowed."
+        $passedAll = $false
+    }
+    if ($allAllowReceiptReceived) {
+        Write-Success "The all-allow control also used the shared typed receipt path."
+    } else {
+        Write-Fail "The all-allow launch did not show a valid shared confirmation receipt in both processes."
+        $passedAll = $false
+    }
+
+    Write-Step "17. Final Result Summary"
     if ($passedAll) {
         Write-Host "`n=========================================================================" -ForegroundColor Green
         Write-Host ">>> [TOTAL EXTRA TIME RESULT: PASS] Extra Time Grant & Unlock verified! <<<" -ForegroundColor Green
@@ -225,6 +719,6 @@ try {
     }
 
 } finally {
-    Write-Step "12. Cleanup & Restoring original settings.json..."
+    Write-Step "18. Cleanup & Restoring original settings.json..."
     Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
 }

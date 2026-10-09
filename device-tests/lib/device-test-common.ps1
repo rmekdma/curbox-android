@@ -36,6 +36,7 @@
     - Stop-ServiceProcess: Terminate or induce crash on target process PID
     - Restart-DeviceAccessibilityServiceIfEnabled: Rebind the service only when it was enabled in the saved baseline
     - Enable-AccessibilityService: Ensure accessibility service is enabled in secure settings
+    - Disable-AccessibilityService: Temporarily remove Curbox while preserving other accessibility services
     - New-RolloverAppRuleConfig: Generate AppRuleSnapshot with rolloverEnabled and unlockDays
     - New-RuleRolloverPool: Generate RuleRolloverPool PSCustomObject
     - Test-AppRuleGuardianGrant: Verify whether an AppRuleGuardianGrant is recorded in override state
@@ -167,6 +168,14 @@ function Get-TestDeviceShellOutput([string]$Command) {
         return (& $script:DeviceTestShellOutputHandler $Command | Out-String).TrimEnd()
     }
     return (adb shell $Command | Out-String).TrimEnd()
+}
+
+function Get-TestDeviceEpochTimeMs {
+    $timestamp = Get-TestDeviceShellOutput -Command "date +%s%3N"
+    if ($timestamp -notmatch '^\d{13}$') {
+        return $null
+    }
+    return [long]$timestamp
 }
 
 function Push-TestDeviceFile([string]$LocalPath, [string]$RemotePath) {
@@ -351,10 +360,13 @@ function Inject-TestAppRules(
     $AppRuleSnapshot,
     [string]$PackageName = "neth.iecal.curbox.debug",
     [long]$UsageGenerationStartedAtMs = 0,
-    $AppRuleRolloverState = $null
+    $AppRuleRolloverState = $null,
+    [switch]$PreserveOverrides
 ) {
-    adb shell "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName" | Out-Null
-    Start-Sleep -Milliseconds 500
+    if (-not $PreserveOverrides) {
+        Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.action.CLEAR_TEST_APP_RULE_OVERRIDES -p $PackageName"
+        Start-Sleep -Milliseconds 500
+    }
 
     if ($UsageGenerationStartedAtMs -gt 0) {
         Set-DeviceUsageGeneration -GenerationStartedAtMs $UsageGenerationStartedAtMs -PackageName $PackageName | Out-Null
@@ -375,10 +387,10 @@ function Inject-TestAppRules(
     $shScript = "CONTENT=`$(cat /data/local/tmp/app_rules_inject.json)`nam broadcast -a neth.iecal.curbox.action.APPLY_TEST_APP_RULES -p $PackageName --es extra_app_rules_json `"`$CONTENT`"`n"
     Push-TempStringToDevice -Content $shScript -RemotePath "/data/local/tmp/inject.sh"
 
-    adb shell "chmod 755 /data/local/tmp/inject.sh; /data/local/tmp/inject.sh" | Out-Null
-    adb shell "rm -f /data/local/tmp/app_rules_inject.json /data/local/tmp/inject.sh" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName" | Out-Null
-    adb shell "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName" | Out-Null
+    Invoke-TestDeviceShell -Command "chmod 755 /data/local/tmp/inject.sh; /data/local/tmp/inject.sh"
+    Invoke-TestDeviceShell -Command "rm -f /data/local/tmp/app_rules_inject.json /data/local/tmp/inject.sh"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.app_rules -p $PackageName"
+    Invoke-TestDeviceShell -Command "am broadcast -a neth.iecal.curbox.refresh.appblocker -p $PackageName"
     Start-Sleep -Seconds 1
 }
 
@@ -643,9 +655,9 @@ function Select-TestRulePickerOption([string]$CurrentUi, $CandidateOptions, [str
 }
 
 function Assert-WindowFocus([string]$ExpectedActivity, [switch]$PassThru) {
-    $windowFocus = adb shell "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
+    $windowFocus = Get-TestDeviceShellOutput -Command "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'"
     if (-not $windowFocus -or $windowFocus.Trim() -eq "") {
-        $windowFocus = adb shell "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'" | Out-String
+        $windowFocus = Get-TestDeviceShellOutput -Command "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"
     }
     $isMatch = $windowFocus -match $ExpectedActivity
     if (-not $isMatch -and -not $PassThru) {
@@ -658,6 +670,20 @@ function Assert-WindowFocus([string]$ExpectedActivity, [switch]$PassThru) {
         }
     }
     return $isMatch
+}
+
+function Wait-ForWindowFocus(
+    [string]$ExpectedActivity,
+    [int]$TimeoutSeconds = 5,
+    [int]$PollIntervalMilliseconds = 200
+) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $focus = Assert-WindowFocus -ExpectedActivity $ExpectedActivity -PassThru
+    while (-not $focus.Success -and $watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        Start-Sleep -Milliseconds $PollIntervalMilliseconds
+        $focus = Assert-WindowFocus -ExpectedActivity $ExpectedActivity -PassThru
+    }
+    return $focus
 }
 
 function New-GuardianPinAuthConfig(
@@ -1163,6 +1189,24 @@ function Enable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.d
     if ($needsServiceUpdate -or $needsAccessibilityUpdate) {
         Start-Sleep -Seconds 2
     }
+    return $true
+}
+
+function Disable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.debug", [string]$ServiceName = "neth.iecal.curbox.services.AppBlockerService") {
+    $fullService = "$PackageName/$ServiceName"
+    $enabledServices = Get-DeviceSecureSetting -Name "enabled_accessibility_services"
+    $serviceList = @($enabledServices -split ":" | Where-Object { $_ -and $_ -ne "null" })
+    if ($serviceList -notcontains $fullService) {
+        return $false
+    }
+
+    $remainingServices = @($serviceList | Where-Object { $_ -ne $fullService })
+    if ($remainingServices.Count -eq 0) {
+        Invoke-TestDeviceShell -Command "settings delete secure enabled_accessibility_services"
+    } else {
+        Invoke-TestDeviceShell -Command "settings put secure enabled_accessibility_services $($remainingServices -join ':')"
+    }
+    Start-Sleep -Seconds 2
     return $true
 }
 

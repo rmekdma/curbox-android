@@ -7,6 +7,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import neth.iecal.curbox.testing.AccessibilityFrameworkTestObjects
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -42,7 +43,7 @@ class ForegroundObservationSourceContractInstrumentedTest {
             assertTrue("the default reporter must persist the per-test marker", logAfter.contains(marker))
         } finally {
             try {
-                callbackEvent.recycle()
+                AccessibilityFrameworkTestObjects.releaseEvent(callbackEvent)
             } finally {
                 if (logExistedBefore) {
                     logFile.writeBytes(checkNotNull(logBytesBefore))
@@ -78,7 +79,7 @@ class ForegroundObservationSourceContractInstrumentedTest {
          * value and leaves the callback event owned by this test, which is recycled exactly once
          * below. Production's finally block owns the copy on every path.
          */
-        callbackEvent.recycle()
+        AccessibilityFrameworkTestObjects.releaseEvent(callbackEvent)
     }
 
     @Test
@@ -103,7 +104,7 @@ class ForegroundObservationSourceContractInstrumentedTest {
         assertEquals(9_000L, captured.signal.eventElapsedMs)
         assertEquals(3, reported.size)
         assertEquals(targetPackage, callbackEvent.packageName)
-        callbackEvent.recycle()
+        AccessibilityFrameworkTestObjects.releaseEvent(callbackEvent)
     }
 
     @Test
@@ -126,7 +127,7 @@ class ForegroundObservationSourceContractInstrumentedTest {
         assertEquals(10_000L, captured.capturedAtElapsedMs)
         assertEquals(ForegroundReadState.FAILED, captured.activeRoot.readState)
         assertEquals(ForegroundReadState.FAILED, captured.applicationWindows.readState)
-        callbackEvent.recycle()
+        AccessibilityFrameworkTestObjects.releaseEvent(callbackEvent)
     }
 
     @Test
@@ -294,7 +295,9 @@ class ForegroundObservationSourceContractInstrumentedTest {
     )
 
     private fun callbackEvent(packageName: String, eventTime: Long): AccessibilityEvent =
-        AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED).apply {
+        AccessibilityFrameworkTestObjects.createEvent(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        ).apply {
             this.packageName = packageName
             this.eventTime = eventTime
         }
@@ -307,7 +310,7 @@ class ForegroundObservationSourceContractInstrumentedTest {
         override fun onInterrupt() = Unit
 
         override fun getRootInActiveWindow(): AccessibilityNodeInfo? = rootPackage?.let {
-            AccessibilityNodeInfo.obtain().apply { packageName = it }
+            AccessibilityFrameworkTestObjects.createNodeInfo().apply { packageName = it }
         }
 
         override fun getWindows(): MutableList<AccessibilityWindowInfo> = mutableListOf()

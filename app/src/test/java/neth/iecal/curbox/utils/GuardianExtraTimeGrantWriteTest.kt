@@ -7,6 +7,7 @@ import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.GuardianAuthConfig
+import neth.iecal.curbox.data.models.GuardianApprovalGrantReceipt
 import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.domain.apprules.AppRuleEvaluator
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
@@ -21,6 +22,54 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GuardianExtraTimeGrantWriteTest {
+    @Test
+    fun directGrantReceiptIdentifiesOnlyTheExactCommittedWrite() {
+        val current = settingsWithRuleAndGrants()
+        val basis = GuardianExtraTimeGrantBasis.capture(current, "rule", nowMs)!!
+        val grantedAtMs = nowMs + 1L
+        val committed = GuardianExtraTimeGrantWrite.nextSettings(
+            current = current,
+            password = "",
+            basis = basis,
+            durationMinutes = 15L,
+            grantedAtMs = grantedAtMs,
+            transactionNowMs = grantedAtMs
+        )
+        val stored = GuardianExtraTimeGrantWrite.resultFor(
+            committed,
+            basis,
+            15L,
+            grantedAtMs,
+            grantedAtMs
+        )
+
+        assertEquals(
+            GuardianExtraTimeGrantWrite.Result.StoredWithReceipt(
+                GuardianApprovalGrantReceipt(
+                    ruleId = basis.ruleId,
+                    useDayId = basis.useDayId,
+                    grantedAtMs = grantedAtMs,
+                    grantedMillis = 15L * MINUTE
+                )
+            ),
+            GuardianExtraTimeGrantWrite.withReceipt(
+                stored,
+                basis,
+                15L,
+                grantedAtMs
+            )
+        )
+        assertEquals(
+            GuardianExtraTimeGrantWrite.Result.Rejected,
+            GuardianExtraTimeGrantWrite.withReceipt(
+                GuardianExtraTimeGrantWrite.Result.Rejected,
+                basis,
+                15L,
+                grantedAtMs
+            )
+        )
+    }
+
     @Test
     fun basisCountsOnlyCurrentDayDirectGrantsIncludingAlreadyUsedTime() {
         val settings = settingsWithRuleAndGrants(
