@@ -393,6 +393,149 @@ class InitialMonitorTest {
         job.cancelAndJoin()
     }
 
+    @Test fun retriesForTwoChildrenSurviveUntilTheWorkerStarts() = runBlocking {
+        val store = MemoryLearningStore()
+        val children = listOf(TodoChild("One", mapOf(Subject.MATH to "1")), TodoChild("Two", mapOf(Subject.MATH to "2")))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = children, accountId = "account"), "session"))
+        val requested = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = children
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(userId)
+                return DailyReport(userId.toInt(), 1)
+            }
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        screen.toggleMonitor("Two")
+        store.updateMonitor { it.monitor.copy(reports = children.associate { child ->
+            (child.name to Subject.MATH) to ReportState(failed = true, failure = LearningFailure.NETWORK)
+        }, reportFailureSessions = children.associate { (it.name to Subject.MATH) to "session" }) }
+        screen.retryMonitor("One", Subject.MATH)
+        screen.retryMonitor("Two", Subject.MATH)
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        withTimeout(5000) { store.changes.first { it.monitor.reports.values.count { report -> report.value != null } == 2 } }
+        assertEquals(listOf("1", "2"), requested.toList())
+        job.cancelAndJoin()
+    }
+
+    @Test fun catalogAndReportRetriesSurviveTogglingAnotherChild() = runBlocking {
+        val store = MemoryLearningStore()
+        val children = listOf(TodoChild("One", mapOf(Subject.MATH to "1")), TodoChild("Two", mapOf(Subject.MATH to "2")), TodoChild("Three", mapOf(Subject.MATH to "3")))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = children, accountId = "account"), "session"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = children
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(userId.toInt(), 1)
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        screen.toggleMonitor("Two")
+        store.updateMonitor { it.monitor.copy(catalogFailures = mapOf("One" to LearningFailure.NETWORK), catalogFailureSessions = mapOf("One" to "session"),
+            reports = mapOf(("Two" to Subject.MATH) to ReportState(failed = true, failure = LearningFailure.NETWORK)),
+            reportFailureSessions = mapOf(("Two" to Subject.MATH) to "session")) }
+        screen.retryMonitor("One", null)
+        screen.retryMonitor("Two", Subject.MATH)
+        screen.toggleMonitor("Three")
+        screen.toggleMonitor("Three")
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.MATH]?.value?.count == 1 && it.monitor.reports["Two" to Subject.MATH]?.value?.count == 2 } }
+        job.cancelAndJoin()
+    }
+
+    @Test fun unregisteringChildCancelsOnlyItsOwnQueuedRetry() = runBlocking {
+        val store = MemoryLearningStore()
+        val children = listOf(TodoChild("One", mapOf(Subject.MATH to "1")), TodoChild("Two", mapOf(Subject.MATH to "2")))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = children, accountId = "account"), "session"))
+        val requested = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = children
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(userId)
+                return DailyReport(userId.toInt(), 1)
+            }
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        screen.toggleMonitor("Two")
+        store.updateMonitor { it.monitor.copy(reports = children.associate { child ->
+            (child.name to Subject.MATH) to ReportState(failed = true, failure = LearningFailure.NETWORK)
+        }, reportFailureSessions = children.associate { (it.name to Subject.MATH) to "session" }) }
+        screen.retryMonitor("One", Subject.MATH)
+        screen.retryMonitor("Two", Subject.MATH)
+        screen.toggleMonitor("Two")
+        screen.toggleMonitor("Two")
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.MATH]?.value?.count == 1 } }
+        delay(150)
+        assertEquals(listOf("1"), requested.toList())
+        assertTrue(store.read().monitor.reports.getValue("Two" to Subject.MATH).failed)
+        job.cancelAndJoin()
+    }
+
+    @Test fun retryRequestedDuringAnOlderRetryIsNotConsumedByItsResult() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("One", mapOf(Subject.MATH to "1"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                val count = calls.incrementAndGet()
+                if (count == 1) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
+                return DailyReport(count, 1)
+            }
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        store.updateMonitor { it.monitor.copy(reports = mapOf(("One" to Subject.MATH) to ReportState(failed = true, failure = LearningFailure.NETWORK)),
+            reportFailureSessions = mapOf(("One" to Subject.MATH) to "session")) }
+        screen.retryMonitor("One", Subject.MATH)
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        withTimeout(5000) { while (entered.count != 0L) delay(10) }
+        screen.retryMonitor("One", Subject.MATH)
+        release.countDown()
+        withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.MATH]?.value?.count == 2 } }
+        job.cancelAndJoin()
+    }
+
     @Test fun manualCommitPreservesConcurrentMonitorState() {
         val store = MemoryLearningStore()
         val manual = store.claim()

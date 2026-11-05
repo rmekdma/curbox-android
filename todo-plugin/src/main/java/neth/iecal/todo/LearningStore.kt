@@ -16,6 +16,8 @@ data class MonitorAccountSnapshot(
     val catalogRegistrations: Map<String, Long> = emptyMap()
 )
 
+data class RetryIntent(val registration: Long, val revision: Long, val sessionRef: String)
+
 data class MonitorState(
     val ownerEpoch: Long = 0,
     val controlRevision: Long = 0,
@@ -45,6 +47,8 @@ data class MonitorState(
     val baselineRegistrations: Map<Pair<String, Subject>, Long> = emptyMap(),
     val baselineSessions: Map<Pair<String, Subject>, String> = emptyMap(),
     val baselinePermissions: Map<Pair<String, Subject>, Long> = emptyMap(),
+    val catalogRetries: Map<String, RetryIntent> = emptyMap(),
+    val reportRetries: Map<Pair<String, Subject>, RetryIntent> = emptyMap(),
     val retryRevision: Long = 0,
     val catalogRetryRequested: Boolean = false,
     val reportRetryRequested: Pair<String, Subject>? = null
@@ -92,3 +96,16 @@ fun MonitorState.registeredChildren(): Map<String, Long> = if (registrations.isE
 
 fun MonitorState.catalogFailureFor(child: String): LearningFailure? = catalogFailures[child] ?: if (catalogFailures.isEmpty() && childName == child) catalogFailure else null
 fun MonitorState.catalogFailureSessionFor(child: String): String? = catalogFailureSessions[child] ?: if (catalogFailures.isEmpty() && childName == child) catalogFailureSession else null
+
+/** Converts the former single retry slots once, before they can be canceled or replaced. */
+fun MonitorState.migrateRetries(sessionRef: String?): MonitorState {
+    if (!catalogRetryRequested && reportRetryRequested == null) return this
+    val registered = registeredChildren()
+    val child = catalogRetryChild ?: childName
+    val catalog = if (catalogRetryRequested && child != null && sessionRef != null && registered[child] != null && child !in catalogRetries)
+        catalogRetries + (child to RetryIntent(registered.getValue(child), retryRevision, sessionRef)) else catalogRetries
+    val key = reportRetryRequested
+    val reports = if (key != null && sessionRef != null && registered[key.first] != null && key !in reportRetries)
+        reportRetries + (key to RetryIntent(registered.getValue(key.first), retryRevision, sessionRef)) else reportRetries
+    return copy(catalogRetries = catalog, reportRetries = reports, catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null)
+}
