@@ -36,6 +36,15 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         return if (count >= target) GoalStatus.COMPLETE else GoalStatus.INCOMPLETE
     }
 
+    fun saveInterval(input: String): Boolean {
+        val value = input.trim()
+        if (!value.matches(Regex("[0-9]+")) || value.all { it == '0' }) return false
+        val normalized = value.trimStart('0')
+        val updated = store.updateMonitor { it.monitor.copy(intervalMinutes = normalized) } ?: return false
+        monitor = updated.monitor
+        return true
+    }
+
     fun saveGoal(childName: String, subject: Subject, input: String): Boolean {
         val trimmed = input.trim()
         if (!trimmed.matches(Regex("[0-9]+"))) return false

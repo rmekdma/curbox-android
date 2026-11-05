@@ -12,6 +12,8 @@
             <com.google.android.material.button.MaterialButton android:id="@+id/nextDate" android:layout_width="wrap_content" android:layout_height="wrap_content" />
         </LinearLayout>
         <com.google.android.material.button.MaterialButton android:id="@+id/refresh" android:layout_width="match_parent" android:layout_height="wrap_content" />
+        <EditText android:id="@+id/intervalMinutes" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="number" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/saveInterval" android:layout_width="match_parent" android:layout_height="wrap_content" />
         <ProgressBar android:id="@+id/loading" android:layout_width="wrap_content" android:layout_height="wrap_content" android:visibility="gone" />
         <TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content" />
         <LinearLayout android:id="@+id/children" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" />

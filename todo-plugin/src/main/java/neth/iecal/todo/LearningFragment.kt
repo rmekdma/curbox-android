@@ -24,7 +24,7 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, PREVIOUS_DATE, NEXT_DATE, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, PREVIOUS_DATE, NEXT_DATE, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
@@ -54,6 +54,15 @@ class LearningFragment : Fragment() {
         b.previousDate.text = text(LearningText.PREVIOUS_DATE)
         b.nextDate.text = text(LearningText.NEXT_DATE)
         b.refresh.text = text(LearningText.REFRESH)
+        b.intervalMinutes.hint = text(LearningText.INTERVAL)
+        b.saveInterval.text = text(LearningText.SAVE_INTERVAL)
+        b.saveInterval.setOnClickListener {
+            val input = b.intervalMinutes.text.toString()
+            viewLifecycleOwner.lifecycleScope.launch {
+                val saved = withContext(Dispatchers.IO) { screen.saveInterval(input) }
+                if (!saved) b.intervalMinutes.error = text(LearningText.INVALID_INTERVAL)
+            }
+        }
         screen.selectDate(date())
         b.previousDate.setOnClickListener { changeDate(selectedDate.minusDays(1)) }
         b.nextDate.setOnClickListener { changeDate(selectedDate.plusDays(1)) }
@@ -70,6 +79,7 @@ class LearningFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             screen.monitorChanges.map { it.monitor }.distinctUntilChanged().collectLatest { monitor ->
                 screen.acceptMonitor(monitor)
+                if (b.intervalMinutes.text.isEmpty()) b.intervalMinutes.setText(monitor.intervalMinutes)
                 if (binding != null) render()
             }
         }

@@ -4,6 +4,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningScreenTest {
+    @Test fun `polling interval accepts positive minutes of any size`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = emptyList<TodoChild>()
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0, 0)
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        assertEquals("1", screen.monitor.intervalMinutes)
+        assertFalse(screen.saveInterval("0"))
+        assertFalse(screen.saveInterval("-2"))
+        assertTrue(screen.saveInterval("999999999999999999999999"))
+        assertEquals("999999999999999999999999", store.read().monitor.intervalMinutes)
+    }
+
     @Test fun `failed retry keeps last valid report and requires explicit retry`() {
         val api = object : TodoApi {
             var reports = 0

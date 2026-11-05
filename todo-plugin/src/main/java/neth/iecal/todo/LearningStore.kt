@@ -17,6 +17,7 @@ data class MonitorState(
     val controlRevision: Long = 0,
     val registrationEpoch: Long = 0,
     val accounts: Map<String, MonitorAccountSnapshot> = emptyMap(),
+    val intervalMinutes: String = "1",
     val cycleOwner: Long = 0,
     val cycleStartedElapsedMillis: Long = 0,
     val accountId: String? = null,

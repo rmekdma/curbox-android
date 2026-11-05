@@ -127,7 +127,7 @@ class MonitorOwnershipTest {
             baselineSessions = mapOf(success to "session"), baselinePermissions = mapOf(success to 0)
         ) }
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host()) }
-        withTimeout(5000) { store.changes.first { it.monitor.cycleOwner == 1L && it.monitor.cycleStartedElapsedMillis > 0 } }
+        withTimeout(5000) { store.changes.first { it.monitor.ownerEpoch == 1L } }
         assertTrue(requested.isEmpty())
         screen.retryMonitor("Sample", null)
         withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.ENGLISH]?.value?.count == 3 } }

@@ -93,7 +93,7 @@ class AppBlockerService : BaseBlockingService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         super.onAccessibilityEvent(event)
-        try { learningHost?.event() } catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
+        try { learningHost?.event(event.eventType) } catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
 
         try {
             if (BuildConfig.SUPPORTS_ANTI_UNINSTALL) {

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.os.SystemClock
+import android.view.accessibility.AccessibilityEvent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +27,6 @@ class LearningServiceHost(private val service: AccessibilityService, private val
     private val state = MutableStateFlow(HostObservation(connection = Connection.CONNECTED))
     override val observations: StateFlow<HostObservation> = state
     private val source = AndroidForegroundObservationSource(service)
-    private val evidence = ForegroundEvidenceModule()
     private val sequencer = AtomicConnectionScopedSourceOrderSequencer()
     private data class Request(val result: CompletableDeferred<HostObservation?>? = null)
     private val hints = Channel<Request>(Channel.CONFLATED) { it.result?.complete(null) }
@@ -62,9 +62,11 @@ class LearningServiceHost(private val service: AccessibilityService, private val
         val component = ComponentName(service, service.javaClass)
         return enabled.split(':').any { ComponentName.unflattenFromString(it) == component }
     }
-    fun event() {
+    fun event(type: Int) {
+        state.value = state.value.copy(callbackReceived = true)
+        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && type != AccessibilityEvent.TYPE_WINDOWS_CHANGED) return
         generation.incrementAndGet()
-        state.value = state.value.copy(callbackReceived = true, foreground = Foreground.Unknown)
+        state.value = state.value.copy(foreground = Foreground.Unknown)
         hints.trySend(Request())
     }
     override suspend fun refreshObservation(): HostObservation {
@@ -84,11 +86,9 @@ class LearningServiceHost(private val service: AccessibilityService, private val
         val observedGeneration = generation.get()
         val facts = source.capture(ObservationTrigger(sequencer.nextSourceOrderIdentity(), ObservationKind.REFRESH,
             requestedAtWallMs = System.currentTimeMillis(), requestedAtElapsedMs = SystemClock.elapsedRealtime()))
-        evidence.classify(facts, ForegroundEvidencePolicySnapshot())
-        val screen = when (facts.displayState) { DisplayState.SCREEN_OFF -> Screen.OFF; DisplayState.UNLOCKED -> Screen.UNLOCKED; DisplayState.KEYGUARD -> Screen.LOCKED; DisplayState.UNKNOWN -> Screen.UNKNOWN }
         val name = facts.activeRoot.packageName
         val app = if (name == null) null else runCatching { service.packageManager.getApplicationInfo(name, 0) }.getOrNull()
-        val foreground = if (screen == Screen.UNLOCKED && facts.activeRoot.readState == ForegroundReadState.AVAILABLE && app != null && app.flags and ApplicationInfo.FLAG_SYSTEM == 0) Foreground.Confirmed(name!!) else Foreground.Unknown
+        val (screen, foreground) = mapForeground(facts, app != null && app.flags and ApplicationInfo.FLAG_SYSTEM == 0)
         if (valid && generation.get() == observedGeneration) state.value = state.value.copy(accessibilityEnabled = accessibilityEnabled(), screen = screen, foreground = foreground, observedAtMillis = facts.capturedAtWallMs)
         return state.value
     }
