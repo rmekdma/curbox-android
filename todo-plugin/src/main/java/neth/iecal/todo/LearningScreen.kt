@@ -12,7 +12,7 @@ class LearningScreen(private val api: TodoApi, private val now: () -> Long = Sys
     private var session: TodoSession? = null
 
     fun signIn(email: String, password: String, date: String) {
-        val request = synchronized(lock) { ++generation }
+        val request = synchronized(lock) { session = null; ++generation }
         try {
             val authenticated = api.signIn(email, password)
             synchronized(lock) {
@@ -22,7 +22,10 @@ class LearningScreen(private val api: TodoApi, private val now: () -> Long = Sys
             refreshForRequest(date, authenticated, request)
         } catch (e: TodoApiException) {
             synchronized(lock) {
-                if (request == generation) state = state.copy(error = true, loginRequired = e.authenticationRequired)
+                if (request == generation) {
+                    if (e.authenticationRequired) session = null
+                    state = state.copy(error = true, loginRequired = e.authenticationRequired)
+                }
             }
         }
     }
@@ -40,7 +43,10 @@ class LearningScreen(private val api: TodoApi, private val now: () -> Long = Sys
     private fun refreshForRequest(date: String, current: TodoSession, request: Long) {
         val children = try { api.catalog(current) } catch (e: TodoApiException) {
             synchronized(lock) {
-                if (request == generation) state = state.copy(error = true, loginRequired = e.authenticationRequired)
+                if (request == generation) {
+                    if (e.authenticationRequired) session = null
+                    state = state.copy(error = true, loginRequired = e.authenticationRequired)
+                }
             }
             return
         }
@@ -54,7 +60,10 @@ class LearningScreen(private val api: TodoApi, private val now: () -> Long = Sys
             catch (e: TodoApiException) {
                 synchronized(lock) {
                     if (request != generation) return
-                    if (e.authenticationRequired) state = state.copy(loginRequired = true)
+                    if (e.authenticationRequired) {
+                        session = null
+                        state = state.copy(loginRequired = true)
+                    }
                     val previous = state.reports[key]?.takeIf { it.date == date } ?: ReportState(date = date)
                     previous.copy(failed = true)
                 }
@@ -62,7 +71,9 @@ class LearningScreen(private val api: TodoApi, private val now: () -> Long = Sys
             synchronized(lock) {
                 if (request != generation) return
                 state = state.copy(reports = state.reports + (key to result))
+                if (state.loginRequired) return
             }
         }
     }
 }
+

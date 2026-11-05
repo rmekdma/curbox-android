@@ -50,3 +50,23 @@ class LearningScreenRaceTest {
         assertEquals(DailyReport(3, 0), screen.state.reports["Child" to Subject.MATH]?.value)
     }
 }
+
+class LearningAuthenticationTest {
+    @Test fun `authentication failure stops remaining reports and asks for login`() {
+        val requested = mutableListOf<Subject>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", linkedMapOf(Subject.MATH to "math", Subject.ENGLISH to "english")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(subject)
+                throw TodoApiException(authenticationRequired = true)
+            }
+        }
+        val screen = LearningScreen(api)
+        screen.signIn("sample", "sample", "20261105")
+        assertTrue(screen.state.loginRequired)
+        assertEquals(listOf(Subject.MATH), requested)
+        screen.refresh("20261105")
+        assertEquals(listOf(Subject.MATH), requested)
+    }
+}
