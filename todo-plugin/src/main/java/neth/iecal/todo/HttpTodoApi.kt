@@ -8,7 +8,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
-data class TodoSession(val accountId: String, val token: String)
+data class TodoSession(val accountId: String, val token: String) {
+    override fun toString(): String = "TodoSession(redacted)"
+}
 
 class TodoApiException(val authenticationRequired: Boolean = false) : Exception()
 
@@ -40,7 +42,11 @@ class HttpTodoApi(private val baseUrl: String) : TodoApi {
             val data = try { post("/v3/$path/user", body, session.token).asJsonArray } catch (e: TodoApiException) { throw e } catch (e: Exception) { throw TodoApiException() }
             for (element in data) {
                 val user = element.asJsonObject
-                val name = user.get("name")?.takeUnless { it.isJsonNull }?.asString?.trim()
+                val nameElement = user.get("name")
+                if (nameElement == null || !nameElement.isJsonPrimitive || !nameElement.asJsonPrimitive.isString) throw TodoApiException()
+                val idElement = user.get("userId") ?: throw TodoApiException()
+                if (!idElement.isJsonNull && (!idElement.isJsonPrimitive || !idElement.asJsonPrimitive.isString)) throw TodoApiException()
+                val name = nameElement.asString.trim()
                     ?.takeIf { it.isNotEmpty() } ?: throw TodoApiException()
                 val id = user.get("userId")?.takeUnless { it.isJsonNull }?.asString?.trim()
                 val subjects = children.getOrPut(name) { linkedMapOf() }
@@ -97,6 +103,7 @@ class HttpTodoApi(private val baseUrl: String) : TodoApi {
         } catch (e: TodoApiException) { throw e } catch (e: Exception) { throw TodoApiException() }
     }
 }
+
 
 
 

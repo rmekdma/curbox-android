@@ -57,3 +57,18 @@ class TodoApiTest {
 
 
 
+
+class TodoValidationTest {
+    @Test fun `numeric child name is rejected`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":[{"name":123,"userId":"x"}]}"""))
+        server.start()
+        try {
+            assertThrows(TodoApiException::class.java) { HttpTodoApi(server.url("/").toString()).catalog(TodoSession("123", "synthetic")) }
+        } finally { server.shutdown() }
+    }
+
+    @Test fun `session text does not expose token`() {
+        assertFalse(TodoSession("account", "synthetic-secret").toString().contains("synthetic-secret"))
+    }
+}

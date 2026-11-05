@@ -5,35 +5,64 @@ data class LearningState(val children: List<TodoChild> = emptyList(), val report
 
 /** Synchronous screen operations; callers run them off the main thread. */
 class LearningScreen(private val api: TodoApi, private val now: () -> Long = System::currentTimeMillis) {
-    var state = LearningState()
+    @Volatile var state = LearningState()
         private set
+    private val lock = Any()
+    private var generation = 0L
     private var session: TodoSession? = null
 
     fun signIn(email: String, password: String, date: String) {
+        val request = synchronized(lock) { ++generation }
         try {
-            session = api.signIn(email, password)
-            refresh(date)
+            val authenticated = api.signIn(email, password)
+            synchronized(lock) {
+                if (request != generation) return
+                session = authenticated
+            }
+            refreshForRequest(date, authenticated, request)
         } catch (e: TodoApiException) {
-            state = state.copy(error = true, loginRequired = e.authenticationRequired)
+            synchronized(lock) {
+                if (request == generation) state = state.copy(error = true, loginRequired = e.authenticationRequired)
+            }
         }
     }
 
     fun refresh(date: String) {
-        val current = session ?: return
+        val request: Long
+        val current: TodoSession
+        synchronized(lock) {
+            current = session ?: return
+            request = ++generation
+        }
+        refreshForRequest(date, current, request)
+    }
+
+    private fun refreshForRequest(date: String, current: TodoSession, request: Long) {
         val children = try { api.catalog(current) } catch (e: TodoApiException) {
-            state = state.copy(error = true, loginRequired = e.authenticationRequired)
+            synchronized(lock) {
+                if (request == generation) state = state.copy(error = true, loginRequired = e.authenticationRequired)
+            }
             return
         }
-        state = state.copy(children = children, error = false, loginRequired = false)
+        synchronized(lock) {
+            if (request != generation) return
+            state = state.copy(children = children, error = false, loginRequired = false)
+        }
         for (child in children) for ((subject, id) in child.userIds) {
             val key = child.name to subject
-            val previous = state.reports[key]?.takeIf { it.date == date } ?: ReportState(date = date)
             val result = try { ReportState(api.report(current, subject, id, date), now(), date) }
             catch (e: TodoApiException) {
-                if (e.authenticationRequired) state = state.copy(loginRequired = true)
-                previous.copy(failed = true)
+                synchronized(lock) {
+                    if (request != generation) return
+                    if (e.authenticationRequired) state = state.copy(loginRequired = true)
+                    val previous = state.reports[key]?.takeIf { it.date == date } ?: ReportState(date = date)
+                    previous.copy(failed = true)
+                }
             }
-            state = state.copy(reports = state.reports + (key to result))
+            synchronized(lock) {
+                if (request != generation) return
+                state = state.copy(reports = state.reports + (key to result))
+            }
         }
     }
 }
