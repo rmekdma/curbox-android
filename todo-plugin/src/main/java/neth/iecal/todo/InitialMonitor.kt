@@ -116,14 +116,14 @@ class InitialMonitor(
         val session = store.readSession(requireNotNull(control.ref))
         if (session.accountId != control.account) return
         if (doc.monitor.reports.any { (key, report) -> report.failure == LearningFailure.AUTHENTICATION && doc.monitor.reportFailureSessions[key] == control.ref }) return
-        val needsCatalog = doc.monitor.catalogRetryRequested || (doc.monitor.catalogFailure == null &&
+        val needsCatalog = doc.monitor.catalogRetryRequested || (doc.monitor.catalogFailure != null && doc.monitor.catalogFailureSession != null && doc.monitor.catalogFailureSession != control.ref) || (doc.monitor.catalogFailure == null &&
             (!doc.monitor.catalogAttempted || doc.monitor.catalogOwner != control.owner || doc.monitor.catalogRegistration != control.registration || doc.monitor.catalogSession != control.ref || doc.monitor.catalogPermissionRevision != control.permission.revision))
         val childBefore = doc.monitor.children.firstOrNull { it.name == control.child }
         fun goal(subject: Subject) = control.goals[requireNotNull(control.child) to subject] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
         fun needsInitial(subject: Subject): Boolean {
             val key = requireNotNull(control.child) to subject
             val previous = doc.monitor.reports[key]
-            return goal(subject) > 0 && (previous?.failed != true || doc.monitor.reportRetryRequested == key) &&
+            return goal(subject) > 0 && (previous?.failed != true || doc.monitor.reportRetryRequested == key || (doc.monitor.reportFailureSessions[key] != null && doc.monitor.reportFailureSessions[key] != control.ref)) &&
                 (previous?.failed == true || previous?.date != date || doc.monitor.baselineEpochs[key] != control.owner || doc.monitor.baselineRegistrations[key] != control.registration || doc.monitor.baselineSessions[key] != control.ref || doc.monitor.baselinePermissions[key] != control.permission.revision)
         }
         if (regularSubject == null && !needsCatalog && (doc.monitor.catalogFailure != null || childBefore == null || childBefore.userIds.keys.none(::needsInitial))) return
@@ -142,7 +142,7 @@ class InitialMonitor(
         doc = store.updateMonitor { current ->
             if (!valid(current)) null else current.monitor.copy(cycleOwner = control.owner, cycleStartedElapsedMillis = elapsed())
         } ?: return
-        if (doc.monitor.catalogRetryRequested || (doc.monitor.catalogFailure == null &&
+        if (doc.monitor.catalogRetryRequested || (doc.monitor.catalogFailure != null && doc.monitor.catalogFailureSession != null && doc.monitor.catalogFailureSession != control.ref) || (doc.monitor.catalogFailure == null &&
                 (!doc.monitor.catalogAttempted || doc.monitor.catalogOwner != control.owner || doc.monitor.catalogRegistration != control.registration || doc.monitor.catalogSession != control.ref || doc.monitor.catalogPermissionRevision != control.permission.revision))) {
             val children = try { api.catalog(session) } catch (e: TodoApiException) {
                 currentCoroutineContext().ensureActive()
@@ -167,7 +167,7 @@ class InitialMonitor(
             val key = child.name to subject
             val goal = control.goals[key] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             val previous = doc.monitor.reports[key]
-            if (regularSubject == null && (goal == 0 || (previous?.failed == true && doc.monitor.reportRetryRequested != key) || (previous?.failed != true && previous?.date == date && doc.monitor.baselineEpochs[key] == control.owner && doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref &&
+            if (regularSubject == null && (goal == 0 || (previous?.failed == true && doc.monitor.reportRetryRequested != key && (doc.monitor.reportFailureSessions[key] == null || doc.monitor.reportFailureSessions[key] == control.ref)) || (previous?.failed != true && previous?.date == date && doc.monitor.baselineEpochs[key] == control.owner && doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref &&
                     doc.monitor.baselinePermissions[key] == control.permission.revision))) continue
             if (regularSubject != null) {
                 val observation = host.refreshObservation()
