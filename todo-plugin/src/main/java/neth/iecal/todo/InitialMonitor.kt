@@ -38,7 +38,8 @@ class InitialMonitor(
     private val freshPermission: () -> Boolean,
     private val publish: suspend (StoredLearning, NotificationPermission) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
-    private val elapsed: () -> Long = { System.nanoTime() / 1_000_000 }
+    private val elapsed: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val achievement: suspend (StoredLearning, NotificationPermission, String, Subject, suspend () -> Boolean) -> Unit = { _, _, _, _, _ -> }
 ) : CurboxPlugin {
     private companion object { val cycleMutex = Mutex() }
     private data class Control(val owner: Long, val version: Long, val manualRevision: Long, val registration: Long, val account: String?, val child: String?, val registrations: Map<String, Long>, val ref: String?, val goals: Map<Pair<String, Subject>, Int>, val connected: Boolean, val permission: NotificationPermission, val interval: String)
@@ -203,8 +204,18 @@ class InitialMonitor(
             val result = try { ReportState(api.report(session, subject, id, date), now(), date) }
                 catch (e: TodoApiException) { (previous ?: ReportState(date = date)).copy(failed = true, failure = e.kind) }
             currentCoroutineContext().ensureActive()
+            var achieved = false
             doc = store.updateMonitor { current ->
+                val old = current.monitor.reports[key]
+                achieved = regularSubject != null && !result.failed && result.value != null &&
+                    old?.value != null && old.date == date && old.value.count < goal && result.value.count >= goal &&
+                    current.monitor.baselineEpochs[key] == control.owner && current.monitor.baselineRegistrations[key] == control.registration &&
+                    current.monitor.baselineSessions[key] == control.ref && current.monitor.baselinePermissions[key] == control.permission.revision &&
+                    current.monitor.baselineGoals[key] == goal
                 if (!valid(current)) null else current.monitor.copy(reports = current.monitor.reports + (key to result),
+                    reportVersions = current.monitor.reportVersions + (key to Math.addExact(current.monitor.reportVersions[key] ?: 0, 1)),
+                    latestAchievements = if (achieved) current.monitor.latestAchievements + ((requireNotNull(control.account) to child.name) to subject) else current.monitor.latestAchievements,
+                    baselineGoals = if (result.failed) current.monitor.baselineGoals else current.monitor.baselineGoals + (key to goal),
                     reportRetryRequested = if (current.monitor.reportRetryRequested == key) null else current.monitor.reportRetryRequested,
                     reportFailureSessions = if (result.failed) current.monitor.reportFailureSessions + (key to requireNotNull(control.ref)) else current.monitor.reportFailureSessions - key,
                     baselineEpochs = if (result.failed) current.monitor.baselineEpochs else current.monitor.baselineEpochs + (key to control.owner),
@@ -212,7 +223,15 @@ class InitialMonitor(
                     baselineSessions = if (result.failed) current.monitor.baselineSessions else current.monitor.baselineSessions + (key to requireNotNull(control.ref)),
                     baselinePermissions = if (result.failed) current.monitor.baselinePermissions else current.monitor.baselinePermissions + (key to control.permission.revision))
             } ?: return
-            publish(doc, control.permission)
+            if (achieved) {
+                currentCoroutineContext().ensureActive()
+                val version = doc.monitor.reportVersions[key]
+                achievement(doc, control.permission, child.name, subject) {
+                    currentCoroutineContext().ensureActive()
+                    val latest = store.read()
+                    valid(latest) && latest.monitor.reportVersions[key] == version
+                }
+            } else publish(doc, control.permission)
             if (result.failure == LearningFailure.AUTHENTICATION) return
         }
     }

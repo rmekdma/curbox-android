@@ -210,6 +210,12 @@ class AppBlockerService : BaseBlockingService() {
                     try { neth.iecal.curbox.learning.LearningNotifications.publish(this, storage, document, permission.state, expected) }
                     catch (e: CancellationException) { throw e }
                     catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
+                },
+                elapsed = android.os.SystemClock::elapsedRealtime,
+                achievement = { document, expected, child, subject, stillValid ->
+                    try { neth.iecal.curbox.learning.LearningNotifications.publish(this, storage, document, permission.state, expected, child, subject, stillValid) }
+                    catch (e: CancellationException) { throw e }
+                    catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
                 }
             )
             learningJob = serviceScope.launch {

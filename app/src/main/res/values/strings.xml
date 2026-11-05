@@ -1897,6 +1897,8 @@
     <string name="learning_monitor_start">Start watching</string>
     <string name="learning_monitor_stop">Stop watching</string>
     <string name="learning_notification_channel">Learning status</string>
+    <string name="learning_checked_complete">✓ Complete</string>
+    <string name="learning_achievement_title">%1$s completed %2$s</string>
     <string name="learning_monitor_report">Watching: %1$d items, %2$d minutes. Checked %3$s.</string>
     <string name="learning_monitor_value">%1$d items. Checked %2$s.</string>
 </resources>

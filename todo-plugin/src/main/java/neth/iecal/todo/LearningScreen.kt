@@ -117,6 +117,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
                 val epoch = Math.addExact(old.registrationEpoch, 1)
                 val registrations = previous.registeredChildren().let { if (childName in it) it - childName else it + (childName to epoch) }
                 previous.copy(accounts = accounts, accountId = account, childName = registrations.keys.firstOrNull(), registrations = registrations,
+                    latestAchievements = previous.latestAchievements - (account to childName),
                     children = if (previous.children.isEmpty()) doc.state.children else previous.children,
                     catalogRetryRequested = false, reportRetryRequested = null,
                     registrationEpoch = epoch, controlRevision = Math.addExact(old.controlRevision, 1))

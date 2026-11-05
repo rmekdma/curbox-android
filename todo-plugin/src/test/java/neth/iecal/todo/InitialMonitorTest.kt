@@ -16,6 +16,208 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class InitialMonitorTest {
+    @Test fun onlyARegularCrossingRequestsAnAchievement() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 2 else 5, 1)
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val clock = java.util.concurrent.atomic.AtomicLong(1000)
+        val effects = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Subject>>())
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, childName, subject, _ -> effects.add(childName to subject) }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 2 } }
+            assertTrue(effects.isEmpty())
+            clock.set(61000)
+            host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
+            withTimeout(5000) { while (effects.isEmpty()) delay(10) }
+            assertEquals(listOf("Sample" to Subject.MATH), effects.toList())
+            clock.set(121000)
+            host.observations.value = host.observations.value.copy(callbackReceived = true)
+            delay(150)
+            assertEquals(2, calls.get())
+            assertEquals(1, effects.size)
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun changedGoalDoesNotTurnExistingProgressIntoAnAchievement() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 2 else 3, 1)
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val clock = java.util.concurrent.atomic.AtomicLong(1000)
+        val effects = java.util.Collections.synchronizedList(mutableListOf<Subject>())
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 2 } }
+            assertTrue(screen.saveGoal("Sample", Subject.MATH, "3"))
+            clock.set(61000)
+            host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 3 } }
+            assertTrue(effects.isEmpty())
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun completedBaselineIsSilentAndOtherChildCanAchieveAfterFailure() = runBlocking {
+        val store = MemoryLearningStore()
+        val children = listOf(TodoChild("One", mapOf(Subject.MATH to "one")), TodoChild("Two", mapOf(Subject.MATH to "two")))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = children, accountId = "account"), "session"))
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = children
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (userId == "one") return DailyReport(5, 1)
+                return when (calls.incrementAndGet()) {
+                    1 -> DailyReport(2, 1)
+                    2 -> throw TodoApiException(kind = LearningFailure.NETWORK)
+                    else -> DailyReport(5, 1)
+                }
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val clock = java.util.concurrent.atomic.AtomicLong(1000)
+        val effects = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        screen.toggleMonitor("Two")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, child, _, _ -> effects.add(child) }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports.size == 2 } }
+            assertTrue(effects.isEmpty())
+            clock.set(61000)
+            host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Two" to Subject.MATH]?.failed == true } }
+            assertTrue(effects.isEmpty())
+            clock.set(121000)
+            host.observations.value = host.observations.value.copy(callbackReceived = true)
+            withTimeout(5000) { while (effects.isEmpty()) delay(10) }
+            assertEquals(listOf("Two"), effects.toList())
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun acceptedAchievementRemainsAuthorizedAfterLeavingTheApp() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val calls = AtomicInteger()
+        val enteredReport = java.util.concurrent.CountDownLatch(1)
+        val releaseReport = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (calls.incrementAndGet() == 1) return DailyReport(1, 1)
+                enteredReport.countDown()
+                check(releaseReport.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                return DailyReport(5, 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val clock = java.util.concurrent.atomic.AtomicLong(1000)
+        val authorized = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, _, valid ->
+            authorized.complete(valid())
+        }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 1 } }
+            clock.set(61000)
+            host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
+            withTimeout(5000) { while (enteredReport.count != 0L) delay(10) }
+            host.observations.value = host.observations.value.copy(foreground = neth.iecal.plugin.Foreground.Confirmed("home"))
+            releaseReport.countDown()
+            assertEquals(true, withTimeout(5000) { authorized.await() })
+            clock.set(121000)
+            delay(150)
+            assertEquals(2, calls.get())
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun deregistrationRevokesQueuedAchievement() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 1 else 5, 1)
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val clock = java.util.concurrent.atomic.AtomicLong(1000)
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val authorized = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, _, valid ->
+            entered.complete(Unit)
+            release.await()
+            authorized.complete(valid())
+        }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 1 } }
+            clock.set(61000)
+            host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
+            withTimeout(5000) { entered.await() }
+            screen.toggleMonitor("Sample")
+            release.complete(Unit)
+            assertEquals(false, withTimeout(5000) { authorized.await() })
+        } finally { job.cancelAndJoin() }
+    }
+
     @Test fun registeredChildrenShareOneRegularCycle() = runBlocking {
         val store = MemoryLearningStore()
         val children = listOf(TodoChild("One", mapOf(Subject.MATH to "one")), TodoChild("Two", mapOf(Subject.MATH to "two")))

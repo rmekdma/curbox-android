@@ -45,6 +45,9 @@ data class MonitorState(
     val baselineRegistrations: Map<Pair<String, Subject>, Long> = emptyMap(),
     val baselineSessions: Map<Pair<String, Subject>, String> = emptyMap(),
     val baselinePermissions: Map<Pair<String, Subject>, Long> = emptyMap(),
+    val baselineGoals: Map<Pair<String, Subject>, Int> = emptyMap(),
+    val reportVersions: Map<Pair<String, Subject>, Long> = emptyMap(),
+    val latestAchievements: Map<Pair<String, String>, Subject> = emptyMap(),
     val retryRevision: Long = 0,
     val catalogRetryRequested: Boolean = false,
     val reportRetryRequested: Pair<String, Subject>? = null
