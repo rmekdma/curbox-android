@@ -79,6 +79,14 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.SUBJECT_ENGLISH -> R.string.learning_english
             neth.iecal.todo.LearningText.REPORT -> R.string.learning_report
             neth.iecal.todo.LearningText.LAST_REPORT -> R.string.learning_last_report
+            neth.iecal.todo.LearningText.PREVIOUS_DATE -> R.string.learning_previous_date
+            neth.iecal.todo.LearningText.NEXT_DATE -> R.string.learning_next_date
+            neth.iecal.todo.LearningText.REFRESH -> R.string.learning_refresh
+            neth.iecal.todo.LearningText.GOAL -> R.string.learning_goal
+            neth.iecal.todo.LearningText.SAVE_GOAL -> R.string.learning_save_goal
+            neth.iecal.todo.LearningText.INVALID_GOAL -> R.string.learning_invalid_goal
+            neth.iecal.todo.LearningText.COMPLETE -> R.string.learning_complete
+            neth.iecal.todo.LearningText.INCOMPLETE -> R.string.learning_incomplete
         }
         return getString(resource, *args)
     }

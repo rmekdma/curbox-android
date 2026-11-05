@@ -320,3 +320,129 @@ class LearningAccountScopeTest {
         assertEquals(DailyReport(2, 0), restored.state.reports["Child" to Subject.MATH]?.value)
     }
 }
+
+class LearningGoalTest {
+    @Test fun `goal persists and zero completes without a report`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport = throw TodoApiException()
+        }
+        val screen = LearningScreen(api, store)
+        screen.signIn("sample", "sample", "20261105")
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "0"))
+        val reopened = LearningScreen(api, store)
+        reopened.restore()
+        assertEquals(0, reopened.goal("Child", Subject.MATH))
+        assertEquals(GoalStatus.COMPLETE, reopened.goalStatus("Child", Subject.MATH, "20261105"))
+        assertNull(reopened.state.reports["Child" to Subject.MATH]?.value)
+    }
+}
+
+class LearningHistoryGoalTest {
+    private fun api() = object : TodoApi {
+        override fun signIn(email: String, password: String) = TodoSession(email, "token")
+        override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+        override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (date == "20261104") 4 else 7, 1)
+    }
+
+    @Test fun `selected date uses its own report and goal changes recalculate`() {
+        val screen = LearningScreen(api())
+        screen.signIn("A", "sample", "20261105")
+        assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
+        screen.selectDate("20261104")
+        assertEquals(GoalStatus.UNKNOWN, screen.goalStatus("Child", Subject.MATH, "20261104"))
+        screen.refresh("20261104", onlyIfSelected = true)
+        assertEquals(GoalStatus.INCOMPLETE, screen.goalStatus("Child", Subject.MATH, "20261104"))
+        assertTrue(screen.saveGoal("Child", Subject.MATH, " 4 "))
+        assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261104"))
+        assertFalse(screen.saveGoal("Child", Subject.MATH, "100"))
+        assertFalse(screen.saveGoal("Child", Subject.MATH, "-1"))
+    }
+
+    @Test fun `new account does not inherit goals`() {
+        val screen = LearningScreen(api())
+        screen.signIn("A", "sample", "20261105")
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "9"))
+        screen.signIn("B", "sample", "20261105")
+        assertEquals(5, screen.goal("Child", Subject.MATH))
+        screen.signIn("A", "sample", "20261105")
+        assertEquals(9, screen.goal("Child", Subject.MATH))
+    }
+
+    @Test fun `late past date cannot replace current date`() {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (date == "20261104") { started.countDown(); release.await() }
+                return DailyReport(if (date == "20261104") 1 else 7, 0)
+            }
+        }
+        val screen = LearningScreen(api)
+        screen.signIn("A", "sample", "20261105")
+        screen.selectDate("20261104")
+        val old = Thread { screen.refresh("20261104", onlyIfSelected = true) }
+        old.start()
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        screen.selectDate("20261105")
+        screen.refresh("20261105", onlyIfSelected = true)
+        release.countDown()
+        old.join(5000)
+        assertEquals(DailyReport(7, 0), screen.state.reports["Child" to Subject.MATH]?.value)
+    }
+
+    @Test fun `zero goal keeps last count and failure latch without retry`() {
+        var calls = 0
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                calls++
+                if (calls > 1) throw TodoApiException()
+                return DailyReport(2, 1)
+            }
+        }
+        val screen = LearningScreen(api)
+        screen.signIn("A", "sample", "20261105")
+        screen.refresh("20261105")
+        screen.saveGoal("Child", Subject.MATH, "0")
+        screen.retryReport("Child", Subject.MATH, "20261105")
+        assertEquals(2, calls)
+        assertEquals(DailyReport(2, 1), screen.state.reports["Child" to Subject.MATH]?.value)
+        assertTrue(screen.state.reports["Child" to Subject.MATH]!!.failed)
+        screen.saveGoal("Child", Subject.MATH, "5")
+        screen.refresh("20261104")
+        assertEquals(2, calls)
+    }
+}
+
+class LearningGoalRaceTest {
+    @Test fun `goal change fences an in flight report`() {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            var calls = 0
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                calls++
+                if (calls == 2) { started.countDown(); release.await() }
+                return DailyReport(calls, 0)
+            }
+        }
+        val screen = LearningScreen(api)
+        screen.signIn("A", "sample", "20261105")
+        val old = Thread { screen.refresh("20261105") }
+        old.start()
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "0"))
+        release.countDown()
+        old.join(5000)
+        assertEquals(DailyReport(1, 0), screen.state.reports["Child" to Subject.MATH]?.value)
+        assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
+    }
+}

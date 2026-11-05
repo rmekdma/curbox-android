@@ -1883,6 +1883,14 @@
     <string name="learning_english">English</string>
     <string name="learning_report">%1$d items, %2$d minutes on %3$s. Checked %4$s.</string>
     <string name="learning_last_report">Last check: %1$d items, %2$d minutes on %3$s. Checked %4$s. Could not update.</string>
+    <string name="learning_previous_date">Previous</string>
+    <string name="learning_next_date">Next</string>
+    <string name="learning_refresh">Refresh</string>
+    <string name="learning_goal">Goal</string>
+    <string name="learning_save_goal">Save goal</string>
+    <string name="learning_invalid_goal">Enter a number from 0 to 99</string>
+    <string name="learning_complete">Complete</string>
+    <string name="learning_incomplete">Not complete</string>
 </resources>
 
 
