@@ -95,6 +95,7 @@ Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_
 ## Build and verification
 
 Use the check that matches the change. Documentation-only changes do not need a Gradle build.
+Use debug builds for development. Build release APKs only when the user explicitly requests them.
 
 ```bash
 ./gradlew testFullDebugUnitTest
