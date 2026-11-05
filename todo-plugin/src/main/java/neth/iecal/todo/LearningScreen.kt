@@ -67,7 +67,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         val updated = store.updateMonitor { doc ->
             val failure = if (subject == null) doc.monitor.catalogFailure else doc.monitor.reports[childName to subject]?.failure
             val failedRef = if (subject == null) doc.monitor.catalogFailureSession else doc.monitor.reportFailureSessions[childName to subject]
-            if (doc.monitor.accountId != doc.state.accountId || doc.monitor.childName != childName ||
+            if (doc.monitor.accountId != doc.state.accountId || childName !in doc.monitor.registeredChildren() ||
                 (failure == LearningFailure.AUTHENTICATION && (doc.sessionRef == null || doc.sessionRef == failedRef))) null
             else {
                 val old = doc.monitor
@@ -90,18 +90,20 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             if (account == null || doc.sessionRef == null || doc.state.children.none { it.name == childName }) null
             else {
                 val old = doc.monitor
-                val accounts = old.accountId?.let { old.accounts + (it to MonitorAccountSnapshot(old.catalogFailure, old.catalogFailureSession, old.catalogAttempted, old.children, old.reports, old.reportFailureSessions)) } ?: old.accounts
+                val accounts = old.accountId?.let { old.accounts + (it to MonitorAccountSnapshot(old.catalogFailure, old.catalogFailureSession, old.catalogAttempted, old.children, old.reports, old.reportFailureSessions, old.registeredChildren())) } ?: old.accounts
                 val previous = if (old.accountId == account) old else {
                     val saved = accounts[account] ?: MonitorAccountSnapshot()
-                    old.copy(accountId = account, childName = null, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
+                    old.copy(accountId = account, childName = null, registrations = saved.registrations, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
                         catalogAttempted = saved.catalogAttempted, children = saved.children, reports = saved.reports, reportFailureSessions = saved.reportFailureSessions,
                         baselineEpochs = emptyMap(), baselineRegistrations = emptyMap(), baselineSessions = emptyMap(), baselinePermissions = emptyMap(),
                         catalogRetryRequested = false, reportRetryRequested = null)
                 }
-                previous.copy(accounts = accounts, accountId = account, childName = if (previous.childName == childName) null else childName,
+                val epoch = Math.addExact(old.registrationEpoch, 1)
+                val registrations = previous.registeredChildren().let { if (childName in it) it - childName else it + (childName to epoch) }
+                previous.copy(accounts = accounts, accountId = account, childName = registrations.keys.firstOrNull(), registrations = registrations,
                     children = if (previous.children.isEmpty()) doc.state.children else previous.children,
                     catalogRetryRequested = false, reportRetryRequested = null,
-                    registrationEpoch = Math.addExact(old.registrationEpoch, 1), controlRevision = Math.addExact(old.controlRevision, 1))
+                    registrationEpoch = epoch, controlRevision = Math.addExact(old.controlRevision, 1))
             }
         }
         if (updated != null) monitor = updated.monitor

@@ -9,13 +9,15 @@ data class MonitorAccountSnapshot(
     val catalogAttempted: Boolean = false,
     val children: List<TodoChild> = emptyList(),
     val reports: Map<Pair<String, Subject>, ReportState> = emptyMap(),
-    val reportFailureSessions: Map<Pair<String, Subject>, String> = emptyMap()
+    val reportFailureSessions: Map<Pair<String, Subject>, String> = emptyMap(),
+    val registrations: Map<String, Long> = emptyMap()
 )
 
 data class MonitorState(
     val ownerEpoch: Long = 0,
     val controlRevision: Long = 0,
     val registrationEpoch: Long = 0,
+    val registrations: Map<String, Long> = emptyMap(),
     val accounts: Map<String, MonitorAccountSnapshot> = emptyMap(),
     val cycleOwner: Long = 0,
     val cycleStartedElapsedMillis: Long = 0,
@@ -76,3 +78,6 @@ class MemoryLearningStore : LearningStore {
     @Synchronized override fun readSession(ref: String) = requireNotNull(sessions[ref])
     @Synchronized override fun writeSession(ref: String, session: TodoSession) { sessions[ref] = session }
 }
+
+/** Registrations persisted before multiple children were supported remain active. */
+fun MonitorState.registeredChildren(): Map<String, Long> = if (registrations.isEmpty() && childName != null) mapOf(childName to registrationEpoch) else registrations

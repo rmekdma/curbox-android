@@ -62,6 +62,96 @@ class InitialMonitorTest {
         job.cancelAndJoin()
     }
 
+    @Test fun registeringAnotherChildPreservesBothRegistrations() {
+        val store = MemoryLearningStore()
+        val children = listOf(TodoChild("One", mapOf(Subject.MATH to "1")), TodoChild("Two", mapOf(Subject.MATH to "2")))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = children, accountId = "account"), "session"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = children
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        screen.toggleMonitor("Two")
+        assertEquals(setOf("One", "Two"), store.read().monitor.registrations.keys)
+    }
+
+    @Test fun registeringSecondChildDuringSlowFirstRequestKeepsBothResults() = runBlocking {
+        val store = MemoryLearningStore()
+        val children = listOf(TodoChild("One", mapOf(Subject.MATH to "1")), TodoChild("Two", mapOf(Subject.MATH to "2")))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = children, accountId = "account"), "session"))
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = children
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (userId == "1") { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
+                return DailyReport(userId.toInt(), 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        withTimeout(5000) { while (entered.count != 0L) delay(10) }
+        screen.toggleMonitor("Two")
+        release.countDown()
+        withTimeout(5000) { store.changes.first { it.monitor.reports["Two" to Subject.MATH]?.value?.count == 2 } }
+        assertEquals(1, store.read().monitor.reports["One" to Subject.MATH]?.value?.count)
+        job.cancelAndJoin()
+    }
+
+    @Test fun reregisteringQueuedChildDiscardsOldGeneration() = runBlocking {
+        val store = MemoryLearningStore()
+        val children = listOf(TodoChild("One", mapOf(Subject.MATH to "1")), TodoChild("Two", mapOf(Subject.MATH to "2")))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = children, accountId = "account"), "session"))
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = children
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (userId == "1") { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
+                else calls.incrementAndGet()
+                return DailyReport(userId.toInt(), 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        withTimeout(5000) { while (entered.count != 0L) delay(10) }
+        screen.toggleMonitor("Two")
+        screen.toggleMonitor("Two")
+        screen.toggleMonitor("Two")
+        release.countDown()
+        withTimeout(5000) { store.changes.first { it.monitor.reports["Two" to Subject.MATH]?.value?.count == 2 } }
+        assertEquals(1, calls.get())
+        assertEquals(1, store.read().monitor.reports["One" to Subject.MATH]?.value?.count)
+        job.cancelAndJoin()
+    }
+
     @Test fun manualCommitPreservesConcurrentMonitorState() {
         val store = MemoryLearningStore()
         val manual = store.claim()
