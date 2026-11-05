@@ -139,11 +139,11 @@ class LearningFragment : Fragment() {
             b.children.addView(TextView(requireContext()).apply { text = child.name; textSize = 20f })
             b.children.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
                 icon = androidx.core.content.ContextCompat.getDrawable(requireContext(), android.R.drawable.ic_lock_silent_mode_off)
-                text = this@LearningFragment.text(if (screen.monitor.accountId == state.accountId && screen.monitor.childName == child.name) LearningText.MONITOR_STOP else LearningText.MONITOR_START)
+                text = this@LearningFragment.text(if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()) LearningText.MONITOR_STOP else LearningText.MONITOR_START)
                 setOnClickListener { runRequest { screen.toggleMonitor(child.name) } }
             })
-            if (screen.monitor.accountId == state.accountId && screen.monitor.childName == child.name && screen.monitor.catalogFailure != null) {
-                b.children.addView(TextView(requireContext()).apply { text = failureText(screen.monitor.catalogFailure) })
+            if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && screen.monitor.catalogFailureFor(child.name) != null) {
+                b.children.addView(TextView(requireContext()).apply { text = failureText(screen.monitor.catalogFailureFor(child.name)) })
                 b.children.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
                     text = this@LearningFragment.text(LearningText.RETRY)
                     isEnabled = screen.canRetryMonitor(child.name, null)
@@ -152,13 +152,13 @@ class LearningFragment : Fragment() {
             }
             for (subject in child.userIds.keys) {
                 val monitored = screen.monitor.reports[child.name to subject]
-                if (screen.monitor.accountId == state.accountId && screen.monitor.childName == child.name && monitored?.value != null) {
+                if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && monitored?.value != null) {
                     val checked = java.text.DateFormat.getDateTimeInstance().format(java.util.Date(monitored.checkedAt ?: 0))
                     b.children.addView(TextView(requireContext()).apply {
                         text = this@LearningFragment.text(LearningText.MONITOR_REPORT, monitored.value.count, monitored.value.minutes, checked)
                     })
                 }
-                if (screen.monitor.accountId == state.accountId && screen.monitor.childName == child.name && monitored?.failed == true) {
+                if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && monitored?.failed == true) {
                     b.children.addView(TextView(requireContext()).apply { text = failureText(monitored.failure) })
                     b.children.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
                         text = this@LearningFragment.text(LearningText.RETRY)

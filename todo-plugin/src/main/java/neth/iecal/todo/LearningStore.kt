@@ -9,13 +9,18 @@ data class MonitorAccountSnapshot(
     val catalogAttempted: Boolean = false,
     val children: List<TodoChild> = emptyList(),
     val reports: Map<Pair<String, Subject>, ReportState> = emptyMap(),
-    val reportFailureSessions: Map<Pair<String, Subject>, String> = emptyMap()
+    val reportFailureSessions: Map<Pair<String, Subject>, String> = emptyMap(),
+    val registrations: Map<String, Long> = emptyMap(),
+    val catalogFailures: Map<String, LearningFailure> = emptyMap(),
+    val catalogFailureSessions: Map<String, String> = emptyMap(),
+    val catalogRegistrations: Map<String, Long> = emptyMap()
 )
 
 data class MonitorState(
     val ownerEpoch: Long = 0,
     val controlRevision: Long = 0,
     val registrationEpoch: Long = 0,
+    val registrations: Map<String, Long> = emptyMap(),
     val accounts: Map<String, MonitorAccountSnapshot> = emptyMap(),
     val intervalMinutes: String = "1",
     val cycleOwner: Long = 0,
@@ -24,6 +29,10 @@ data class MonitorState(
     val childName: String? = null,
     val catalogFailure: LearningFailure? = null,
     val catalogFailureSession: String? = null,
+    val catalogFailures: Map<String, LearningFailure> = emptyMap(),
+    val catalogFailureSessions: Map<String, String> = emptyMap(),
+    val catalogRetryChild: String? = null,
+    val catalogRegistrations: Map<String, Long> = emptyMap(),
     val catalogAttempted: Boolean = false,
     val catalogOwner: Long = 0,
     val catalogRegistration: Long = 0,
@@ -77,3 +86,9 @@ class MemoryLearningStore : LearningStore {
     @Synchronized override fun readSession(ref: String) = requireNotNull(sessions[ref])
     @Synchronized override fun writeSession(ref: String, session: TodoSession) { sessions[ref] = session }
 }
+
+/** Registrations persisted before multiple children were supported remain active. */
+fun MonitorState.registeredChildren(): Map<String, Long> = if (registrations.isEmpty() && childName != null) mapOf(childName to registrationEpoch) else registrations
+
+fun MonitorState.catalogFailureFor(child: String): LearningFailure? = catalogFailures[child] ?: if (catalogFailures.isEmpty() && childName == child) catalogFailure else null
+fun MonitorState.catalogFailureSessionFor(child: String): String? = catalogFailureSessions[child] ?: if (catalogFailures.isEmpty() && childName == child) catalogFailureSession else null
