@@ -1,0 +1,66 @@
+package neth.iecal.curbox.learning
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import neth.iecal.curbox.R
+import neth.iecal.todo.StoredLearning
+import neth.iecal.todo.Subject
+
+/** Serializes notification effects from replacement service connections. */
+object LearningNotifications {
+    private val mutex = Mutex()
+    suspend fun publish(context: Context, store: LearningStorage, committed: StoredLearning,
+        permission: kotlinx.coroutines.flow.StateFlow<neth.iecal.todo.NotificationPermission>, expected: neth.iecal.todo.NotificationPermission) = mutex.withLock {
+        val current = withContext(Dispatchers.IO) { store.read() }
+        if (permission.value != expected || current.monitor.ownerEpoch != committed.monitor.ownerEpoch || current.monitor.controlRevision != committed.monitor.controlRevision || current.revision != committed.revision) return@withLock
+        val notifications = NotificationManagerCompat.from(context)
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val child = current.monitor.childName
+        val tag = if (child == null || current.monitor.accountId != current.state.accountId) null else
+            "learning:" + java.util.UUID.nameUUIDFromBytes("${current.monitor.accountId}:$child".toByteArray())
+        for (active in manager.activeNotifications) {
+            if (active.tag?.startsWith("learning:") == true && active.tag != tag) manager.cancel(active.tag, active.id)
+        }
+        if (child == null || tag == null) return@withLock
+        manager.createNotificationChannel(NotificationChannel("learning_status", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) })
+        val details = current.monitor.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty().joinToString("\n") { subject ->
+            val label = context.getString(when (subject) { Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english })
+            val key = child to subject
+            val report = current.monitor.reports[key]
+            val goal = current.state.goalsByAccount[current.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
+            val reportValue = report?.value
+            val value = when {
+                goal == 0 -> context.getString(R.string.learning_complete)
+                reportValue != null -> {
+                    val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
+                    val status = if (report.date != today) context.getString(R.string.learning_unknown)
+                        else context.getString(if (reportValue.count >= goal) R.string.learning_complete else R.string.learning_incomplete)
+                    context.getString(R.string.learning_monitor_value, reportValue.count,
+                        java.text.DateFormat.getDateTimeInstance().format(java.util.Date(report.checkedAt ?: 0))) + " " + status
+                }
+                else -> context.getString(R.string.learning_unknown)
+            }
+            val failure = when (report?.failure ?: current.monitor.catalogFailure) {
+                neth.iecal.todo.LearningFailure.NETWORK -> context.getString(R.string.learning_network_error)
+                neth.iecal.todo.LearningFailure.SERVER -> context.getString(R.string.learning_server_error)
+                neth.iecal.todo.LearningFailure.INVALID_DATA -> context.getString(R.string.learning_invalid_error)
+                neth.iecal.todo.LearningFailure.STORAGE -> context.getString(R.string.learning_storage_error)
+                neth.iecal.todo.LearningFailure.AUTHENTICATION -> context.getString(R.string.learning_login_required)
+                null -> ""
+            }
+            "$label: $value $failure".trim()
+        }
+        val notification = NotificationCompat.Builder(context, "learning_status")
+            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(child)
+            .setContentText(details).setStyle(NotificationCompat.BigTextStyle().bigText(details))
+            .setOngoing(true).setSilent(true).build()
+        if (permission.value == expected && expected.granted && notifications.areNotificationsEnabled()) notifications.notify(tag, 0x4c454152, notification)
+    }
+}

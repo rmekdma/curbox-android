@@ -11,6 +11,8 @@ enum class GoalStatus { UNKNOWN, INCOMPLETE, COMPLETE }
 class LearningScreen(private val api: TodoApi, private val store: LearningStore = MemoryLearningStore(), private val now: () -> Long = System::currentTimeMillis) {
     @Volatile var state = LearningState()
         private set
+    @Volatile var monitor = MonitorState()
+        private set
     @Volatile var selectedDate: String? = null
         private set
     private val lock = Any()
@@ -52,6 +54,59 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         }
     }
 
+    val monitorChanges get() = store.changes
+    fun acceptMonitor(value: MonitorState) { monitor = value }
+
+    fun canRetryMonitor(childName: String, subject: Subject?): Boolean {
+        val failure = if (subject == null) monitor.catalogFailure else monitor.reports[childName to subject]?.failure
+        val failedRef = if (subject == null) monitor.catalogFailureSession else monitor.reportFailureSessions[childName to subject]
+        return failure != LearningFailure.AUTHENTICATION || (sessionRef != null && sessionRef != failedRef)
+    }
+
+    fun retryMonitor(childName: String, subject: Subject?) {
+        val updated = store.updateMonitor { doc ->
+            val failure = if (subject == null) doc.monitor.catalogFailure else doc.monitor.reports[childName to subject]?.failure
+            val failedRef = if (subject == null) doc.monitor.catalogFailureSession else doc.monitor.reportFailureSessions[childName to subject]
+            if (doc.monitor.accountId != doc.state.accountId || doc.monitor.childName != childName ||
+                (failure == LearningFailure.AUTHENTICATION && (doc.sessionRef == null || doc.sessionRef == failedRef))) null
+            else {
+                val old = doc.monitor
+                val key = subject?.let { childName to it }
+                if (key == null && old.catalogFailure == null || key != null && old.reports[key]?.failed != true) null
+                else old.copy(
+                    catalogRetryRequested = key == null,
+                    reportRetryRequested = key,
+                    retryRevision = Math.addExact(old.retryRevision, 1),
+                    controlRevision = Math.addExact(old.controlRevision, 1)
+                )
+            }
+        }
+        if (updated != null) monitor = updated.monitor
+    }
+
+    fun toggleMonitor(childName: String) {
+        val updated = store.updateMonitor { doc ->
+            val account = doc.state.accountId
+            if (account == null || doc.sessionRef == null || doc.state.children.none { it.name == childName }) null
+            else {
+                val old = doc.monitor
+                val accounts = old.accountId?.let { old.accounts + (it to MonitorAccountSnapshot(old.catalogFailure, old.catalogFailureSession, old.catalogAttempted, old.children, old.reports, old.reportFailureSessions)) } ?: old.accounts
+                val previous = if (old.accountId == account) old else {
+                    val saved = accounts[account] ?: MonitorAccountSnapshot()
+                    old.copy(accountId = account, childName = null, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
+                        catalogAttempted = saved.catalogAttempted, children = saved.children, reports = saved.reports, reportFailureSessions = saved.reportFailureSessions,
+                        baselineEpochs = emptyMap(), baselineRegistrations = emptyMap(), baselineSessions = emptyMap(), baselinePermissions = emptyMap(),
+                        catalogRetryRequested = false, reportRetryRequested = null)
+                }
+                previous.copy(accounts = accounts, accountId = account, childName = if (previous.childName == childName) null else childName,
+                    children = if (previous.children.isEmpty()) doc.state.children else previous.children,
+                    catalogRetryRequested = false, reportRetryRequested = null,
+                    registrationEpoch = Math.addExact(old.registrationEpoch, 1), controlRevision = Math.addExact(old.controlRevision, 1))
+            }
+        }
+        if (updated != null) monitor = updated.monitor
+    }
+
     fun storageFailure() { synchronized(lock) { session = null; sessionRef = null; generation++; state = state.copy(error = true, failure = LearningFailure.STORAGE) } }
 
     fun restore() {
@@ -61,6 +116,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             synchronized(lock) {
                 val scoped = !saved.state.accountId.isNullOrBlank() && (savedSession == null || savedSession.accountId == saved.state.accountId)
                 state = if (scoped) saved.state else LearningState(loginRequired = true)
+                monitor = saved.monitor
                 session = if (scoped) savedSession else null
                 sessionRef = if (scoped) saved.sessionRef else null
             }

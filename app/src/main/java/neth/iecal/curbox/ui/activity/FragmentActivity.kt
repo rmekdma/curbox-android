@@ -87,6 +87,9 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.INVALID_GOAL -> R.string.learning_invalid_goal
             neth.iecal.todo.LearningText.COMPLETE -> R.string.learning_complete
             neth.iecal.todo.LearningText.INCOMPLETE -> R.string.learning_incomplete
+            neth.iecal.todo.LearningText.MONITOR_START -> R.string.learning_monitor_start
+            neth.iecal.todo.LearningText.MONITOR_STOP -> R.string.learning_monitor_stop
+            neth.iecal.todo.LearningText.MONITOR_REPORT -> R.string.learning_monitor_report
         }
         return getString(resource, *args)
     }

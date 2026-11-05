@@ -11,6 +11,7 @@ android {
     buildFeatures { viewBinding = true }
 }
 dependencies {
+    implementation(project(":plugin-contract"))
     implementation(libs.androidx.fragment.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.material)

@@ -137,6 +137,7 @@ android {
 
 
 dependencies {
+    implementation(project(":plugin-contract"))
     implementation(project(":todo-plugin"))
 
     implementation(libs.androidx.core.ktx)

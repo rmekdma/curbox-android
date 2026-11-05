@@ -29,3 +29,5 @@ rootProject.name = "Curbox"
 include(":app")
 include(":apitester")
 include(":todo-plugin")
+
+include(":plugin-contract")

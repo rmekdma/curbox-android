@@ -7,12 +7,14 @@ import android.util.Base64
 import androidx.datastore.core.Serializer
 import com.google.gson.GsonBuilder
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.todo.LearningState
 import neth.iecal.todo.StoredLearning
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import neth.iecal.todo.MonitorState
 import neth.iecal.todo.LearningStore
 import neth.iecal.todo.TodoSession
 import java.io.InputStream
@@ -42,9 +44,11 @@ class LearningStorage(context: Context) : LearningStore {
         require(state.get("children")?.isJsonArray == true && (state.get("reports")?.isJsonArray == true || state.get("reports")?.isJsonObject == true))
         val ref = root.get("sessionRef")
         require(ref == null || ref.isJsonNull || (ref.isJsonPrimitive && ref.asJsonPrimitive.isString))
+        if (!root.has("monitor")) root.add("monitor", gson.toJsonTree(MonitorState()))
         return requireNotNull(gson.fromJson(root, StoredLearning::class.java))
     }
 
+    override val changes = stateStore.data.map { document(it) }
     override fun read(): StoredLearning = runBlocking { document(stateStore.data.first()) }
     override fun claim(): StoredLearning = runBlocking {
         document(stateStore.updateData { raw ->
@@ -62,6 +66,15 @@ class LearningStorage(context: Context) : LearningStore {
             } else raw
         }
         committed
+    }
+    override fun updateMonitor(change: (StoredLearning) -> MonitorState?): StoredLearning? = runBlocking {
+        var updated: StoredLearning? = null
+        stateStore.updateData { raw ->
+            val previous = document(raw)
+            val monitor = change(previous)
+            if (monitor == null) raw else previous.copy(monitor = monitor).also { updated = it }.let(gson::toJson)
+        }
+        updated
     }
     override fun readSession(ref: String): TodoSession = runBlocking {
         val raw = sessionStore.data.first()
