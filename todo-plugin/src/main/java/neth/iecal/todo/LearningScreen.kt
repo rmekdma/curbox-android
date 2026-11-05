@@ -3,7 +3,7 @@ package neth.iecal.todo
 import java.util.UUID
 
 data class ReportState(val value: DailyReport? = null, val checkedAt: Long? = null, val date: String? = null, val failed: Boolean = false, val failure: LearningFailure? = null)
-data class LearningState(val children: List<TodoChild> = emptyList(), val reports: Map<Pair<String, Subject>, ReportState> = emptyMap(), val error: Boolean = false, val loginRequired: Boolean = false, val catalogCheckedAt: Long? = null, val failure: LearningFailure? = null)
+data class LearningState(val children: List<TodoChild> = emptyList(), val reports: Map<Pair<String, Subject>, ReportState> = emptyMap(), val error: Boolean = false, val loginRequired: Boolean = false, val catalogCheckedAt: Long? = null, val failure: LearningFailure? = null, val accountId: String? = null)
 
 /** Synchronous screen operations; callers run them off the main thread. */
 class LearningScreen(private val api: TodoApi, private val store: LearningStore = MemoryLearningStore(), private val now: () -> Long = System::currentTimeMillis) {
@@ -20,7 +20,12 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         try {
             val saved = store.read()
             val savedSession = saved.sessionRef?.let { store.readSession(it) }
-            synchronized(lock) { state = saved.state; session = savedSession; sessionRef = saved.sessionRef }
+            synchronized(lock) {
+                val scoped = !saved.state.accountId.isNullOrBlank() && (savedSession == null || savedSession.accountId == saved.state.accountId)
+                state = if (scoped) saved.state else LearningState(loginRequired = true)
+                session = if (scoped) savedSession else null
+                sessionRef = if (scoped) saved.sessionRef else null
+            }
         } catch (e: Exception) { storageFailure() }
     }
 
@@ -33,7 +38,8 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             store.writeSession(ref, authenticated)
             synchronized(lock) {
                 if (local != generation) return
-                val next = claim.state.copy(error = false, loginRequired = false, failure = null)
+                val previous = if (!claim.state.accountId.isNullOrBlank() && claim.state.accountId == authenticated.accountId) claim.state else LearningState()
+                val next = previous.copy(error = false, loginRequired = false, failure = null, accountId = authenticated.accountId)
                 if (!store.commit(claim.revision, next, ref)) return
                 state = next; session = authenticated; sessionRef = ref
             }
@@ -41,7 +47,8 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         } catch (e: TodoApiException) {
             synchronized(lock) {
                 if (local != generation) return
-                val next = claim.state.copy(error = true, loginRequired = e.authenticationRequired, failure = e.kind)
+                val previous = if (claim.state.accountId.isNullOrBlank()) LearningState() else claim.state
+                val next = previous.copy(error = true, loginRequired = e.authenticationRequired, failure = e.kind)
                 if (store.commit(claim.revision, next, null)) state = next
             }
         }
