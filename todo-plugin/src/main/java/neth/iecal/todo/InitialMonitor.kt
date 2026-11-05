@@ -126,21 +126,26 @@ class InitialMonitor(
             today() == date
         var doc = store.read()
         if (!valid(doc)) return
+        if (doc.monitor.catalogRetryRequested || doc.monitor.reportRetryRequested != null) {
+            doc = store.updateMonitor { if (valid(it)) it.monitor.migrateRetries(it.sessionRef) else null } ?: return
+        }
         val session = store.readSession(requireNotNull(control.ref))
         if (session.accountId != control.account) return
         val childName = requireNotNull(control.child)
         fun failure(monitor: MonitorState) = monitor.catalogFailureFor(childName)
         fun failureSession(monitor: MonitorState) = monitor.catalogFailureSessionFor(childName)
-        fun retry(monitor: MonitorState) = monitor.catalogRetryRequested && (monitor.catalogRetryChild == null || monitor.catalogRetryChild == childName)
+        fun eligible(intent: RetryIntent?) = intent?.registration == control.registration && intent.sessionRef == control.ref
+        fun retry(monitor: MonitorState) = eligible(monitor.catalogRetries[childName])
+        fun reportRetry(monitor: MonitorState, key: Pair<String, Subject>) = eligible(monitor.reportRetries[key])
         val knownChild = doc.monitor.children.firstOrNull { it.name == control.child }
         val initialized = knownChild != null && knownChild.userIds.keys.all { subject ->
             val key = knownChild.name to subject
             val goal = control.goals[key] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             val report = doc.monitor.reports[key]
-            goal == 0 || (report?.failed == true && (doc.monitor.reportFailureSessions[key] == null || doc.monitor.reportFailureSessions[key] == control.ref) && doc.monitor.reportRetryRequested != key) ||
+            goal == 0 || (!reportRetry(doc.monitor, key) && ((report?.failed == true && (doc.monitor.reportFailureSessions[key] == null || doc.monitor.reportFailureSessions[key] == control.ref) && !reportRetry(doc.monitor, key)) ||
                 (report?.failed != true && report?.date == date && doc.monitor.baselineEpochs[key] == control.owner &&
                     doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref &&
-                    doc.monitor.baselinePermissions[key] == control.permission.revision)
+                    doc.monitor.baselinePermissions[key] == control.permission.revision)))
         }
         if (regularSubject == null && initialized && failure(doc.monitor) == null && !retry(doc.monitor) &&
             (doc.monitor.catalogRegistrations[childName] ?: doc.monitor.catalogRegistration) == control.registration) return
@@ -152,8 +157,8 @@ class InitialMonitor(
         fun needsInitial(subject: Subject): Boolean {
             val key = requireNotNull(control.child) to subject
             val previous = doc.monitor.reports[key]
-            return goal(subject) > 0 && (previous?.failed != true || doc.monitor.reportRetryRequested == key || (doc.monitor.reportFailureSessions[key] != null && doc.monitor.reportFailureSessions[key] != control.ref)) &&
-                (previous?.failed == true || previous?.date != date || doc.monitor.baselineEpochs[key] != control.owner || doc.monitor.baselineRegistrations[key] != control.registration || doc.monitor.baselineSessions[key] != control.ref || doc.monitor.baselinePermissions[key] != control.permission.revision)
+            return goal(subject) > 0 && (previous?.failed != true || reportRetry(doc.monitor, key) || (doc.monitor.reportFailureSessions[key] != null && doc.monitor.reportFailureSessions[key] != control.ref)) &&
+                (reportRetry(doc.monitor, key) || previous?.failed == true || previous?.date != date || doc.monitor.baselineEpochs[key] != control.owner || doc.monitor.baselineRegistrations[key] != control.registration || doc.monitor.baselineSessions[key] != control.ref || doc.monitor.baselinePermissions[key] != control.permission.revision)
         }
         if (regularSubject == null && !needsCatalog && (failure(doc.monitor) != null || childBefore == null || childBefore.userIds.keys.none(::needsInitial))) return
         if (regularSubject != null) {
@@ -176,15 +181,16 @@ class InitialMonitor(
         }
         if (retry(doc.monitor) || (failure(doc.monitor) != null && failureSession(doc.monitor) != null && failureSession(doc.monitor) != control.ref) || (failure(doc.monitor) == null &&
                 (!doc.monitor.catalogAttempted || doc.monitor.catalogOwner != control.owner || (doc.monitor.catalogRegistrations[childName] ?: doc.monitor.catalogRegistration) != control.registration || doc.monitor.catalogSession != control.ref || doc.monitor.catalogPermissionRevision != control.permission.revision))) {
+            val catalogIntent = doc.monitor.catalogRetries[childName]?.takeIf(::eligible)
             val children = try { api.catalog(session) } catch (e: TodoApiException) {
                 currentCoroutineContext().ensureActive()
-                val failed = store.updateMonitor { if (valid(it)) it.monitor.copy(catalogAttempted = true, catalogFailure = e.kind, catalogFailureSession = control.ref, catalogFailures = it.monitor.catalogFailures + (childName to e.kind), catalogFailureSessions = it.monitor.catalogFailureSessions + (childName to requireNotNull(control.ref)), catalogRetryRequested = if (retry(it.monitor)) false else it.monitor.catalogRetryRequested, catalogRetryChild = if (retry(it.monitor)) null else it.monitor.catalogRetryChild) else null }
+                val failed = store.updateMonitor { if (valid(it)) it.monitor.copy(catalogAttempted = true, catalogFailure = e.kind, catalogFailureSession = control.ref, catalogFailures = it.monitor.catalogFailures + (childName to e.kind), catalogFailureSessions = it.monitor.catalogFailureSessions + (childName to requireNotNull(control.ref)), catalogRetries = if (catalogIntent != null && it.monitor.catalogRetries[childName] == catalogIntent) it.monitor.catalogRetries - childName else it.monitor.catalogRetries) else null }
                 if (failed != null) publish(failed, control.permission)
                 return
             }
             currentCoroutineContext().ensureActive()
             doc = store.updateMonitor { current ->
-                if (!valid(current)) null else current.monitor.copy(catalogAttempted = true, catalogFailure = null, catalogFailureSession = null, catalogFailures = current.monitor.catalogFailures - childName, catalogFailureSessions = current.monitor.catalogFailureSessions - childName, catalogRetryRequested = if (retry(current.monitor)) false else current.monitor.catalogRetryRequested, catalogRetryChild = if (retry(current.monitor)) null else current.monitor.catalogRetryChild,
+                if (!valid(current)) null else current.monitor.copy(catalogAttempted = true, catalogFailure = null, catalogFailureSession = null, catalogFailures = current.monitor.catalogFailures - childName, catalogFailureSessions = current.monitor.catalogFailureSessions - childName, catalogRetries = if (catalogIntent != null && current.monitor.catalogRetries[childName] == catalogIntent) current.monitor.catalogRetries - childName else current.monitor.catalogRetries,
                     catalogRegistrations = current.monitor.catalogRegistrations + (childName to control.registration), catalogOwner = control.owner, catalogRegistration = control.registration, catalogSession = control.ref,
                     catalogPermissionRevision = control.permission.revision, children = children)
             } ?: return
@@ -199,8 +205,9 @@ class InitialMonitor(
             val key = child.name to subject
             val goal = control.goals[key] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             val previous = doc.monitor.reports[key]
-            if (regularSubject == null && (goal == 0 || (previous?.failed == true && doc.monitor.reportRetryRequested != key && (doc.monitor.reportFailureSessions[key] == null || doc.monitor.reportFailureSessions[key] == control.ref)) || (previous?.failed != true && previous?.date == date && doc.monitor.baselineEpochs[key] == control.owner && doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref &&
+            if (regularSubject == null && (goal == 0 || (previous?.failed == true && !reportRetry(doc.monitor, key) && (doc.monitor.reportFailureSessions[key] == null || doc.monitor.reportFailureSessions[key] == control.ref)) || (!reportRetry(doc.monitor, key) && previous?.failed != true && previous?.date == date && doc.monitor.baselineEpochs[key] == control.owner && doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref &&
                     doc.monitor.baselinePermissions[key] == control.permission.revision))) continue
+            val reportIntent = doc.monitor.reportRetries[key]?.takeIf(::eligible)
             val result = try { ReportState(api.report(session, subject, id, date), now(), date) }
                 catch (e: TodoApiException) { (previous ?: ReportState(date = date)).copy(failed = true, failure = e.kind) }
             currentCoroutineContext().ensureActive()
@@ -210,13 +217,11 @@ class InitialMonitor(
                 achieved = regularSubject != null && !result.failed && result.value != null &&
                     old?.value != null && old.date == date && old.value.count < goal && result.value.count >= goal &&
                     current.monitor.baselineEpochs[key] == control.owner && current.monitor.baselineRegistrations[key] == control.registration &&
-                    current.monitor.baselineSessions[key] == control.ref && current.monitor.baselinePermissions[key] == control.permission.revision &&
-                    current.monitor.baselineGoals[key] == goal
+                    current.monitor.baselineSessions[key] == control.ref && current.monitor.baselinePermissions[key] == control.permission.revision
                 if (!valid(current)) null else current.monitor.copy(reports = current.monitor.reports + (key to result),
                     reportVersions = current.monitor.reportVersions + (key to Math.addExact(current.monitor.reportVersions[key] ?: 0, 1)),
                     latestAchievements = if (achieved) current.monitor.latestAchievements + ((requireNotNull(control.account) to child.name) to subject) else current.monitor.latestAchievements,
-                    baselineGoals = if (result.failed) current.monitor.baselineGoals else current.monitor.baselineGoals + (key to goal),
-                    reportRetryRequested = if (current.monitor.reportRetryRequested == key) null else current.monitor.reportRetryRequested,
+                    reportRetries = if (reportIntent != null && current.monitor.reportRetries[key] == reportIntent) current.monitor.reportRetries - key else current.monitor.reportRetries,
                     reportFailureSessions = if (result.failed) current.monitor.reportFailureSessions + (key to requireNotNull(control.ref)) else current.monitor.reportFailureSessions - key,
                     baselineEpochs = if (result.failed) current.monitor.baselineEpochs else current.monitor.baselineEpochs + (key to control.owner),
                     baselineRegistrations = if (result.failed) current.monitor.baselineRegistrations else current.monitor.baselineRegistrations + (key to control.registration),

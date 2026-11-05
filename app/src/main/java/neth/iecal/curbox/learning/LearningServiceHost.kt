@@ -15,7 +15,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -24,20 +23,17 @@ import neth.iecal.plugin.*
 
 /** Connection scoped adapter; framework tree reads occur only on its worker. */
 class LearningServiceHost(private val service: AccessibilityService, private val scope: CoroutineScope) : CurboxHost {
-    private val state = MutableStateFlow(HostObservation(connection = Connection.CONNECTED))
-    override val observations: StateFlow<HostObservation> = state
+    private val publication = LearningHostObservations()
+    override val observations: StateFlow<HostObservation> = publication.observations
     private val source = AndroidForegroundObservationSource(service)
     private val sequencer = AtomicConnectionScopedSourceOrderSequencer()
     private data class Request(val result: CompletableDeferred<HostObservation?>? = null)
     private val hints = Channel<Request>(Channel.CONFLATED) { it.result?.complete(null) }
-    @Volatile private var valid = true
-    private val generation = java.util.concurrent.atomic.AtomicLong()
     private var registered = false
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            generation.incrementAndGet()
-            if (intent.action == Intent.ACTION_SCREEN_OFF) state.value = state.value.copy(screen = Screen.OFF, foreground = Foreground.Unknown)
-            else { state.value = state.value.copy(screen = Screen.UNKNOWN, foreground = Foreground.Unknown); hints.trySend(Request()) }
+            val off = intent.action == Intent.ACTION_SCREEN_OFF
+            if (publication.screenChanged(if (off) Screen.OFF else Screen.UNKNOWN) && !off) hints.trySend(Request())
         }
     }
     private var worker: Job? = null
@@ -63,39 +59,29 @@ class LearningServiceHost(private val service: AccessibilityService, private val
         return enabled.split(':').any { ComponentName.unflattenFromString(it) == component }
     }
     fun event(type: Int) {
-        state.value = state.value.copy(callbackReceived = true)
-        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && type != AccessibilityEvent.TYPE_WINDOWS_CHANGED) return
-        generation.incrementAndGet()
-        state.value = state.value.copy(foreground = Foreground.Unknown)
-        hints.trySend(Request())
+        val relevant = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        if (publication.event(relevant)) hints.trySend(Request())
     }
     override suspend fun refreshObservation(): HostObservation {
-        if (!valid) return state.value.copy(foreground = Foreground.Unknown)
+        if (!publication.isActive()) return observations.value.copy(foreground = Foreground.Unknown)
         val result = CompletableDeferred<HostObservation?>()
-        if (hints.trySend(Request(result)).isFailure) return state.value.copy(foreground = Foreground.Unknown)
+        if (hints.trySend(Request(result)).isFailure) return observations.value.copy(foreground = Foreground.Unknown)
         val observation = withTimeoutOrNull(5000) { result.await() }
         if (observation == null) {
-            generation.incrementAndGet()
-            state.value = state.value.copy(foreground = Foreground.Unknown)
-            return state.value
+            return publication.invalidate()
         }
-        return observation
+        return observations.value
     }
-    private fun capture(): HostObservation {
-        if (!valid) return state.value
-        val observedGeneration = generation.get()
+    private fun capture(): HostObservation = publication.capture {
         val facts = source.capture(ObservationTrigger(sequencer.nextSourceOrderIdentity(), ObservationKind.REFRESH,
             requestedAtWallMs = System.currentTimeMillis(), requestedAtElapsedMs = SystemClock.elapsedRealtime()))
         val name = facts.activeRoot.packageName
         val app = if (name == null) null else runCatching { service.packageManager.getApplicationInfo(name, 0) }.getOrNull()
         val (screen, foreground) = mapForeground(facts, app != null && app.flags and ApplicationInfo.FLAG_SYSTEM == 0)
-        if (valid && generation.get() == observedGeneration) state.value = state.value.copy(accessibilityEnabled = accessibilityEnabled(), screen = screen, foreground = foreground, observedAtMillis = facts.capturedAtWallMs)
-        return state.value
+        LearningHostCapture(accessibilityEnabled(), screen, foreground, facts.capturedAtWallMs)
     }
     fun stop() {
-        valid = false
-        generation.incrementAndGet()
-        state.value = state.value.copy(connection = Connection.DISCONNECTED, foreground = Foreground.Unknown)
+        publication.stop()
         hints.cancel()
         worker?.cancel()
         if (registered) { service.unregisterReceiver(receiver); registered = false }

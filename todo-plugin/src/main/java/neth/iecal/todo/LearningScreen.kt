@@ -76,19 +76,22 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         val updated = store.updateMonitor { doc ->
             val failure = if (subject == null) doc.monitor.catalogFailureFor(childName) else doc.monitor.reports[childName to subject]?.failure
             val failedRef = if (subject == null) doc.monitor.catalogFailureSessionFor(childName) else doc.monitor.reportFailureSessions[childName to subject]
-            if (doc.monitor.accountId != doc.state.accountId || childName !in doc.monitor.registeredChildren() ||
-                (failure == LearningFailure.AUTHENTICATION && (doc.sessionRef == null || doc.sessionRef == failedRef))) null
+            if (doc.sessionRef == null || doc.monitor.accountId != doc.state.accountId || childName !in doc.monitor.registeredChildren() ||
+                (failure == LearningFailure.AUTHENTICATION && doc.sessionRef == failedRef)) null
             else {
-                val old = doc.monitor
+                val old = doc.monitor.migrateRetries(doc.sessionRef)
                 val key = subject?.let { childName to it }
                 if (key == null && old.catalogFailureFor(childName) == null || key != null && old.reports[key]?.failed != true) null
-                else old.copy(
-                    catalogRetryRequested = key == null,
-                    catalogRetryChild = if (key == null) childName else null,
-                    reportRetryRequested = key,
-                    retryRevision = Math.addExact(old.retryRevision, 1),
+                else {
+                    val revision = Math.addExact(old.retryRevision, 1)
+                    val intent = RetryIntent(old.registeredChildren().getValue(childName), revision, requireNotNull(doc.sessionRef))
+                    old.copy(
+                    catalogRetries = if (key == null) old.catalogRetries + (childName to intent) else old.catalogRetries,
+                    reportRetries = if (key != null) old.reportRetries + (key to intent) else old.reportRetries,
+                    retryRevision = revision,
                     controlRevision = Math.addExact(old.controlRevision, 1)
                 )
+                }
             }
         }
         if (updated != null) monitor = updated.monitor
@@ -99,7 +102,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             val account = doc.state.accountId
             if (account == null || doc.sessionRef == null || doc.state.children.none { it.name == childName }) null
             else {
-                val savedMonitor = doc.monitor
+                val savedMonitor = doc.monitor.migrateRetries(doc.sessionRef)
                 val legacyChild = savedMonitor.childName
                 val legacyFailure = savedMonitor.catalogFailure
                 val old = if (legacyChild != null && legacyFailure != null && savedMonitor.catalogFailures.isEmpty()) {
@@ -112,14 +115,16 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
                     old.copy(accountId = account, childName = null, registrations = saved.registrations, catalogFailures = saved.catalogFailures, catalogFailureSessions = saved.catalogFailureSessions, catalogRegistrations = saved.catalogRegistrations, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
                         catalogAttempted = saved.catalogAttempted, children = saved.children, reports = saved.reports, reportFailureSessions = saved.reportFailureSessions,
                         baselineEpochs = emptyMap(), baselineRegistrations = emptyMap(), baselineSessions = emptyMap(), baselinePermissions = emptyMap(),
-                        catalogRetryRequested = false, reportRetryRequested = null)
+                        catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null,
+                        catalogRetries = emptyMap(), reportRetries = emptyMap())
                 }
                 val epoch = Math.addExact(old.registrationEpoch, 1)
                 val registrations = previous.registeredChildren().let { if (childName in it) it - childName else it + (childName to epoch) }
                 previous.copy(accounts = accounts, accountId = account, childName = registrations.keys.firstOrNull(), registrations = registrations,
                     latestAchievements = previous.latestAchievements - (account to childName),
                     children = if (previous.children.isEmpty()) doc.state.children else previous.children,
-                    catalogRetryRequested = false, reportRetryRequested = null,
+                    catalogRetries = previous.catalogRetries - childName,
+                    reportRetries = previous.reportRetries.filterKeys { it.first != childName },
                     registrationEpoch = epoch, controlRevision = Math.addExact(old.controlRevision, 1))
             }
         }
