@@ -9,6 +9,7 @@ import neth.iecal.curbox.R
 import neth.iecal.todo.StoredLearning
 import neth.iecal.todo.Subject
 import neth.iecal.todo.registeredChildren
+import neth.iecal.todo.catalogFailureFor
 
 /** Serializes notification effects from replacement service connections. */
 object LearningNotifications {
@@ -43,7 +44,7 @@ object LearningNotifications {
                 }
                 else -> context.getString(R.string.learning_unknown)
             }
-            val failure = when (report?.failure ?: current.monitor.catalogFailure) {
+            val failure = when (report?.failure ?: current.monitor.catalogFailureFor(child)) {
                 neth.iecal.todo.LearningFailure.NETWORK -> context.getString(R.string.learning_network_error)
                 neth.iecal.todo.LearningFailure.SERVER -> context.getString(R.string.learning_server_error)
                 neth.iecal.todo.LearningFailure.INVALID_DATA -> context.getString(R.string.learning_invalid_error)

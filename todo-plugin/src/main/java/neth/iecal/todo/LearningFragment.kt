@@ -132,8 +132,8 @@ class LearningFragment : Fragment() {
                 text = this@LearningFragment.text(if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()) LearningText.MONITOR_STOP else LearningText.MONITOR_START)
                 setOnClickListener { runRequest { screen.toggleMonitor(child.name) } }
             })
-            if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && screen.monitor.catalogFailure != null) {
-                b.children.addView(TextView(requireContext()).apply { text = failureText(screen.monitor.catalogFailure) })
+            if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && screen.monitor.catalogFailureFor(child.name) != null) {
+                b.children.addView(TextView(requireContext()).apply { text = failureText(screen.monitor.catalogFailureFor(child.name)) })
                 b.children.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
                     text = this@LearningFragment.text(LearningText.RETRY)
                     isEnabled = screen.canRetryMonitor(child.name, null)

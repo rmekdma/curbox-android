@@ -10,7 +10,10 @@ data class MonitorAccountSnapshot(
     val children: List<TodoChild> = emptyList(),
     val reports: Map<Pair<String, Subject>, ReportState> = emptyMap(),
     val reportFailureSessions: Map<Pair<String, Subject>, String> = emptyMap(),
-    val registrations: Map<String, Long> = emptyMap()
+    val registrations: Map<String, Long> = emptyMap(),
+    val catalogFailures: Map<String, LearningFailure> = emptyMap(),
+    val catalogFailureSessions: Map<String, String> = emptyMap(),
+    val catalogRegistrations: Map<String, Long> = emptyMap()
 )
 
 data class MonitorState(
@@ -25,6 +28,10 @@ data class MonitorState(
     val childName: String? = null,
     val catalogFailure: LearningFailure? = null,
     val catalogFailureSession: String? = null,
+    val catalogFailures: Map<String, LearningFailure> = emptyMap(),
+    val catalogFailureSessions: Map<String, String> = emptyMap(),
+    val catalogRetryChild: String? = null,
+    val catalogRegistrations: Map<String, Long> = emptyMap(),
     val catalogAttempted: Boolean = false,
     val catalogOwner: Long = 0,
     val catalogRegistration: Long = 0,
@@ -81,3 +88,6 @@ class MemoryLearningStore : LearningStore {
 
 /** Registrations persisted before multiple children were supported remain active. */
 fun MonitorState.registeredChildren(): Map<String, Long> = if (registrations.isEmpty() && childName != null) mapOf(childName to registrationEpoch) else registrations
+
+fun MonitorState.catalogFailureFor(child: String): LearningFailure? = catalogFailures[child] ?: if (catalogFailures.isEmpty() && childName == child) catalogFailure else null
+fun MonitorState.catalogFailureSessionFor(child: String): String? = catalogFailureSessions[child] ?: if (catalogFailures.isEmpty() && childName == child) catalogFailureSession else null

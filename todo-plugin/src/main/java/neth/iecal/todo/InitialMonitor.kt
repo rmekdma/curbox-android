@@ -93,6 +93,10 @@ class InitialMonitor(
         if (!valid(doc)) return
         val session = store.readSession(requireNotNull(control.ref))
         if (session.accountId != control.account) return
+        val childName = requireNotNull(control.child)
+        fun failure(monitor: MonitorState) = monitor.catalogFailureFor(childName)
+        fun failureSession(monitor: MonitorState) = monitor.catalogFailureSessionFor(childName)
+        fun retry(monitor: MonitorState) = monitor.catalogRetryRequested && (monitor.catalogRetryChild == null || monitor.catalogRetryChild == childName)
         val knownChild = doc.monitor.children.firstOrNull { it.name == control.child }
         val initialized = knownChild != null && knownChild.userIds.keys.all { subject ->
             val key = knownChild.name to subject
@@ -103,29 +107,29 @@ class InitialMonitor(
                     doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref &&
                     doc.monitor.baselinePermissions[key] == control.permission.revision)
         }
-        if (initialized && doc.monitor.catalogFailure == null && !doc.monitor.catalogRetryRequested &&
-            doc.monitor.catalogRegistration == control.registration) return
+        if (initialized && failure(doc.monitor) == null && !retry(doc.monitor) &&
+            (doc.monitor.catalogRegistrations[childName] ?: doc.monitor.catalogRegistration) == control.registration) return
         if (doc.monitor.reports.any { (key, report) -> report.failure == LearningFailure.AUTHENTICATION && doc.monitor.reportFailureSessions[key] == control.ref }) return
         doc = store.updateMonitor { current ->
             if (!valid(current)) null else current.monitor.copy(cycleOwner = control.owner, cycleStartedElapsedMillis = System.nanoTime() / 1_000_000)
         } ?: return
-        if (doc.monitor.catalogRetryRequested || (doc.monitor.catalogFailure != null && doc.monitor.catalogFailureSession != null && doc.monitor.catalogFailureSession != control.ref) || (doc.monitor.catalogFailure == null &&
-                (!doc.monitor.catalogAttempted || doc.monitor.catalogOwner != control.owner || doc.monitor.catalogRegistration != control.registration || doc.monitor.catalogSession != control.ref || doc.monitor.catalogPermissionRevision != control.permission.revision))) {
+        if (retry(doc.monitor) || (failure(doc.monitor) != null && failureSession(doc.monitor) != null && failureSession(doc.monitor) != control.ref) || (failure(doc.monitor) == null &&
+                (!doc.monitor.catalogAttempted || doc.monitor.catalogOwner != control.owner || (doc.monitor.catalogRegistrations[childName] ?: doc.monitor.catalogRegistration) != control.registration || doc.monitor.catalogSession != control.ref || doc.monitor.catalogPermissionRevision != control.permission.revision))) {
             val children = try { api.catalog(session) } catch (e: TodoApiException) {
                 currentCoroutineContext().ensureActive()
-                val failed = store.updateMonitor { if (valid(it)) it.monitor.copy(catalogAttempted = true, catalogFailure = e.kind, catalogFailureSession = control.ref, catalogRetryRequested = false) else null }
+                val failed = store.updateMonitor { if (valid(it)) it.monitor.copy(catalogAttempted = true, catalogFailure = e.kind, catalogFailureSession = control.ref, catalogFailures = it.monitor.catalogFailures + (childName to e.kind), catalogFailureSessions = it.monitor.catalogFailureSessions + (childName to requireNotNull(control.ref)), catalogRetryRequested = if (retry(it.monitor)) false else it.monitor.catalogRetryRequested, catalogRetryChild = if (retry(it.monitor)) null else it.monitor.catalogRetryChild) else null }
                 if (failed != null) publish(failed, control.permission)
                 return
             }
             currentCoroutineContext().ensureActive()
             doc = store.updateMonitor { current ->
-                if (!valid(current)) null else current.monitor.copy(catalogAttempted = true, catalogFailure = null, catalogFailureSession = null, catalogRetryRequested = false,
-                    catalogOwner = control.owner, catalogRegistration = control.registration, catalogSession = control.ref,
+                if (!valid(current)) null else current.monitor.copy(catalogAttempted = true, catalogFailure = null, catalogFailureSession = null, catalogFailures = current.monitor.catalogFailures - childName, catalogFailureSessions = current.monitor.catalogFailureSessions - childName, catalogRetryRequested = if (retry(current.monitor)) false else current.monitor.catalogRetryRequested, catalogRetryChild = if (retry(current.monitor)) null else current.monitor.catalogRetryChild,
+                    catalogRegistrations = current.monitor.catalogRegistrations + (childName to control.registration), catalogOwner = control.owner, catalogRegistration = control.registration, catalogSession = control.ref,
                     catalogPermissionRevision = control.permission.revision, children = children)
             } ?: return
             publish(doc, control.permission)
         }
-        if (doc.monitor.catalogFailure != null) return
+        if (failure(doc.monitor) != null) return
         val child = doc.monitor.children.firstOrNull { it.name == control.child } ?: return
         for ((subject, id) in child.userIds) {
             doc = store.read()

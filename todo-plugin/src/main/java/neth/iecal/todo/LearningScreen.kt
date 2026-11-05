@@ -58,23 +58,24 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
     fun acceptMonitor(value: MonitorState) { monitor = value }
 
     fun canRetryMonitor(childName: String, subject: Subject?): Boolean {
-        val failure = if (subject == null) monitor.catalogFailure else monitor.reports[childName to subject]?.failure
-        val failedRef = if (subject == null) monitor.catalogFailureSession else monitor.reportFailureSessions[childName to subject]
+        val failure = if (subject == null) monitor.catalogFailureFor(childName) else monitor.reports[childName to subject]?.failure
+        val failedRef = if (subject == null) monitor.catalogFailureSessionFor(childName) else monitor.reportFailureSessions[childName to subject]
         return failure != LearningFailure.AUTHENTICATION || (sessionRef != null && sessionRef != failedRef)
     }
 
     fun retryMonitor(childName: String, subject: Subject?) {
         val updated = store.updateMonitor { doc ->
-            val failure = if (subject == null) doc.monitor.catalogFailure else doc.monitor.reports[childName to subject]?.failure
-            val failedRef = if (subject == null) doc.monitor.catalogFailureSession else doc.monitor.reportFailureSessions[childName to subject]
+            val failure = if (subject == null) doc.monitor.catalogFailureFor(childName) else doc.monitor.reports[childName to subject]?.failure
+            val failedRef = if (subject == null) doc.monitor.catalogFailureSessionFor(childName) else doc.monitor.reportFailureSessions[childName to subject]
             if (doc.monitor.accountId != doc.state.accountId || childName !in doc.monitor.registeredChildren() ||
                 (failure == LearningFailure.AUTHENTICATION && (doc.sessionRef == null || doc.sessionRef == failedRef))) null
             else {
                 val old = doc.monitor
                 val key = subject?.let { childName to it }
-                if (key == null && old.catalogFailure == null || key != null && old.reports[key]?.failed != true) null
+                if (key == null && old.catalogFailureFor(childName) == null || key != null && old.reports[key]?.failed != true) null
                 else old.copy(
                     catalogRetryRequested = key == null,
+                    catalogRetryChild = if (key == null) childName else null,
                     reportRetryRequested = key,
                     retryRevision = Math.addExact(old.retryRevision, 1),
                     controlRevision = Math.addExact(old.controlRevision, 1)
@@ -89,11 +90,17 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             val account = doc.state.accountId
             if (account == null || doc.sessionRef == null || doc.state.children.none { it.name == childName }) null
             else {
-                val old = doc.monitor
-                val accounts = old.accountId?.let { old.accounts + (it to MonitorAccountSnapshot(old.catalogFailure, old.catalogFailureSession, old.catalogAttempted, old.children, old.reports, old.reportFailureSessions, old.registeredChildren())) } ?: old.accounts
+                val savedMonitor = doc.monitor
+                val legacyChild = savedMonitor.childName
+                val legacyFailure = savedMonitor.catalogFailure
+                val old = if (legacyChild != null && legacyFailure != null && savedMonitor.catalogFailures.isEmpty()) {
+                    savedMonitor.copy(catalogFailures = mapOf(legacyChild to legacyFailure),
+                        catalogFailureSessions = savedMonitor.catalogFailureSession?.let { mapOf(legacyChild to it) }.orEmpty())
+                } else savedMonitor
+                val accounts = old.accountId?.let { old.accounts + (it to MonitorAccountSnapshot(old.catalogFailure, old.catalogFailureSession, old.catalogAttempted, old.children, old.reports, old.reportFailureSessions, old.registeredChildren(), old.catalogFailures, old.catalogFailureSessions, old.catalogRegistrations)) } ?: old.accounts
                 val previous = if (old.accountId == account) old else {
                     val saved = accounts[account] ?: MonitorAccountSnapshot()
-                    old.copy(accountId = account, childName = null, registrations = saved.registrations, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
+                    old.copy(accountId = account, childName = null, registrations = saved.registrations, catalogFailures = saved.catalogFailures, catalogFailureSessions = saved.catalogFailureSessions, catalogRegistrations = saved.catalogRegistrations, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
                         catalogAttempted = saved.catalogAttempted, children = saved.children, reports = saved.reports, reportFailureSessions = saved.reportFailureSessions,
                         baselineEpochs = emptyMap(), baselineRegistrations = emptyMap(), baselineSessions = emptyMap(), baselinePermissions = emptyMap(),
                         catalogRetryRequested = false, reportRetryRequested = null)
