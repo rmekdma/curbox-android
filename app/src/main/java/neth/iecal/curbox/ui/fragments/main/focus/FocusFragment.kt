@@ -148,6 +148,13 @@ class FocusFragment : Fragment() {
     }
 
     private fun setupClicks() {
+        binding.btnLearning.setOnClickListener {
+            parentFragmentManager.beginTransaction()
+                .replace(R.id.fragment_holder, neth.iecal.todo.LearningFragment())
+                .addToBackStack(null)
+                .commit()
+        }
+
         binding.btnGoToStats.setOnClickListener {
             parentFragmentManager.beginTransaction()
                 .replace(R.id.fragment_holder, FocusStatsFragment())

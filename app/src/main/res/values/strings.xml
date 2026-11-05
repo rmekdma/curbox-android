@@ -1864,4 +1864,25 @@
     <string name="unit_minutes">Minutes</string>
     <string name="unit_hours">Hours</string>
     <string name="unit_days">Days</string>
+    <string name="learning_title">Learning</string>
+    <string name="learning_demo_title">Learning sample</string>
+    <string name="learning_email">Email</string>
+    <string name="learning_password">Password</string>
+    <string name="learning_sign_in">Sign in</string>
+    <string name="learning_retry">Check again</string>
+    <string name="learning_unknown">Not checked yet</string>
+    <string name="learning_empty">No children found</string>
+    <string name="learning_error">Could not check. Try again.</string>
+    <string name="learning_network_error">Could not connect. Check your internet and try again.</string>
+    <string name="learning_server_error">The service could not complete the check. Try again.</string>
+    <string name="learning_invalid_error">The service sent a response we could not read. Try again.</string>
+    <string name="learning_storage_error">Could not read or save learning data. Try again.</string>
+    <string name="learning_login_required">Please sign in again.</string>
+    <string name="learning_korean">Korean</string>
+    <string name="learning_math">Math</string>
+    <string name="learning_english">English</string>
+    <string name="learning_report">%1$d items, %2$d minutes on %3$s. Checked %4$s.</string>
+    <string name="learning_last_report">Last check: %1$d items, %2$d minutes on %3$s. Checked %4$s. Could not update.</string>
 </resources>
+
+

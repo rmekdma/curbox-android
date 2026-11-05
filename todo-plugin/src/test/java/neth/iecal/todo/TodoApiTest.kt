@@ -72,3 +72,15 @@ class TodoValidationTest {
         assertFalse(TodoSession("account", "synthetic-secret").toString().contains("synthetic-secret"))
     }
 }
+
+class TodoSigninValidationTest {
+    @Test fun `numeric account identifier is invalid data`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":{"accountId":123,"authToken":"sample"}}"""))
+        server.start()
+        try {
+            val failure = assertThrows(TodoApiException::class.java) { HttpTodoApi(server.url("/").toString()).signIn("sample", "sample") }
+            assertEquals(LearningFailure.INVALID_DATA, failure.kind)
+        } finally { server.shutdown() }
+    }
+}

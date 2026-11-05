@@ -57,7 +57,32 @@ import neth.iecal.curbox.utils.GuardianSessionRegistry
 private const val LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID = "app_blocker_groups"
 private const val LEGACY_CREATE_APP_GROUP_FRAGMENT_ID = "create_app_group"
 
-class FragmentActivity : AppCompatActivity() {
+class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
+    override fun createLearningScreen() = neth.iecal.curbox.learning.LearningComposition.createScreen(applicationContext)
+    override fun learningText(key: neth.iecal.todo.LearningText, vararg args: Any): String {
+        val resource = when (key) {
+            neth.iecal.todo.LearningText.TITLE -> if (neth.iecal.curbox.BuildConfig.LEARNING_FAKE_ONLY) R.string.learning_demo_title else R.string.learning_title
+            neth.iecal.todo.LearningText.EMAIL -> R.string.learning_email
+            neth.iecal.todo.LearningText.PASSWORD -> R.string.learning_password
+            neth.iecal.todo.LearningText.SIGN_IN -> R.string.learning_sign_in
+            neth.iecal.todo.LearningText.RETRY -> R.string.learning_retry
+            neth.iecal.todo.LearningText.UNKNOWN -> R.string.learning_unknown
+            neth.iecal.todo.LearningText.EMPTY -> R.string.learning_empty
+            neth.iecal.todo.LearningText.ERROR -> R.string.learning_error
+            neth.iecal.todo.LearningText.NETWORK_ERROR -> R.string.learning_network_error
+            neth.iecal.todo.LearningText.SERVER_ERROR -> R.string.learning_server_error
+            neth.iecal.todo.LearningText.INVALID_ERROR -> R.string.learning_invalid_error
+            neth.iecal.todo.LearningText.STORAGE_ERROR -> R.string.learning_storage_error
+            neth.iecal.todo.LearningText.LOGIN_REQUIRED -> R.string.learning_login_required
+            neth.iecal.todo.LearningText.SUBJECT_KOREAN -> R.string.learning_korean
+            neth.iecal.todo.LearningText.SUBJECT_MATH -> R.string.learning_math
+            neth.iecal.todo.LearningText.SUBJECT_ENGLISH -> R.string.learning_english
+            neth.iecal.todo.LearningText.REPORT -> R.string.learning_report
+            neth.iecal.todo.LearningText.LAST_REPORT -> R.string.learning_last_report
+        }
+        return getString(resource, *args)
+    }
+
     private var selectedFragmentId: String = AllAppsUsageFragment.FRAGMENT_ID
     private var guardianDialogVisible = false
     private var initialGuardianGate = false
@@ -547,3 +572,5 @@ class FragmentActivity : AppCompatActivity() {
         }
     }
 }
+
+

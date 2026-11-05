@@ -40,6 +40,11 @@ androidComponents {
     }
 }
 
+val learningReal = providers.gradleProperty("learningReal").map { it.toBooleanStrict() }.getOrElse(false)
+if (learningReal && gradle.startParameter.taskNames.any { it.contains("test", ignoreCase = true) }) {
+    error("Tests require the fake learning composition")
+}
+
 android {
     namespace = "neth.iecal.curbox"
     compileSdk = 35
@@ -51,6 +56,7 @@ android {
     }
 
     defaultConfig {
+        buildConfigField("Boolean", "LEARNING_FAKE_ONLY", (!learningReal).toString())
         applicationId = "neth.iecal.curbox"
         minSdk = 26
         targetSdk = 35
@@ -89,6 +95,7 @@ android {
 
         // Full uses the shared cross device sync implementation.
         getByName("full") { java.srcDir("src/sync/java") }
+        getByName("main") { java.srcDir(if (learningReal) "src/learningReal/java" else "src/learningFake/java") }
     }
 
 
@@ -130,6 +137,7 @@ android {
 
 
 dependencies {
+    implementation(project(":todo-plugin"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
@@ -198,3 +206,4 @@ androidComponents {
         }
     }
 }
+
