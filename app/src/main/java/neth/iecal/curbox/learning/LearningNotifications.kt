@@ -5,21 +5,15 @@ import android.app.NotificationManager
 import android.content.Context
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
 import neth.iecal.todo.StoredLearning
 import neth.iecal.todo.Subject
 
 /** Serializes notification effects from replacement service connections. */
 object LearningNotifications {
-    private val mutex = Mutex()
     suspend fun publish(context: Context, store: LearningStorage, committed: StoredLearning,
-        permission: kotlinx.coroutines.flow.StateFlow<neth.iecal.todo.NotificationPermission>, expected: neth.iecal.todo.NotificationPermission) = mutex.withLock {
-        val current = withContext(Dispatchers.IO) { store.read() }
-        if (permission.value != expected || current.monitor.ownerEpoch != committed.monitor.ownerEpoch || current.monitor.controlRevision != committed.monitor.controlRevision || current.revision != committed.revision) return@withLock
+        permission: kotlinx.coroutines.flow.StateFlow<neth.iecal.todo.NotificationPermission>, expected: neth.iecal.todo.NotificationPermission) =
+        neth.iecal.todo.OrderedLearningPublisher.publish(store, committed, permission, expected) publisher@{ current ->
         val notifications = NotificationManagerCompat.from(context)
         val manager = context.getSystemService(NotificationManager::class.java)
         val child = current.monitor.childName
@@ -28,7 +22,7 @@ object LearningNotifications {
         for (active in manager.activeNotifications) {
             if (active.tag?.startsWith("learning:") == true && active.tag != tag) manager.cancel(active.tag, active.id)
         }
-        if (child == null || tag == null) return@withLock
+        if (child == null || tag == null) return@publisher
         manager.createNotificationChannel(NotificationChannel("learning_status", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) })
         val details = current.monitor.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty().joinToString("\n") { subject ->
             val label = context.getString(when (subject) { Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english })
