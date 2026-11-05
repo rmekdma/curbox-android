@@ -36,14 +36,14 @@ jobs:
           gradle-version: wrapper
           arguments: clean
 
-      - name: Build Fdroid Release APK
-        run: ./gradlew assembleFdroidRelease
+      - name: Build Full Release APK
+        run: ./gradlew assembleFullRelease
 
-      - name: Sign Fdroid Variant APKs
+      - name: Sign Full Variant APKs
         uses: r0adkll/sign-android-release@v1
-        id: sign_app_fdroid
+        id: sign_app_full
         with:
-          releaseDirectory: app/build/outputs/apk/fdroid/release
+          releaseDirectory: app/build/outputs/apk/full/release
           signingKeyBase64: ${{ secrets.SIGNING_KEY }}
           alias: ${{ secrets.ALIAS }}
           keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
@@ -52,7 +52,7 @@ jobs:
       - name: Get APK Info
         id: apk_info
         run: |
-          APK_PATH=${{ steps.sign_app_fdroid.outputs.signedReleaseFile }}
+          APK_PATH=${{ steps.sign_app_full.outputs.signedReleaseFile }}
           APK_NAME=$(basename "$APK_PATH")
           APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
           
@@ -145,8 +145,8 @@ jobs:
             -F "parse_mode=HTML" \
             "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendDocument"
 
-      - name: Upload Signed Fdroid Release APK
+      - name: Upload Signed Full Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: fdroid-release-apk
-          path: ${{ steps.sign_app_fdroid.outputs.signedReleaseFile }}
+          name: full-release-apk
+          path: ${{ steps.sign_app_full.outputs.signedReleaseFile }}

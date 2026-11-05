@@ -7,14 +7,12 @@ Guidelines for building and publishing Curbox release artifacts.
 | Variant | Command | Unsigned output |
 | --- | --- | --- |
 | Full | `.\gradlew.bat assembleFullRelease` | `app/build/outputs/apk/full/release/app-full-release-unsigned.apk` |
-| Play Store | `.\gradlew.bat assemblePlaystoreRelease` | `app/build/outputs/apk/playstore/release/app-playstore-release-unsigned.apk` |
-| F-Droid | `.\gradlew.bat assembleFdroidRelease` | `app/build/outputs/apk/fdroid/release/app-fdroid-universal-release-unsigned.apk` |
 
 ## Publishing rules
 
-- **Upload target**: Upload only the Full Release APK to GitHub. Do not upload Play Store or F-Droid APKs.
+- **Upload target**: Upload only the Full Release APK to GitHub.
 - **Asset naming**: Use a semver version name format `v<major>.<minor>.<patch>` and name the uploaded APK `curbox-<version>-full.apk` (e.g., `curbox-v4.1.0-full.apk`).
-- **Direct upload**: Upload the APK file directly to GitHub releases. Do not use CI for APK uploads.
+- **Upload**: The GitHub Release workflow signs and uploads the Full APK; a manual release can upload the signed APK directly.
 - **Release artifacts**: Treat only `*Release` tasks as release artifacts. Debug APKs use the `.debug` application ID suffix, the `Debug Curbox` label, and `application-debuggable`; never publish a debug APK as a release APK.
 - **Signing requirement**: Release tasks produce unsigned APKs by default. Android refuses to install unsigned APKs ("The package is invalid" / `INSTALL_PARSE_FAILED_NO_CERTIFICATES`). Always sign the APK using `apksigner` before publishing.
 - **Metadata inspection**: Before publishing a Full APK, inspect `app/build/outputs/apk/full/release/output-metadata.json`. It must report `variantName` as `fullRelease` and a version name matching `v<major>.<minor>.<patch>`.

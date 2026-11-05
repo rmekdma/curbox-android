@@ -71,14 +71,14 @@ jobs:
           gradle-version: wrapper
           arguments: clean
 
-      - name: Build Fdroid Release APK
-        run: ./gradlew assembleFdroidRelease
+      - name: Build Full Release APK
+        run: ./gradlew assembleFullRelease
 
-      - name: Sign Fdroid Variant APKs
+      - name: Sign Full Variant APKs
         uses: r0adkll/sign-android-release@v1
-        id: sign_app_fdroid
+        id: sign_app_full
         with:
-          releaseDirectory: app/build/outputs/apk/fdroid/release
+          releaseDirectory: app/build/outputs/apk/full/release
           signingKeyBase64: ${{ secrets.SIGNING_KEY }}
           alias: ${{ secrets.ALIAS }}
           keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
@@ -87,8 +87,8 @@ jobs:
       - name: Rename signed APK
         id: apk
         run: |
-          SRC="${{ steps.sign_app_fdroid.outputs.signedReleaseFile }}"
-          DEST="curbox-${{ steps.tag.outputs.name }}-fdroid.apk"
+          SRC="${{ steps.sign_app_full.outputs.signedReleaseFile }}"
+          DEST="curbox-${{ steps.tag.outputs.name }}-full.apk"
           cp "$SRC" "$DEST"
           echo "path=$DEST" >> $GITHUB_OUTPUT
 

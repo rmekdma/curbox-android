@@ -79,15 +79,9 @@ Room uses `fallbackToDestructiveMigration()`. Any entity change requires a datab
 
 ### Build variants
 
-Gate optional behavior at every entry point (UI, service lifecycle, manifests, API responses).
-
-| Flavor | Sync | UI hider | Anti uninstall | Internet |
-| --- | --- | --- | --- | --- |
-| `full` | Yes | Yes | Yes | Yes |
-| `playstore` | Yes | No | No | Yes |
-| `fdroid` | No | Yes | Yes | No |
-
-Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_SECURE_SETTINGS`, `FDROID_VARIANT`, `SYNC_USE_FCM`. The Play Store manifest removes `AdminReceiver` and `NodePickerService`.
+The `full` flavor includes sync, UI hider, anti uninstall, and internet access.
+Keep optional behavior gated at every entry point (UI, service lifecycle, manifests, API responses).
+Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_SECURE_SETTINGS`, `FDROID_VARIANT`, `SYNC_USE_FCM`.
 
 ## UI and product copy
 
@@ -105,12 +99,10 @@ Use the check that matches the change. Documentation-only changes do not need a 
 ```bash
 ./gradlew testFullDebugUnitTest
 ./gradlew assembleFullDebug
-./gradlew assemblePlaystoreDebug
-./gradlew assembleFdroidDebug
 ./gradlew installAndGrantAccessibilityFullDebug
 ```
 
-- Build all three flavors after changing shared source, source sets, manifests, BuildConfig gates, or optional feature wiring.
+- Build full after changing shared source, source sets, manifests, BuildConfig gates, or optional feature wiring.
 - `testFullDebugUnitTest` includes `CryptoBoxTest` and UI hider `ScriptLanguageTest`.
 - Use the install task only when an emulator or device is available (installs, grants accessibility through adb, and launches Debug Curbox).
 - Lint does not abort builds; inspect relevant warnings rather than treating a successful build as proof that lint is clean.

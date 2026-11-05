@@ -23,9 +23,7 @@ Architecture and invariants for Curbox multi-device sync, encryption, and cleanu
 | Flavor | Sync source set | Notes |
 | --- | --- | --- |
 | `full` | `app/src/sync/java` | Real sync implementation with Supabase and FCM. |
-| `playstore` | `app/src/sync/java` | Real sync implementation. Billing is currently a free stub (`SyncEntitlement`). |
-| `fdroid` | `app/src/fdroid/java` | Stubbed with `NoopSyncProvider`. Must compile without sync-only classes, Firebase, Supabase, or `INTERNET` permission. |
 
 - Real sync code lives exclusively in `app/src/sync/java`. Common interfaces and `SyncGateway` live in `app/src/main/java`.
-- `SYNC_USE_FCM` in `app/build.gradle.kts` controls the FCM push migration in sync-enabled flavors.
+- `SYNC_USE_FCM` in `app/build.gradle.kts` controls the FCM push migration in the full flavor.
 - Sync initializes only in the main application process (`Curbox.isMainProcess()`).

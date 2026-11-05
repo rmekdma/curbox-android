@@ -59,7 +59,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resValue("string", "app_name", "Curbox")
 
-        // Every flavor ships every feature unless it opts out below.
+        // Full includes all blocker features.
         buildConfigField("Boolean", "SUPPORTS_UI_HIDER", "true")
         buildConfigField("Boolean", "SUPPORTS_ANTI_UNINSTALL", "true")
         // Holds WRITE_SECURE_SETTINGS (granted once via Shizuku) so grayscale can
@@ -68,13 +68,6 @@ android {
     }
 
     productFlavors {
-        // Fully offline, otherwise every feature except cross device sync.
-        create("fdroid") {
-            dimension = "version"
-            versionNameSuffix = "-fdroid"
-            buildConfigField("Boolean", "FDROID_VARIANT", "true")
-        }
-
         // Everything: sync plus all blocker features.
         create("full") {
             dimension = "version"
@@ -87,18 +80,6 @@ android {
             // and battery win lands.
             buildConfigField("Boolean", "SYNC_USE_FCM", "true")
         }
-
-        // Play Store policy build: keeps sync but strips the UI hider and anti
-        // uninstall (no device admin), see src/playstore/AndroidManifest.xml.
-        create("playstore") {
-            dimension = "version"
-            versionNameSuffix = "-playstore"
-            buildConfigField("Boolean", "FDROID_VARIANT", "false")
-            buildConfigField("Boolean", "SYNC_USE_FCM", "true")
-            buildConfigField("Boolean", "SUPPORTS_UI_HIDER", "false")
-            buildConfigField("Boolean", "SUPPORTS_ANTI_UNINSTALL", "false")
-            buildConfigField("Boolean", "SUPPORTS_WRITE_SECURE_SETTINGS", "false")
-        }
     }
 
     sourceSets {
@@ -106,10 +87,8 @@ android {
         getByName("test") { java.srcDir("src/testShared/java") }
         getByName("androidTest") { java.srcDir("src/testShared/java") }
 
-        // Cross device sync code shared by the full and playstore flavors.
-        // F-Droid never compiles it, so that build stays offline.
+        // Full uses the shared cross device sync implementation.
         getByName("full") { java.srcDir("src/sync/java") }
-        getByName("playstore") { java.srcDir("src/sync/java") }
     }
 
 
@@ -127,20 +106,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-
-            // required because of hardcoded f-droid values
-            applicationVariants.all {
-                val variant = this
-                if (variant.flavorName == "fdroid") {
-                    variant.outputs
-                        .map { it as com.android.build.gradle.internal.api.BaseVariantOutputImpl }
-                        .forEach { output ->
-                            val outputFileName = "app-fdroid-universal-release-unsigned.apk"
-                            println("OutputFileName: $outputFileName")
-                            output.outputFileName = outputFileName
-                        }
-                }
-            }
         }
         debug {
             applicationIdSuffix = ".debug"
@@ -189,26 +154,12 @@ dependencies {
     implementation(libs.gson)
     implementation(libs.kotlinx.coroutines.android)
 
-    // Cross device sync. These live only in the full and playstore flavors so the
-    // F-Droid build compiles with no network, no auth, and no Supabase code at all.
+    // Cross device sync and FCM use the full flavor's shared implementation.
     "fullImplementation"(libs.okhttp)
     "fullImplementation"(libs.androidx.security.crypto)
     "fullImplementation"(libs.androidx.work.runtime.ktx)
-    "playstoreImplementation"(libs.okhttp)
-    "playstoreImplementation"(libs.androidx.security.crypto)
-    "playstoreImplementation"(libs.androidx.work.runtime.ktx)
-    // Play Store flavor sells the yearly Sync Premium subscription through
-    // Google Play. The directly distributed full flavor uses Polar instead.
-    "playstoreImplementation"("com.android.billingclient:billing:9.1.0")
-
-    // FCM push, sync flavors ONLY, so the phone can sync instantly in the
-    // background without holding a websocket open. F-Droid never pulls in Firebase
-    // or Google Play Services. Initialised manually from FcmConfig, so the
-    // google-services Gradle plugin and google-services.json are NOT required.
     "fullImplementation"(platform("com.google.firebase:firebase-bom:33.5.1"))
     "fullImplementation"("com.google.firebase:firebase-messaging")
-    "playstoreImplementation"(platform("com.google.firebase:firebase-bom:33.5.1"))
-    "playstoreImplementation"("com.google.firebase:firebase-messaging")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

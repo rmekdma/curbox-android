@@ -105,5 +105,5 @@ Each feature is a compartmentalized class that receives a service instance in `o
 
 ### Automate Accessibility Granting
 When developing accessibility services, Android often requires you to manually re-enable the service after every fresh install. To automate this, you can use the custom Gradle task:
-- Run `./gradlew installAndGrantAccessibilityFdroidDebug` from your terminal.
+- Run `./gradlew installAndGrantAccessibilityFullDebug` from your terminal.
 - This will build the F-Droid debug variant, install it, automatically grant the necessary accessibility permissions via ADB, and launch the app.
