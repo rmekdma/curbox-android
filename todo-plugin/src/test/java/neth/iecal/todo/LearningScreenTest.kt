@@ -27,6 +27,33 @@ class LearningScreenTest {
         assertFalse(screen.loginRequired)
     }
 
+    @Test fun `explicit sign in reopens old initial failures without losing reports or registrations`() {
+        val store = MemoryLearningStore()
+        val session = TodoSession("account", "token")
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        store.writeSession("old", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(accountId = "account", children = listOf(child)), "old"))
+        val key = "Child" to Subject.MATH
+        store.updateMonitor { it.monitor.copy(accountId = "account", childName = "Child", registrations = mapOf("Child" to 7),
+            catalogFailure = LearningFailure.NETWORK, reports = mapOf(key to ReportState(DailyReport(3, 4), 10, "20261104", true, LearningFailure.NETWORK, true)),
+            baselineEpochs = mapOf(key to 1)) }
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(5, 6)
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.signIn("example", "example", "20261105")
+        val monitor = store.read().monitor
+        assertEquals(mapOf("Child" to 7L), monitor.registeredChildren())
+        assertEquals(DailyReport(3, 4), monitor.reports[key]?.value)
+        assertFalse(monitor.reports.getValue(key).failed)
+        assertEquals(null, monitor.catalogFailure)
+        assertTrue(monitor.baselineEpochs.isEmpty())
+    }
+
     @Test fun `polling interval accepts positive minutes of any size`() {
         val store = MemoryLearningStore()
         val api = object : TodoApi {
