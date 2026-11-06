@@ -6,7 +6,7 @@ This file applies to the whole repository. Preserve more specific instructions i
 
 ## Start here
 
-- Modules: `:app` and `:apitester` (sample client for Curbox AIDL API).
+- Modules: `:app`, `:apitester` (sample client for Curbox AIDL API), `:plugin-contract` (host/plugin contract), and `:todo-plugin` (learning UI and monitoring).
 - Language and UI: Kotlin, classic Views, Fragments, and ViewBinding.
 - Do not add Jetpack Compose or the Navigation component.
 - JVM target: 17.
@@ -79,8 +79,9 @@ Room uses `fallbackToDestructiveMigration()`. Any entity change requires a datab
 
 ### Build variants
 
-The `full` flavor includes sync, UI hider, anti uninstall, and internet access.
-Keep optional behavior gated at every entry point (UI, service lifecycle, manifests, API responses).
+The only configured flavor is `full`; it includes sync, UI hider, anti uninstall, and internet access. Keep optional behavior gated at every entry point (UI, service lifecycle, manifests, API responses).
+
+Learning uses the fake composition by default. `-PlearningReal=true` selects the real composition; test task requests are rejected in that mode. Use fake composition for tests and device verification; never call the real Todo API in tests.
 Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_SECURE_SETTINGS`, `FDROID_VARIANT`, `SYNC_USE_FCM`.
 
 ## UI and product copy
