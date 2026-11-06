@@ -18,10 +18,13 @@ data class MonitorAccountSnapshot(
 
 data class RetryIntent(val registration: Long, val revision: Long, val sessionRef: String)
 
+data class ZeroGoalInitial(val owner: Long, val registration: Long, val sessionRef: String, val permissionRevision: Long, val date: String)
+
 data class MonitorState(
     val ownerEpoch: Long = 0,
     val controlRevision: Long = 0,
     val goalVersions: Map<String, Map<Pair<String, Subject>, Long>> = emptyMap(),
+    val zeroGoalInitials: Map<Pair<String, Subject>, ZeroGoalInitial> = emptyMap(),
     val registrationEpoch: Long = 0,
     val registrations: Map<String, Long> = emptyMap(),
     val accounts: Map<String, MonitorAccountSnapshot> = emptyMap(),
