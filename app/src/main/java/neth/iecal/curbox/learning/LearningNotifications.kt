@@ -31,13 +31,20 @@ object LearningNotifications {
         if (children.isEmpty()) return@publisher
         manager.createNotificationChannel(NotificationChannel("learning_achievements", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_HIGH))
         for (child in children) {
-        val details = current.monitor.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty().joinToString("\n") { subject ->
-            val label = context.getString(when (subject) { Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english })
+        val details = learningNotificationDetails(current.monitor, child,
+            { subject -> context.getString(when (subject) { Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english }) },
+            { failure -> context.getString(when (failure) {
+                neth.iecal.todo.LearningFailure.NETWORK -> R.string.learning_network_error
+                neth.iecal.todo.LearningFailure.SERVER -> R.string.learning_server_error
+                neth.iecal.todo.LearningFailure.INVALID_DATA -> R.string.learning_invalid_error
+                neth.iecal.todo.LearningFailure.STORAGE -> R.string.learning_storage_error
+                neth.iecal.todo.LearningFailure.AUTHENTICATION -> R.string.learning_login_required
+            }) }) { subject ->
             val key = child to subject
             val report = current.monitor.reports[key]
             val goal = current.state.goalsByAccount[current.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             val reportValue = report?.value
-            val value = when {
+            when {
                 goal == 0 -> context.getString(R.string.learning_checked_complete)
                 reportValue != null -> {
                     val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
@@ -48,15 +55,6 @@ object LearningNotifications {
                 }
                 else -> context.getString(R.string.learning_unknown)
             }
-            val failure = when (report?.failure ?: current.monitor.catalogFailureFor(child)) {
-                neth.iecal.todo.LearningFailure.NETWORK -> context.getString(R.string.learning_network_error)
-                neth.iecal.todo.LearningFailure.SERVER -> context.getString(R.string.learning_server_error)
-                neth.iecal.todo.LearningFailure.INVALID_DATA -> context.getString(R.string.learning_invalid_error)
-                neth.iecal.todo.LearningFailure.STORAGE -> context.getString(R.string.learning_storage_error)
-                neth.iecal.todo.LearningFailure.AUTHENTICATION -> context.getString(R.string.learning_login_required)
-                null -> ""
-            }
-            "$label: $value $failure".trim()
         }
         val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
         val latest = current.monitor.latestAchievements[current.monitor.accountId to child]
@@ -71,5 +69,18 @@ object LearningNotifications {
             .setOngoing(true).setSilent(child != achievementChild).build()
         if (permission.value == expected && expected.granted && notifications.areNotificationsEnabled() && (child != achievementChild || stillValid())) notifications.notify(tag(child), 0x4c454152, notification)
         }
+    }
+}
+
+internal fun learningNotificationDetails(
+    monitor: neth.iecal.todo.MonitorState, child: String,
+    label: (Subject) -> String, failureText: (neth.iecal.todo.LearningFailure) -> String,
+    value: (Subject) -> String
+): String {
+    val subjects = monitor.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty()
+    if (subjects.isEmpty()) return monitor.catalogFailureFor(child)?.let(failureText).orEmpty()
+    return subjects.joinToString("\n") { subject ->
+        val failure = (monitor.reports[child to subject]?.failure ?: monitor.catalogFailureFor(child))?.let(failureText).orEmpty()
+        "${label(subject)}: ${value(subject)} $failure".trim()
     }
 }

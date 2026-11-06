@@ -192,7 +192,7 @@ class LearningFragment : Fragment() {
                     setOnClickListener { runRequest { screen.retryMonitor(child.name, null) } }
                 })
             }
-            for (subject in child.userIds.keys) {
+            for (subject in screen.visibleSubjects(child.name)) {
                 val monitored = screen.monitor.reports[child.name to subject]
                 if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && monitored?.value != null) {
                     val checked = java.text.DateFormat.getDateTimeInstance().format(java.util.Date(monitored.checkedAt ?: 0))
@@ -254,7 +254,7 @@ class LearningFragment : Fragment() {
                 if (value != null && report.failed) b.children.addView(TextView(requireContext()).apply { text = failureText(report.failure) })
                 b.children.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
                     text = this@LearningFragment.text(LearningText.RETRY)
-                    isEnabled = !screen.loginRequired && screen.goal(child.name, subject) > 0
+                    isEnabled = subject in child.userIds && !screen.loginRequired && screen.goal(child.name, subject) > 0
                     setOnClickListener { runRequest { screen.retryReport(child.name, subject, selected) } }
                 })
             }

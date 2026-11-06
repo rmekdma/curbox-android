@@ -573,3 +573,25 @@ class LearningGoalRaceTest {
         assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
     }
 }
+
+class MonitorSubjectVisibilityTest {
+    @org.junit.Test fun `new monitor subject is visible and retryable without changing manual history`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "math")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2, 1)
+        }
+        val screen = LearningScreen(api, store)
+        screen.signIn("A", "password", "20261105")
+        screen.toggleMonitor("Child")
+        store.updateMonitor { it.monitor.copy(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "math", Subject.ENGLISH to "english"))), reports = mapOf(("Child" to Subject.ENGLISH) to ReportState(failed = true, failure = LearningFailure.NETWORK))) }
+        screen.acceptMonitor(store.read().monitor)
+        org.junit.Assert.assertEquals(setOf(Subject.MATH, Subject.ENGLISH), screen.visibleSubjects("Child"))
+        org.junit.Assert.assertEquals(setOf(Subject.MATH), screen.state.children.single().userIds.keys)
+        screen.retryMonitor("Child", Subject.ENGLISH)
+        org.junit.Assert.assertTrue(("Child" to Subject.ENGLISH) in screen.monitor.reportRetries)
+        screen.acceptMonitor(screen.monitor.copy(accountId = "B"))
+        org.junit.Assert.assertEquals(setOf(Subject.MATH), screen.visibleSubjects("Child"))
+    }
+}
