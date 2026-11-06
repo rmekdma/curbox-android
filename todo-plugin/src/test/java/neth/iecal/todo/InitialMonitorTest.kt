@@ -188,6 +188,165 @@ class InitialMonitorTest {
         } finally { job.cancelAndJoin() }
     }
 
+
+    @Test fun midnightStartsASilentNewBaselineWithTheScreenOff() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val wall = java.util.concurrent.atomic.AtomicLong(java.time.Instant.parse("2026-01-01T14:59:00Z").toEpochMilli())
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (date == "20260101") 1 else 5, 1)
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val effects = java.util.Collections.synchronizedList(mutableListOf<Subject>())
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, now = wall::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.date == "20260101" } }
+            wall.set(java.time.Instant.parse("2026-01-01T15:00:00Z").toEpochMilli())
+            host.observations.value = host.observations.value.copy(callbackReceived = true)
+            withTimeout(2000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.date == "20260102" } }
+            assertTrue(effects.isEmpty())
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun regularFailureDoesNotBlockTheNextDaysInitialCheck() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val wall = java.util.concurrent.atomic.AtomicLong(java.time.Instant.parse("2026-01-01T14:59:00Z").toEpochMilli())
+        val elapsed = java.util.concurrent.atomic.AtomicLong(0)
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (calls.incrementAndGet() == 2) throw TodoApiException(kind = LearningFailure.NETWORK)
+                return DailyReport(1, 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, now = wall::get, elapsed = elapsed::get).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value != null } }
+            elapsed.set(60000)
+            host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.failed == true } }
+            wall.set(java.time.Instant.parse("2026-01-01T15:00:00Z").toEpochMilli())
+            host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.LOCKED)
+            withTimeout(2000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.date == "20260102" } }
+            Unit
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun delayedPreviousDayResponseCannotReplaceTheNewBaseline() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val wall = java.util.concurrent.atomic.AtomicLong(java.time.Instant.parse("2026-01-01T14:59:00Z").toEpochMilli())
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (date == "20260101") {
+                    entered.countDown()
+                    check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    return DailyReport(99, 1)
+                }
+                return DailyReport(5, 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val effects = java.util.Collections.synchronizedList(mutableListOf<Int>())
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { doc, _ ->
+            doc.monitor.reports["Sample" to Subject.MATH]?.value?.count?.let(effects::add)
+        }, now = wall::get).run(host) }
+        try {
+            withTimeout(5000) { while (entered.count != 0L) delay(10) }
+            wall.set(java.time.Instant.parse("2026-01-01T15:00:00Z").toEpochMilli())
+            host.observations.value = host.observations.value.copy(callbackReceived = true)
+            release.countDown()
+            val result = withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.date == "20260102" } }
+            assertEquals(5, result.monitor.reports["Sample" to Subject.MATH]?.value?.count)
+            assertTrue(99 !in effects)
+        } finally { release.countDown(); job.cancelAndJoin() }
+    }
+
+    @Test fun newDayFailureRetainsLastSuccessAndStaysStoppedAcrossRestartsAndDays() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val wall = java.util.concurrent.atomic.AtomicLong(java.time.Instant.parse("2026-01-01T14:59:00Z").toEpochMilli())
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (calls.incrementAndGet() > 1) throw TodoApiException(kind = LearningFailure.NETWORK)
+                return DailyReport(5, 4)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val permission = MutableStateFlow(NotificationPermission(true))
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        fun monitor() = InitialMonitor(api, store, permission, { true }, { _, _ -> }, now = wall::get)
+        var job = launch { monitor().run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value != null } }
+            wall.set(java.time.Instant.parse("2026-01-01T15:00:00Z").toEpochMilli())
+            host.observations.value = host.observations.value.copy(callbackReceived = true)
+            val failed = withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.failed == true } }.monitor.reports.getValue("Sample" to Subject.MATH)
+            assertEquals("20260101", failed.date)
+            assertEquals(5, failed.value?.count)
+            job.cancelAndJoin()
+            wall.set(java.time.Instant.parse("2026-01-02T15:00:00Z").toEpochMilli())
+            job = launch { monitor().run(host) }
+            withTimeout(5000) { store.changes.first { it.monitor.ownerEpoch >= 2 } }
+            delay(200)
+            assertEquals(2, calls.get())
+            assertTrue(store.read().monitor.reports.getValue("Sample" to Subject.MATH).failed)
+        } finally { job.cancelAndJoin() }
+    }
+
+
     @Test fun onlyARegularCrossingRequestsAnAchievement() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))

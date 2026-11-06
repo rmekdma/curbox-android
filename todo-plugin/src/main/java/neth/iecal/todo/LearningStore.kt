@@ -18,7 +18,7 @@ data class MonitorAccountSnapshot(
 
 data class RetryIntent(val registration: Long, val revision: Long, val sessionRef: String)
 
-data class ZeroGoalInitial(val owner: Long, val registration: Long, val sessionRef: String, val permissionRevision: Long, val date: String)
+data class ZeroGoalInitial(val owner: Long, val registration: Long, val sessionRef: String, val permissionRevision: Long, val date: String, val dateEpoch: Long = 0)
 
 data class MonitorState(
     val ownerEpoch: Long = 0,
@@ -58,6 +58,16 @@ data class MonitorState(
     val retryRevision: Long = 0,
     val catalogRetryRequested: Boolean = false,
     val reportRetryRequested: Pair<String, Subject>? = null
+)
+
+/** Discards completion baselines without clearing historical reports or retry latches. */
+fun MonitorState.resetLearningBaselines(): MonitorState = copy(
+    cycleOwner = 0,
+    baselineEpochs = emptyMap(),
+    baselineRegistrations = emptyMap(),
+    baselineSessions = emptyMap(),
+    baselinePermissions = emptyMap(),
+    latestAchievements = emptyMap()
 )
 
 data class StoredLearning(val revision: Long = 0, val state: LearningState = LearningState(), val sessionRef: String? = null, val monitor: MonitorState = MonitorState())
