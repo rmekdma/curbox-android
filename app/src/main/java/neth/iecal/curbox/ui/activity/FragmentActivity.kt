@@ -58,9 +58,15 @@ private const val LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID = "app_blocker_groups"
 private const val LEGACY_CREATE_APP_GROUP_FRAGMENT_ID = "create_app_group"
 
 class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
+    override suspend fun learningAvailability() = neth.iecal.curbox.learning.LearningStatus.read(applicationContext)
     override fun createLearningScreen() = neth.iecal.curbox.learning.LearningComposition.createScreen(applicationContext)
     override fun learningText(key: neth.iecal.todo.LearningText, vararg args: Any): String {
         val resource = when (key) {
+            neth.iecal.todo.LearningText.ACCESSIBILITY_NEEDED -> R.string.learning_accessibility_needed
+            neth.iecal.todo.LearningText.NOTIFICATIONS_NEEDED -> R.string.learning_notifications_needed
+            neth.iecal.todo.LearningText.SERVICE_UNKNOWN -> R.string.learning_service_unknown
+            neth.iecal.todo.LearningText.ACCESSIBILITY_SETTINGS -> R.string.learning_accessibility_settings
+            neth.iecal.todo.LearningText.NOTIFICATION_SETTINGS -> R.string.learning_notification_settings
             neth.iecal.todo.LearningText.TITLE -> if (neth.iecal.curbox.BuildConfig.LEARNING_FAKE_ONLY) R.string.learning_demo_title else R.string.learning_title
             neth.iecal.todo.LearningText.EMAIL -> R.string.learning_email
             neth.iecal.todo.LearningText.PASSWORD -> R.string.learning_password

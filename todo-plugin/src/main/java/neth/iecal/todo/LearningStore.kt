@@ -77,7 +77,7 @@ interface LearningStore {
     val changes: Flow<StoredLearning>
     fun read(): StoredLearning
     fun claim(): StoredLearning
-    fun commit(revision: Long, state: LearningState, sessionRef: String?): Boolean
+    fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String? = null): Boolean
     /** Applies a monitor change atomically against the latest document. Null rejects the update. */
     fun updateMonitor(change: (StoredLearning) -> MonitorState?): StoredLearning?
     fun readSession(ref: String): TodoSession
@@ -91,8 +91,8 @@ class MemoryLearningStore : LearningStore {
     private val sessions = mutableMapOf<String, TodoSession>()
     @Synchronized override fun read() = document
     @Synchronized override fun claim(): StoredLearning { document = document.copy(revision = document.revision + 1); updates.value = document; return document }
-    @Synchronized override fun commit(revision: Long, state: LearningState, sessionRef: String?): Boolean {
-        if (document.revision != revision) return false
+    @Synchronized override fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String?): Boolean {
+        if (document.revision != revision || !document.acceptsApiResult(expectedSessionRef)) return false
         document = document.withManualState(state, sessionRef)
         updates.value = document
         return true
@@ -126,6 +126,14 @@ fun MonitorState.migrateRetries(sessionRef: String?): MonitorState {
     return copy(catalogRetries = catalog, reportRetries = reports, catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null)
 }
 
+/** A rejected session pauses every registration until the user signs in again. */
+fun MonitorState.authenticationRequired(sessionRef: String?): Boolean {
+    if (sessionRef == null) return true
+    if (catalogFailure == LearningFailure.AUTHENTICATION && (catalogFailureSession == null || catalogFailureSession == sessionRef)) return true
+    if (catalogFailures.any { (child, failure) -> failure == LearningFailure.AUTHENTICATION && (catalogFailureSessions[child] == null || catalogFailureSessions[child] == sessionRef) }) return true
+    return reports.any { (key, report) -> report.failure == LearningFailure.AUTHENTICATION && (reportFailureSessions[key] == null || reportFailureSessions[key] == sessionRef) }
+}
+
 /** Commits manual state while fencing only goals whose effective value changed. */
 fun StoredLearning.withManualState(next: LearningState, ref: String?): StoredLearning {
     var versions = monitor.goalVersions
@@ -144,5 +152,31 @@ fun StoredLearning.withManualState(next: LearningState, ref: String?): StoredLea
         versions = versions + (account to scoped)
     }
     val migrated = monitor.migrateRetries(sessionRef)
-    return copy(state = next, sessionRef = ref, monitor = migrated.copy(goalVersions = versions, reportRetries = retries))
+    var updated = migrated.copy(goalVersions = versions, reportRetries = retries)
+    if (ref != null && ref != sessionRef && next.accountId != null) {
+        if (updated.accountId != next.accountId) {
+            val accounts = updated.accountId?.let { account ->
+                updated.accounts + (account to MonitorAccountSnapshot(updated.catalogFailure, updated.catalogFailureSession, updated.catalogAttempted,
+                    updated.children, updated.reports, updated.reportFailureSessions, updated.registeredChildren(), updated.catalogFailures,
+                    updated.catalogFailureSessions, updated.catalogRegistrations))
+            } ?: updated.accounts
+            val saved = accounts[next.accountId] ?: MonitorAccountSnapshot()
+            updated = updated.copy(accounts = accounts, accountId = next.accountId, childName = saved.registrations.keys.firstOrNull(),
+                registrations = saved.registrations, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
+                catalogFailures = saved.catalogFailures, catalogFailureSessions = saved.catalogFailureSessions, catalogRegistrations = saved.catalogRegistrations,
+                catalogAttempted = saved.catalogAttempted, children = saved.children, reports = saved.reports,
+                reportFailureSessions = saved.reportFailureSessions, zeroGoalInitials = emptyMap(), reportVersions = emptyMap())
+        }
+        updated = updated.resetLearningBaselines().copy(
+            catalogFailure = null, catalogFailureSession = null, catalogFailures = emptyMap(), catalogFailureSessions = emptyMap(),
+            reports = updated.reports.mapValues { (_, report) -> if (report.initialFailure != false || report.failure == LearningFailure.AUTHENTICATION) report.copy(failed = false, failure = null, initialFailure = null) else report },
+            reportFailureSessions = emptyMap(), catalogRetries = emptyMap(), reportRetries = emptyMap(),
+            catalogAttempted = false, catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null,
+            zeroGoalInitials = emptyMap(), controlRevision = Math.addExact(updated.controlRevision, 1))
+    }
+    return copy(state = next, sessionRef = ref, monitor = updated)
 }
+
+/** API results cannot commit after their session is replaced or rejected. */
+fun StoredLearning.acceptsApiResult(expectedRef: String?): Boolean = expectedRef == null ||
+    (sessionRef == expectedRef && (monitor.accountId != state.accountId || !monitor.authenticationRequired(expectedRef)))

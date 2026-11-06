@@ -17,6 +17,7 @@ import com.google.gson.JsonParser
 import neth.iecal.todo.MonitorState
 import neth.iecal.todo.LearningStore
 import neth.iecal.todo.TodoSession
+import neth.iecal.todo.acceptsApiResult
 import neth.iecal.todo.withManualState
 import java.io.InputStream
 import java.io.OutputStream
@@ -57,11 +58,11 @@ class LearningStorage(context: Context) : LearningStore {
             gson.toJson(previous.copy(revision = Math.addExact(previous.revision, 1)))
         })
     }
-    override fun commit(revision: Long, state: LearningState, sessionRef: String?): Boolean = runBlocking {
+    override fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String?): Boolean = runBlocking {
         var committed = false
         stateStore.updateData { raw ->
             val previous = document(raw)
-            if (previous.revision == revision) {
+            if (previous.revision == revision && previous.acceptsApiResult(expectedSessionRef)) {
                 committed = true
                 gson.toJson(previous.withManualState(state, sessionRef))
             } else raw

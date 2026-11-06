@@ -30,16 +30,25 @@ class LearningServiceHost(private val service: AccessibilityService, private val
     private data class Request(val result: CompletableDeferred<HostObservation?>? = null)
     private val hints = Channel<Request>(Channel.CONFLATED) { it.result?.complete(null) }
     private var registered = false
+    private var probeRegistered = false
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val off = intent.action == Intent.ACTION_SCREEN_OFF
             if (publication.screenChanged(if (off) Screen.OFF else Screen.UNKNOWN) && !off) hints.trySend(Request())
         }
     }
+    private val probeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val nonce = intent.getStringExtra(LearningStatus.NONCE) ?: return
+            if (publication.isActive()) service.sendBroadcast(Intent(LearningStatus.RESPONSE).setPackage(service.packageName).putExtra(LearningStatus.NONCE, nonce))
+        }
+    }
     private var worker: Job? = null
     fun start() {
         service.registerReceiver(receiver, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT) })
         registered = true
+        androidx.core.content.ContextCompat.registerReceiver(service, probeReceiver, IntentFilter(LearningStatus.PROBE), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+        probeRegistered = true
         worker = scope.launch(Dispatchers.Default) {
             for (request in hints) {
                 val observation = try { capture() }
@@ -85,5 +94,6 @@ class LearningServiceHost(private val service: AccessibilityService, private val
         hints.cancel()
         worker?.cancel()
         if (registered) { service.unregisterReceiver(receiver); registered = false }
+        if (probeRegistered) { service.unregisterReceiver(probeReceiver); probeRegistered = false }
     }
 }

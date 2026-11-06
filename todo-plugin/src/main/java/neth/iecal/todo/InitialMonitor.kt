@@ -54,8 +54,13 @@ class InitialMonitor(
         coroutineScope {
             val controls = Channel<Control>(Channel.CONFLATED)
             val finished = Channel<Unit>(Channel.CONFLATED)
+            val connectionEpoch = java.util.concurrent.atomic.AtomicLong()
+            var lastConnected: Boolean? = null
             launch {
                 combine(store.changes, host.observations, permission) { doc, observation, notification ->
+                    val connected = observation.connection == Connection.CONNECTED && observation.accessibilityEnabled
+                    if (lastConnected != null && lastConnected != connected) connectionEpoch.incrementAndGet()
+                    lastConnected = connected
                     Control(owner, doc.monitor.controlRevision, doc.monitor.goalVersions[doc.state.accountId].orEmpty(), doc.monitor.registrationEpoch,
                         doc.state.accountId, doc.monitor.childName, doc.monitor.registeredChildren(), doc.sessionRef,
                         doc.state.goalsByAccount[doc.state.accountId].orEmpty(),
@@ -84,6 +89,9 @@ class InitialMonitor(
                 select<Unit> {
                     controls.onReceive { control ->
                         val old = current
+                        if (old?.connected == true && !control.connected) {
+                            withContext(Dispatchers.IO) { store.updateMonitor { doc -> if (doc.monitor.ownerEpoch == owner) doc.monitor.resetLearningBaselines() else null } }
+                        }
                         val goalOnly = old != null && old.copy(goals = control.goals, goalVersions = control.goalVersions) == control
                         pending = pending || !goalOnly
                         current = control
@@ -130,11 +138,12 @@ class InitialMonitor(
                         val restart = java.util.concurrent.atomic.AtomicBoolean(false)
                         restartInitial = restart.takeIf { initial }
                         val requestDateEpoch = dateEpoch.get()
+                        val requestConnectionEpoch = connectionEpoch.get()
                         running = launch(Dispatchers.IO) {
                             cycleMutex.withLock {
                                 val cycle = if (initial) null else RegularCycle()
                                 for ((child, registration) in control.registrations) {
-                                    initialize(control.copy(child = child, registration = registration), host, if (initial) null else subject, cycle, restart, dateEpoch, requestDateEpoch)
+                                    initialize(control.copy(child = child, registration = registration), host, if (initial) null else subject, cycle, restart, dateEpoch, requestDateEpoch, connectionEpoch, requestConnectionEpoch)
                                 }
                             }
                         }.also { job -> job.invokeOnCompletion { finished.trySend(Unit) } }
@@ -144,16 +153,16 @@ class InitialMonitor(
         }
     }
 
-    private suspend fun initialize(control: Control, host: CurboxHost, regularSubject: Subject?, cycle: RegularCycle?, restartInitial: java.util.concurrent.atomic.AtomicBoolean, dateEpoch: java.util.concurrent.atomic.AtomicLong, requestDateEpoch: Long) {
+    private suspend fun initialize(control: Control, host: CurboxHost, regularSubject: Subject?, cycle: RegularCycle?, restartInitial: java.util.concurrent.atomic.AtomicBoolean, dateEpoch: java.util.concurrent.atomic.AtomicLong, requestDateEpoch: Long, connectionEpoch: java.util.concurrent.atomic.AtomicLong, requestConnectionEpoch: Long) {
         val date = today()
         fun valid(doc: StoredLearning, subject: Subject? = null): Boolean = doc.monitor.ownerEpoch == control.owner &&
             doc.monitor.registeredChildren()[control.child] == control.registration &&
             doc.state.accountId == control.account && doc.monitor.accountId == control.account && doc.sessionRef == control.ref &&
             (subject == null || (doc.monitor.goalVersions[control.account].orEmpty()[control.child to subject] ?: 0) == (control.goalVersions[control.child to subject] ?: 0)) && permission.value == control.permission && control.permission.granted && freshPermission() &&
             host.observations.value.connection == Connection.CONNECTED && host.observations.value.accessibilityEnabled &&
-            today() == date && dateEpoch.get() == requestDateEpoch
+            today() == date && dateEpoch.get() == requestDateEpoch && connectionEpoch.get() == requestConnectionEpoch
         var doc = store.read()
-        if (!valid(doc)) return
+        if (!valid(doc) || doc.monitor.authenticationRequired(control.ref)) return
         if (doc.monitor.catalogRetryRequested || doc.monitor.reportRetryRequested != null) {
             doc = store.updateMonitor { if (valid(it)) it.monitor.migrateRetries(it.sessionRef) else null } ?: return
         }
@@ -245,6 +254,7 @@ class InitialMonitor(
         for ((subject, id) in child.userIds) {
             if (regularSubject != null && subject != regularSubject) continue
             doc = store.read()
+            if (doc.monitor.authenticationRequired(control.ref)) return
             val key = child.name to subject
             val goal = control.goals[key] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             if (!valid(doc, subject)) {
