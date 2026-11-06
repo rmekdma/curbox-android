@@ -312,6 +312,11 @@ class AppBlockerService : BaseBlockingService() {
         startBackgroundWorker()
     }
 
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        cleanupLearning()
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         cleanupLearning()
         super.onDestroy()

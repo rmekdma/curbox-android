@@ -19,16 +19,21 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /** The host supplies its process-safe dependencies and localized text. */
+data class LearningAvailability(val accessibilityEnabled: Boolean, val notificationsEnabled: Boolean, val serviceConnected: Boolean?)
+
 interface LearningHost {
+    suspend fun learningAvailability(): LearningAvailability
     fun createLearningScreen(): LearningScreen
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, PREVIOUS_DATE, NEXT_DATE, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, PREVIOUS_DATE, NEXT_DATE, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
     private lateinit var screen: LearningScreen
+    private var availability: LearningAvailability? = null
+    private var availabilityJob: kotlinx.coroutines.Job? = null
     private var selectedDate = LocalDate.now(ZoneId.of("Asia/Seoul"))
     private val host get() = requireActivity() as LearningHost
     private fun text(key: LearningText, vararg args: Any) = host.learningText(key, *args)
@@ -46,6 +51,14 @@ class LearningFragment : Fragment() {
 
     override fun onViewCreated(view: View, state: Bundle?) {
         val b = binding ?: return
+        b.accessibilitySettings.text = text(LearningText.ACCESSIBILITY_SETTINGS)
+        b.notificationSettings.text = text(LearningText.NOTIFICATION_SETTINGS)
+        b.accessibilitySettings.setOnClickListener { startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        b.notificationSettings.setOnClickListener {
+            val intent = if (android.os.Build.VERSION.SDK_INT >= 26) android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, requireContext().packageName)
+                else android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:" + requireContext().packageName))
+            startActivity(intent)
+        }
         b.title.text = text(LearningText.TITLE)
         b.email.hint = text(LearningText.EMAIL)
         b.password.hint = text(LearningText.PASSWORD)
@@ -83,6 +96,25 @@ class LearningFragment : Fragment() {
                 if (binding != null) render()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        availabilityJob?.cancel()
+        availabilityJob = viewLifecycleOwner.lifecycleScope.launch {
+            while (true) {
+                availability = host.learningAvailability()
+                if (binding != null) render()
+                kotlinx.coroutines.delay(5000)
+            }
+        }
+    }
+
+    override fun onPause() {
+        availabilityJob?.cancel()
+        availabilityJob = null
+        availability = null
+        super.onPause()
     }
 
     private fun date() = selectedDate.format(DateTimeFormatter.BASIC_ISO_DATE)
@@ -132,8 +164,18 @@ class LearningFragment : Fragment() {
         val selected = date()
         b.selectedDate.text = selectedDate.toString()
         b.nextDate.isEnabled = selectedDate.isBefore(LocalDate.now(ZoneId.of("Asia/Seoul")))
-        b.status.text = when { state.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); state.catalogCheckedAt == null -> text(LearningText.UNKNOWN); state.children.isEmpty() -> text(LearningText.EMPTY); else -> "" }
-        b.retry.visibility = if (state.error && !state.loginRequired) View.VISIBLE else View.GONE
+        b.status.text = when { screen.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); state.catalogCheckedAt == null -> text(LearningText.UNKNOWN); state.children.isEmpty() -> text(LearningText.EMPTY); else -> "" }
+        b.retry.visibility = if (state.error && !screen.loginRequired) View.VISIBLE else View.GONE
+        val status = availability
+        b.availability.text = when {
+            status == null -> text(LearningText.SERVICE_UNKNOWN)
+            !status.accessibilityEnabled -> text(LearningText.ACCESSIBILITY_NEEDED)
+            !status.notificationsEnabled -> text(LearningText.NOTIFICATIONS_NEEDED)
+            status.serviceConnected != true -> text(LearningText.SERVICE_UNKNOWN)
+            else -> ""
+        }
+        b.accessibilitySettings.visibility = if (status?.accessibilityEnabled == false) View.VISIBLE else View.GONE
+        b.notificationSettings.visibility = if (status?.notificationsEnabled == false) View.VISIBLE else View.GONE
         b.children.removeAllViews()
         for (child in state.children) {
             b.children.addView(TextView(requireContext()).apply { text = child.name; textSize = 20f })
@@ -200,7 +242,7 @@ class LearningFragment : Fragment() {
                 if (value != null && report.failed) b.children.addView(TextView(requireContext()).apply { text = failureText(report.failure) })
                 b.children.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
                     text = this@LearningFragment.text(LearningText.RETRY)
-                    isEnabled = !state.loginRequired && screen.goal(child.name, subject) > 0
+                    isEnabled = !screen.loginRequired && screen.goal(child.name, subject) > 0
                     setOnClickListener { runRequest { screen.retryReport(child.name, subject, selected) } }
                 })
             }

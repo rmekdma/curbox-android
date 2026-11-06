@@ -144,7 +144,7 @@ class InitialMonitor(
             host.observations.value.connection == Connection.CONNECTED && host.observations.value.accessibilityEnabled &&
             today() == date && dateEpoch.get() == requestDateEpoch
         var doc = store.read()
-        if (!valid(doc)) return
+        if (!valid(doc) || doc.monitor.authenticationRequired(control.ref)) return
         if (doc.monitor.catalogRetryRequested || doc.monitor.reportRetryRequested != null) {
             doc = store.updateMonitor { if (valid(it)) it.monitor.migrateRetries(it.sessionRef) else null } ?: return
         }
@@ -220,7 +220,7 @@ class InitialMonitor(
         for ((subject, id) in child.userIds) {
             if (regularSubject != null && subject != regularSubject) continue
             doc = store.read()
-            if (!valid(doc)) return
+            if (!valid(doc) || doc.monitor.authenticationRequired(control.ref)) return
             val key = child.name to subject
             val goal = control.goals[key] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             val previous = doc.monitor.reports[key]

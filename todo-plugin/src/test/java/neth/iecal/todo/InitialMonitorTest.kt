@@ -16,6 +16,34 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class InitialMonitorTest {
+    @Test fun rejectedCatalogSessionPausesAllRegisteredChildren() = runBlocking {
+        val store = MemoryLearningStore()
+        val children = listOf(TodoChild("First", mapOf(Subject.MATH to "1")), TodoChild("Second", mapOf(Subject.MATH to "2")))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = children, accountId = "account"), "session"))
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession): List<TodoChild> { calls.incrementAndGet(); throw TodoApiException(kind = LearningFailure.AUTHENTICATION) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore(); screen.toggleMonitor("First"); screen.toggleMonitor("Second")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.catalogFailureFor("First") == LearningFailure.AUTHENTICATION } }
+            delay(200)
+            assertEquals(1, calls.get())
+            assertEquals(2, store.read().monitor.registeredChildren().size)
+        } finally { job.cancelAndJoin() }
+    }
+
     @Test fun midnightStartsASilentNewBaselineWithTheScreenOff() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))

@@ -1901,6 +1901,11 @@
     <string name="learning_achievement_title">%1$s completed %2$s</string>
     <string name="learning_monitor_report">Watching: %1$d items, %2$d minutes. Checked %3$s.</string>
     <string name="learning_monitor_value">%1$d items. Checked %2$s.</string>
+    <string name="learning_accessibility_needed">Learning is paused. Turn on accessibility for Curbox.</string>
+    <string name="learning_notifications_needed">Learning is paused. Turn on notifications for Curbox.</string>
+    <string name="learning_service_unknown">Learning may be paused. Could not check the service.</string>
+    <string name="learning_accessibility_settings">Open accessibility settings</string>
+    <string name="learning_notification_settings">Open notification settings</string>
 </resources>
 
 

@@ -121,3 +121,11 @@ fun MonitorState.migrateRetries(sessionRef: String?): MonitorState {
         reportRetries + (key to RetryIntent(registered.getValue(key.first), retryRevision, sessionRef)) else reportRetries
     return copy(catalogRetries = catalog, reportRetries = reports, catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null)
 }
+
+/** A rejected session pauses every registration until the user signs in again. */
+fun MonitorState.authenticationRequired(sessionRef: String?): Boolean {
+    if (sessionRef == null) return true
+    if (catalogFailure == LearningFailure.AUTHENTICATION && (catalogFailureSession == null || catalogFailureSession == sessionRef)) return true
+    if (catalogFailures.any { (child, failure) -> failure == LearningFailure.AUTHENTICATION && (catalogFailureSessions[child] == null || catalogFailureSessions[child] == sessionRef) }) return true
+    return reports.any { (key, report) -> report.failure == LearningFailure.AUTHENTICATION && (reportFailureSessions[key] == null || reportFailureSessions[key] == sessionRef) }
+}

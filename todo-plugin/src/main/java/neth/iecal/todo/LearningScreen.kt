@@ -66,7 +66,10 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
     val monitorChanges get() = store.changes
     fun acceptMonitor(value: MonitorState) { monitor = value }
 
+    val loginRequired: Boolean get() = state.loginRequired || (monitor.accountId == state.accountId && sessionRef != null && monitor.authenticationRequired(sessionRef))
+
     fun canRetryMonitor(childName: String, subject: Subject?): Boolean {
+        if (loginRequired) return false
         val failure = if (subject == null) monitor.catalogFailureFor(childName) else monitor.reports[childName to subject]?.failure
         val failedRef = if (subject == null) monitor.catalogFailureSessionFor(childName) else monitor.reportFailureSessions[childName to subject]
         return failure != LearningFailure.AUTHENTICATION || (sessionRef != null && sessionRef != failedRef)
@@ -76,7 +79,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         val updated = store.updateMonitor { doc ->
             val failure = if (subject == null) doc.monitor.catalogFailureFor(childName) else doc.monitor.reports[childName to subject]?.failure
             val failedRef = if (subject == null) doc.monitor.catalogFailureSessionFor(childName) else doc.monitor.reportFailureSessions[childName to subject]
-            if (doc.sessionRef == null || doc.monitor.accountId != doc.state.accountId || childName !in doc.monitor.registeredChildren() ||
+            if (doc.monitor.authenticationRequired(doc.sessionRef) || doc.sessionRef == null || doc.monitor.accountId != doc.state.accountId || childName !in doc.monitor.registeredChildren() ||
                 (failure == LearningFailure.AUTHENTICATION && doc.sessionRef == failedRef)) null
             else {
                 val old = doc.monitor.migrateRetries(doc.sessionRef)
@@ -159,6 +162,14 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
                 val previous = if (!claim.state.accountId.isNullOrBlank() && claim.state.accountId == authenticated.accountId) claim.state else LearningState(goalsByAccount = claim.state.goalsByAccount)
                 val next = previous.copy(error = false, loginRequired = false, failure = null, accountId = authenticated.accountId)
                 if (!store.commit(claim.revision, next, ref)) return
+                val updated = store.updateMonitor { doc ->
+                    if (doc.sessionRef != ref || doc.monitor.accountId != authenticated.accountId) null else doc.monitor.resetLearningBaselines().copy(
+                        catalogFailure = null, catalogFailureSession = null, catalogFailures = emptyMap(), catalogFailureSessions = emptyMap(),
+                        reports = doc.monitor.reports.mapValues { (_, report) -> if (report.initialFailure != false || report.failure == LearningFailure.AUTHENTICATION) report.copy(failed = false, failure = null, initialFailure = null) else report },
+                        reportFailureSessions = emptyMap(), catalogRetries = emptyMap(), reportRetries = emptyMap(),
+                        catalogAttempted = false, controlRevision = Math.addExact(doc.monitor.controlRevision, 1))
+                }
+                if (updated != null) monitor = updated.monitor
                 state = next; session = authenticated; sessionRef = ref
             }
             refreshForRequest(date, authenticated, local, claim.revision, ref, true)
@@ -179,6 +190,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         synchronized(lock) { if (onlyIfSelected && selectedDate != date) return; selectedDate = date; current = session ?: return; ref = sessionRef ?: return; local = ++generation }
         val claim = store.claim()
         if (claim.sessionRef != ref) { restore(); return }
+        if (claim.monitor.accountId == claim.state.accountId && claim.monitor.authenticationRequired(ref)) { monitor = claim.monitor; return }
         refreshForRequest(date, current, local, claim.revision, ref, false)
     }
 
@@ -197,6 +209,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         }
         val claim = store.claim()
         if (claim.sessionRef != ref) { restore(); return }
+        if (claim.monitor.accountId == claim.state.accountId && claim.monitor.authenticationRequired(ref)) { monitor = claim.monitor; return }
         var authFailure = false
         val key = childName to subject
         val result = try { ReportState(api.report(current, subject, userId, date), now(), date) }

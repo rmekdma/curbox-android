@@ -4,6 +4,29 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningScreenTest {
+    @Test fun `monitor authentication failure blocks manual refresh until sign in`() {
+        val store = MemoryLearningStore()
+        val session = TodoSession("account", "token")
+        store.writeSession("old", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(accountId = "account"), "old"))
+        store.updateMonitor { it.monitor.copy(accountId = "account", catalogFailure = LearningFailure.AUTHENTICATION, catalogFailureSession = "old") }
+        var calls = 0
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession): List<TodoChild> { calls++; return emptyList() }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0, 0)
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.refresh("20261105")
+        assertEquals(0, calls)
+        assertTrue(screen.loginRequired)
+        screen.signIn("example", "example", "20261105")
+        assertEquals(1, calls)
+        assertFalse(screen.loginRequired)
+    }
+
     @Test fun `polling interval accepts positive minutes of any size`() {
         val store = MemoryLearningStore()
         val api = object : TodoApi {
