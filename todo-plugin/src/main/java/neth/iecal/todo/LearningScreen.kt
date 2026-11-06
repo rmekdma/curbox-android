@@ -53,12 +53,19 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         return true
     }
 
+    fun visibleSubjects(childName: String): Set<Subject> {
+        val manual = state.children.firstOrNull { it.name == childName }?.userIds?.keys.orEmpty()
+        val additional = if (state.accountId != null && monitor.accountId == state.accountId && childName in monitor.registeredChildren() && state.children.any { it.name == childName })
+            monitor.children.firstOrNull { it.name == childName }?.userIds?.keys.orEmpty() else emptySet()
+        return manual + additional
+    }
+
     fun saveGoal(childName: String, subject: Subject, input: String): Boolean {
         val trimmed = input.trim()
         if (!trimmed.matches(Regex("[0-9]+"))) return false
         val value = trimmed.toIntOrNull()?.takeIf { it in 0..99 } ?: return false
         synchronized(lock) {
-            if (state.accountId == null || state.children.none { it.name == childName && subject in it.userIds }) return false
+            if (state.accountId == null || subject !in visibleSubjects(childName)) return false
             generation++
             val claim = store.claim()
             if (claim.state.accountId != state.accountId || claim.sessionRef != sessionRef) return false
