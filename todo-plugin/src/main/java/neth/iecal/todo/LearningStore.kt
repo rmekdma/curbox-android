@@ -21,6 +21,7 @@ data class RetryIntent(val registration: Long, val revision: Long, val sessionRe
 data class MonitorState(
     val ownerEpoch: Long = 0,
     val controlRevision: Long = 0,
+    val goalVersions: Map<String, Map<Pair<String, Subject>, Long>> = emptyMap(),
     val registrationEpoch: Long = 0,
     val registrations: Map<String, Long> = emptyMap(),
     val accounts: Map<String, MonitorAccountSnapshot> = emptyMap(),
@@ -79,7 +80,7 @@ class MemoryLearningStore : LearningStore {
     @Synchronized override fun claim(): StoredLearning { document = document.copy(revision = document.revision + 1); updates.value = document; return document }
     @Synchronized override fun commit(revision: Long, state: LearningState, sessionRef: String?): Boolean {
         if (document.revision != revision) return false
-        document = document.copy(state = state, sessionRef = sessionRef)
+        document = document.withManualState(state, sessionRef)
         updates.value = document
         return true
     }
@@ -110,4 +111,25 @@ fun MonitorState.migrateRetries(sessionRef: String?): MonitorState {
     val reports = if (key != null && sessionRef != null && registered[key.first] != null && key !in reportRetries)
         reportRetries + (key to RetryIntent(registered.getValue(key.first), retryRevision, sessionRef)) else reportRetries
     return copy(catalogRetries = catalog, reportRetries = reports, catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null)
+}
+
+/** Commits manual state while fencing only goals whose effective value changed. */
+fun StoredLearning.withManualState(next: LearningState, ref: String?): StoredLearning {
+    var versions = monitor.goalVersions
+    var retries = monitor.migrateRetries(sessionRef).reportRetries
+    for (account in state.goalsByAccount.keys + next.goalsByAccount.keys) {
+        val before = state.goalsByAccount[account].orEmpty()
+        val after = next.goalsByAccount[account].orEmpty()
+        var scoped = versions[account].orEmpty()
+        for (key in before.keys + after.keys) {
+            val default = when (key.second) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
+            if ((before[key] ?: default) != (after[key] ?: default)) {
+                scoped = scoped + (key to Math.addExact(scoped[key] ?: 0, 1))
+                if (account == monitor.accountId && after[key] == 0) retries = retries - key
+            }
+        }
+        versions = versions + (account to scoped)
+    }
+    val migrated = monitor.migrateRetries(sessionRef)
+    return copy(state = next, sessionRef = ref, monitor = migrated.copy(goalVersions = versions, reportRetries = retries))
 }

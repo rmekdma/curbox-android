@@ -36,6 +36,14 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         return if (count >= target) GoalStatus.COMPLETE else GoalStatus.INCOMPLETE
     }
 
+    fun monitorGoalStatus(childName: String, subject: Subject, date: String): GoalStatus {
+        val target = goal(childName, subject)
+        if (target == 0) return GoalStatus.COMPLETE
+        val report = monitor.reports[childName to subject]
+        val count = report?.value?.takeIf { report.date == date }?.count ?: return GoalStatus.UNKNOWN
+        return if (count >= target) GoalStatus.COMPLETE else GoalStatus.INCOMPLETE
+    }
+
     fun saveInterval(input: String): Boolean {
         val value = input.trim()
         if (!value.matches(Regex("[0-9]+")) || value.all { it == '0' }) return false
@@ -81,7 +89,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             else {
                 val old = doc.monitor.migrateRetries(doc.sessionRef)
                 val key = subject?.let { childName to it }
-                if (key == null && old.catalogFailureFor(childName) == null || key != null && old.reports[key]?.failed != true) null
+                if (key == null && old.catalogFailureFor(childName) == null || key != null && (old.reports[key]?.failed != true || (doc.state.goalsByAccount[doc.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8; null -> 0 }) == 0)) null
                 else {
                     val revision = Math.addExact(old.retryRevision, 1)
                     val intent = RetryIntent(old.registeredChildren().getValue(childName), revision, requireNotNull(doc.sessionRef))

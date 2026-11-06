@@ -90,6 +90,7 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.MONITOR_START -> R.string.learning_monitor_start
             neth.iecal.todo.LearningText.MONITOR_STOP -> R.string.learning_monitor_stop
             neth.iecal.todo.LearningText.MONITOR_REPORT -> R.string.learning_monitor_report
+            neth.iecal.todo.LearningText.MONITOR_STATUS -> R.string.learning_monitor_status
             neth.iecal.todo.LearningText.INTERVAL -> R.string.learning_interval
             neth.iecal.todo.LearningText.SAVE_INTERVAL -> R.string.learning_save_interval
             neth.iecal.todo.LearningText.INVALID_INTERVAL -> R.string.learning_invalid_interval

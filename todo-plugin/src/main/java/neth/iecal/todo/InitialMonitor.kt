@@ -42,7 +42,7 @@ class InitialMonitor(
     private val achievement: suspend (StoredLearning, NotificationPermission, String, Subject, suspend () -> Boolean) -> Unit = { _, _, _, _, _ -> }
 ) : CurboxPlugin {
     private companion object { val cycleMutex = Mutex() }
-    private data class Control(val owner: Long, val version: Long, val manualRevision: Long, val registration: Long, val account: String?, val child: String?, val registrations: Map<String, Long>, val ref: String?, val goals: Map<Pair<String, Subject>, Int>, val connected: Boolean, val permission: NotificationPermission, val interval: String)
+    private data class Control(val owner: Long, val version: Long, val goalVersions: Map<Pair<String, Subject>, Long>, val registration: Long, val account: String?, val child: String?, val registrations: Map<String, Long>, val ref: String?, val goals: Map<Pair<String, Subject>, Int>, val connected: Boolean, val permission: NotificationPermission, val interval: String)
     private class RegularCycle(var started: Boolean = false)
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -55,7 +55,7 @@ class InitialMonitor(
             val finished = Channel<Unit>(Channel.CONFLATED)
             launch {
                 combine(store.changes, host.observations, permission) { doc, observation, notification ->
-                    Control(owner, doc.monitor.controlRevision, doc.revision, doc.monitor.registrationEpoch,
+                    Control(owner, doc.monitor.controlRevision, doc.monitor.goalVersions[doc.state.accountId].orEmpty(), doc.monitor.registrationEpoch,
                         doc.state.accountId, doc.monitor.childName, doc.monitor.registeredChildren(), doc.sessionRef,
                         doc.state.goalsByAccount[doc.state.accountId].orEmpty(),
                         observation.connection == Connection.CONNECTED && observation.accessibilityEnabled, notification, doc.monitor.intervalMinutes)
@@ -66,6 +66,7 @@ class InitialMonitor(
             var current: Control? = null
             var running: Job? = null
             var pending = false
+            var restartInitial: java.util.concurrent.atomic.AtomicBoolean? = null
             while (isActive) {
                 val waitMillis = current?.let { control ->
                     val doc = withContext(Dispatchers.IO) { store.read() }
@@ -75,21 +76,26 @@ class InitialMonitor(
                 } ?: 60_000L
                 select<Unit> {
                     controls.onReceive { control ->
+                        val old = current
+                        val goalOnly = old != null && old.copy(goals = control.goals, goalVersions = control.goalVersions) == control
+                        pending = pending || !goalOnly
                         current = control
-                        pending = true
                         launch {
                             val latest = withContext(Dispatchers.IO) { store.read() }
                             if (latest.monitor.ownerEpoch == owner) publish(latest, control.permission)
                         }
                     }
-                    finished.onReceive { running = null }
+                    finished.onReceive {
+                        if (restartInitial?.get() == true) pending = true
+                        running = null
+                        restartInitial = null
+                    }
                     wake.onReceive { }
                     onTimeout(waitMillis) { }
                 }
                 val control = current
                 if (running == null && control != null && control.connected && control.permission.granted && freshPermission() && control.account != null && control.registrations.isNotEmpty() && control.ref != null) {
                     val initial = pending
-                    pending = false
                     val observation = host.observations.value
                     val subject = if (observation.screen == Screen.UNLOCKED) when ((observation.foreground as? Foreground.Confirmed)?.packageName) {
                         "com.enuma.todohangeul" -> Subject.KOREAN
@@ -100,12 +106,15 @@ class InitialMonitor(
                     val doc = withContext(Dispatchers.IO) { store.read() }
                     val interval = runCatching { BigInteger(control.interval).multiply(BigInteger.valueOf(60_000)).min(BigInteger.valueOf(Long.MAX_VALUE)).toLong() }.getOrDefault(60_000)
                     val due = doc.monitor.cycleOwner != owner || elapsed() - doc.monitor.cycleStartedElapsedMillis >= interval
-                    if (initial || (subject != null && due)) {
+                    if ((initial || (subject != null && due)) && doc.monitor.goalVersions[control.account].orEmpty() == control.goalVersions) {
+                        pending = false
+                        val restart = java.util.concurrent.atomic.AtomicBoolean(false)
+                        restartInitial = restart.takeIf { initial }
                         running = launch(Dispatchers.IO) {
                             cycleMutex.withLock {
                                 val cycle = if (initial) null else RegularCycle()
                                 for ((child, registration) in control.registrations) {
-                                    initialize(control.copy(child = child, registration = registration), host, if (initial) null else subject, cycle)
+                                    initialize(control.copy(child = child, registration = registration), host, if (initial) null else subject, cycle, restart)
                                 }
                             }
                         }.also { job -> job.invokeOnCompletion { finished.trySend(Unit) } }
@@ -115,13 +124,13 @@ class InitialMonitor(
         }
     }
 
-    private suspend fun initialize(control: Control, host: CurboxHost, regularSubject: Subject?, cycle: RegularCycle?) {
+    private suspend fun initialize(control: Control, host: CurboxHost, regularSubject: Subject?, cycle: RegularCycle?, restartInitial: java.util.concurrent.atomic.AtomicBoolean) {
         fun today() = java.time.Instant.ofEpochMilli(now()).atZone(ZoneId.of("Asia/Seoul")).toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
         val date = today()
-        fun valid(doc: StoredLearning): Boolean = doc.monitor.ownerEpoch == control.owner &&
-            doc.revision == control.manualRevision && doc.monitor.registeredChildren()[control.child] == control.registration &&
+        fun valid(doc: StoredLearning, subject: Subject? = null): Boolean = doc.monitor.ownerEpoch == control.owner &&
+            doc.monitor.registeredChildren()[control.child] == control.registration &&
             doc.state.accountId == control.account && doc.monitor.accountId == control.account && doc.sessionRef == control.ref &&
-            doc.state.goalsByAccount[control.account].orEmpty() == control.goals && permission.value == control.permission && control.permission.granted && freshPermission() &&
+            (subject == null || (doc.monitor.goalVersions[control.account].orEmpty()[control.child to subject] ?: 0) == (control.goalVersions[control.child to subject] ?: 0)) && permission.value == control.permission && control.permission.granted && freshPermission() &&
             host.observations.value.connection == Connection.CONNECTED && host.observations.value.accessibilityEnabled &&
             today() == date
         var doc = store.read()
@@ -171,11 +180,11 @@ class InitialMonitor(
         if (regularSubject != null) {
             val observation = host.refreshObservation()
             val expected = when (regularSubject) { Subject.KOREAN -> "com.enuma.todohangeul"; Subject.MATH -> "com.enuma.todomath"; Subject.ENGLISH -> "com.enuma.todoenglish" }
-            if (observation.connection != Connection.CONNECTED || !observation.accessibilityEnabled || observation.screen != Screen.UNLOCKED || observation.foreground != Foreground.Confirmed(expected) || !valid(store.read())) return
+            if (observation.connection != Connection.CONNECTED || !observation.accessibilityEnabled || observation.screen != Screen.UNLOCKED || observation.foreground != Foreground.Confirmed(expected) || !valid(store.read(), regularSubject)) return
         }
         if (cycle == null || !cycle.started) {
             doc = store.updateMonitor { current ->
-                if (!valid(current)) null else current.monitor.copy(cycleOwner = control.owner, cycleStartedElapsedMillis = elapsed())
+                if (!valid(current, regularSubject)) null else current.monitor.copy(cycleOwner = control.owner, cycleStartedElapsedMillis = elapsed())
             } ?: return
             if (cycle != null) cycle.started = true
         }
@@ -201,7 +210,7 @@ class InitialMonitor(
         for ((subject, id) in child.userIds) {
             if (regularSubject != null && subject != regularSubject) continue
             doc = store.read()
-            if (!valid(doc)) return
+            if (!valid(doc, subject)) return
             val key = child.name to subject
             val goal = control.goals[key] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             val previous = doc.monitor.reports[key]
@@ -212,13 +221,13 @@ class InitialMonitor(
                 catch (e: TodoApiException) { (previous ?: ReportState(date = date)).copy(failed = true, failure = e.kind) }
             currentCoroutineContext().ensureActive()
             var achieved = false
-            doc = store.updateMonitor { current ->
+            val committed = store.updateMonitor { current ->
                 val old = current.monitor.reports[key]
                 achieved = regularSubject != null && !result.failed && result.value != null &&
                     old?.value != null && old.date == date && old.value.count < goal && result.value.count >= goal &&
                     current.monitor.baselineEpochs[key] == control.owner && current.monitor.baselineRegistrations[key] == control.registration &&
                     current.monitor.baselineSessions[key] == control.ref && current.monitor.baselinePermissions[key] == control.permission.revision
-                if (!valid(current)) null else current.monitor.copy(reports = current.monitor.reports + (key to result),
+                if (!valid(current, subject)) null else current.monitor.copy(reports = current.monitor.reports + (key to result),
                     reportVersions = current.monitor.reportVersions + (key to Math.addExact(current.monitor.reportVersions[key] ?: 0, 1)),
                     latestAchievements = if (achieved) current.monitor.latestAchievements + ((requireNotNull(control.account) to child.name) to subject) else current.monitor.latestAchievements,
                     reportRetries = if (reportIntent != null && current.monitor.reportRetries[key] == reportIntent) current.monitor.reportRetries - key else current.monitor.reportRetries,
@@ -227,14 +236,19 @@ class InitialMonitor(
                     baselineRegistrations = if (result.failed) current.monitor.baselineRegistrations else current.monitor.baselineRegistrations + (key to control.registration),
                     baselineSessions = if (result.failed) current.monitor.baselineSessions else current.monitor.baselineSessions + (key to requireNotNull(control.ref)),
                     baselinePermissions = if (result.failed) current.monitor.baselinePermissions else current.monitor.baselinePermissions + (key to control.permission.revision))
-            } ?: return
+            }
+            if (committed == null) {
+                if (regularSubject == null && (store.read().monitor.goalVersions[control.account].orEmpty()[key] ?: 0) != (control.goalVersions[key] ?: 0)) restartInitial.set(true)
+                return
+            }
+            doc = committed
             if (achieved) {
                 currentCoroutineContext().ensureActive()
                 val version = doc.monitor.reportVersions[key]
                 achievement(doc, control.permission, child.name, subject) {
                     currentCoroutineContext().ensureActive()
                     val latest = store.read()
-                    valid(latest) && latest.monitor.reportVersions[key] == version
+                    valid(latest, subject) && latest.monitor.reportVersions[key] == version
                 }
             } else publish(doc, control.permission)
             if (result.failure == LearningFailure.AUTHENTICATION) return
