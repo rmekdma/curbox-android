@@ -95,7 +95,13 @@ android {
 
         // Full uses the shared cross device sync implementation.
         getByName("full") { java.srcDir("src/sync/java") }
-        getByName("main") { java.srcDir(if (learningReal) "src/learningReal/java" else "src/learningFake/java") }
+        if (learningReal) {
+            getByName("main") { java.srcDir("src/learningReal/java") }
+        } else {
+            getByName("release") { java.srcDir("src/learningFake/java") }
+            getByName("debug") { java.srcDir("src/learningFakeDebug/java") }
+            maybeCreate("fullDebug").manifest.srcFile("src/learningFakeDebug/AndroidManifest.xml")
+        }
     }
 
 
@@ -207,4 +213,3 @@ androidComponents {
         }
     }
 }
-

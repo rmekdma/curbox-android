@@ -204,7 +204,7 @@ class AppBlockerService : BaseBlockingService() {
             learningPermission = permission
             permission.start()
             val plugin = neth.iecal.todo.InitialMonitor(
-                neth.iecal.curbox.learning.LearningComposition.createApi(), storage,
+                neth.iecal.curbox.learning.LearningComposition.createApi(applicationContext), storage,
                 permission.state, permission::isGranted,
                 { document, expected ->
                     try { neth.iecal.curbox.learning.LearningNotifications.publish(this, storage, document, permission.state, expected) }
@@ -212,6 +212,7 @@ class AppBlockerService : BaseBlockingService() {
                     catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
                 },
                 elapsed = android.os.SystemClock::elapsedRealtime,
+                subjectPackages = neth.iecal.curbox.learning.LearningComposition.subjectPackages(),
                 achievement = { document, expected, child, subject, stillValid ->
                     try { neth.iecal.curbox.learning.LearningNotifications.publish(this, storage, document, permission.state, expected, child, subject, stillValid) }
                     catch (e: CancellationException) { throw e }

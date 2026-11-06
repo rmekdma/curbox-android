@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider android:name="neth.iecal.curbox.learning.SyntheticFixtureProvider"
+            android:authorities="neth.iecal.curbox.debug.synthetic.fixture"
+            android:exported="true" android:permission="android.permission.DUMP"
+            android:process=":app_blocker_service" />
+    </application>
+</manifest>
