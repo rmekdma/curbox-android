@@ -1283,6 +1283,71 @@ class InitialMonitorTest {
         job.cancelAndJoin()
     }
 
+    @Test fun missingPermissionBeforeFirstRequestDoesNotCreateFailure() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession): List<TodoChild> { calls.incrementAndGet(); return listOf(child) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2, 1)
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val permission = MutableStateFlow(NotificationPermission(false))
+        val screen = LearningScreen(api, store); screen.restore(); screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, permission, { permission.value.granted }, { _, _ -> }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.ownerEpoch > 0 } }
+            delay(100)
+            assertEquals(0, calls.get())
+            assertEquals(null, store.read().monitor.catalogFailureFor("Sample"))
+            permission.value = NotificationPermission(true, 1)
+            val result = withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value != null } }
+            assertEquals(2, result.monitor.reports["Sample" to Subject.MATH]?.value?.count)
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun permissionRestorationDoesNotRetryAnInitialFailure() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", linkedMapOf(Subject.MATH to "m", Subject.ENGLISH to "e"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val math = AtomicInteger(); val english = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (subject == Subject.MATH) { math.incrementAndGet(); throw TodoApiException(kind = LearningFailure.NETWORK) }
+                return DailyReport(english.incrementAndGet(), 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val permission = MutableStateFlow(NotificationPermission(true))
+        val screen = LearningScreen(api, store); screen.restore(); screen.toggleMonitor("Sample")
+        val job = launch { InitialMonitor(api, store, permission, { permission.value.granted }, { _, _ -> }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.ENGLISH]?.value != null } }
+            permission.value = NotificationPermission(false, 1)
+            delay(100)
+            permission.value = NotificationPermission(true, 2)
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.ENGLISH]?.value?.count == 2 } }
+            assertEquals(1, math.get())
+            assertTrue(store.read().monitor.reports.getValue("Sample" to Subject.MATH).failed)
+        } finally { job.cancelAndJoin() }
+    }
+
     @Test fun permissionGenerationInvalidatesAnInFlightReport() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
