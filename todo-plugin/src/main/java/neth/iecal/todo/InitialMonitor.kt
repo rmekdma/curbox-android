@@ -245,9 +245,15 @@ class InitialMonitor(
         for ((subject, id) in child.userIds) {
             if (regularSubject != null && subject != regularSubject) continue
             doc = store.read()
-            if (!valid(doc, subject)) return
             val key = child.name to subject
             val goal = control.goals[key] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
+            if (!valid(doc, subject)) {
+                if (regularSubject == null && valid(doc)) {
+                    if (goal == 0) continue
+                    restartInitial.set(true)
+                }
+                return
+            }
             val previous = doc.monitor.reports[key]
             if (regularSubject == null && (goal == 0 || (wasZeroInitial(doc.monitor, key) && !reportRetry(doc.monitor, key)) || (previous?.failed == true && previous.initialFailure != false && !reportRetry(doc.monitor, key) && (doc.monitor.reportFailureSessions[key] == null || doc.monitor.reportFailureSessions[key] == control.ref)) || (!reportRetry(doc.monitor, key) && (previous?.failed != true || previous.initialFailure == false) && previous?.date == date && doc.monitor.baselineEpochs[key] == control.owner && doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref &&
                     doc.monitor.baselinePermissions[key] == control.permission.revision))) continue

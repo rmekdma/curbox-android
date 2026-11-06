@@ -347,6 +347,78 @@ class InitialMonitorTest {
     }
 
 
+    @Test fun changedUnstartedGoalCompletesItsOriginalInitialPass() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("One", linkedMapOf(Subject.MATH to "math", Subject.ENGLISH to "english"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requests.add(userId)
+                if (subject == Subject.MATH) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
+                return DailyReport(1, 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        try {
+            withTimeout(5000) { while (entered.count != 0L) delay(10) }
+            assertTrue(screen.saveGoal("One", Subject.ENGLISH, "4"))
+            release.countDown()
+            withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.ENGLISH]?.value != null } }
+            assertEquals(listOf("math", "english"), requests.toList())
+        } finally { release.countDown(); job.cancelAndJoin() }
+    }
+
+    @Test fun zeroedUnstartedGoalDoesNotStopOtherInitialSubjects() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("One", linkedMapOf(Subject.MATH to "math", Subject.ENGLISH to "english", Subject.KOREAN to "korean"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requests.add(userId)
+                if (subject == Subject.MATH) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
+                return DailyReport(1, 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("One")
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        try {
+            withTimeout(5000) { while (entered.count != 0L) delay(10) }
+            assertTrue(screen.saveGoal("One", Subject.ENGLISH, "0"))
+            release.countDown()
+            withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.KOREAN]?.value != null } }
+            assertEquals(listOf("math", "korean"), requests.toList())
+        } finally { release.countDown(); job.cancelAndJoin() }
+    }
+
     @Test fun onlyARegularCrossingRequestsAnAchievement() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
