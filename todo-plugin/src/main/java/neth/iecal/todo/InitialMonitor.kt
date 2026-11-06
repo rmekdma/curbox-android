@@ -39,7 +39,8 @@ class InitialMonitor(
     private val publish: suspend (StoredLearning, NotificationPermission) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
     private val elapsed: () -> Long = { System.nanoTime() / 1_000_000 },
-    private val achievement: suspend (StoredLearning, NotificationPermission, String, Subject, suspend () -> Boolean) -> Unit = { _, _, _, _, _ -> }
+    private val achievement: suspend (StoredLearning, NotificationPermission, String, Subject, suspend () -> Boolean) -> Unit = { _, _, _, _, _ -> },
+    private val subjectPackages: SubjectPackages = SubjectPackages()
 ) : CurboxPlugin {
     private companion object { val cycleMutex = Mutex() }
     private data class Control(val owner: Long, val version: Long, val goalVersions: Map<Pair<String, Subject>, Long>, val registration: Long, val account: String?, val child: String?, val registrations: Map<String, Long>, val ref: String?, val goals: Map<Pair<String, Subject>, Int>, val connected: Boolean, val permission: NotificationPermission, val interval: String)
@@ -124,12 +125,7 @@ class InitialMonitor(
                 if (running == null && control != null && control.connected && control.permission.granted && freshPermission() && control.account != null && control.registrations.isNotEmpty() && control.ref != null) {
                     val initial = pending
                     val observation = host.observations.value
-                    val subject = if (observation.screen == Screen.UNLOCKED) when ((observation.foreground as? Foreground.Confirmed)?.packageName) {
-                        "com.enuma.todohangeul" -> Subject.KOREAN
-                        "com.enuma.todomath" -> Subject.MATH
-                        "com.enuma.todoenglish" -> Subject.ENGLISH
-                        else -> null
-                    } else null
+                    val subject = if (observation.screen == Screen.UNLOCKED) subjectPackages.subjectFor((observation.foreground as? Foreground.Confirmed)?.packageName) else null
                     val doc = withContext(Dispatchers.IO) { store.read() }
                     val interval = runCatching { BigInteger(control.interval).multiply(BigInteger.valueOf(60_000)).min(BigInteger.valueOf(Long.MAX_VALUE)).toLong() }.getOrDefault(60_000)
                     val due = doc.monitor.cycleOwner != owner || elapsed() - doc.monitor.cycleStartedElapsedMillis >= interval
@@ -222,7 +218,7 @@ class InitialMonitor(
         }
         if (regularSubject != null) {
             val observation = host.refreshObservation()
-            val expected = when (regularSubject) { Subject.KOREAN -> "com.enuma.todohangeul"; Subject.MATH -> "com.enuma.todomath"; Subject.ENGLISH -> "com.enuma.todoenglish" }
+            val expected = subjectPackages.packageFor(regularSubject)
             if (observation.connection != Connection.CONNECTED || !observation.accessibilityEnabled || observation.screen != Screen.UNLOCKED || observation.foreground != Foreground.Confirmed(expected) || !valid(store.read(), regularSubject)) return
         }
         if (cycle == null || !cycle.started) {
