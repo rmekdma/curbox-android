@@ -18,8 +18,7 @@ object OrderedLearningPublisher {
         write: suspend (StoredLearning) -> Unit
     ) = mutex.withLock {
         val current = withContext(Dispatchers.IO) { store.read() }
-        if (permission.value != expected || current.monitor.ownerEpoch != committed.monitor.ownerEpoch ||
-            current.monitor.controlRevision != committed.monitor.controlRevision || current.revision != committed.revision) return@withLock
+        if (permission.value != expected || current.monitor.ownerEpoch != committed.monitor.ownerEpoch) return@withLock
         write(current)
     }
 }

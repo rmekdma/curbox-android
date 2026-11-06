@@ -17,6 +17,7 @@ import com.google.gson.JsonParser
 import neth.iecal.todo.MonitorState
 import neth.iecal.todo.LearningStore
 import neth.iecal.todo.TodoSession
+import neth.iecal.todo.withManualState
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.KeyStore
@@ -62,7 +63,7 @@ class LearningStorage(context: Context) : LearningStore {
             val previous = document(raw)
             if (previous.revision == revision) {
                 committed = true
-                gson.toJson(previous.copy(state = state, sessionRef = sessionRef))
+                gson.toJson(previous.withManualState(state, sessionRef))
             } else raw
         }
         committed

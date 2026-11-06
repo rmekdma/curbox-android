@@ -27,7 +27,7 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, PREVIOUS_DATE, NEXT_DATE, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, PREVIOUS_DATE, NEXT_DATE, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
@@ -199,6 +199,15 @@ class LearningFragment : Fragment() {
                     b.children.addView(TextView(requireContext()).apply {
                         text = this@LearningFragment.text(LearningText.MONITOR_REPORT, monitored.value.count, monitored.value.minutes, checked)
                     })
+                }
+                if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()) {
+                    val today = LocalDate.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.BASIC_ISO_DATE)
+                    val status = when (screen.monitorGoalStatus(child.name, subject, today)) {
+                        GoalStatus.COMPLETE -> text(LearningText.COMPLETE)
+                        GoalStatus.INCOMPLETE -> text(LearningText.INCOMPLETE)
+                        GoalStatus.UNKNOWN -> text(LearningText.UNKNOWN)
+                    }
+                    b.children.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.MONITOR_STATUS, status) })
                 }
                 if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && monitored?.failed == true) {
                     b.children.addView(TextView(requireContext()).apply { text = failureText(monitored.failure) })

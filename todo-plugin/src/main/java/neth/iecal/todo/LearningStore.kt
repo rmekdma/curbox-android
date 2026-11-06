@@ -18,9 +18,13 @@ data class MonitorAccountSnapshot(
 
 data class RetryIntent(val registration: Long, val revision: Long, val sessionRef: String)
 
+data class ZeroGoalInitial(val owner: Long, val registration: Long, val sessionRef: String, val permissionRevision: Long, val date: String, val dateEpoch: Long = 0)
+
 data class MonitorState(
     val ownerEpoch: Long = 0,
     val controlRevision: Long = 0,
+    val goalVersions: Map<String, Map<Pair<String, Subject>, Long>> = emptyMap(),
+    val zeroGoalInitials: Map<Pair<String, Subject>, ZeroGoalInitial> = emptyMap(),
     val registrationEpoch: Long = 0,
     val registrations: Map<String, Long> = emptyMap(),
     val accounts: Map<String, MonitorAccountSnapshot> = emptyMap(),
@@ -89,7 +93,7 @@ class MemoryLearningStore : LearningStore {
     @Synchronized override fun claim(): StoredLearning { document = document.copy(revision = document.revision + 1); updates.value = document; return document }
     @Synchronized override fun commit(revision: Long, state: LearningState, sessionRef: String?): Boolean {
         if (document.revision != revision) return false
-        document = document.copy(state = state, sessionRef = sessionRef)
+        document = document.withManualState(state, sessionRef)
         updates.value = document
         return true
     }
@@ -128,4 +132,33 @@ fun MonitorState.authenticationRequired(sessionRef: String?): Boolean {
     if (catalogFailure == LearningFailure.AUTHENTICATION && (catalogFailureSession == null || catalogFailureSession == sessionRef)) return true
     if (catalogFailures.any { (child, failure) -> failure == LearningFailure.AUTHENTICATION && (catalogFailureSessions[child] == null || catalogFailureSessions[child] == sessionRef) }) return true
     return reports.any { (key, report) -> report.failure == LearningFailure.AUTHENTICATION && (reportFailureSessions[key] == null || reportFailureSessions[key] == sessionRef) }
+}
+
+/** Commits manual state while fencing only goals whose effective value changed. */
+fun StoredLearning.withManualState(next: LearningState, ref: String?): StoredLearning {
+    var versions = monitor.goalVersions
+    var retries = monitor.migrateRetries(sessionRef).reportRetries
+    for (account in state.goalsByAccount.keys + next.goalsByAccount.keys) {
+        val before = state.goalsByAccount[account].orEmpty()
+        val after = next.goalsByAccount[account].orEmpty()
+        var scoped = versions[account].orEmpty()
+        for (key in before.keys + after.keys) {
+            val default = when (key.second) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
+            if ((before[key] ?: default) != (after[key] ?: default)) {
+                scoped = scoped + (key to Math.addExact(scoped[key] ?: 0, 1))
+                if (account == monitor.accountId && after[key] == 0) retries = retries - key
+            }
+        }
+        versions = versions + (account to scoped)
+    }
+    val migrated = monitor.migrateRetries(sessionRef)
+    var updated = migrated.copy(goalVersions = versions, reportRetries = retries)
+    if (ref != null && ref != sessionRef && next.accountId != null && updated.accountId == next.accountId) {
+        updated = updated.resetLearningBaselines().copy(
+            catalogFailure = null, catalogFailureSession = null, catalogFailures = emptyMap(), catalogFailureSessions = emptyMap(),
+            reports = updated.reports.mapValues { (_, report) -> if (report.initialFailure != false || report.failure == LearningFailure.AUTHENTICATION) report.copy(failed = false, failure = null, initialFailure = null) else report },
+            reportFailureSessions = emptyMap(), catalogRetries = emptyMap(), reportRetries = emptyMap(),
+            catalogAttempted = false, controlRevision = Math.addExact(updated.controlRevision, 1))
+    }
+    return copy(state = next, sessionRef = ref, monitor = updated)
 }
