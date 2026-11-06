@@ -151,4 +151,73 @@ class MonitorOwnershipTest {
         assertTrue(store.read().monitor.reports.getValue(failure).failed)
         job.cancelAndJoin()
     }
+    @Test fun recreatedMonitorRestoresRegistrationWithSilentFreshBaseline() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val count = AtomicInteger(1)
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(count.get(), 1)
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val effects = Collections.synchronizedList(mutableListOf<Subject>())
+        val permission = MutableStateFlow(NotificationPermission(true))
+        fun monitor() = InitialMonitor(api, store, permission, { true }, { _, _ -> },
+            achievement = { _, _, _, subject, _ -> effects.add(subject) })
+        val first = launch { monitor().run(host()) }
+        withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 1 } }
+        first.cancelAndJoin()
+        count.set(6)
+        val restored = launch { monitor().run(host()) }
+        withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 6 } }
+        assertTrue(store.read().monitor.registeredChildren().containsKey("Sample"))
+        assertTrue(effects.isEmpty())
+        restored.cancelAndJoin()
+    }
+
+    @Test fun recreatedMonitorKeepsInitialFailurePausedUntilExplicitRetry() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (calls.incrementAndGet() == 1) throw TodoApiException(kind = LearningFailure.NETWORK)
+                return DailyReport(2, 1)
+            }
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Sample")
+        val permission = MutableStateFlow(NotificationPermission(true))
+        val restoredPublished = CompletableDeferred<Unit>()
+        fun monitor() = InitialMonitor(api, store, permission, { true }, { doc, _ ->
+            if (doc.monitor.ownerEpoch == 2L) restoredPublished.complete(Unit)
+        })
+        val first = launch { monitor().run(host()) }
+        withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.failed == true } }
+        first.cancelAndJoin()
+        val restored = launch { monitor().run(host()) }
+        withTimeout(5000) { restoredPublished.await() }
+        delay(200)
+        assertEquals(1, calls.get())
+        assertEquals(LearningFailure.NETWORK, store.read().monitor.reports["Sample" to Subject.MATH]?.failure)
+        screen.retryMonitor("Sample", Subject.MATH)
+        withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 2 } }
+        assertEquals(2, calls.get())
+        restored.cancelAndJoin()
+    }
+
 }
