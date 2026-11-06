@@ -56,6 +56,16 @@ data class MonitorState(
     val reportRetryRequested: Pair<String, Subject>? = null
 )
 
+/** Discards completion baselines without clearing historical reports or retry latches. */
+fun MonitorState.resetLearningBaselines(): MonitorState = copy(
+    cycleOwner = 0,
+    baselineEpochs = emptyMap(),
+    baselineRegistrations = emptyMap(),
+    baselineSessions = emptyMap(),
+    baselinePermissions = emptyMap(),
+    latestAchievements = emptyMap()
+)
+
 data class StoredLearning(val revision: Long = 0, val state: LearningState = LearningState(), val sessionRef: String? = null, val monitor: MonitorState = MonitorState())
 
 /** Storage transactions reject effects owned by a superseded request. */

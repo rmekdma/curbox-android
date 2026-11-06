@@ -58,7 +58,9 @@ object LearningNotifications {
             }
             "$label: $value $failure".trim()
         }
+        val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
         val latest = current.monitor.latestAchievements[current.monitor.accountId to child]
+            ?.takeIf { current.monitor.reports[child to it]?.date == today }
         val title = if (latest == null) child else context.getString(R.string.learning_achievement_title, child, context.getString(when (latest) {
             Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english
         }))

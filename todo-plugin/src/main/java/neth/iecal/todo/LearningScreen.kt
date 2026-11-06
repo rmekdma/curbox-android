@@ -2,7 +2,7 @@ package neth.iecal.todo
 
 import java.util.UUID
 
-data class ReportState(val value: DailyReport? = null, val checkedAt: Long? = null, val date: String? = null, val failed: Boolean = false, val failure: LearningFailure? = null)
+data class ReportState(val value: DailyReport? = null, val checkedAt: Long? = null, val date: String? = null, val failed: Boolean = false, val failure: LearningFailure? = null, val initialFailure: Boolean? = null)
 data class LearningState(val children: List<TodoChild> = emptyList(), val reports: Map<Pair<String, Subject>, ReportState> = emptyMap(), val error: Boolean = false, val loginRequired: Boolean = false, val catalogCheckedAt: Long? = null, val failure: LearningFailure? = null, val accountId: String? = null, val goalsByAccount: Map<String, Map<Pair<String, Subject>, Int>> = emptyMap())
 
 enum class GoalStatus { UNKNOWN, INCOMPLETE, COMPLETE }
