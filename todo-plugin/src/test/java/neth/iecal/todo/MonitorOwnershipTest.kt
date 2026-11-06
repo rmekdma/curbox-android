@@ -97,7 +97,7 @@ class MonitorOwnershipTest {
         assertEquals(null, visible)
     }
 
-    @Test fun metadataRetryContinuesOnlyPreviouslyUnattemptedPositiveSubjects() = runBlocking {
+    @Test fun metadataRetryRechecksRuntimeBaselinesButPreservesFailedSubjects() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.KOREAN to "k", Subject.MATH to "m", Subject.ENGLISH to "e"))
         val session = TodoSession("account", "token")
@@ -105,12 +105,13 @@ class MonitorOwnershipTest {
         val claim = store.claim()
         assertTrue(store.commit(claim.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
         val requested = Collections.synchronizedList(mutableListOf<Subject>())
+        val koreanCalls = AtomicInteger()
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 requested.add(subject)
-                return DailyReport(3, 2)
+                return DailyReport(if (subject == Subject.KOREAN && koreanCalls.incrementAndGet() > 1) 6 else 3, 2)
             }
         }
         val screen = LearningScreen(api, store)
@@ -126,17 +127,28 @@ class MonitorOwnershipTest {
             baselineEpochs = mapOf(success to 1), baselineRegistrations = mapOf(success to doc.monitor.registrationEpoch),
             baselineSessions = mapOf(success to "session"), baselinePermissions = mapOf(success to 0)
         ) }
-        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host()) }
+        val clock = java.util.concurrent.atomic.AtomicLong(1000)
+        val effects = Collections.synchronizedList(mutableListOf<Subject>())
+        val host = host()
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> },
+            elapsed = clock::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
         withTimeout(5000) { store.changes.first { it.monitor.ownerEpoch == 1L } }
         assertTrue(requested.isEmpty())
         screen.retryMonitor("Sample", null)
         withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.ENGLISH]?.value?.count == 3 } }
         val state = store.read().monitor
-        assertEquals(listOf(Subject.ENGLISH), requested.toList())
-        assertEquals(original, state.reports[success])
+        assertEquals(listOf(Subject.KOREAN, Subject.ENGLISH), requested.toList())
+        assertEquals(3, state.reports[success]?.value?.count)
         assertEquals(LearningFailure.SERVER, state.reports[failure]?.failure)
         assertTrue(state.reports[failure]?.failed == true)
         assertTrue(state.cycleStartedElapsedMillis > 0)
+        assertTrue(effects.isEmpty())
+        clock.set(61000)
+        host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED,
+            foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todohangeul"))
+        withTimeout(5000) { while (effects.isEmpty()) delay(10) }
+        assertEquals(listOf(Subject.KOREAN), effects.toList())
+        assertTrue(store.read().monitor.reports.getValue(failure).failed)
         job.cancelAndJoin()
     }
 }
