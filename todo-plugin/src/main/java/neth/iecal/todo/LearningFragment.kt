@@ -34,6 +34,7 @@ class LearningFragment : Fragment() {
     private lateinit var screen: LearningScreen
     private var availability: LearningAvailability? = null
     private var availabilityJob: kotlinx.coroutines.Job? = null
+    private val goalDrafts = mutableMapOf<Triple<String?, String, Subject>, String>()
     private var selectedDate = LocalDate.now(ZoneId.of("Asia/Seoul"))
     private val host get() = requireActivity() as LearningHost
     private fun text(key: LearningText, vararg args: Any) = host.learningText(key, *args)
@@ -104,7 +105,7 @@ class LearningFragment : Fragment() {
         availabilityJob = viewLifecycleOwner.lifecycleScope.launch {
             while (true) {
                 availability = host.learningAvailability()
-                if (binding != null) render()
+                if (binding != null) renderAvailability()
                 kotlinx.coroutines.delay(5000)
             }
         }
@@ -166,16 +167,15 @@ class LearningFragment : Fragment() {
         b.nextDate.isEnabled = selectedDate.isBefore(LocalDate.now(ZoneId.of("Asia/Seoul")))
         b.status.text = when { screen.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); state.catalogCheckedAt == null -> text(LearningText.UNKNOWN); state.children.isEmpty() -> text(LearningText.EMPTY); else -> "" }
         b.retry.visibility = if (state.error && !screen.loginRequired) View.VISIBLE else View.GONE
-        val status = availability
-        b.availability.text = when {
-            status == null -> text(LearningText.SERVICE_UNKNOWN)
-            !status.accessibilityEnabled -> text(LearningText.ACCESSIBILITY_NEEDED)
-            !status.notificationsEnabled -> text(LearningText.NOTIFICATIONS_NEEDED)
-            status.serviceConnected != true -> text(LearningText.SERVICE_UNKNOWN)
-            else -> ""
+        renderAvailability()
+        var focused: Triple<String?, String, Subject>? = null
+        var selection = 0
+        for (index in 0 until b.children.childCount) {
+            val input = b.children.getChildAt(index) as? android.widget.EditText ?: continue
+            @Suppress("UNCHECKED_CAST") val key = input.tag as? Triple<String?, String, Subject> ?: continue
+            goalDrafts[key] = input.text.toString()
+            if (input.hasFocus()) { focused = key; selection = input.selectionStart.coerceAtLeast(0) }
         }
-        b.accessibilitySettings.visibility = if (status?.accessibilityEnabled == false) View.VISIBLE else View.GONE
-        b.notificationSettings.visibility = if (status?.notificationsEnabled == false) View.VISIBLE else View.GONE
         b.children.removeAllViews()
         for (child in state.children) {
             b.children.addView(TextView(requireContext()).apply { text = child.name; textSize = 20f })
@@ -231,9 +231,12 @@ class LearningFragment : Fragment() {
                 val goalInput = android.widget.EditText(requireContext()).apply {
                     inputType = android.text.InputType.TYPE_CLASS_NUMBER
                     hint = this@LearningFragment.text(LearningText.GOAL)
-                    setText(screen.goal(child.name, subject).toString())
+                    val key = Triple(state.accountId, child.name, subject)
+                    tag = key
+                    setText(goalDrafts[key] ?: screen.goal(child.name, subject).toString())
                 }
                 b.children.addView(goalInput)
+                if (focused == goalInput.tag) { goalInput.requestFocus(); goalInput.setSelection(selection.coerceAtMost(goalInput.text.length)) }
                 b.children.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
                     text = this@LearningFragment.text(LearningText.SAVE_GOAL)
                     setOnClickListener {
@@ -256,6 +259,20 @@ class LearningFragment : Fragment() {
                 })
             }
         }
+    }
+
+    private fun renderAvailability() {
+        val b = binding ?: return
+        val status = availability
+        b.availability.text = when {
+            status == null -> text(LearningText.SERVICE_UNKNOWN)
+            !status.accessibilityEnabled -> text(LearningText.ACCESSIBILITY_NEEDED)
+            !status.notificationsEnabled -> text(LearningText.NOTIFICATIONS_NEEDED)
+            status.serviceConnected != true -> text(LearningText.SERVICE_UNKNOWN)
+            else -> ""
+        }
+        b.accessibilitySettings.visibility = if (status?.accessibilityEnabled == false) View.VISIBLE else View.GONE
+        b.notificationSettings.visibility = if (status?.notificationsEnabled == false) View.VISIBLE else View.GONE
     }
 
     override fun onDestroyView() { binding = null; super.onDestroyView() }

@@ -54,6 +54,67 @@ class LearningScreenTest {
         assertTrue(monitor.baselineEpochs.isEmpty())
     }
 
+    @Test fun `service authentication failure rejects an older manual success`() {
+        val store = MemoryLearningStore()
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (calls.incrementAndGet() == 2) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)); return DailyReport(99, 1) }
+                return DailyReport(1, 1)
+            }
+        }
+        val screen = LearningScreen(api, store)
+        screen.signIn("example", "example", "20261105")
+        screen.toggleMonitor("Child")
+        val request = Thread { screen.refresh("20261105") }
+        request.start()
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val ref = store.read().sessionRef
+        store.updateMonitor { it.monitor.copy(catalogFailure = LearningFailure.AUTHENTICATION, catalogFailureSession = ref) }
+        release.countDown(); request.join(5000)
+        assertEquals(DailyReport(1, 1), store.read().state.reports["Child" to Subject.MATH]?.value)
+        assertTrue(store.read().monitor.authenticationRequired(ref))
+    }
+
+    @Test fun `sign in restores the matching account registrations and values`() {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession(email, "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (calls.incrementAndGet() == 2) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)); return DailyReport(99, 1) }
+                return DailyReport(1, 1)
+            }
+        }
+        val screen = LearningScreen(api, store)
+        val key = "Child" to Subject.MATH
+        screen.signIn("A", "example", "20261105"); screen.toggleMonitor("Child")
+        store.updateMonitor { it.monitor.copy(reports = mapOf(key to ReportState(DailyReport(3, 1), 1, "20261105"))) }
+        val old = Thread { screen.refresh("20261105") }
+        old.start()
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        screen.signIn("B", "example", "20261105")
+        assertTrue(store.read().monitor.registeredChildren().isEmpty())
+        screen.toggleMonitor("Child")
+        store.updateMonitor { it.monitor.copy(reports = mapOf(key to ReportState(DailyReport(7, 1), 2, "20261105")), catalogFailure = LearningFailure.NETWORK) }
+        screen.signIn("A", "example", "20261105")
+        release.countDown(); old.join(5000)
+        assertEquals(null, store.read().monitor.catalogFailure)
+        assertEquals("A", store.read().monitor.accountId)
+        assertTrue("Child" in store.read().monitor.registeredChildren())
+        assertEquals(DailyReport(3, 1), store.read().monitor.reports[key]?.value)
+        assertEquals(DailyReport(7, 1), store.read().monitor.accounts["B"]?.reports?.get(key)?.value)
+    }
+
     @Test fun `polling interval accepts positive minutes of any size`() {
         val store = MemoryLearningStore()
         val api = object : TodoApi {

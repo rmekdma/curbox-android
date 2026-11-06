@@ -222,7 +222,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             if (local != generation) return
             val next = state.copy(reports = state.reports + (key to result), loginRequired = authFailure)
             val nextRef = if (authFailure) null else ref
-            if (!store.commit(claim.revision, next, nextRef)) return
+            if (!store.commit(claim.revision, next, nextRef, ref)) return
             state = next
             if (authFailure) { session = null; sessionRef = null }
         }
@@ -234,14 +234,14 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
                 if (local != generation) return
                 val next = state.copy(error = true, loginRequired = e.authenticationRequired, failure = e.kind)
                 val nextRef = if (e.authenticationRequired) null else ref
-                if (store.commit(revision, next, nextRef)) { state = next; if (nextRef == null) { session = null; sessionRef = null } }
+                if (store.commit(revision, next, nextRef, ref)) { state = next; if (nextRef == null) { session = null; sessionRef = null } }
             }
             return
         }
         synchronized(lock) {
             if (local != generation) return
             val next = state.copy(children = children, error = false, loginRequired = false, catalogCheckedAt = now(), failure = null)
-            if (!store.commit(revision, next, ref)) return
+            if (!store.commit(revision, next, ref, ref)) return
             state = next
         }
         for (child in children) for ((subject, id) in child.userIds) {
@@ -260,7 +260,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
                 if (local != generation) return
                 val next = state.copy(reports = state.reports + (key to result), loginRequired = authFailure)
                 val nextRef = if (authFailure) null else ref
-                if (!store.commit(revision, next, nextRef)) return
+                if (!store.commit(revision, next, nextRef, ref)) return
                 state = next
                 if (authFailure) { session = null; sessionRef = null; return }
             }
