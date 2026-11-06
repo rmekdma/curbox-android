@@ -56,10 +56,10 @@ internal class LearningPermissionCapture(
             update(!blocked() && read(), force)
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             val old = state.value
             state.value = NotificationPermission(false, if (old.revision == Long.MAX_VALUE) Long.MAX_VALUE else old.revision + 1)
-            try { report(e) } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { }
+            try { report(if (e is Exception) e else Exception(e)) } catch (cancelled: CancellationException) { throw cancelled } catch (_: Throwable) { }
         }
     }
 

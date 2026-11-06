@@ -22,6 +22,12 @@ class LearningPermissionCaptureTest {
         assertTrue(capture.state.value.granted)
         assertTrue(capture.state.value.revision > before.revision)
     }
+    @Test fun `error during capture revokes permission even if logging also fails`() {
+        val capture = LearningPermissionCapture({ throw AssertionError("capture") }, { throw LinkageError("logger") }, true)
+        capture.refresh(false)
+        assertFalse(capture.state.value.granted)
+        assertEquals(1L, capture.state.value.revision)
+    }
     @Test(expected = CancellationException::class) fun `cancellation is propagated`() {
         LearningPermissionCapture({ throw CancellationException() }, {}).refresh(false)
     }
