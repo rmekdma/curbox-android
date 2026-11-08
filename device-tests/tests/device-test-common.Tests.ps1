@@ -908,6 +908,22 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
         }
     }
 
+    Context "Device shell failures" {
+        It "propagates a nonzero adb exit" {
+            $original = (Get-Item Function:\adb).ScriptBlock
+            try {
+                Set-Item Function:\adb { $global:LASTEXITCODE = 42 } -Force
+                $script:DeviceTestShellHandler = $null
+                $failed = $false
+                try { Invoke-TestDeviceShell -Command "settings delete secure example" } catch { $failed = $true }
+                $failed | Should Be $true
+            } finally {
+                Set-Item Function:\adb $original -Force
+                $global:LASTEXITCODE = 0
+            }
+        }
+    }
+
     Context "Disable-AccessibilityService" {
         It "removes only Curbox and preserves other enabled services" {
             $serviceName = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
@@ -917,7 +933,7 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             }
             $script:accessibilityCommands = @()
             $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
-            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command; $script:secureValues.enabled_accessibility_services = "com.example/.Reader:com.example/.Magnifier" }
 
             (Disable-AccessibilityService) | Should Be $true
 
@@ -933,7 +949,7 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             }
             $script:accessibilityCommands = @()
             $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
-            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command; $script:secureValues.enabled_accessibility_services = "null" }
 
             (Disable-AccessibilityService) | Should Be $true
 
@@ -956,6 +972,19 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             $script:accessibilityCommands.Count | Should Be 0
             $global:DeviceTestUnexpectedAdbCalls | Should Be 0
         }
+        It "rejects a failed setting write or mismatched readback" {
+            $script:secureValues = @{ enabled_accessibility_services = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService" }
+            $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
+            $script:DeviceTestShellHandler = { param($Command) throw "write failed" }
+            $failed = $false
+            try { Disable-AccessibilityService } catch { $failed = $true }
+            $failed | Should Be $true
+            $script:DeviceTestShellHandler = { param($Command) }
+            $failed = $false
+            try { Disable-AccessibilityService } catch { $failed = $true }
+            $failed | Should Be $true
+        }
+
     }
 
     Context "Stop-ServiceProcess" {

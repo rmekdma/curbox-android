@@ -81,6 +81,12 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.WATCHING_PAUSED -> R.string.learning_watching_paused
             neth.iecal.todo.LearningText.SETTINGS_CHANGED -> R.string.learning_settings_changed
             neth.iecal.todo.LearningText.MONITOR_PROGRESS -> R.string.learning_monitor_progress
+            neth.iecal.todo.LearningText.MANUAL_ERROR -> R.string.learning_manual_error
+            neth.iecal.todo.LearningText.AUTOMATIC_ERROR -> R.string.learning_automatic_error
+            neth.iecal.todo.LearningText.PROGRESS_COUNT -> R.string.learning_notification_progress
+            neth.iecal.todo.LearningText.MINUTES -> R.string.learning_minutes
+            neth.iecal.todo.LearningText.RELATIVE_MINUTES -> R.string.learning_relative_minutes
+            neth.iecal.todo.LearningText.RELATIVE_HOURS -> R.string.learning_relative_hours
             neth.iecal.todo.LearningText.ZERO_GOAL -> R.string.learning_zero_goal
             neth.iecal.todo.LearningText.PROGRESS -> R.string.learning_progress
             neth.iecal.todo.LearningText.PROGRESS_COMPLETE -> R.string.learning_progress_complete

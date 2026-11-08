@@ -95,13 +95,13 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         val ref = sessionRef ?: return@synchronized null
         if (session == null || loginRequired) return@synchronized null
         val subjects = subjectIds(state, monitor, childName)
-        if (subjects.isEmpty()) return@synchronized null
+        if (state.children.none { it.name == childName }) return@synchronized null
         LearningGoalScope(account, ref, childName, subjects)
     }
 
     /** Saves every goal together only if the original account, session and subjects still match. */
     fun saveGoals(scope: LearningGoalScope, inputs: Map<Subject, String>): Boolean {
-        if (inputs.keys != scope.subjects.keys) return false
+        if (inputs.keys != Subject.entries.toSet()) return false
         val values = inputs.mapValues { (_, input) ->
             val value = input.trim()
             if (!value.matches(Regex("[0-9]+"))) return false
@@ -111,6 +111,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             if (sessionRef != scope.sessionRef || state.accountId != scope.accountId || session == null || loginRequired) return false
             val claim = store.claim()
             if (claim.sessionRef != scope.sessionRef || claim.state.accountId != scope.accountId ||
+                claim.state.children.none { it.name == scope.childName } ||
                 subjectIds(claim.state, claim.monitor, scope.childName) != scope.subjects ||
                 (claim.monitor.accountId == scope.accountId && claim.monitor.authenticationRequired(scope.sessionRef))) return false
             val goals = claim.state.goalsByAccount[scope.accountId].orEmpty() + values.mapKeys { scope.childName to it.key }

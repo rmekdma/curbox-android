@@ -61,20 +61,29 @@ class LearningScreenTest {
     @Test fun `goal settings save all values atomically and reject invalid input`() {
         val store = MemoryLearningStore()
         val child = TodoChild("Child", mapOf(Subject.MATH to "m", Subject.ENGLISH to "e"))
+        val requested = mutableListOf<Subject>()
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = TodoSession("account", "token")
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(subject)
+                return DailyReport(1, 1)
+            }
         }
         val screen = testLearningScreen(api, store)
         screen.signIn("fake", "fake", "20261108")
         val scope = requireNotNull(screen.goalScope("Child"))
-        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "100")))
+        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "100", Subject.KOREAN to "7")))
         assertEquals(5, screen.goal("Child", Subject.MATH))
         assertEquals(8, screen.goal("Child", Subject.ENGLISH))
-        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "0")))
+        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "0", Subject.KOREAN to "7")))
         assertEquals(3, screen.goal("Child", Subject.MATH))
         assertEquals(0, screen.goal("Child", Subject.ENGLISH))
+        assertEquals(7, screen.goal("Child", Subject.KOREAN))
+        assertEquals(setOf(Subject.MATH, Subject.ENGLISH), screen.visibleSubjects("Child"))
+        requested.clear()
+        screen.refresh("20261108")
+        assertEquals(setOf(Subject.MATH), requested.toSet())
     }
 
     @Test fun `goal dialog cannot write after session or subject identity changes`() {
@@ -91,12 +100,12 @@ class LearningScreenTest {
         val claim = store.claim()
         val changed = claim.state.copy(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "new"))))
         assertTrue(store.commit(claim.revision, changed, claim.sessionRef, claim.sessionRef))
-        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3")))
+        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "8", Subject.KOREAN to "6")))
         assertTrue(store.read().state.goalsByAccount.isEmpty())
         screen.signIn("fake", "fake", "20261108")
         val oldSession = requireNotNull(screen.goalScope("Child"))
         screen.signIn("fake", "fake", "20261108")
-        assertFalse(screen.saveGoals(oldSession, mapOf(Subject.MATH to "3")))
+        assertFalse(screen.saveGoals(oldSession, mapOf(Subject.MATH to "3", Subject.ENGLISH to "8", Subject.KOREAN to "6")))
         assertTrue(store.read().state.goalsByAccount.isEmpty())
     }
 
@@ -111,7 +120,7 @@ class LearningScreenTest {
         screen.signIn("fake", "fake", "20261108")
         val scope = requireNotNull(screen.goalScope("Child"))
         screen.toggleMonitor("Child")
-        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3")))
+        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "8", Subject.KOREAN to "6")))
     }
 
     @Test fun `monitor authentication failure blocks manual refresh until sign in`() {

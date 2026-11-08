@@ -27,7 +27,7 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, WATCHING_PAUSED, WATCHING_ISSUE, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, LAST_VALUE, LAST_PROGRESS }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, WATCHING_PAUSED, WATCHING_ISSUE, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, LAST_VALUE, LAST_PROGRESS, MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
@@ -39,6 +39,7 @@ class LearningFragment : Fragment() {
     private var availabilityJob: kotlinx.coroutines.Job? = null
     private var settingsDialog: androidx.appcompat.app.AlertDialog? = null
     private val childStatuses = mutableMapOf<String, TextView>()
+    private val checkedTimes = mutableMapOf<TextView, Long>()
     private var renderedDay = LocalDate.now(ZoneId.of("Asia/Seoul"))
     private val host get() = requireActivity() as LearningHost
     private fun text(key: LearningText, vararg args: Any) = host.learningText(key, *args)
@@ -112,7 +113,7 @@ class LearningFragment : Fragment() {
                     render()
                 }
                 availability = host.learningAvailability()
-                if (binding != null) renderAvailability()
+                if (binding != null) { renderAvailability(); updateCheckedTimes() }
                 kotlinx.coroutines.delay(5000)
             }
         }
@@ -200,6 +201,7 @@ class LearningFragment : Fragment() {
         b.swipeRefresh.isEnabled = !showLogin
         renderAvailability()
         childStatuses.clear()
+        checkedTimes.clear()
         b.children.removeAllViews()
         for (child in state.children) {
             val watching = screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()
@@ -240,49 +242,60 @@ class LearningFragment : Fragment() {
                 }
                 card.addView(content)
                 b.children.addView(card)
-                val label = text(when (subject) { Subject.KOREAN -> LearningText.SUBJECT_KOREAN; Subject.MATH -> LearningText.SUBJECT_MATH; Subject.ENGLISH -> LearningText.SUBJECT_ENGLISH })
-                content.addView(TextView(requireContext()).apply { text = label; textSize = 20f })
                 val report = state.reports[child.name to subject]
-                val value = report?.value?.takeIf { report.date == selected }
+                val monitored = screen.monitor.reports[child.name to subject].takeIf { screen.monitor.accountId == state.accountId }
+                val selectedReport = latestDisplayReport(report, monitored, selected)
+                val value = selectedReport?.value
                 val goal = screen.goal(child.name, subject)
-                if (goal == 0) {
-                    content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.ZERO_GOAL) })
+                val row = android.widget.LinearLayout(requireContext()).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
                 }
-                val description = if (value == null) {
-                    if (report?.failed == true) failureText(report.failure) else if (goal == 0) "" else text(LearningText.UNKNOWN)
-                } else if (report.failed || goal == 0) {
-                    text(LearningText.LAST_VALUE, text(LearningText.LAST_PROGRESS, value.count, value.minutes))
-                } else {
-                    text(if (value.count >= goal) LearningText.PROGRESS_COMPLETE else LearningText.PROGRESS, value.count, goal, value.minutes)
+                content.addView(row)
+                row.addView(TextView(requireContext()).apply { text = subjectLabel(subject); textSize = 20f })
+                val todayValue = value?.takeIf { selectedReport?.date == selected }
+                if (goal != 0 && todayValue != null) {
+                    row.addView(TextView(requireContext()).apply {
+                        text = "  " + this@LearningFragment.text(LearningText.PROGRESS_COUNT, todayValue.count, goal)
+                    })
+                } else if (goal != 0 && todayValue == null) {
+                    row.addView(TextView(requireContext()).apply { text = "  " + this@LearningFragment.text(LearningText.UNKNOWN) })
                 }
-                if (description.isNotEmpty()) content.addView(TextView(requireContext()).apply { text = description })
-                val monitored = screen.monitor.reports[child.name to subject]
-                if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()) {
-                    val today = LocalDate.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.BASIC_ISO_DATE)
-                    val monitorStatus = when (screen.monitorGoalStatus(child.name, subject, today)) {
-                        GoalStatus.COMPLETE -> text(LearningText.COMPLETE)
-                        GoalStatus.INCOMPLETE -> text(LearningText.INCOMPLETE)
-                        GoalStatus.UNKNOWN -> text(LearningText.UNKNOWN)
-                    }
-                    val todayValue = monitored?.value?.takeIf { monitored.date == today }
-                    val progress = if (todayValue == null) text(LearningText.MONITOR_STATUS, monitorStatus)
-                        else text(LearningText.MONITOR_PROGRESS, todayValue.count, screen.goal(child.name, subject), monitorStatus)
-                    content.addView(TextView(requireContext()).apply { text = progress; textSize = 12f })
-                    if (monitored?.failed == true) {
-                        if (monitored.value != null) {
-                            val checked = java.text.DateFormat.getDateTimeInstance().format(java.util.Date(monitored.checkedAt ?: 0))
-                            content.addView(TextView(requireContext()).apply {
-                                text = this@LearningFragment.text(LearningText.MONITOR_REPORT, monitored.value.count, monitored.value.minutes, checked)
-                                textSize = 12f
-                            })
-                        }
-                        content.addView(TextView(requireContext()).apply { text = failureText(monitored.failure) })
-                    }
+                if (goal == 0 || (todayValue != null && selectedReport?.failed == false && todayValue.count >= goal)) {
+                    row.addView(android.widget.ImageView(requireContext()).apply {
+                        val size = (24 * resources.displayMetrics.density).toInt()
+                        layoutParams = android.widget.LinearLayout.LayoutParams(size, size)
+                        setImageResource(R.drawable.learning_check)
+                        contentDescription = this@LearningFragment.text(LearningText.COMPLETE)
+                    })
                 }
-                if (report?.failed == true && value != null) content.addView(TextView(requireContext()).apply { text = failureText(report.failure) })
+                row.addView(View(requireContext()), android.widget.LinearLayout.LayoutParams(0, 1, 1f))
+                selectedReport?.checkedAt?.let { checkedAt ->
+                    val time = TextView(requireContext())
+                    checkedTimes[time] = checkedAt
+                    row.addView(time)
+                }
+                if (value != null) {
+                    val details = if (selectedReport?.date == selected) text(LearningText.MINUTES, value.minutes)
+                        else text(LearningText.LAST_VALUE, text(LearningText.LAST_PROGRESS, value.count, value.minutes))
+                    content.addView(TextView(requireContext()).apply { text = details })
+                }
+                if (report?.failed == true) content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.MANUAL_ERROR, failureText(report.failure)) })
+                if (monitored?.failed == true) content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.AUTOMATIC_ERROR, failureText(monitored.failure)) })
+
             }
         }
         updateChildStatuses()
+        updateCheckedTimes()
+    }
+
+    private fun updateCheckedTimes() {
+        val now = System.currentTimeMillis()
+        checkedTimes.forEach { (view, checkedAt) ->
+            val minutes = elapsedMinutes(now, checkedAt)
+            view.text = if (minutes < 60) text(LearningText.RELATIVE_MINUTES, minutes)
+                else text(LearningText.RELATIVE_HOURS, minutes / 60, minutes % 60)
+        }
     }
 
     private fun iconButton(icon: Int, description: String, viewId: Int, action: () -> Unit): android.widget.ImageButton =
@@ -347,7 +360,7 @@ class LearningFragment : Fragment() {
     private fun showGoalsDialog(childName: String) {
         val scope = screen.goalScope(childName) ?: return
         val content = dialogContent()
-        val inputs = scope.subjects.keys.associateWith { subject ->
+        val inputs = Subject.entries.associateWith { subject ->
             val row = android.widget.LinearLayout(requireContext()).apply {
                 orientation = android.widget.LinearLayout.HORIZONTAL
                 gravity = android.view.Gravity.CENTER_VERTICAL
@@ -431,6 +444,7 @@ class LearningFragment : Fragment() {
         settingsDialog?.dismiss()
         settingsDialog = null
         childStatuses.clear()
+        checkedTimes.clear()
         binding = null
         showingLogin = false
         super.onDestroyView()
@@ -438,3 +452,14 @@ class LearningFragment : Fragment() {
 }
 
 
+
+internal fun latestDisplayReport(manual: ReportState?, monitor: ReportState?, today: String): ReportState? {
+    val reports = listOfNotNull(manual, monitor).filter { it.value != null }
+    return (reports.filter { it.date == today }.ifEmpty { reports }).maxByOrNull { it.checkedAt ?: Long.MIN_VALUE }
+}
+
+internal fun elapsedMinutes(now: Long, checkedAt: Long): Long {
+    if (checkedAt >= now) return 0
+    val elapsed = try { Math.subtractExact(now, checkedAt) } catch (_: ArithmeticException) { Long.MAX_VALUE }
+    return elapsed / 60_000
+}

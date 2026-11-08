@@ -248,6 +248,7 @@ function Invoke-TestDeviceShell([string]$Command) {
         return
     }
     adb shell $Command | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "adb shell failed ($LASTEXITCODE): $Command" }
 }
 
 function Get-TestDeviceShellOutput([string]$Command) {
@@ -1294,6 +1295,8 @@ function Disable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.
         Invoke-TestDeviceShell -Command "settings put secure enabled_accessibility_services $($remainingServices -join ':')"
     }
     Start-Sleep -Seconds 2
+    $actual = @( (Get-DeviceSecureSetting -Name "enabled_accessibility_services") -split ":" | Where-Object { $_ -and $_ -ne "null" })
+    if (($actual -join ":") -ne ($remainingServices -join ":")) { throw "Accessibility service settings did not match the requested state." }
     return $true
 }
 
