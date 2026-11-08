@@ -38,13 +38,24 @@ try {
     $fixtureWritten = $true
     Set-LearningFixture $baseline
     Start-TestApp -PackageName 'neth.iecal.curbox.debug' | Out-Null
-    $ui = Wait-For-UI 'nav_focus|btn_learning|id/signIn' 15
-    if ($ui -notmatch 'id/signIn') {
-        if ($ui -notmatch 'btn_learning') {
-            if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/nav_focus"' 'Focus')) { throw "Focus tab not found." }
-            $ui = Wait-For-UI 'btn_learning' 10
+    $ui = Wait-For-UI 'nav_reducers|card_learning|id/signIn|id/dashboard' 15
+    if ($ui -notmatch 'id/signIn|id/dashboard') {
+        if ($ui -notmatch 'card_learning') {
+            if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/nav_reducers"' 'Reducers')) { throw "Reducers tab not found." }
+            $ui = Wait-For-UI 'card_learning|card_app_rules' 10
         }
-        if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/btn_learning"' 'Learning')) { throw "Learning screen not found." }
+        for ($attempt = 0; $ui -notmatch 'card_learning' -and $attempt -lt 5; $attempt++) {
+            Invoke-TestDeviceShell -Command 'input swipe 500 1400 500 450 350'
+            $ui = Dump-UI
+        }
+        $card = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/card_learning"'
+        $nav = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/nav_reducers"'
+        if ($card.Found -and $nav.Found -and $card.Y -ge $nav.Y1) { Invoke-TestDeviceShell -Command 'input swipe 500 1400 500 450 350'; $ui = Dump-UI }
+        if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/card_learning"' 'Learning')) { throw "Learning screen not found." }
+        $ui = Wait-For-UI 'id/signIn|id/dashboard' 10
+    }
+    if ($ui -match 'id/dashboard') {
+        if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/changeAccount"' 'Change account')) { throw "Change account not found." }
         $ui = Wait-For-UI 'id/signIn' 10
     }
     if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/signIn"' 'Fake sign in')) { throw "Sign in not found." }
@@ -62,7 +73,7 @@ try {
     $record = $null
     while ($wait.Elapsed.TotalSeconds -lt 40) {
         $items = @(Get-LearningNotifications)
-        if ($items.Count -eq 1 -and $items[0].Text -match '(?m)^                android\.title=String \(Child1\)' -and $items[0].Text -match '(?m)^                android\.text=String \(Math: Items: 2\.' -and $items[0].Text -match '(?m)^    NotificationRecord\([^\r\n]*sound=null[^\r\n]*groupKey=silent') { $record = $items[0]; break }
+        if ($items.Count -eq 1 -and $items[0].Text -match '(?m)^                android\.title=String \(Child1\)' -and $items[0].Text -match '(?m)^                android\.text=String \(Math: 2/5\)' -and $items[0].Text -match '(?m)^    NotificationRecord\([^\r\n]*sound=null[^\r\n]*groupKey=silent') { $record = $items[0]; break }
         Start-Sleep -Seconds 2
     }
     if (-not $record) { throw "Silent 2 of 5 baseline notification was not observed." }
@@ -77,7 +88,7 @@ try {
         $focus = Assert-WindowFocus -ExpectedActivity $TargetPackage -PassThru
         if (-not $focus.Success) { throw "API tester lost foreground." }
         $items = @(Get-LearningNotifications)
-        if ($items.Count -eq 1 -and $items[0].Tag -eq $record.Tag -and $items[0].Id -eq $record.Id -and $items[0].Text -match '(?m)^                android\.title=String \(Child1 completed Math\)' -and $items[0].Text -match '(?m)^                android\.text=String \(Math: Items: 5\.') { $finished = $true; break }
+        if ($items.Count -eq 1 -and $items[0].Tag -eq $record.Tag -and $items[0].Id -eq $record.Id -and $items[0].Text -match '(?m)^                android\.title=String \(Child1\)' -and $items[0].Text -match '(?m)^                android\.text=String \(Math: 5/5 \u2713\)') { $finished = $true; break }
         Start-Sleep -Seconds 3
     }
     if (-not $finished) { throw "Completion notification did not replace the baseline." }
@@ -87,13 +98,20 @@ try {
     if ($registered) {
         try {
             Start-TestApp -PackageName 'neth.iecal.curbox.debug' | Out-Null
-            $ui = Wait-For-UI 'nav_focus|btn_learning|id/signIn' 15
-            if ($ui -notmatch 'id/signIn') {
-                if ($ui -notmatch 'btn_learning') {
-                    if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/nav_focus"' 'Focus')) { throw "Cleanup could not open Focus." }
-                    $ui = Wait-For-UI 'btn_learning' 10
+            $ui = Wait-For-UI 'nav_reducers|card_learning|id/dashboard' 15
+            if ($ui -notmatch 'id/dashboard') {
+                if ($ui -notmatch 'card_learning') {
+                    if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/nav_reducers"' 'Reducers')) { throw "Cleanup could not open Reducers." }
+                    $ui = Wait-For-UI 'card_learning|card_app_rules' 10
                 }
-                if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/btn_learning"' 'Learning')) { throw "Cleanup could not open Learning." }
+                for ($attempt = 0; $ui -notmatch 'card_learning' -and $attempt -lt 5; $attempt++) {
+                    Invoke-TestDeviceShell -Command 'input swipe 500 1400 500 450 350'
+                    $ui = Dump-UI
+                }
+                $card = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/card_learning"'
+                $nav = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/nav_reducers"'
+                if ($card.Found -and $nav.Found -and $card.Y -ge $nav.Y1) { Invoke-TestDeviceShell -Command 'input swipe 500 1400 500 450 350'; $ui = Dump-UI }
+                if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/card_learning"' 'Learning')) { throw "Cleanup could not open Learning." }
             }
             $ui = Wait-For-UI 'Stop watching' 15
             if (-not (Tap-Node $ui 'text="Stop watching"' 'Stop watching')) { throw "Could not stop the synthetic registration." }

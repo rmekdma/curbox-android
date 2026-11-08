@@ -19,12 +19,14 @@ class LearningScreenTest {
         }
         val screen = LearningScreen(api, store)
         screen.restore()
+        assertFalse(screen.signedIn)
         screen.refresh("20261105")
         assertEquals(0, calls)
         assertTrue(screen.loginRequired)
         screen.signIn("example", "example", "20261105")
         assertEquals(1, calls)
         assertFalse(screen.loginRequired)
+        assertTrue(screen.signedIn)
     }
 
     @Test fun `explicit sign in reopens old initial failures without losing reports or registrations`() {
@@ -192,6 +194,7 @@ class LearningAuthenticationTest {
         val screen = LearningScreen(api)
         screen.signIn("sample", "sample", "20261105")
         assertTrue(screen.state.loginRequired)
+        assertFalse(screen.signedIn)
         assertEquals(listOf(Subject.MATH), requested)
         screen.refresh("20261105")
         assertEquals(listOf(Subject.MATH), requested)
@@ -234,6 +237,7 @@ class LearningRestoreTest {
         first.signIn("sample", "sample", "20261105")
         val reopened = LearningScreen(api, store = store)
         reopened.restore()
+        assertTrue(reopened.signedIn)
         assertEquals(DailyReport(2, 4), reopened.state.reports["Child" to Subject.MATH]?.value)
         assertEquals(1, api.calls)
     }

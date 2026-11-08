@@ -43,27 +43,13 @@ object LearningNotifications {
             val key = child to subject
             val report = current.monitor.reports[key]
             val goal = current.state.goalsByAccount[current.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
-            val reportValue = report?.value
-            when {
-                goal == 0 -> context.getString(R.string.learning_checked_complete)
-                reportValue != null -> {
-                    val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
-                    val status = if (report.date != today) context.getString(R.string.learning_unknown)
-                        else context.getString(if (reportValue.count >= goal) R.string.learning_checked_complete else R.string.learning_incomplete)
-                    context.getString(R.string.learning_monitor_value, reportValue.count,
-                        java.text.DateFormat.getDateTimeInstance().format(java.util.Date(report.checkedAt ?: 0))) + " " + status
-                }
-                else -> context.getString(R.string.learning_unknown)
+            learningNotificationValue(report, goal, java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE),
+                context.getString(R.string.learning_unknown), context.getString(R.string.learning_notification_complete)) { count, target, complete ->
+                context.getString(if (complete) R.string.learning_notification_progress_complete else R.string.learning_notification_progress, count, target)
             }
         }
-        val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
-        val latest = current.monitor.latestAchievements[current.monitor.accountId to child]
-            ?.takeIf { current.monitor.reports[child to it]?.date == today }
-        val title = if (latest == null) child else context.getString(R.string.learning_achievement_title, child, context.getString(when (latest) {
-            Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english
-        }))
         val notification = NotificationCompat.Builder(context, "learning_achievements")
-            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(title)
+            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(child)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentText(details).setStyle(NotificationCompat.BigTextStyle().bigText(details))
             .setOngoing(true).setSilent(child != achievementChild).build()
@@ -82,5 +68,17 @@ internal fun learningNotificationDetails(
     return subjects.joinToString("\n") { subject ->
         val failure = (monitor.reports[child to subject]?.failure ?: monitor.catalogFailureFor(child))?.let(failureText).orEmpty()
         "${label(subject)}: ${value(subject)} $failure".trim()
+    }
+}
+
+internal fun learningNotificationValue(
+    report: neth.iecal.todo.ReportState?, goal: Int, today: String, unknown: String, complete: String,
+    progress: (Int, Int, Boolean) -> String
+): String {
+    val value = report?.value
+    return when {
+        goal == 0 -> complete
+        value == null || report.date != today -> unknown
+        else -> progress(value.count, goal, value.count >= goal)
     }
 }

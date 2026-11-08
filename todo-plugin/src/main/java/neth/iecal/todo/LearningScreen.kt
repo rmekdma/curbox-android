@@ -82,6 +82,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
     fun acceptMonitor(value: MonitorState) { monitor = value }
 
     val loginRequired: Boolean get() = state.loginRequired || (monitor.accountId == state.accountId && sessionRef != null && monitor.authenticationRequired(sessionRef))
+    internal val signedIn: Boolean get() = synchronized(lock) { session != null && sessionRef != null && !loginRequired }
 
     fun canRetryMonitor(childName: String, subject: Subject?): Boolean {
         if (loginRequired) return false

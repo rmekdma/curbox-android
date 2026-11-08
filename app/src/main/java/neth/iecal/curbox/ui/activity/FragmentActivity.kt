@@ -71,6 +71,8 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.EMAIL -> R.string.learning_email
             neth.iecal.todo.LearningText.PASSWORD -> R.string.learning_password
             neth.iecal.todo.LearningText.SIGN_IN -> R.string.learning_sign_in
+            neth.iecal.todo.LearningText.CHANGE_ACCOUNT -> R.string.learning_change_account
+            neth.iecal.todo.LearningText.CANCEL -> R.string.learning_cancel
             neth.iecal.todo.LearningText.RETRY -> R.string.learning_retry
             neth.iecal.todo.LearningText.UNKNOWN -> R.string.learning_unknown
             neth.iecal.todo.LearningText.EMPTY -> R.string.learning_empty
@@ -227,6 +229,7 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
         }
 
         when (selectedFragmentId) {
+            "learning",
             OnboardingFragment.FRAGMENT_ID,
             AccessibilityGuide.FRAGMENT_ID,
             LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID,
@@ -256,6 +259,7 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
                 bottomNav.visibility = android.view.View.GONE
                 
                 val fragment = when (selectedFragmentId) {
+                    "learning" -> neth.iecal.todo.LearningFragment()
                     OnboardingFragment.FRAGMENT_ID -> OnboardingFragment()
                     // Keep old deep links resolvable, but never recreate the coupled editor.
                     LEGACY_APP_BLOCKER_GROUPS_FRAGMENT_ID -> AppRuleGroupsFragment()

@@ -27,7 +27,9 @@ date selected on the screen. Learning goals do not change Curbox blocking rules.
   retaining registrations.
 - Each registered child has a status notification. A new achievement updates
   that child's notification; actual sound and heads up depend on Android and
-  the user's notification channel settings.
+  the user's notification channel settings. The title is the child name. Each
+  subject shows today's count and goal, with a check mark when complete. Zero
+  goals show a check mark; missing or older reports show as not checked.
 
 ## Boundaries and lifetime
 

@@ -27,11 +27,13 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, PREVIOUS_DATE, NEXT_DATE, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, PREVIOUS_DATE, NEXT_DATE, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
     private lateinit var screen: LearningScreen
+    private var changingAccount = false
+    private var showingLogin = false
     private var availability: LearningAvailability? = null
     private var availabilityJob: kotlinx.coroutines.Job? = null
     private val goalDrafts = mutableMapOf<Triple<String?, String, Subject>, String>()
@@ -64,6 +66,10 @@ class LearningFragment : Fragment() {
         b.email.hint = text(LearningText.EMAIL)
         b.password.hint = text(LearningText.PASSWORD)
         b.signIn.text = text(LearningText.SIGN_IN)
+        b.changeAccount.text = text(LearningText.CHANGE_ACCOUNT)
+        b.cancelAccountChange.text = text(LearningText.CANCEL)
+        b.changeAccount.setOnClickListener { changingAccount = true; render() }
+        b.cancelAccountChange.setOnClickListener { changingAccount = false; b.password.text.clear(); render() }
         b.retry.text = text(LearningText.RETRY)
         b.previousDate.text = text(LearningText.PREVIOUS_DATE)
         b.nextDate.text = text(LearningText.NEXT_DATE)
@@ -86,7 +92,13 @@ class LearningFragment : Fragment() {
             val password = b.password.text.toString()
             b.password.text.clear()
             val requested = date()
-            runRequest { screen.signIn(email, password, requested, onlyIfSelected = true) }
+            b.cancelAccountChange.isEnabled = false
+            runRequest(onComplete = {
+                binding?.cancelAccountChange?.isEnabled = true
+                if (screen.signedIn) changingAccount = false
+            }) {
+                screen.signIn(email, password, requested, onlyIfSelected = true)
+            }
         }
         b.retry.setOnClickListener { runRequest { screen.refresh(date(), onlyIfSelected = true) } }
         runRequest { screen.restore() }
@@ -133,7 +145,7 @@ class LearningFragment : Fragment() {
         runRequest { screen.refresh(requested, onlyIfSelected = true) }
     }
 
-    private fun runRequest(block: () -> Unit) {
+    private fun runRequest(onComplete: () -> Unit = {}, block: () -> Unit) {
         binding?.loading?.visibility = View.VISIBLE
         binding?.signIn?.isEnabled = false
         binding?.retry?.isEnabled = false
@@ -145,6 +157,7 @@ class LearningFragment : Fragment() {
                 binding?.loading?.visibility = View.GONE
                 binding?.signIn?.isEnabled = true
                 binding?.retry?.isEnabled = true
+                onComplete()
                 if (binding != null) render()
             }
         }
@@ -163,9 +176,25 @@ class LearningFragment : Fragment() {
         val b = binding ?: return
         val state = screen.state
         val selected = date()
+        val signedIn = screen.signedIn
+        val showLogin = !signedIn || changingAccount
+        if (showingLogin && !showLogin) {
+            val focused = b.root.findFocus()
+            focused?.clearFocus()
+            val input = requireContext().getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            input.hideSoftInputFromWindow(b.root.windowToken, 0)
+        }
+        showingLogin = showLogin
+        val loginVisibility = if (showLogin) View.VISIBLE else View.GONE
+        b.dashboard.visibility = if (showLogin) View.GONE else View.VISIBLE
+        b.changeAccount.visibility = if (signedIn && !changingAccount) View.VISIBLE else View.GONE
+        b.cancelAccountChange.visibility = if (signedIn && changingAccount) View.VISIBLE else View.GONE
+        b.email.visibility = loginVisibility
+        b.password.visibility = loginVisibility
+        b.signIn.visibility = loginVisibility
         b.selectedDate.text = selectedDate.toString()
         b.nextDate.isEnabled = selectedDate.isBefore(LocalDate.now(ZoneId.of("Asia/Seoul")))
-        b.status.text = when { screen.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); state.catalogCheckedAt == null -> text(LearningText.UNKNOWN); state.children.isEmpty() -> text(LearningText.EMPTY); else -> "" }
+        b.status.text = when { screen.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); showLogin -> ""; state.catalogCheckedAt == null -> text(LearningText.UNKNOWN); state.children.isEmpty() -> text(LearningText.EMPTY); else -> "" }
         b.retry.visibility = if (state.error && !screen.loginRequired) View.VISIBLE else View.GONE
         renderAvailability()
         var focused: Triple<String?, String, Subject>? = null
@@ -275,7 +304,7 @@ class LearningFragment : Fragment() {
         b.notificationSettings.visibility = if (status?.notificationsEnabled == false) View.VISIBLE else View.GONE
     }
 
-    override fun onDestroyView() { binding = null; super.onDestroyView() }
+    override fun onDestroyView() { binding = null; showingLogin = false; super.onDestroyView() }
 }
 
 
