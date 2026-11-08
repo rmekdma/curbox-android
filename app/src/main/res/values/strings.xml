@@ -1901,6 +1901,13 @@
     <string name="learning_interval">Check interval in minutes</string>
     <string name="learning_save_interval">Save</string>
     <string name="learning_invalid_interval">Enter a number above zero</string>
+    <string name="learning_subject_settings">Subject settings</string>
+    <string name="learning_confirm">Confirm</string>
+    <string name="learning_watching">Watching</string>
+    <string name="learning_not_watching">Not watching</string>
+    <string name="learning_watching_issue">Some checks need attention</string>
+    <string name="learning_watching_paused">Watching is paused</string>
+    <string name="learning_settings_changed">Settings changed. Close this and try again.</string>
     <string name="learning_monitor_start">Start watching</string>
     <string name="learning_monitor_stop">Stop watching</string>
     <string name="learning_notification_channel">Learning status</string>

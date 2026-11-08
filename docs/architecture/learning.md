@@ -5,6 +5,10 @@ supports sign in, goals, manual reports and date selection. Watching is enabled
 per child; the automatic monitor uses today in `Asia/Seoul`, regardless of the
 date selected on the screen. Learning goals do not change Curbox blocking rules.
 
+The dashboard opens the check interval and each child’s subject goals in separate
+settings dialogs. Goal changes are validated and saved together for the account,
+session and subject identities captured when the dialog opened.
+
 ## Monitoring behavior
 
 - Registration starts an initial check of subscribed subjects with positive

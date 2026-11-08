@@ -7,6 +7,9 @@ data class LearningState(val children: List<TodoChild> = emptyList(), val report
 
 enum class GoalStatus { UNKNOWN, INCOMPLETE, COMPLETE }
 
+/** Account and subject identities captured when goal settings are opened. */
+data class LearningGoalScope(val accountId: String, val sessionRef: String, val childName: String, val subjects: Map<Subject, String>)
+
 /** Failure scope authorized by one explicit dashboard refresh. */
 data class LearningRetryScope(val accountId: String, val sessionRef: String, val monitor: MonitorState)
 
@@ -76,6 +79,45 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             val goals = claim.state.goalsByAccount[account].orEmpty() + ((childName to subject) to value)
             val next = claim.state.copy(goalsByAccount = claim.state.goalsByAccount + (account to goals))
             if (!store.commit(claim.revision, next, claim.sessionRef)) return false
+            state = next
+            return true
+        }
+    }
+
+    private fun subjectIds(state: LearningState, monitor: MonitorState, childName: String): Map<Subject, String> {
+        val child = state.children.firstOrNull { it.name == childName } ?: return emptyMap()
+        val monitored = if (state.accountId != null && monitor.accountId == state.accountId)
+            monitor.children.firstOrNull { it.name == childName }?.userIds.orEmpty() else emptyMap()
+        return monitored + child.userIds
+    }
+
+    fun goalScope(childName: String): LearningGoalScope? = synchronized(lock) {
+        val account = state.accountId ?: return@synchronized null
+        val ref = sessionRef ?: return@synchronized null
+        if (session == null || loginRequired) return@synchronized null
+        val subjects = subjectIds(state, monitor, childName)
+        if (subjects.isEmpty()) return@synchronized null
+        LearningGoalScope(account, ref, childName, subjects)
+    }
+
+    /** Saves every goal together only if the original account, session and subjects still match. */
+    fun saveGoals(scope: LearningGoalScope, inputs: Map<Subject, String>): Boolean {
+        if (inputs.keys != scope.subjects.keys) return false
+        val values = inputs.mapValues { (_, input) ->
+            val value = input.trim()
+            if (!value.matches(Regex("[0-9]+"))) return false
+            value.toIntOrNull()?.takeIf { it in 0..99 } ?: return false
+        }
+        synchronized(lock) {
+            if (sessionRef != scope.sessionRef || state.accountId != scope.accountId || session == null || loginRequired) return false
+            val claim = store.claim()
+            if (claim.sessionRef != scope.sessionRef || claim.state.accountId != scope.accountId ||
+                subjectIds(claim.state, claim.monitor, scope.childName) != scope.subjects ||
+                (claim.monitor.accountId == scope.accountId && claim.monitor.authenticationRequired(scope.sessionRef))) return false
+            val goals = claim.state.goalsByAccount[scope.accountId].orEmpty() + values.mapKeys { scope.childName to it.key }
+            val next = claim.state.copy(goalsByAccount = claim.state.goalsByAccount + (scope.accountId to goals))
+            generation++
+            if (!store.commit(claim.revision, next, scope.sessionRef, scope.sessionRef)) return false
             state = next
             return true
         }

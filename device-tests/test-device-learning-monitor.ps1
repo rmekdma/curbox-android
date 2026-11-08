@@ -60,15 +60,15 @@ try {
     }
     if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/signIn"' 'Fake sign in')) { throw "Sign in not found." }
     $ui = Wait-For-UI 'Child1' 20
-    if ($ui -notmatch 'Child1' -or $ui -match 'Stop watching') { throw "Expected one unregistered synthetic child." }
-    if ($ui -notmatch 'text="5"' -or $ui -notmatch 'resource-id="neth.iecal.curbox.debug:id/intervalMinutes"[^>]*text="1"') {
-        # UI attributes may be reordered; check the interval and goal structurally below.
-        [xml]$doc = $ui
-        $interval = $doc.SelectSingleNode('//node[@resource-id="neth.iecal.curbox.debug:id/intervalMinutes"]')
-        if (-not $interval -or $interval.text -ne '1' -or -not $doc.SelectSingleNode('//node[@class="android.widget.EditText" and @text="5"]')) { throw "Set the synthetic Math goal to 5 and interval to 1 minute before running." }
-    }
+    if ($ui -notmatch 'Child1' -or $ui -match 'content-desc="Stop watching"') { throw "Expected one unregistered synthetic child." }
+    if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/learning_subject_settings"' 'Subject settings')) { throw "Subject settings not found." }
+    $ui = Wait-For-UI 'Subject settings' 10
+    [xml]$doc = $ui
+    if (-not $doc.SelectSingleNode('//node[@class="android.widget.EditText" and @text="5"]')) { throw "Set the synthetic Math goal to 5 before running." }
+    if (-not (Tap-Node $ui 'text="Cancel"' 'Cancel subject settings')) { throw "Cancel not found." }
+    $ui = Dump-UI
     $registered = $true
-    if (-not (Tap-Node $ui 'text="Start watching"' 'Start watching')) { $registered = $false; throw "Registration button not found." }
+    if (-not (Tap-Node $ui 'content-desc="Start watching"' 'Start watching')) { $registered = $false; throw "Registration button not found." }
     $wait = [Diagnostics.Stopwatch]::StartNew()
     $record = $null
     while ($wait.Elapsed.TotalSeconds -lt 40) {
@@ -114,7 +114,7 @@ try {
                 if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/card_learning"' 'Learning')) { throw "Cleanup could not open Learning." }
             }
             $ui = Wait-For-UI 'Stop watching' 15
-            if (-not (Tap-Node $ui 'text="Stop watching"' 'Stop watching')) { throw "Could not stop the synthetic registration." }
+            if (-not (Tap-Node $ui 'content-desc="Stop watching"' 'Stop watching')) { throw "Could not stop the synthetic registration." }
             $ui = Wait-For-UI 'Start watching' 15
             if ($ui -notmatch 'Start watching') { throw "Synthetic registration remains." }
         } catch { $cleanupErrors += $_.Exception.Message }

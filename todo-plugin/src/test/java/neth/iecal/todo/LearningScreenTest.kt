@@ -58,6 +58,62 @@ class LearningScreenTest {
         assertTrue(store.read().monitor.reportRetries.isEmpty())
     }
 
+    @Test fun `goal settings save all values atomically and reject invalid input`() {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m", Subject.ENGLISH to "e"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
+        }
+        val screen = LearningScreen(api, store)
+        screen.signIn("fake", "fake", "20261108")
+        val scope = requireNotNull(screen.goalScope("Child"))
+        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "100")))
+        assertEquals(5, screen.goal("Child", Subject.MATH))
+        assertEquals(8, screen.goal("Child", Subject.ENGLISH))
+        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "0")))
+        assertEquals(3, screen.goal("Child", Subject.MATH))
+        assertEquals(0, screen.goal("Child", Subject.ENGLISH))
+    }
+
+    @Test fun `goal dialog cannot write after session or subject identity changes`() {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
+        }
+        val screen = LearningScreen(api, store)
+        screen.signIn("fake", "fake", "20261108")
+        val scope = requireNotNull(screen.goalScope("Child"))
+        val claim = store.claim()
+        val changed = claim.state.copy(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "new"))))
+        assertTrue(store.commit(claim.revision, changed, claim.sessionRef, claim.sessionRef))
+        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3")))
+        assertTrue(store.read().state.goalsByAccount.isEmpty())
+        screen.signIn("fake", "fake", "20261108")
+        val oldSession = requireNotNull(screen.goalScope("Child"))
+        screen.signIn("fake", "fake", "20261108")
+        assertFalse(screen.saveGoals(oldSession, mapOf(Subject.MATH to "3")))
+        assertTrue(store.read().state.goalsByAccount.isEmpty())
+    }
+
+    @Test fun `goal dialog remains valid when watching registration changes`() {
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
+        }
+        val screen = LearningScreen(api)
+        screen.signIn("fake", "fake", "20261108")
+        val scope = requireNotNull(screen.goalScope("Child"))
+        screen.toggleMonitor("Child")
+        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3")))
+    }
+
     @Test fun `monitor authentication failure blocks manual refresh until sign in`() {
         val store = MemoryLearningStore()
         val session = TodoSession("account", "token")
