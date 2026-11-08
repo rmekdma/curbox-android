@@ -121,7 +121,8 @@ Run `device-tests/test-device-learning-monitor.ps1` on a dedicated device with
 `-LearningApkPath`, `-ExpectedApkSha256`, and `-BuildToolsDirectory` pointing to
 the verified fake debug APK, its SHA256, and Android build tools. Install that
 exact APK and the harmless API tester first, enable Curbox accessibility, and
-remove existing learning registrations. The test checks the installed APK and
+remove existing learning registrations, and set the Math goal to 5 and the check
+interval to 1 minute. The test checks the installed APK and
 fake markers before changing test state. `run-all-device-tests.ps1` skips this
 test unless those artifact arguments are supplied. The test checks Android
 notification fields, not audible sound or heads up display.

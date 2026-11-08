@@ -93,8 +93,14 @@ Describe "Device Test Common Helpers" {
             $script:DeviceTestShellOutputHandler = { param($command) '__ABSENT__' }
             (Get-LearningRegistrationCount) | Should Be 0
         }
+        It "accepts the empty serializer default and omitted null account fields" {
+            $script:DeviceTestShellOutputHandler = { param($command) '' }
+            (Get-LearningRegistrationCount) | Should Be 0
+            $script:DeviceTestShellOutputHandler = { param($command) '{"revision":0,"state":{"children":[],"reports":{}},"monitor":{"registrations":{}}}' }
+            (Get-LearningRegistrationCount) | Should Be 0
+        }
         It "fails closed on invalid data or mismatched accounts" {
-            foreach ($value in @('{', '{"state":{"accountId":"x"},"monitor":{"accountId":"y","registrations":{}}}')) {
+            foreach ($value in @('STATE: ', '{', '{"state":{"children":[],"reports":{}}}', '{"state":{"accountId":"x"},"monitor":{"accountId":"y","registrations":{}}}')) {
                 $script:DeviceTestShellOutputHandler = { param($command) $value }
                 $failed = $false
                 try { Get-LearningRegistrationCount | Out-Null } catch { $failed = $true }

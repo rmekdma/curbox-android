@@ -121,11 +121,11 @@ function Assert-LearningFakeApk([string]$ApkPath, [string]$ExpectedHash, [string
 }
 
 function Get-LearningRegistrationCount {
-    $raw = Get-TestDeviceShellOutput -Command "run-as neth.iecal.curbox.debug sh -c 'if [ -f files/datastore/learning-fake-state.json ]; then cat files/datastore/learning-fake-state.json; else echo __ABSENT__; fi'"
-    if ($raw.Trim() -eq '__ABSENT__') { return 0 }
+    $raw = Get-TestDeviceShellOutput -Command "run-as neth.iecal.curbox.debug sh -c 'if [ -f files/datastore/learning-fake-state.json ]; then if [ -s files/datastore/learning-fake-state.json ]; then printf STATE:; cat files/datastore/learning-fake-state.json; fi; else echo __ABSENT__; fi'"
+    if ($raw -ceq '' -or $raw.Trim() -eq '__ABSENT__') { return 0 }
+    if ($raw.StartsWith('STATE:')) { $raw = $raw.Substring(6) }
     try { $document = $raw | ConvertFrom-Json -ErrorAction Stop } catch { throw "Invalid fake learning state." }
     if (-not $document.state -or -not $document.monitor -or
-        -not $document.state.PSObject.Properties['accountId'] -or -not $document.monitor.PSObject.Properties['accountId'] -or
         -not $document.monitor.PSObject.Properties['registrations'] -or
         $document.monitor.registrations -isnot [pscustomobject] -or
         $document.state.accountId -cne $document.monitor.accountId) { throw "Unsupported fake learning state." }
