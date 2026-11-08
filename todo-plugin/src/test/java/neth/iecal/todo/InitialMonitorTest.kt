@@ -33,7 +33,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore(); screen.toggleMonitor("First"); screen.toggleMonitor("Second")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
         try {
@@ -66,7 +66,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore(); screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
         try {
@@ -102,7 +102,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -139,7 +139,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -171,7 +171,7 @@ class InitialMonitorTest {
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
         val effects = java.util.Collections.synchronizedList(mutableListOf<Subject>())
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
@@ -205,7 +205,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -241,7 +241,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -273,7 +273,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val effects = java.util.Collections.synchronizedList(mutableListOf<Subject>())
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, now = wall::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
@@ -308,7 +308,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, now = wall::get, elapsed = elapsed::get).run(host) }
@@ -351,7 +351,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val effects = java.util.Collections.synchronizedList(mutableListOf<Int>())
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { doc, _ ->
@@ -390,7 +390,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val permission = MutableStateFlow(NotificationPermission(true))
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         fun monitor() = InitialMonitor(api, store, permission, { true }, { _, _ -> }, now = wall::get)
@@ -436,7 +436,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -472,7 +472,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -504,7 +504,7 @@ class InitialMonitorTest {
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
         val effects = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Subject>>())
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, childName, subject, _ -> effects.add(childName to subject) }).run(host) }
@@ -542,7 +542,7 @@ class InitialMonitorTest {
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
         val effects = java.util.Collections.synchronizedList(mutableListOf<Subject>())
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
@@ -576,7 +576,7 @@ class InitialMonitorTest {
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
         val effects = java.util.Collections.synchronizedList(mutableListOf<Subject>())
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
@@ -616,7 +616,7 @@ class InitialMonitorTest {
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
         val effects = java.util.Collections.synchronizedList(mutableListOf<String>())
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         screen.toggleMonitor("Two")
@@ -661,7 +661,7 @@ class InitialMonitorTest {
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
         val authorized = kotlinx.coroutines.CompletableDeferred<Boolean>()
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, _, valid ->
@@ -702,7 +702,7 @@ class InitialMonitorTest {
         val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
         val release = kotlinx.coroutines.CompletableDeferred<Unit>()
         val authorized = kotlinx.coroutines.CompletableDeferred<Boolean>()
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, _, valid ->
@@ -742,7 +742,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         screen.toggleMonitor("Two")
@@ -780,7 +780,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get).run(host) }
@@ -823,7 +823,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get).run(host) }
@@ -863,7 +863,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -897,7 +897,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = if (fresh) observations.value else observations.value.copy(foreground = neth.iecal.plugin.Foreground.Unknown)
         }
         val clock = java.util.concurrent.atomic.AtomicLong(1000)
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get).run(host) }
@@ -944,7 +944,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -980,7 +980,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = children
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         screen.toggleMonitor("Two")
@@ -1008,7 +1008,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -1043,7 +1043,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -1078,7 +1078,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -1114,7 +1114,7 @@ class InitialMonitorTest {
                 return DailyReport(userId.toInt(), 1)
             }
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         screen.toggleMonitor("Two")
@@ -1145,7 +1145,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = children
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(userId.toInt(), 1)
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         screen.toggleMonitor("Two")
@@ -1181,7 +1181,7 @@ class InitialMonitorTest {
                 return DailyReport(userId.toInt(), 1)
             }
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         screen.toggleMonitor("Two")
@@ -1223,7 +1223,7 @@ class InitialMonitorTest {
                 return DailyReport(count, 1)
             }
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("One")
         store.updateMonitor { it.monitor.copy(reports = mapOf(("One" to Subject.MATH) to ReportState(failed = true, failure = LearningFailure.NETWORK)),
@@ -1271,7 +1271,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
@@ -1301,7 +1301,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val permission = MutableStateFlow(NotificationPermission(false))
-        val screen = LearningScreen(api, store); screen.restore(); screen.toggleMonitor("Sample")
+        val screen = testLearningScreen(api, store); screen.restore(); screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, permission, { permission.value.granted }, { _, _ -> }).run(host) }
         try {
             withTimeout(5000) { store.changes.first { it.monitor.ownerEpoch > 0 } }
@@ -1335,7 +1335,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val permission = MutableStateFlow(NotificationPermission(true))
-        val screen = LearningScreen(api, store); screen.restore(); screen.toggleMonitor("Sample")
+        val screen = testLearningScreen(api, store); screen.restore(); screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, permission, { permission.value.granted }, { _, _ -> }).run(host) }
         try {
             withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.ENGLISH]?.value != null } }
@@ -1371,7 +1371,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val permission = MutableStateFlow(NotificationPermission(true))
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, permission, { permission.value.granted }, { _, _ -> }).run(host) }
@@ -1410,7 +1410,7 @@ class InitialMonitorTest {
             override suspend fun refreshObservation() = observations.value
         }
         val published = java.util.Collections.synchronizedList(mutableListOf<Int>())
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { doc, _ ->
@@ -1449,7 +1449,7 @@ class InitialMonitorTest {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
             override suspend fun refreshObservation() = observations.value
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }

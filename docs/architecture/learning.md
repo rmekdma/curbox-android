@@ -1,9 +1,8 @@
 # Learning feature
 
 Curbox hosts the Todo learning screen and monitor in the same APK. The screen
-supports sign in, goals, manual reports and date selection. Watching is enabled
-per child; the automatic monitor uses today in `Asia/Seoul`, regardless of the
-date selected on the screen. Learning goals do not change Curbox blocking rules.
+supports sign in, goals, manual reports for today. Watching is enabled
+per child; the automatic monitor uses today in `Asia/Seoul`, as does the dashboard. Learning goals do not change Curbox blocking rules.
 
 The dashboard opens the check interval and each child’s subject goals in separate
 settings dialogs. Goal changes are validated and saved together for the account,
@@ -24,7 +23,7 @@ session and subject identities captured when the dialog opened.
   notification; a baseline or completion caused by lowering a goal is silent.
 - An initial catalog or report failure waits for an explicit retry; an explicit
   sign in can also start a new initial check. Pulling down on the signed in
-  dashboard refreshes the selected date and explicitly retries eligible failed
+  dashboard refreshes today and explicitly retries eligible failed
   watching checks for today. Failure state survives restart,
   date or permission changes, and unregistering and registering the same child.
   A later temporary report failure after a valid baseline may retry on a

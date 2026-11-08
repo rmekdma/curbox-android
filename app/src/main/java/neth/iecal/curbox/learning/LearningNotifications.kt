@@ -31,6 +31,7 @@ object LearningNotifications {
         if (children.isEmpty()) return@publisher
         manager.createNotificationChannel(NotificationChannel("learning_achievements", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_HIGH))
         for (child in children) {
+        val checkRanges = mutableListOf<IntRange>()
         val details = learningNotificationDetails(current.monitor, child,
             { subject -> context.getString(when (subject) { Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english }) },
             { failure -> context.getString(when (failure) {
@@ -39,7 +40,7 @@ object LearningNotifications {
                 neth.iecal.todo.LearningFailure.INVALID_DATA -> R.string.learning_invalid_error
                 neth.iecal.todo.LearningFailure.STORAGE -> R.string.learning_storage_error
                 neth.iecal.todo.LearningFailure.AUTHENTICATION -> R.string.learning_login_required
-            }) }) { subject ->
+            }) }, { start, end -> checkRanges.add(start until end) }) { subject ->
             val key = child to subject
             val report = current.monitor.reports[key]
             val goal = current.state.goalsByAccount[current.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
@@ -48,10 +49,15 @@ object LearningNotifications {
                 context.getString(if (complete) R.string.learning_notification_progress_complete else R.string.learning_notification_progress, count, target)
             }
         }
+        val styledDetails = android.text.SpannableString(details).apply {
+            checkRanges.forEach { range ->
+                setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.rgb(46, 125, 50)), range.first, range.last + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
         val notification = NotificationCompat.Builder(context, "learning_achievements")
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(child)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentText(details).setStyle(NotificationCompat.BigTextStyle().bigText(details))
+            .setContentText(styledDetails).setStyle(NotificationCompat.BigTextStyle().bigText(styledDetails))
             .setOngoing(true).setSilent(child != achievementChild).build()
         if (permission.value == expected && expected.granted && notifications.areNotificationsEnabled() && (child != achievementChild || stillValid())) notifications.notify(tag(child), 0x4c454152, notification)
         }
@@ -61,14 +67,22 @@ object LearningNotifications {
 internal fun learningNotificationDetails(
     monitor: neth.iecal.todo.MonitorState, child: String,
     label: (Subject) -> String, failureText: (neth.iecal.todo.LearningFailure) -> String,
-    value: (Subject) -> String
+    checkRange: (Int, Int) -> Unit = { _, _ -> }, value: (Subject) -> String
 ): String {
     val subjects = monitor.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty()
     if (subjects.isEmpty()) return monitor.catalogFailureFor(child)?.let(failureText).orEmpty()
-    return subjects.joinToString("\n") { subject ->
+    val result = StringBuilder()
+    for (subject in subjects) {
+        if (result.isNotEmpty()) result.append('\n')
         val failure = (monitor.reports[child to subject]?.failure ?: monitor.catalogFailureFor(child))?.let(failureText).orEmpty()
-        "${label(subject)}: ${value(subject)} $failure".trim()
+        result.append(label(subject)).append(": ")
+        val progress = value(subject)
+        val start = result.length
+        result.append(progress)
+        progress.forEachIndexed { index, char -> if (char == '✓') checkRange(start + index, start + index + 1) }
+        if (failure.isNotEmpty()) result.append(' ').append(failure)
     }
+    return result.toString()
 }
 
 internal fun learningNotificationValue(

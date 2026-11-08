@@ -51,7 +51,7 @@ class MonitorOwnershipTest {
                 return DailyReport(2, 1)
             }
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val published = Collections.synchronizedList(mutableListOf<Int>())
@@ -114,7 +114,7 @@ class MonitorOwnershipTest {
                 return DailyReport(if (subject == Subject.KOREAN && koreanCalls.incrementAndGet() > 1) 6 else 3, 2)
             }
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val date = LocalDate.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.BASIC_ISO_DATE)
@@ -164,7 +164,7 @@ class MonitorOwnershipTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(count.get(), 1)
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val effects = Collections.synchronizedList(mutableListOf<Subject>())
@@ -198,7 +198,7 @@ class MonitorOwnershipTest {
                 return DailyReport(2, 1)
             }
         }
-        val screen = LearningScreen(api, store)
+        val screen = testLearningScreen(api, store)
         screen.restore()
         screen.toggleMonitor("Sample")
         val permission = MutableStateFlow(NotificationPermission(true))

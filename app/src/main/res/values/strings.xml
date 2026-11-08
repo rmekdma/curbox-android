@@ -1886,13 +1886,13 @@
     <string name="learning_korean">Korean</string>
     <string name="learning_math">Math</string>
     <string name="learning_english">English</string>
+    <string name="learning_zero_goal">0/0 ✓</string>
+    <string name="learning_progress">%1$d/%2$d · %3$d min</string>
+    <string name="learning_progress_complete">%1$d/%2$d ✓ · %3$d min</string>
+    <string name="learning_last_value">Last check: %1$s</string>
     <string name="learning_report">Items: %1$d. Minutes: %2$d. Date: %3$s. Checked: %4$s.</string>
     <string name="learning_last_report">Last check. Items: %1$d. Minutes: %2$d. Date: %3$s. Checked: %4$s. Could not update.</string>
-    <string name="learning_previous_date">Previous</string>
-    <string name="learning_next_date">Next</string>
     <string name="learning_refresh">Refresh</string>
-    <string name="learning_pull_help">Pull down to refresh this date and retry today’s watching checks.</string>
-    <string name="learning_selected_report">Selected date: %1$s %2$s</string>
     <string name="learning_goal">Learning goal</string>
     <string name="learning_save_goal">Save</string>
     <string name="learning_invalid_goal">Enter a number from 0 to 99</string>

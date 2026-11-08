@@ -14,19 +14,18 @@ data class LearningGoalScope(val accountId: String, val sessionRef: String, val 
 data class LearningRetryScope(val accountId: String, val sessionRef: String, val monitor: MonitorState)
 
 /** Synchronous screen operations; callers run them off the main thread. */
-class LearningScreen(private val api: TodoApi, private val store: LearningStore = MemoryLearningStore(), private val now: () -> Long = System::currentTimeMillis) {
+class LearningScreen(private val api: TodoApi, private val store: LearningStore = MemoryLearningStore(), private val isCurrentDate: ((String) -> Boolean)? = null, private val now: () -> Long = System::currentTimeMillis) {
     @Volatile var state = LearningState()
         private set
     @Volatile var monitor = MonitorState()
         private set
-    @Volatile var selectedDate: String? = null
-        private set
+    private fun dateIsCurrent(date: String): Boolean = isCurrentDate?.invoke(date)
+        ?: (date == java.time.Instant.ofEpochMilli(now()).atZone(java.time.ZoneId.of("Asia/Seoul")).toLocalDate().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE))
+
     private val lock = Any()
     private var generation = 0L
     private var session: TodoSession? = null
     private var sessionRef: String? = null
-
-    fun selectDate(date: String) = synchronized(lock) { selectedDate = date; generation++ }
 
     fun goal(childName: String, subject: Subject): Int = state.goalsByAccount[state.accountId]?.get(childName to subject) ?: when (subject) {
         Subject.KOREAN -> 6
@@ -239,8 +238,8 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         } catch (e: Exception) { storageFailure() }
     }
 
-    fun signIn(email: String, password: String, date: String, onlyIfSelected: Boolean = false) {
-        val local = synchronized(lock) { if (onlyIfSelected && selectedDate != date) return; selectedDate = date; session = null; sessionRef = null; ++generation }
+    fun signIn(email: String, password: String, date: String) {
+        val local = synchronized(lock) { session = null; sessionRef = null; ++generation }
         val claim = store.claim()
         try {
             val authenticated = api.signIn(email, password)
@@ -265,11 +264,11 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         }
     }
 
-    fun refresh(date: String, onlyIfSelected: Boolean = false, includeFailed: Boolean = false, expectedSessionRef: String? = null) {
+    fun refresh(date: String, includeFailed: Boolean = false, expectedSessionRef: String? = null) {
         val local: Long
         val current: TodoSession
         val ref: String
-        synchronized(lock) { if (onlyIfSelected && selectedDate != date || expectedSessionRef != null && sessionRef != expectedSessionRef) return; selectedDate = date; current = session ?: return; ref = sessionRef ?: return; local = ++generation }
+        synchronized(lock) { if (expectedSessionRef != null && sessionRef != expectedSessionRef) return; current = session ?: return; ref = sessionRef ?: return; local = ++generation }
         val claim = store.claim()
         if (claim.sessionRef != ref) { restore(); return }
         if (claim.monitor.accountId == claim.state.accountId && claim.monitor.authenticationRequired(ref)) { monitor = claim.monitor; return }
@@ -283,7 +282,6 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         val userId: String
         synchronized(lock) {
             if (goal(childName, subject) == 0) return
-            selectedDate = date
             current = session ?: return
             ref = sessionRef ?: return
             userId = state.children.firstOrNull { it.name == childName }?.userIds?.get(subject) ?: return
@@ -300,7 +298,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             synchronized(lock) { (state.reports[key] ?: ReportState(date = date)).copy(failed = true, failure = e.kind) }
         }
         synchronized(lock) {
-            if (local != generation) return
+            if (local != generation || !dateIsCurrent(date)) return
             val next = state.copy(reports = state.reports + (key to result), loginRequired = authFailure)
             val nextRef = if (authFailure) null else ref
             if (!store.commit(claim.revision, next, nextRef, ref)) return
@@ -338,7 +336,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
                 }
             }
             synchronized(lock) {
-                if (local != generation) return
+                if (local != generation || !dateIsCurrent(date)) return
                 val next = state.copy(reports = state.reports + (key to result), loginRequired = authFailure)
                 val nextRef = if (authFailure) null else ref
                 if (!store.commit(revision, next, nextRef, ref)) return
