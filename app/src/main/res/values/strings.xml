@@ -1886,9 +1886,10 @@
     <string name="learning_korean">Korean</string>
     <string name="learning_math">Math</string>
     <string name="learning_english">English</string>
-    <string name="learning_zero_goal">0/0 ✓</string>
+    <string name="learning_zero_goal">✓</string>
     <string name="learning_progress">%1$d/%2$d · %3$d min</string>
     <string name="learning_progress_complete">%1$d/%2$d ✓ · %3$d min</string>
+    <string name="learning_last_progress">%1$d · %2$d min</string>
     <string name="learning_last_value">Last check: %1$s</string>
     <string name="learning_report">Items: %1$d. Minutes: %2$d. Date: %3$s. Checked: %4$s.</string>
     <string name="learning_last_report">Last check. Items: %1$d. Minutes: %2$d. Date: %3$s. Checked: %4$s. Could not update.</string>

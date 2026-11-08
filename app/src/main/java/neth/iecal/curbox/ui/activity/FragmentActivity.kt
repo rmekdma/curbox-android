@@ -84,6 +84,7 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.ZERO_GOAL -> R.string.learning_zero_goal
             neth.iecal.todo.LearningText.PROGRESS -> R.string.learning_progress
             neth.iecal.todo.LearningText.PROGRESS_COMPLETE -> R.string.learning_progress_complete
+            neth.iecal.todo.LearningText.LAST_PROGRESS -> R.string.learning_last_progress
             neth.iecal.todo.LearningText.LAST_VALUE -> R.string.learning_last_value
             neth.iecal.todo.LearningText.RETRY -> R.string.learning_retry
             neth.iecal.todo.LearningText.UNKNOWN -> R.string.learning_unknown

@@ -27,7 +27,7 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, WATCHING_PAUSED, WATCHING_ISSUE, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, LAST_VALUE }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, WATCHING_PAUSED, WATCHING_ISSUE, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, LAST_VALUE, LAST_PROGRESS }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
@@ -245,14 +245,17 @@ class LearningFragment : Fragment() {
                 val report = state.reports[child.name to subject]
                 val value = report?.value?.takeIf { report.date == selected }
                 val goal = screen.goal(child.name, subject)
-                val description = if (value == null && goal == 0) text(LearningText.ZERO_GOAL)
-                else if (value == null) {
-                    if (report?.failed == true) failureText(report.failure) else text(LearningText.UNKNOWN)
-                } else {
-                    val progress = text(if (value.count >= goal) LearningText.PROGRESS_COMPLETE else LearningText.PROGRESS, value.count, goal, value.minutes)
-                    if (report.failed) text(LearningText.LAST_VALUE, progress) else progress
+                if (goal == 0) {
+                    content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.ZERO_GOAL) })
                 }
-                content.addView(TextView(requireContext()).apply { text = description })
+                val description = if (value == null) {
+                    if (report?.failed == true) failureText(report.failure) else if (goal == 0) "" else text(LearningText.UNKNOWN)
+                } else if (report.failed || goal == 0) {
+                    text(LearningText.LAST_VALUE, text(LearningText.LAST_PROGRESS, value.count, value.minutes))
+                } else {
+                    text(if (value.count >= goal) LearningText.PROGRESS_COMPLETE else LearningText.PROGRESS, value.count, goal, value.minutes)
+                }
+                if (description.isNotEmpty()) content.addView(TextView(requireContext()).apply { text = description })
                 val monitored = screen.monitor.reports[child.name to subject]
                 if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()) {
                     val today = LocalDate.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.BASIC_ISO_DATE)
@@ -276,7 +279,7 @@ class LearningFragment : Fragment() {
                         content.addView(TextView(requireContext()).apply { text = failureText(monitored.failure) })
                     }
                 }
-                if (report?.failed == true && (value != null || goal == 0)) content.addView(TextView(requireContext()).apply { text = failureText(report.failure) })
+                if (report?.failed == true && value != null) content.addView(TextView(requireContext()).apply { text = failureText(report.failure) })
             }
         }
         updateChildStatuses()
