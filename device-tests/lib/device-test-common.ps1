@@ -69,6 +69,93 @@ function Write-Fail([string]$Msg) {
     Write-Host "[FAIL] $Msg" -ForegroundColor Red
 }
 
+function Test-ApprovedLearningApk([string]$ExpectedHash, [string]$ArtifactHash, [string]$InstalledHash, [string]$Signer, [string]$Manifest, [string]$Dex) {
+    $expectedSigner = "2429a67995d6e0a03312ff8f67d7df53c40dbdeb86e454d62f87d8e8243e4c6a"
+    return ($ExpectedHash -match '^[0-9a-fA-F]{64}$' -and $ArtifactHash -eq $ExpectedHash -and
+        $InstalledHash -eq $ExpectedHash -and $Signer -eq $expectedSigner -and
+        $Manifest.Contains('android:debuggable(0x0101000f)=(type 0x12)0xffffffff') -and
+        $Manifest.Contains('Ticket19DebugAppComponentFactory') -and
+        $Manifest.Contains('SyntheticFixtureProvider') -and $Manifest.Contains('neth.iecal.curbox.debug.synthetic.fixture') -and
+        $Manifest.Contains('android.permission.DUMP') -and $Dex.Contains('LearningComposition$createApi$1') -and
+        $Dex.Contains('SyntheticFixtureProvider') -and $Dex.Contains('neth.iecal.curbox.apitester') -and
+        -not $Dex.Contains('https://api.todomath.com'))
+}
+
+function Assert-LearningFakeApk([string]$ApkPath, [string]$ExpectedHash, [string]$BuildToolsDirectory) {
+    if (-not (Test-Path -LiteralPath $ApkPath -PathType Leaf)) { throw "Fake debug APK not found." }
+    $aapt = Join-Path $BuildToolsDirectory "aapt.exe"
+    $signerTool = Join-Path $BuildToolsDirectory "apksigner.bat"
+    if (-not (Test-Path -LiteralPath $aapt -PathType Leaf) -or -not (Test-Path -LiteralPath $signerTool -PathType Leaf)) { throw "Android build tools not found." }
+    $packagePath = Get-TestDeviceShellOutput -Command "pm path neth.iecal.curbox.debug"
+    if ($packagePath -notmatch '^package:(/data/app/[A-Za-z0-9_./~=-]+/base\.apk)$') { throw "Cannot identify installed Curbox APK." }
+    $installedPath = $Matches[1]
+    $installedOutput = Get-TestDeviceShellOutput -Command "sha256sum $installedPath"
+    if ($installedOutput -notmatch '^([0-9a-fA-F]{64})\s') { throw "Cannot hash installed Curbox APK." }
+    $installedHash = $Matches[1]
+    $artifactHash = (Get-FileHash -LiteralPath $ApkPath -Algorithm SHA256).Hash
+    $manifest = (& $aapt dump xmltree $ApkPath AndroidManifest.xml | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect APK manifest." }
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $signerOutput = (& $signerTool verify --print-certs $ApkPath 2>$null | Out-String)
+        $signerExitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousErrorPreference }
+    if ($signerExitCode -ne 0 -or $signerOutput -notmatch 'Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]{64})') { throw "Cannot verify APK signer." }
+    $signer = $Matches[1]
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $ApkPath).Path)
+    try {
+        $dex = New-Object System.Text.StringBuilder
+        $entries = @($archive.Entries | Where-Object { $_.FullName -match '^classes[0-9]*\.dex$' })
+        if ($entries.Count -eq 0) { throw "APK contains no DEX." }
+        foreach ($entry in $entries) {
+            $stream = $entry.Open()
+            try {
+                $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::GetEncoding(28591))
+                try { [void]$dex.Append($reader.ReadToEnd()) } finally { $reader.Dispose() }
+            } finally { $stream.Dispose() }
+        }
+    } finally { $archive.Dispose() }
+    if (-not (Test-ApprovedLearningApk $ExpectedHash $artifactHash $installedHash $signer $manifest $dex.ToString())) { throw "Installed APK did not pass fake debug identity checks." }
+}
+
+function Get-LearningRegistrationCount {
+    $raw = Get-TestDeviceShellOutput -Command "run-as neth.iecal.curbox.debug sh -c 'if [ -f files/datastore/learning-fake-state.json ]; then cat files/datastore/learning-fake-state.json; else echo __ABSENT__; fi'"
+    if ($raw.Trim() -eq '__ABSENT__') { return 0 }
+    try { $document = $raw | ConvertFrom-Json -ErrorAction Stop } catch { throw "Invalid fake learning state." }
+    if (-not $document.state -or -not $document.monitor -or
+        -not $document.state.PSObject.Properties['accountId'] -or -not $document.monitor.PSObject.Properties['accountId'] -or
+        -not $document.monitor.PSObject.Properties['registrations'] -or
+        $document.monitor.registrations -isnot [pscustomobject] -or
+        $document.state.accountId -cne $document.monitor.accountId) { throw "Unsupported fake learning state." }
+    $count = @($document.monitor.registrations.PSObject.Properties).Count
+    if ($count -eq 0 -and $document.monitor.childName) { return 1 }
+    return $count
+}
+
+function Get-LearningNotifications {
+    $dump = Get-TestDeviceShellOutput -Command "dumpsys notification --noredact"
+    if ($dump -notmatch '(?ms)^  Notification List:\s*\r?\n(.*?)(?=^  \S|\z)') { throw "Unsupported notification dump format." }
+    $active = $Matches[1]
+    foreach ($record in ($active -split '(?m)(?=^    NotificationRecord\()')) {
+        if ($record -match '(?s)^\s*NotificationRecord\([^\r\n]*pkg=neth\.iecal\.curbox\.debug\s[^\r\n]*id=(-?\d+)\s+tag=(learning:[^\s]+)') {
+            [PSCustomObject]@{ Id = $Matches[1]; Tag = $Matches[2]; Text = $record }
+        }
+    }
+}
+
+function Set-LearningFixture([string]$Json) {
+    if ($Json -notmatch '^[A-Za-z0-9{},:"_\[\] ]+$') { throw "Invalid synthetic fixture characters." }
+    $output = Get-TestDeviceShellOutput -Command "content call --uri content://neth.iecal.curbox.debug.synthetic.fixture --method write --arg '$Json'"
+    if ($output -notmatch 'ok=true') { throw "Synthetic fixture write failed: $output" }
+}
+
+function Reset-LearningFixture {
+    $output = Get-TestDeviceShellOutput -Command "content call --uri content://neth.iecal.curbox.debug.synthetic.fixture --method reset"
+    if ($output -notmatch 'ok=true') { throw "Synthetic fixture reset failed: $output" }
+}
+
 function Assert-AdbDevice {
     $device = (adb devices | Select-String -Pattern "device$")
     if (-not $device) {

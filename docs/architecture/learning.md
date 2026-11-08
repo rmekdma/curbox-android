@@ -109,10 +109,19 @@ notifications and recovery using fake data. Record the Android version and
 what was actually observed: a fixture response alone does not establish sound,
 heads up, reboot behavior or behavior on another Android version. Existing
 device test settings backup does not restore learning accounts or registrations;
-do not treat it as a learning data backup. For an end to end check, use an
-isolated fake environment, such as a dedicated emulator, or a recovery method
-that understands learning state. One useful flow is to register a synthetic
+do not treat it as a learning data backup. Run the learning device test only on
+a dedicated test device: it changes fake learning data and does not restore prior
+learning accounts or registrations. One useful flow is to register a synthetic
 child with Math at 2 of 5 and observe a silent baseline, change the fixture to
 5 of 5, put the harmless API tester in the foreground as the configured subject
 app, wait for the configured regular interval, and verify completion in the
 same child's notification. Existing unit tests cover other policy boundaries.
+
+Run `device-tests/test-device-learning-monitor.ps1` on a dedicated device with
+`-LearningApkPath`, `-ExpectedApkSha256`, and `-BuildToolsDirectory` pointing to
+the verified fake debug APK, its SHA256, and Android build tools. Install that
+exact APK and the harmless API tester first, enable Curbox accessibility, and
+remove existing learning registrations. The test checks the installed APK and
+fake markers before changing test state. `run-all-device-tests.ps1` skips this
+test unless those artifact arguments are supplied. The test checks Android
+notification fields, not audible sound or heads up display.
