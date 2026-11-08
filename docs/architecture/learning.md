@@ -14,16 +14,17 @@ date selected on the screen. Learning goals do not change Curbox blocking rules.
 - Regular checks require an unlocked screen and a confirmed foreground subject
   app. They exclude unregistered children, unsubscribed subjects, completed
   goals and zero goals. Initial and regular report work is serialized and shares
-  the configured interval; an initial report consumes that interval.
+  the configured interval; an initial check consumes the common interval.
 - A zero goal is locally complete without a report. An unknown report is not a
   zero count. A later incomplete to complete transition requests an achievement
   notification; a baseline or completion caused by lowering a goal is silent.
-- An initial catalog or report failure waits for an explicit retry. Its failure
-  state survives restart, date or permission changes, and unregistering and
-  registering the same child. A later temporary report failure after a valid
-  baseline may retry on a subsequent eligible cycle. Authentication failure
-  requires sign in again. Missing accessibility or notification permission
-  pauses monitoring while retaining registrations.
+- An initial catalog or report failure waits for an explicit retry; an explicit
+  sign in can also start a new initial check. Failure state survives restart,
+  date or permission changes, and unregistering and registering the same child.
+  A later temporary report failure after a valid baseline may retry on a
+  subsequent eligible cycle. Authentication failure requires sign in again.
+  Missing accessibility or notification permission pauses monitoring while
+  retaining registrations.
 - Each registered child has a status notification. A new achievement updates
   that child's notification; actual sound and heads up depend on Android and
   the user's notification channel settings.
@@ -40,8 +41,8 @@ The UI runs in the main process. `AppBlockerService` starts and cancels the
 monitor in `:app_blocker_service`; `LearningServiceHost` supplies observations.
 The host refreshes observations on a worker. Unknown foreground, screen off,
 lock or failed observation cannot establish a subject app for regular checks.
-The observation is current state, not an event history. No callback by itself
-does not prove the service is broken. The monitor assumes a single full screen
+The observation is current state, not an event history. Callback silence alone
+does not establish disconnection. The monitor assumes a single full screen
 app; split screen and multiple window focus selection are not supported.
 
 `:todo-plugin` owns learning UI, API and report handling, monitor policy and
@@ -111,5 +112,7 @@ device test settings backup does not restore learning accounts or registrations;
 do not treat it as a learning data backup. For an end to end check, use an
 isolated fake environment, such as a dedicated emulator, or a recovery method
 that understands learning state. One useful flow is to register a synthetic
-child, observe an initial failure, retry it, and verify the displayed status
-and child notification. Existing unit tests cover the other policy boundaries.
+child with Math at 2 of 5 and observe a silent baseline, change the fixture to
+5 of 5, put the harmless API tester in the foreground as the configured subject
+app, wait for the configured regular interval, and verify completion in the
+same child's notification. Existing unit tests cover other policy boundaries.
