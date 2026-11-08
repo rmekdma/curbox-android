@@ -1,12 +1,22 @@
 # Learning feature
 
-Curbox hosts the Todo learning screen and monitor in the same APK. The screen
+Curbox hosts the TODO School screen and monitor in the same APK. The screen
 supports sign in, goals, manual reports for today. Watching is enabled
 per child; the automatic monitor uses today in `Asia/Seoul`, as does the dashboard. Learning goals do not change Curbox blocking rules.
 
 The dashboard opens the check interval and each child’s subject goals in separate
 settings dialogs. Goal changes are validated and saved together for the account,
-session and subject identities captured when the dialog opened.
+session and subject identities captured when the dialog opened. All three subject
+goals can be configured, including unsubscribed subjects; saving a goal does
+not add a subscription or report request.
+
+The dashboard uses today in Seoul and has no date selector. Each subject row
+shows the newest available report for today from manual checks or the same
+account's monitor, with the count and relative check time from that same report.
+Older values are identified as previous checks. A selected successful report
+at its goal shows a green check; a zero goal shows a local check without a
+fabricated count. Manual and automatic errors are labeled separately. The
+relative time updates without rebuilding the settings dialog.
 
 ## Monitoring behavior
 
@@ -34,7 +44,8 @@ session and subject identities captured when the dialog opened.
   that child's notification; actual sound and heads up depend on Android and
   the user's notification channel settings. The title is the child name. Each
   subject shows today's count and goal, with a check mark when complete. Zero
-  goals show a check mark; missing or older reports show as not checked.
+  goals show a check mark; missing or older reports show as not checked. A
+  failed report does not show a completion check for a positive goal.
 
 ## Boundaries and lifetime
 
