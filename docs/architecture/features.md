@@ -28,6 +28,7 @@ Broadcast actions use companion constants (e.g. `AppBlocker.INTENT_ACTION_REFRES
 - `anti_stimulants/`: `AutoDnd`, `GrayScaleFilter`, and `MindfulMessage`. DND state requests are aggregated via `AppBlockerService.syncDndState()`.
 - `hardcoded/`: View IDs and per-app configuration for reel apps and browsers. Never inline view IDs in feature code.
 - `api/`: Exported AIDL service, user approval flows, and auth storage. See `docs/CURBOX_API.md` and `:apitester`.
+- Learning: Todo screen, monitoring and internal host contract. See [learning.md](learning.md).
 
 ## User-facing blocking screens
 
