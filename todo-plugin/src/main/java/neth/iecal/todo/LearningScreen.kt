@@ -7,6 +7,9 @@ data class LearningState(val children: List<TodoChild> = emptyList(), val report
 
 enum class GoalStatus { UNKNOWN, INCOMPLETE, COMPLETE }
 
+/** Failure scope authorized by one explicit dashboard refresh. */
+data class LearningRetryScope(val accountId: String, val sessionRef: String, val monitor: MonitorState)
+
 /** Synchronous screen operations; callers run them off the main thread. */
 class LearningScreen(private val api: TodoApi, private val store: LearningStore = MemoryLearningStore(), private val now: () -> Long = System::currentTimeMillis) {
     @Volatile var state = LearningState()
@@ -91,8 +94,36 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         return failure != LearningFailure.AUTHENTICATION || (sessionRef != null && sessionRef != failedRef)
     }
 
-    fun retryMonitor(childName: String, subject: Subject?) {
+    fun retryScope(): LearningRetryScope? = synchronized(lock) {
+        val account = state.accountId ?: return@synchronized null
+        val ref = sessionRef ?: return@synchronized null
+        if (monitor.accountId != account || loginRequired) return@synchronized LearningRetryScope(account, ref, MonitorState())
+        LearningRetryScope(account, ref, monitor)
+    }
+
+    fun retryFailures(scope: LearningRetryScope) {
+        val snapshot = scope.monitor
+        for ((child, registration) in snapshot.registeredChildren()) {
+            if (snapshot.catalogFailureFor(child) != null) retryMonitor(child, null, scope, registration)
+            snapshot.reports.forEach { (key, report) ->
+                if (key.first == child && report.failed) retryMonitor(child, key.second, scope, registration)
+            }
+        }
+    }
+
+    fun retryMonitor(childName: String, subject: Subject?, scope: LearningRetryScope? = null, registration: Long? = null) {
         val updated = store.updateMonitor { doc ->
+            if (scope != null && (doc.state.accountId != scope.accountId || doc.sessionRef != scope.sessionRef ||
+                    doc.monitor.registeredChildren()[childName] != registration || doc.monitor.accountId != scope.accountId)) return@updateMonitor null
+            if (scope != null) {
+                val old = scope.monitor
+                val sameFailure = if (subject == null) old.catalogFailureFor(childName) == doc.monitor.catalogFailureFor(childName) &&
+                    old.catalogFailureSessionFor(childName) == doc.monitor.catalogFailureSessionFor(childName)
+                else old.reports[childName to subject] == doc.monitor.reports[childName to subject] &&
+                    old.reportVersions[childName to subject] == doc.monitor.reportVersions[childName to subject] &&
+                    old.reportFailureSessions[childName to subject] == doc.monitor.reportFailureSessions[childName to subject]
+                if (!sameFailure) return@updateMonitor null
+            }
             val failure = if (subject == null) doc.monitor.catalogFailureFor(childName) else doc.monitor.reports[childName to subject]?.failure
             val failedRef = if (subject == null) doc.monitor.catalogFailureSessionFor(childName) else doc.monitor.reportFailureSessions[childName to subject]
             if (doc.monitor.authenticationRequired(doc.sessionRef) || doc.sessionRef == null || doc.monitor.accountId != doc.state.accountId || childName !in doc.monitor.registeredChildren() ||
@@ -192,15 +223,15 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         }
     }
 
-    fun refresh(date: String, onlyIfSelected: Boolean = false) {
+    fun refresh(date: String, onlyIfSelected: Boolean = false, includeFailed: Boolean = false, expectedSessionRef: String? = null) {
         val local: Long
         val current: TodoSession
         val ref: String
-        synchronized(lock) { if (onlyIfSelected && selectedDate != date) return; selectedDate = date; current = session ?: return; ref = sessionRef ?: return; local = ++generation }
+        synchronized(lock) { if (onlyIfSelected && selectedDate != date || expectedSessionRef != null && sessionRef != expectedSessionRef) return; selectedDate = date; current = session ?: return; ref = sessionRef ?: return; local = ++generation }
         val claim = store.claim()
         if (claim.sessionRef != ref) { restore(); return }
         if (claim.monitor.accountId == claim.state.accountId && claim.monitor.authenticationRequired(ref)) { monitor = claim.monitor; return }
-        refreshForRequest(date, current, local, claim.revision, ref, false)
+        refreshForRequest(date, current, local, claim.revision, ref, includeFailed)
     }
 
     fun retryReport(childName: String, subject: Subject, date: String) {

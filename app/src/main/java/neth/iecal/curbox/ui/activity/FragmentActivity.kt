@@ -73,6 +73,9 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.SIGN_IN -> R.string.learning_sign_in
             neth.iecal.todo.LearningText.CHANGE_ACCOUNT -> R.string.learning_change_account
             neth.iecal.todo.LearningText.CANCEL -> R.string.learning_cancel
+            neth.iecal.todo.LearningText.MONITOR_PROGRESS -> R.string.learning_monitor_progress
+            neth.iecal.todo.LearningText.PULL_HELP -> R.string.learning_pull_help
+            neth.iecal.todo.LearningText.SELECTED_REPORT -> R.string.learning_selected_report
             neth.iecal.todo.LearningText.RETRY -> R.string.learning_retry
             neth.iecal.todo.LearningText.UNKNOWN -> R.string.learning_unknown
             neth.iecal.todo.LearningText.EMPTY -> R.string.learning_empty

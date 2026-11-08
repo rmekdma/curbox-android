@@ -19,7 +19,9 @@ date selected on the screen. Learning goals do not change Curbox blocking rules.
   zero count. A later incomplete to complete transition requests an achievement
   notification; a baseline or completion caused by lowering a goal is silent.
 - An initial catalog or report failure waits for an explicit retry; an explicit
-  sign in can also start a new initial check. Failure state survives restart,
+  sign in can also start a new initial check. Pulling down on the signed in
+  dashboard refreshes the selected date and explicitly retries eligible failed
+  watching checks for today. Failure state survives restart,
   date or permission changes, and unregistering and registering the same child.
   A later temporary report failure after a valid baseline may retry on a
   subsequent eligible cycle. Authentication failure requires sign in again.

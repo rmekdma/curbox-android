@@ -4,6 +4,60 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningScreenTest {
+    @Test fun `explicit refresh retries failed reports while ordinary refresh leaves them latched`() {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        var calls = 0
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                calls++
+                if (calls == 1) throw TodoApiException(kind = LearningFailure.NETWORK)
+                return DailyReport(3, 4)
+            }
+        }
+        val screen = LearningScreen(api, store)
+        screen.signIn("example", "example", "20261105")
+        screen.refresh("20261105")
+        assertEquals(1, calls)
+        screen.refresh("20261105", includeFailed = true)
+        assertEquals(2, calls)
+        assertEquals(DailyReport(3, 4), screen.state.reports["Child" to Subject.MATH]?.value)
+    }
+
+    @Test fun `refresh scope cannot retry failures for a new registration or session`() {
+        val store = MemoryLearningStore()
+        val session = TodoSession("account", "token")
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        store.writeSession("old", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(accountId = "account", children = listOf(child)), "old"))
+        val key = "Child" to Subject.MATH
+        store.updateMonitor { it.monitor.copy(accountId = "account", registrations = mapOf("Child" to 1),
+            catalogFailures = mapOf("Child" to LearningFailure.NETWORK),
+            reports = mapOf(key to ReportState(failed = true, failure = LearningFailure.NETWORK))) }
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0, 0)
+        }
+        val screen = LearningScreen(api, store)
+        screen.restore()
+        val scope = requireNotNull(screen.retryScope())
+        store.updateMonitor { it.monitor.copy(registrations = mapOf("Child" to 2)) }
+        screen.retryFailures(scope)
+        assertTrue(store.read().monitor.catalogRetries.isEmpty())
+        assertTrue(store.read().monitor.reportRetries.isEmpty())
+        store.writeSession("new", session)
+        val next = store.claim()
+        assertTrue(store.commit(next.revision, next.state, "new"))
+        store.updateMonitor { it.monitor.copy(registrations = mapOf("Child" to 1)) }
+        screen.retryFailures(scope)
+        assertTrue(store.read().monitor.catalogRetries.isEmpty())
+        assertTrue(store.read().monitor.reportRetries.isEmpty())
+    }
+
     @Test fun `monitor authentication failure blocks manual refresh until sign in`() {
         val store = MemoryLearningStore()
         val session = TodoSession("account", "token")
