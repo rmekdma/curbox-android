@@ -35,7 +35,7 @@ class IntervalDiagnosisTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 calls.incrementAndGet()
-                return DailyReport(1, 1)
+                return DailyReport(1)
             }
         }
         val host = object : CurboxHost {

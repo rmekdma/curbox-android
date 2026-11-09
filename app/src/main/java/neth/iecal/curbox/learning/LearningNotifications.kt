@@ -11,7 +11,6 @@ import neth.iecal.todo.Subject
 import neth.iecal.todo.ReportState
 import neth.iecal.todo.learningDisplayReports
 import neth.iecal.todo.learningSubjects
-import neth.iecal.todo.totalLearningMinutes
 import neth.iecal.todo.registeredChildren
 import neth.iecal.todo.catalogFailureFor
 
@@ -57,15 +56,11 @@ object LearningNotifications {
             LearningNotificationRow(context.getString(when (subject) { Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english }), goal, reports[subject], errors)
         }
         val pending = current.monitor.catalogFailureFor(child)?.let(::failureText) ?: context.getString(R.string.learning_unknown)
-        fun line(row: LearningNotificationRow, expanded: Boolean) = learningNotificationLine(row, expanded,
+        fun line(row: LearningNotificationRow) = learningNotificationLine(row,
             context.getString(R.string.learning_notification_complete),
             { goal -> context.getString(R.string.learning_unknown_progress, goal) },
-            { count, goal -> context.getString(R.string.learning_notification_progress, count, goal) },
-            { minutes -> context.getString(R.string.learning_minutes, minutes) })
-        val compact = if (rows.isEmpty()) pending else rows.joinToString(" · ") { line(it, false) }
-        val details = if (rows.isEmpty()) pending else rows.joinToString("\n") { line(it, true) }
-        val total = totalLearningMinutes(reports.values)
-        val totalText = if (total == null) context.getString(R.string.learning_unknown_minutes) else context.getString(R.string.learning_minutes, total)
+            { count, goal -> context.getString(R.string.learning_notification_progress, count, goal) })
+        val compact = if (rows.isEmpty()) pending else rows.joinToString(" · ") { line(it) }
         val alert = child == achievementChild && allowsLearningAlert(committed.monitor, current.monitor)
         val sound = current.monitor.alertSound
         val channelId = if (!alert) statusChannel.id else if (sound == null) "learning_achievements" else {
@@ -77,9 +72,9 @@ object LearningNotifications {
             if (sound != null) channel.setSound(if (sound == "silent") null else android.net.Uri.parse(sound), android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION).build())
             manager.createNotificationChannel(channel)
         }
-        fun remote(expanded: Boolean): android.widget.RemoteViews {
-            val view = android.widget.RemoteViews(context.packageName, if (expanded) R.layout.learning_notification_expanded else R.layout.learning_notification_compact)
-            view.setTextViewText(R.id.learning_notification_title, if (expanded) "$child  $totalText" else child)
+        fun remote(): android.widget.RemoteViews {
+            val view = android.widget.RemoteViews(context.packageName, R.layout.learning_notification_compact)
+            view.setTextViewText(R.id.learning_notification_title, child)
             val rowIds = intArrayOf(R.id.learning_notification_row_0, R.id.learning_notification_row_1, R.id.learning_notification_row_2)
             val labelIds = intArrayOf(R.id.learning_notification_label_0, R.id.learning_notification_label_1, R.id.learning_notification_label_2)
             val checkIds = intArrayOf(R.id.learning_notification_check_0, R.id.learning_notification_check_1, R.id.learning_notification_check_2)
@@ -88,7 +83,7 @@ object LearningNotifications {
             rows.take(3).forEachIndexed { index, row ->
                 val value = row.report?.value
                 val complete = row.goal == 0 || (value != null && !row.report.failed && value.count >= row.goal)
-                val raw = line(row, expanded)
+                val raw = line(row)
                 val suffix = raw.removePrefix(row.label).replace(context.getString(R.string.learning_notification_complete), "").trim()
                 view.setViewVisibility(rowIds[index], android.view.View.VISIBLE)
                 view.setTextViewText(labelIds[index], row.label)
@@ -102,8 +97,7 @@ object LearningNotifications {
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(child)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentText(compact).setStyle(NotificationCompat.DecoratedCustomViewStyle())
-            .addExtras(android.os.Bundle().apply { putCharSequence(android.app.Notification.EXTRA_BIG_TEXT, details); putCharSequence(android.app.Notification.EXTRA_TITLE_BIG, "$child  $totalText") })
-            .setCustomContentView(remote(false)).setCustomBigContentView(remote(true)).setCustomHeadsUpContentView(remote(false))
+            .setCustomContentView(remote()).setCustomHeadsUpContentView(remote())
             .setOngoing(true).setSilent(!alert).build()
         val latest = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { store.read() }
         if (latest.monitor.alertSettingsRevision != current.monitor.alertSettingsRevision) continue
@@ -119,15 +113,13 @@ internal fun allowsLearningAlert(committed: neth.iecal.todo.MonitorState, curren
 internal data class LearningNotificationRow(val label: String, val goal: Int, val report: ReportState?, val errors: List<String> = emptyList())
 
 internal fun learningNotificationLine(
-    row: LearningNotificationRow, expanded: Boolean, check: String,
-    unknown: (Int) -> String, progress: (Int, Int) -> String, minutes: (Int) -> String
+    row: LearningNotificationRow, check: String,
+    unknown: (Int) -> String, progress: (Int, Int) -> String
 ): String {
     val value = row.report?.value
     val complete = row.goal == 0 || (value != null && row.report.failed == false && value.count >= row.goal)
     val parts = mutableListOf(row.label)
     if (complete) parts.add(check)
-    if (row.goal != 0 && (!complete || expanded)) parts.add(if (value == null) unknown(row.goal) else progress(value.count, row.goal))
-    if (expanded && value != null) parts.add(minutes(value.minutes))
-    if (expanded) parts.addAll(row.errors)
+    if (row.goal != 0 && !complete) parts.add(if (value == null) unknown(row.goal) else progress(value.count, row.goal))
     return parts.joinToString(" ")
 }

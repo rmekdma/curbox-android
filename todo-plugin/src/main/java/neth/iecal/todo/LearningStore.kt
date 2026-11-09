@@ -21,13 +21,10 @@ data class MonitorAccountSnapshot(
 
 data class RetryIntent(val registration: Long, val revision: Long, val sessionRef: String)
 
-data class ZeroGoalInitial(val owner: Long, val registration: Long, val sessionRef: String, val permissionRevision: Long, val date: String, val dateEpoch: Long = 0)
-
 data class MonitorState(
     val ownerEpoch: Long = 0,
     val controlRevision: Long = 0,
     val goalVersions: Map<String, Map<Pair<String, Subject>, Long>> = emptyMap(),
-    val zeroGoalInitials: Map<Pair<String, Subject>, ZeroGoalInitial> = emptyMap(),
     val registrationEpoch: Long = 0,
     val registrations: Map<String, Long> = emptyMap(),
     val accounts: Map<String, MonitorAccountSnapshot> = emptyMap(),
@@ -180,6 +177,7 @@ fun StoredLearning.withManualState(next: LearningState, ref: String?, catalogSuc
             val default = when (key.second) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             if ((before[key] ?: default) != (after[key] ?: default)) {
                 scoped = scoped + (key to Math.addExact(scoped[key] ?: 0, 1))
+                if (account == monitor.accountId && (after[key] ?: default) == 0) retries = retries - key
             }
         }
         versions = versions + (account to scoped)
@@ -198,14 +196,14 @@ fun StoredLearning.withManualState(next: LearningState, ref: String?, catalogSuc
                 registrations = saved.registrations, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
                 catalogFailures = saved.catalogFailures, catalogFailureSessions = saved.catalogFailureSessions, catalogRegistrations = saved.catalogRegistrations,
                 catalogAttempted = saved.catalogAttempted, catalogCheckedAt = saved.catalogCheckedAt, manualCatalogOrder = saved.manualCatalogOrder, monitorCatalogOrder = saved.monitorCatalogOrder, children = saved.children, reports = saved.reports,
-                reportFailureSessions = saved.reportFailureSessions, zeroGoalInitials = emptyMap(), reportVersions = emptyMap())
+                reportFailureSessions = saved.reportFailureSessions, reportVersions = emptyMap())
         }
         updated = updated.resetLearningBaselines().copy(
             catalogFailure = null, catalogFailureSession = null, catalogFailures = emptyMap(), catalogFailureSessions = emptyMap(),
             reports = updated.reports.mapValues { (_, report) -> if (report.initialFailure != false || report.failure == LearningFailure.AUTHENTICATION) report.copy(failed = false, failure = null, initialFailure = null) else report },
             reportFailureSessions = emptyMap(), catalogRetries = emptyMap(), reportRetries = emptyMap(),
             catalogAttempted = false, catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null,
-            zeroGoalInitials = emptyMap(), controlRevision = Math.addExact(updated.controlRevision, 1))
+            controlRevision = Math.addExact(updated.controlRevision, 1))
     }
     if (catalogSuccess) {
         updated = updated.copy(manualCatalogOrder = Math.addExact(maxOf(updated.manualCatalogOrder ?: 0, updated.monitorCatalogOrder ?: 0), 1))

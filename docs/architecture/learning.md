@@ -9,39 +9,22 @@ settings dialogs. Goal changes are validated and saved together for the account,
 session and subject identities captured when the dialog opened. Only subscribed
 subjects are offered; saving a goal does not add a subscription.
 
-The dashboard uses today in Seoul and has no date selector. Each subject row
-shows the newest available report for today from manual checks or the same
-account's monitor, with the count and relative check time from that same report.
-When today has no valid report, the row shows `? / goal`. Older report values
-and check times are not displayed. A selected successful report
-at its goal shows a green check; a zero goal shows a local check without a
-fabricated count. Manual and automatic errors are labeled separately. The
-relative time updates without rebuilding the settings dialog. The child total
-sums each visible subject's selected report in seconds and rounds once. It is
-unknown until every visible subject has a current report with seconds, including
-reports saved before seconds were retained.
+The dashboard uses today in Seoul and has no date selector. Each subscribed subject
+shows the count and goal from the newest available report today. A successful
+report at its goal shows a green check. A zero goal shows a local check without
+a fabricated count. Manual and automatic errors are labeled separately.
 
 ## Monitoring behavior
 
-- Registration starts an initial check of subscribed subjects, including those
-  with zero goals. It does not require the subject app to be in front or the screen to be
-  on, but authentication, service availability and applicable permissions are
-  required. The first valid report is a silent baseline.
+- Registration checks the subscribed subjects with positive goals. A zero goal
+  is locally complete and never requests a report, including on manual refresh
+  or explicit retry. Catalog checks remain separate. The first valid report is
+  a silent baseline.
 - Regular checks require an unlocked screen and a confirmed foreground subject
-  app. They exclude unregistered children, unsubscribed subjects, completed
-  positive goals. Zero goals remain eligible. Initial and regular report work is serialized and shares
-  the configured interval; an initial check consumes the common interval.
-- A zero goal is locally complete while reports track learning time. An unknown report is not a
-  zero count. A later incomplete to complete transition requests an achievement
-  notification; a baseline or completion caused by lowering a goal is silent.
-- After leaving a Todo app, the monitor waits one second and rechecks the
-  foreground. If the same app has not returned, it makes one silent final report
-  request for registered children whose subject has a valid completed baseline
-  or a zero goal. The final check bypasses the interval but uses the same
-  serialized worker and does not retry an initial failure. Screen off, lock,
-  disconnection and a return to the same app cancel pending checks. Foreground
-  observations can be conflated, so this is best effort; it does not guarantee
-  the server has received the last activity by the time of the request.
+  app. They exclude unregistered children, unsubscribed subjects and completed
+  goals. Initial and regular work is serialized and shares the configured interval.
+  A positive goal can still be refreshed manually after completion. Only an
+  incomplete to complete transition after a baseline requests an achievement alert.
 - An initial catalog or report failure waits for an explicit retry; an explicit
   sign in can also start a new initial check. Pulling down on the signed in
   dashboard refreshes today and explicitly retries eligible failed
@@ -57,16 +40,10 @@ reports saved before seconds were retained.
   Completion alerts and their sound can be changed independently of the ongoing
   status notification. Selecting a sound previews it briefly; opening the
   settings does not play it. Android channel settings can affect sound and heads up.
-- Each registered child has a status notification. A new achievement updates
-  that child's notification; actual sound and heads up depend on Android and
-  the user's notification channel settings. The title is the child name. Each
-  subject shows today's count and goal, with a check mark when complete. Zero
-  goals show a check mark; missing or older reports show as not checked. A
-  failed report does not show a completion check for a positive goal. The
-  compact notification uses one line; its expanded text has one line per subject.
-  The screen and notification use the same selected today report and total.
-  Manual report updates republish the notification silently without restarting
-  monitoring or changing its baseline.
+- Each registered child has a status notification with one compact summary and
+  the same heads up content. Incomplete subjects show count and goal; completed
+  subjects show a green check. Android controls notification expansion and
+  channel behavior. Manual report updates republish silently.
 
 ## Boundaries and lifetime
 

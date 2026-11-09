@@ -28,7 +28,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession): List<TodoChild> { calls.incrementAndGet(); return listOf(sample) }
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { calls.incrementAndGet(); return DailyReport(0, 0) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { calls.incrementAndGet(); return DailyReport(0) }
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -56,7 +56,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = listOf(math)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 requested.add(subject)
-                return DailyReport(1, 1)
+                return DailyReport(1)
             }
         }
         val host = object : CurboxHost {
@@ -79,7 +79,7 @@ class InitialMonitorTest {
         } finally { job.cancelAndJoin() }
     }
 
-    @Test fun zeroGoalReceivesInitialAndRegularReportsWithoutAchievement() = runBlocking {
+    @Test fun zeroGoalSkipsInitialAndRegularReportsWithoutAchievement() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
         val session = TodoSession("account", "token")
@@ -91,7 +91,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { val n = calls.incrementAndGet(); return DailyReport(n, n, n * 60.0) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { val n = calls.incrementAndGet(); return DailyReport(n) }
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -104,13 +104,44 @@ class InitialMonitorTest {
         val elapsed = java.util.concurrent.atomic.AtomicLong(0)
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = elapsed::get, achievement = { _, _, _, _, _ -> achievements.incrementAndGet(); Unit }).run(host) }
         try {
-            withTimeout(5000) { store.changes.first { it.monitor.reports["Child" to Subject.MATH]?.value?.seconds == 60.0 } }
+            withTimeout(5000) { store.changes.first { it.monitor.catalogAttempted } }
             elapsed.set(120_000)
             host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
-            withTimeout(5000) { store.changes.first { it.monitor.reports["Child" to Subject.MATH]?.value?.seconds == 120.0 } }
-            assertEquals(2, calls.get())
+            delay(300)
+            assertEquals(0, calls.get())
+            assertEquals(null, store.read().monitor.reports["Child" to Subject.MATH])
             assertEquals(0, achievements.get())
         } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun zeroGoalStillRefreshesCatalogAfterMonitorRestart() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "id"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(accountId = "account", children = listOf(child), goalsByAccount = mapOf("account" to mapOf(("Child" to Subject.MATH) to 0))), "session"))
+        store.updateMonitor { it.monitor.copy(accountId = "account", registrations = mapOf("Child" to 1)) }
+        val catalogs = AtomicInteger()
+        val reports = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child).also { catalogs.incrementAndGet() }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1).also { reports.incrementAndGet() }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val permission = MutableStateFlow(NotificationPermission(true))
+        val first = launch { InitialMonitor(api, store, permission, { true }, { _, _ -> }).run(host) }
+        withTimeout(5000) { while (catalogs.get() < 1) delay(10) }
+        first.cancelAndJoin()
+        val second = launch { InitialMonitor(api, store, permission, { true }, { _, _ -> }).run(host) }
+        try {
+            withTimeout(5000) { while (catalogs.get() < 2) delay(10) }
+            assertEquals(0, reports.get())
+        } finally { second.cancelAndJoin() }
     }
 
     @Test fun manualReportChangePublishesSilentlyWithoutStartingMonitorWork() = runBlocking {
@@ -128,7 +159,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession): List<TodoChild> { apiCalls.incrementAndGet(); return listOf(child) }
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { apiCalls.incrementAndGet(); return DailyReport(1, 1) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { apiCalls.incrementAndGet(); return DailyReport(1) }
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.DISCONNECTED, accessibilityEnabled = false))
@@ -143,7 +174,7 @@ class InitialMonitorTest {
             withTimeout(5000) { while (publishCalls.get() == 0) delay(10) }
             val before = store.read().monitor
             val claim = store.claim()
-            val report = ReportState(DailyReport(5, 1, 40.0), 123, "20261109")
+            val report = ReportState(DailyReport(5), 123, "20261109")
             assertTrue(store.commit(claim.revision, claim.state.copy(reports = mapOf(("Child" to Subject.MATH) to report)), "session", "session"))
             withTimeout(5000) { published.first { it == report } }
             delay(100)
@@ -165,7 +196,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession): List<TodoChild> { calls.incrementAndGet(); throw TodoApiException(kind = LearningFailure.AUTHENTICATION) }
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1)
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -196,8 +227,8 @@ class InitialMonitorTest {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
-                if (calls.incrementAndGet() == 1) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)); return DailyReport(99, 1) }
-                return DailyReport(5, 1)
+                if (calls.incrementAndGet() == 1) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)); return DailyReport(99) }
+                return DailyReport(5)
             }
         }
         val host = object : CurboxHost {
@@ -220,7 +251,7 @@ class InitialMonitorTest {
     }
 
 
-    @Test fun retryAtZeroIsExplicitAndPreservesFailureAfterGoalIsRaised() = runBlocking {
+    @Test fun retryAtZeroSkipsAndPreservesFailureAfterGoalIsRaised() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
         val session = TodoSession("account", "token")
@@ -248,10 +279,10 @@ class InitialMonitorTest {
             withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.failed == true } }
             assertTrue(screen.saveGoal("Sample", Subject.MATH, "0"))
             screen.retryMonitor("Sample", Subject.MATH)
-            withTimeout(5000) { while (calls.get() < 2) delay(10) }
+            delay(200)
             assertTrue(screen.saveGoal("Sample", Subject.MATH, "5"))
             delay(200)
-            assertEquals(2, calls.get())
+            assertEquals(1, calls.get())
             assertTrue(store.read().monitor.reports.getValue("Sample" to Subject.MATH).failed)
         } finally { job.cancelAndJoin() }
     }
@@ -271,7 +302,7 @@ class InitialMonitorTest {
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 entered.countDown()
                 check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
-                return DailyReport(3, 1)
+                return DailyReport(3)
             }
         }
         val host = object : CurboxHost {
@@ -291,7 +322,7 @@ class InitialMonitorTest {
         Unit
     }
 
-    @Test fun zeroGoalInitialReportIsPreservedWhenGoalRaised() = runBlocking {
+    @Test fun raisedZeroGoalGetsSilentBaselineWhenEligible() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
         val session = TodoSession("account", "token")
@@ -302,7 +333,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(5, 1).also { calls.incrementAndGet() }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(5).also { calls.incrementAndGet() }
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -315,10 +346,10 @@ class InitialMonitorTest {
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
         try {
-            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value != null } }
+            withTimeout(5000) { store.changes.first { it.monitor.catalogAttempted } }
             assertTrue(screen.saveGoal("Sample", Subject.MATH, "5"))
             delay(200)
-            assertEquals(1, calls.get())
+            assertEquals(0, calls.get())
             clock.set(61000)
             host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
             withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 5 } }
@@ -337,7 +368,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = children
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1).also { requests.add(userId) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1).also { requests.add(userId) }
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -372,7 +403,7 @@ class InitialMonitorTest {
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 requests.add(userId)
                 if (subject == Subject.MATH && mathCalls.incrementAndGet() == 1) throw TodoApiException(kind = LearningFailure.NETWORK)
-                return DailyReport(1, 1)
+                return DailyReport(1)
             }
         }
         val host = object : CurboxHost {
@@ -388,7 +419,7 @@ class InitialMonitorTest {
             assertTrue(screen.saveGoal("One", Subject.ENGLISH, "8"))
             screen.retryMonitor("One", Subject.MATH)
             withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.MATH]?.value != null } }
-            assertEquals(listOf("math", "english", "math"), requests.toList())
+            assertEquals(listOf("math", "math", "english"), requests.toList())
         } finally { job.cancelAndJoin() }
     }
 
@@ -404,7 +435,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (date == "20260101") 1 else 5, 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (date == "20260101") 1 else 5)
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -439,7 +470,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 if (calls.incrementAndGet() == 2) throw TodoApiException(kind = LearningFailure.NETWORK)
-                return DailyReport(1, 1)
+                return DailyReport(1)
             }
         }
         val host = object : CurboxHost {
@@ -479,9 +510,9 @@ class InitialMonitorTest {
                 if (date == "20260101") {
                     entered.countDown()
                     check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
-                    return DailyReport(99, 1)
+                    return DailyReport(99)
                 }
-                return DailyReport(5, 1)
+                return DailyReport(5)
             }
         }
         val host = object : CurboxHost {
@@ -520,7 +551,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 if (calls.incrementAndGet() > 1) throw TodoApiException(kind = LearningFailure.NETWORK)
-                return DailyReport(5, 4)
+                return DailyReport(5)
             }
         }
         val host = object : CurboxHost {
@@ -567,7 +598,7 @@ class InitialMonitorTest {
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 requests.add(userId)
                 if (subject == Subject.MATH) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
-                return DailyReport(1, 1)
+                return DailyReport(1)
             }
         }
         val host = object : CurboxHost {
@@ -603,7 +634,7 @@ class InitialMonitorTest {
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 requests.add(userId)
                 if (subject == Subject.MATH) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
-                return DailyReport(1, 1)
+                return DailyReport(1)
             }
         }
         val host = object : CurboxHost {
@@ -619,7 +650,7 @@ class InitialMonitorTest {
             assertTrue(screen.saveGoal("One", Subject.ENGLISH, "0"))
             release.countDown()
             withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.KOREAN]?.value != null } }
-            assertEquals(listOf("math", "english", "korean"), requests.toList())
+            assertEquals(listOf("math", "korean"), requests.toList())
         } finally { release.countDown(); job.cancelAndJoin() }
     }
 
@@ -634,7 +665,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 2 else 5, 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 2 else 5)
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -672,7 +703,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2, 1).also { calls.incrementAndGet() }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2).also { calls.incrementAndGet() }
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -706,7 +737,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 0 else 1, 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 0 else 1)
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -740,11 +771,11 @@ class InitialMonitorTest {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = children
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
-                if (userId == "one") return DailyReport(5, 1)
+                if (userId == "one") return DailyReport(5)
                 return when (calls.incrementAndGet()) {
-                    1 -> DailyReport(2, 1)
+                    1 -> DailyReport(2)
                     2 -> throw TodoApiException(kind = LearningFailure.NETWORK)
-                    else -> DailyReport(5, 1)
+                    else -> DailyReport(5)
                 }
             }
         }
@@ -787,10 +818,10 @@ class InitialMonitorTest {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
-                if (calls.incrementAndGet() == 1) return DailyReport(1, 1)
+                if (calls.incrementAndGet() == 1) return DailyReport(1)
                 enteredReport.countDown()
                 check(releaseReport.await(5, java.util.concurrent.TimeUnit.SECONDS))
-                return DailyReport(5, 1)
+                return DailyReport(5)
             }
         }
         val host = object : CurboxHost {
@@ -830,7 +861,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 1 else 5, 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (calls.incrementAndGet() == 1) 1 else 5)
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -872,7 +903,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = children
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 calls.add(userId)
-                return DailyReport(1, 1)
+                return DailyReport(1)
             }
         }
         val host = object : CurboxHost {
@@ -908,9 +939,9 @@ class InitialMonitorTest {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport = when (calls.incrementAndGet()) {
-                1 -> DailyReport(1, 1)
+                1 -> DailyReport(1)
                 2 -> throw TodoApiException(kind = LearningFailure.NETWORK)
-                else -> DailyReport(3, 1)
+                else -> DailyReport(3)
             }
         }
         val host = object : CurboxHost {
@@ -953,7 +984,7 @@ class InitialMonitorTest {
                     entered.countDown()
                     check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
                 }
-                return DailyReport(2, 1)
+                return DailyReport(2)
             }
         }
         val host = object : CurboxHost {
@@ -994,7 +1025,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 if (calls.incrementAndGet() == 1) throw TodoApiException(kind = LearningFailure.NETWORK)
-                return DailyReport(2, 1)
+                return DailyReport(2)
             }
         }
         val host = object : CurboxHost {
@@ -1026,7 +1057,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 calls.incrementAndGet()
-                return DailyReport(2, 4)
+                return DailyReport(2)
             }
         }
         val host = object : CurboxHost {
@@ -1073,9 +1104,9 @@ class InitialMonitorTest {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport = when (subject) {
-                Subject.MATH -> if (mathCalls.incrementAndGet() == 1) throw TodoApiException(kind = LearningFailure.NETWORK) else DailyReport(5, 4)
-                Subject.ENGLISH -> { englishCalls.incrementAndGet(); DailyReport(0, 0) }
-                Subject.KOREAN -> DailyReport(6, 4)
+                Subject.MATH -> if (mathCalls.incrementAndGet() == 1) throw TodoApiException(kind = LearningFailure.NETWORK) else DailyReport(5)
+                Subject.ENGLISH -> { englishCalls.incrementAndGet(); DailyReport(0) }
+                Subject.KOREAN -> DailyReport(6)
             }
         }
         val host = object : CurboxHost {
@@ -1089,9 +1120,8 @@ class InitialMonitorTest {
         withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.failed == true } }
         assertEquals(1, mathCalls.get())
         host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
-        withTimeout(5000) { while (englishCalls.get() < 1) delay(10) }
-        assertEquals(1, englishCalls.get())
-        assertEquals(6, store.read().monitor.reports["Sample" to Subject.KOREAN]?.value?.count)
+        withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.KOREAN]?.value?.count == 6 } }
+        assertEquals(0, englishCalls.get())
         screen.toggleMonitor("Sample")
         screen.toggleMonitor("Sample")
         delay(100)
@@ -1103,8 +1133,7 @@ class InitialMonitorTest {
         screen.retryMonitor("Sample", Subject.MATH)
         withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 5 } }
         assertEquals(2, mathCalls.get())
-        withTimeout(5000) { while (englishCalls.get() < 2) delay(10) }
-        assertEquals(2, englishCalls.get())
+        assertEquals(0, englishCalls.get())
         job.cancelAndJoin()
     }
 
@@ -1118,7 +1147,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = children
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1, 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1)
         }
         val screen = testLearningScreen(api, store)
         screen.restore()
@@ -1141,7 +1170,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = children
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 if (userId == "1") { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
-                return DailyReport(userId.toInt(), 1)
+                return DailyReport(userId.toInt())
             }
         }
         val host = object : CurboxHost {
@@ -1176,7 +1205,7 @@ class InitialMonitorTest {
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 if (userId == "1") { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
                 else calls.incrementAndGet()
-                return DailyReport(userId.toInt(), 1)
+                return DailyReport(userId.toInt())
             }
         }
         val host = object : CurboxHost {
@@ -1212,7 +1241,7 @@ class InitialMonitorTest {
                 if (calls.incrementAndGet() == 1) throw TodoApiException(kind = LearningFailure.NETWORK)
                 return children
             }
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(userId.toInt(), 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(userId.toInt())
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -1251,7 +1280,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = children
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 requested.add(userId)
-                return DailyReport(userId.toInt(), 1)
+                return DailyReport(userId.toInt())
             }
         }
         val screen = testLearningScreen(api, store)
@@ -1283,7 +1312,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = children
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(userId.toInt(), 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(userId.toInt())
         }
         val screen = testLearningScreen(api, store)
         screen.restore()
@@ -1318,7 +1347,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = children
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 requested.add(userId)
-                return DailyReport(userId.toInt(), 1)
+                return DailyReport(userId.toInt())
             }
         }
         val screen = testLearningScreen(api, store)
@@ -1360,7 +1389,7 @@ class InitialMonitorTest {
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 val count = calls.incrementAndGet()
                 if (count == 1) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
-                return DailyReport(count, 1)
+                return DailyReport(count)
             }
         }
         val screen = testLearningScreen(api, store)
@@ -1404,7 +1433,7 @@ class InitialMonitorTest {
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 entered.countDown()
                 check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
-                return DailyReport(5, 4)
+                return DailyReport(5)
             }
         }
         val host = object : CurboxHost {
@@ -1434,7 +1463,7 @@ class InitialMonitorTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession): List<TodoChild> { calls.incrementAndGet(); return listOf(child) }
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2, 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2)
         }
         val host = object : CurboxHost {
             override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
@@ -1467,7 +1496,7 @@ class InitialMonitorTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 if (subject == Subject.MATH) { math.incrementAndGet(); throw TodoApiException(kind = LearningFailure.NETWORK) }
-                return DailyReport(english.incrementAndGet(), 1)
+                return DailyReport(english.incrementAndGet())
             }
         }
         val host = object : CurboxHost {
@@ -1503,7 +1532,7 @@ class InitialMonitorTest {
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 entered.countDown()
                 check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
-                return DailyReport(5, 4)
+                return DailyReport(5)
             }
         }
         val host = object : CurboxHost {
@@ -1540,9 +1569,9 @@ class InitialMonitorTest {
                 if (calls.incrementAndGet() == 1) {
                     entered.countDown()
                     check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
-                    return DailyReport(99, 4)
+                    return DailyReport(99)
                 }
-                return DailyReport(2, 4)
+                return DailyReport(2)
             }
         }
         val host = object : CurboxHost {
@@ -1582,7 +1611,7 @@ class InitialMonitorTest {
             }
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 reportCalls.incrementAndGet()
-                return DailyReport(2, 4)
+                return DailyReport(2)
             }
         }
         val host = object : CurboxHost {

@@ -46,9 +46,9 @@ class MonitorOwnershipTest {
                 if (calls.incrementAndGet() == 1) {
                     entered.countDown()
                     check(release.await(5, TimeUnit.SECONDS))
-                    return DailyReport(99, 1)
+                    return DailyReport(99)
                 }
-                return DailyReport(2, 1)
+                return DailyReport(2)
             }
         }
         val screen = testLearningScreen(api, store)
@@ -111,7 +111,7 @@ class MonitorOwnershipTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 requested.add(subject)
-                return DailyReport(if (subject == Subject.KOREAN && koreanCalls.incrementAndGet() > 1) 6 else 3, 2)
+                return DailyReport(if (subject == Subject.KOREAN && koreanCalls.incrementAndGet() > 1) 6 else 3)
             }
         }
         val screen = testLearningScreen(api, store)
@@ -120,7 +120,7 @@ class MonitorOwnershipTest {
         val date = LocalDate.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.BASIC_ISO_DATE)
         val success = "Sample" to Subject.KOREAN
         val failure = "Sample" to Subject.MATH
-        val original = ReportState(DailyReport(6, 2), 123, date)
+        val original = ReportState(DailyReport(6), 123, date)
         store.updateMonitor { doc -> doc.monitor.copy(
             catalogAttempted = true, catalogFailure = LearningFailure.NETWORK,
             reports = mapOf(success to original, failure to ReportState(date = date, failed = true, failure = LearningFailure.SERVER)),
@@ -162,7 +162,7 @@ class MonitorOwnershipTest {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = session
             override fun catalog(session: TodoSession) = listOf(child)
-            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(count.get(), 1)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(count.get())
         }
         val screen = testLearningScreen(api, store)
         screen.restore()
@@ -195,7 +195,7 @@ class MonitorOwnershipTest {
             override fun catalog(session: TodoSession) = listOf(child)
             override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
                 if (calls.incrementAndGet() == 1) throw TodoApiException(kind = LearningFailure.NETWORK)
-                return DailyReport(2, 1)
+                return DailyReport(2)
             }
         }
         val screen = testLearningScreen(api, store)

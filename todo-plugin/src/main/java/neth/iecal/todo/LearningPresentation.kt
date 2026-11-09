@@ -22,16 +22,3 @@ fun learningDisplayReports(state: LearningState, monitor: MonitorState, child: S
 internal fun latestDisplayReport(manual: ReportState?, monitor: ReportState?, today: String): ReportState? =
     listOfNotNull(manual, monitor).filter { it.value != null && it.date == today }
         .maxByOrNull { it.checkedAt ?: Long.MIN_VALUE }
-
-/** Returns a once rounded total only when every selected report has valid original seconds. */
-fun totalLearningMinutes(reports: Collection<ReportState?>): Int? {
-    if (reports.isEmpty()) return null
-    var seconds = 0.0
-    for (report in reports) {
-        val value = report?.value?.seconds ?: return null
-        if (!value.isFinite() || value < 0) return null
-        seconds += value
-        if (!seconds.isFinite() || seconds > Int.MAX_VALUE.toDouble() * 60) return null
-    }
-    return kotlin.math.ceil(seconds / 60).toInt()
-}

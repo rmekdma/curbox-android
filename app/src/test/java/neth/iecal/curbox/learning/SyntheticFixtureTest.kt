@@ -6,12 +6,9 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SyntheticFixtureTest {
-    @Test fun `seconds are optional and must agree with displayed minutes`() {
-        val prefix = """{"revision":"r","children":[{"name":"Child1","users":{"MATH":"user1"}}],"reports":[{"user":"user1","subject":"MATH","date":"20261106","count":2,"minutes":1"""
-        val exact = SyntheticFixture.parse(prefix + ""","seconds":40}]}""")
-        assertEquals(40.0, exact.report("user1", neth.iecal.todo.Subject.MATH, "20261106").seconds!!, 0.0)
-        assertEquals(60.0, SyntheticFixture.parse(prefix + "}]}").report("user1", neth.iecal.todo.Subject.MATH, "20261106").seconds!!, 0.0)
-        assertTrue(runCatching { SyntheticFixture.parse(prefix + ""","seconds":61}]}""") }.isFailure)
+    @Test fun `legacy time fields are ignored`() {
+        val fixture = SyntheticFixture.parse("""{"revision":"r","children":[{"name":"Child1","users":{"MATH":"user1"}}],"reports":[{"user":"user1","subject":"MATH","date":"20261106","count":2,"minutes":1,"seconds":"ignored"}]}""")
+        assertEquals(2, fixture.report("user1", Subject.MATH, "20261106").count)
     }
 
     @Test fun configuredReportsAndFailuresAreDistinct() {

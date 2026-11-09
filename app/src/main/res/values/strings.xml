@@ -1870,10 +1870,6 @@
     <string name="learning_cancel">Cancel</string>
     <string name="learning_manual_error">Manual check · %1$s</string>
     <string name="learning_automatic_error">Automatic check · %1$s</string>
-    <string name="learning_unknown_minutes">\? min</string>
-    <string name="learning_minutes">%1$d min</string>
-    <string name="learning_relative_minutes">%1$dm ago</string>
-    <string name="learning_relative_hours">%1$dh %2$dm ago</string>
     <string name="learning_title">TODO School</string>
     <string name="learning_demo_title">TODO School</string>
     <string name="learning_email">Email</string>
@@ -1893,9 +1889,6 @@
     <string name="learning_math">수학</string>
     <string name="learning_english">영어</string>
     <string name="learning_zero_goal">✓</string>
-    <string name="learning_progress">%1$d/%2$d · %3$d min</string>
-    <string name="learning_progress_complete">%1$d/%2$d ✓ · %3$d min</string>
-    <string name="learning_report">Items: %1$d. Minutes: %2$d. Date: %3$s. Checked: %4$s.</string>
     <string name="learning_refresh">Refresh</string>
     <string name="learning_goal">Learning goal</string>
     <string name="learning_save_goal">Save</string>
@@ -1923,7 +1916,6 @@
     <string name="learning_achievement_title">%1$s completed %2$s</string>
     <string name="learning_monitor_progress">Watching today: %1$d of %2$d. %3$s</string>
     <string name="learning_monitor_status">Watching today: %1$s</string>
-    <string name="learning_monitor_report">Watching. Items: %1$d. Minutes: %2$d. Checked: %3$s.</string>
     <string name="learning_monitor_value">Items: %1$d. Checked: %2$s.</string>
     <string name="learning_accessibility_needed">Learning is paused. Turn on accessibility for Curbox.</string>
     <string name="learning_notifications_needed">Learning is paused. Turn on notifications for Curbox.</string>

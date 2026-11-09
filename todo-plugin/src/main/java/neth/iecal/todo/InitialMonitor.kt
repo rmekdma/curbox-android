@@ -6,7 +6,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.selects.onTimeout
@@ -47,7 +46,6 @@ class InitialMonitor(
     private companion object { val cycleMutex = Mutex() }
     private data class Control(val owner: Long, val version: Long, val goalVersions: Map<Pair<String, Subject>, Long>, val registration: Long, val account: String?, val child: String?, val registrations: Map<String, Long>, val ref: String?, val goals: Map<Pair<String, Subject>, Int>, val connected: Boolean, val permission: NotificationPermission, val interval: String)
     private class RegularCycle(var started: Boolean = false)
-    private data class ExitCheck(val subject: Subject, val control: Control, val date: String, val dateEpoch: Long, val connectionEpoch: Long, val generation: Long)
     private fun today() = java.time.Instant.ofEpochMilli(now()).atZone(ZoneId.of("Asia/Seoul")).toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -68,7 +66,6 @@ class InitialMonitor(
             val finished = Channel<Unit>(Channel.CONFLATED)
             val connectionEpoch = java.util.concurrent.atomic.AtomicLong()
             val dateEpoch = java.util.concurrent.atomic.AtomicLong()
-            val latestControl = java.util.concurrent.atomic.AtomicReference<Control?>()
             var lastConnected: Boolean? = null
             launch {
                 combine(store.changes, host.observations, permission) { doc, observation, notification ->
@@ -79,7 +76,7 @@ class InitialMonitor(
                         doc.state.accountId, doc.monitor.childName, doc.monitor.registeredChildren(), doc.sessionRef,
                         doc.state.goalsByAccount[doc.state.accountId].orEmpty(),
                         observation.connection == Connection.CONNECTED && observation.accessibilityEnabled, notification, doc.monitor.effectiveIntervalSeconds())
-                }.distinctUntilChanged().collect { latestControl.set(it); controls.send(it) }
+                }.distinctUntilChanged().collect { controls.send(it) }
             }
             launch {
                 store.changes.map { listOf(it.state.accountId, it.state.children, it.state.reports, it.monitor.manualCatalogOrder, it.monitor.alertSettingsRevision) }
@@ -89,58 +86,7 @@ class InitialMonitor(
                     }
             }
             val wake = Channel<Unit>(Channel.CONFLATED)
-            val exitLock = Any()
-            val exitGeneration = mutableMapOf<Subject, Long>()
-            val exitTimers = mutableMapOf<Subject, Job>()
-            val readyExits = linkedMapOf<Subject, ExitCheck>()
-            fun invalidateExit(subject: Subject) {
-                exitGeneration[subject] = (exitGeneration[subject] ?: 0) + 1
-                exitTimers.remove(subject)?.cancel()
-                readyExits.remove(subject)
-            }
-            fun exitValid(check: ExitCheck): Boolean = synchronized(exitLock) {
-                val observation = host.observations.value
-                exitGeneration[check.subject] == check.generation && today() == check.date &&
-                    dateEpoch.get() == check.dateEpoch && connectionEpoch.get() == check.connectionEpoch &&
-                    observation.connection == Connection.CONNECTED && observation.accessibilityEnabled && observation.screen == Screen.UNLOCKED &&
-                    subjectPackages.subjectFor((observation.foreground as? Foreground.Confirmed)?.packageName) != check.subject
-            }
-            launch {
-                var activeSubject: Subject? = null
-                host.observations.collect { observation ->
-                    synchronized(exitLock) {
-                        if (observation.connection != Connection.CONNECTED || !observation.accessibilityEnabled || observation.screen != Screen.UNLOCKED) {
-                            Subject.entries.forEach(::invalidateExit)
-                            activeSubject = null
-                        } else {
-                            val next = subjectPackages.subjectFor((observation.foreground as? Foreground.Confirmed)?.packageName)
-                            if (next != activeSubject) {
-                                next?.let(::invalidateExit)
-                                val leaving = activeSubject
-                                val snapshot = latestControl.get()
-                                if (leaving != null && snapshot != null) {
-                                    invalidateExit(leaving)
-                                    val check = ExitCheck(leaving, snapshot, today(), dateEpoch.get(), connectionEpoch.get(), exitGeneration.getValue(leaving))
-                                    exitTimers[leaving] = launch {
-                                        delay(1000)
-                                        val refreshed = host.refreshObservation()
-                                        synchronized(exitLock) {
-                                            val currentSubject = subjectPackages.subjectFor((refreshed.foreground as? Foreground.Confirmed)?.packageName)
-                                            if (exitGeneration[leaving] == check.generation) {
-                                                if (refreshed.connection == Connection.CONNECTED && refreshed.accessibilityEnabled && refreshed.screen == Screen.UNLOCKED && currentSubject != leaving && exitValid(check)) readyExits[leaving] = check
-                                                exitTimers.remove(leaving)
-                                            }
-                                        }
-                                        wake.trySend(Unit)
-                                    }
-                                }
-                                activeSubject = next
-                            }
-                        }
-                    }
-                    wake.trySend(Unit)
-                }
-            }
+            launch { host.observations.collect { wake.trySend(Unit) } }
             var current: Control? = null
             var running: Job? = null
             var pending = false
@@ -193,25 +139,6 @@ class InitialMonitor(
                 }
                 val control = current
                 if (running == null && control != null && control.connected && control.permission.granted && freshPermission() && control.account != null && control.registrations.isNotEmpty() && control.ref != null) {
-                    val exit = synchronized(exitLock) {
-                        val entry = readyExits.entries.firstOrNull()
-                        entry?.value.also {
-                            if (entry != null) readyExits.remove(entry.key)
-                            if (readyExits.isNotEmpty()) wake.trySend(Unit)
-                        }
-                    }
-                    if (exit != null && exitValid(exit)) {
-                        running = launch(Dispatchers.IO) {
-                            cycleMutex.withLock {
-                                val cycle = RegularCycle()
-                                for ((child, registration) in exit.control.registrations) {
-                                    initialize(exit.control.copy(child = child, registration = registration), host, exit.subject, cycle,
-                                        java.util.concurrent.atomic.AtomicBoolean(false), dateEpoch, exit.dateEpoch, connectionEpoch, exit.connectionEpoch) { exitValid(exit) }
-                                }
-                            }
-                        }.also { job -> job.invokeOnCompletion { finished.trySend(Unit) } }
-                        continue
-                    }
                     val initial = pending
                     val observation = host.observations.value
                     val subject = if (observation.screen == Screen.UNLOCKED) subjectPackages.subjectFor((observation.foreground as? Foreground.Confirmed)?.packageName) else null
@@ -238,14 +165,14 @@ class InitialMonitor(
         }
     }
 
-    private suspend fun initialize(control: Control, host: CurboxHost, regularSubject: Subject?, cycle: RegularCycle?, restartInitial: java.util.concurrent.atomic.AtomicBoolean, dateEpoch: java.util.concurrent.atomic.AtomicLong, requestDateEpoch: Long, connectionEpoch: java.util.concurrent.atomic.AtomicLong, requestConnectionEpoch: Long, exitValid: (() -> Boolean)? = null) {
+    private suspend fun initialize(control: Control, host: CurboxHost, regularSubject: Subject?, cycle: RegularCycle?, restartInitial: java.util.concurrent.atomic.AtomicBoolean, dateEpoch: java.util.concurrent.atomic.AtomicLong, requestDateEpoch: Long, connectionEpoch: java.util.concurrent.atomic.AtomicLong, requestConnectionEpoch: Long) {
         val date = today()
         fun valid(doc: StoredLearning, subject: Subject? = null): Boolean = doc.monitor.ownerEpoch == control.owner &&
             doc.monitor.registeredChildren()[control.child] == control.registration &&
             doc.state.accountId == control.account && doc.monitor.accountId == control.account && doc.sessionRef == control.ref &&
             (subject == null || (doc.monitor.goalVersions[control.account].orEmpty()[control.child to subject] ?: 0) == (control.goalVersions[control.child to subject] ?: 0)) && permission.value == control.permission && control.permission.granted && freshPermission() &&
             host.observations.value.connection == Connection.CONNECTED && host.observations.value.accessibilityEnabled &&
-            today() == date && dateEpoch.get() == requestDateEpoch && connectionEpoch.get() == requestConnectionEpoch && (exitValid == null || exitValid())
+            today() == date && dateEpoch.get() == requestDateEpoch && connectionEpoch.get() == requestConnectionEpoch
         var doc = store.read()
         if (!valid(doc) || doc.monitor.authenticationRequired(control.ref)) return
         if (doc.monitor.catalogRetryRequested || doc.monitor.reportRetryRequested != null) {
@@ -259,23 +186,23 @@ class InitialMonitor(
         fun eligible(intent: RetryIntent?) = intent?.registration == control.registration && intent.sessionRef == control.ref
         fun retry(monitor: MonitorState) = eligible(monitor.catalogRetries[childName])
         fun reportRetry(monitor: MonitorState, key: Pair<String, Subject>) = eligible(monitor.reportRetries[key])
+        fun goal(subject: Subject) = control.goals[requireNotNull(control.child) to subject] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
         val knownChild = learningCatalog(doc.state, doc.monitor).firstOrNull { it.name == control.child }
         val initialized = knownChild != null && knownChild.userIds.keys.all { subject ->
             val key = knownChild.name to subject
             val report = doc.monitor.reports[key]
-            (!reportRetry(doc.monitor, key) && ((report?.failed == true && report.initialFailure != false && (doc.monitor.reportFailureSessions[key] == null || doc.monitor.reportFailureSessions[key] == control.ref) && !reportRetry(doc.monitor, key)) ||
+            goal(subject) == 0 || (!reportRetry(doc.monitor, key) && ((report?.failed == true && report.initialFailure != false && (doc.monitor.reportFailureSessions[key] == null || doc.monitor.reportFailureSessions[key] == control.ref) && !reportRetry(doc.monitor, key)) ||
                 ((report?.failed != true || report.initialFailure == false) && report?.date == date && doc.monitor.baselineEpochs[key] == control.owner &&
                     doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref &&
                     doc.monitor.baselinePermissions[key] == control.permission.revision)))
         }
-        if (regularSubject == null && initialized && failure(doc.monitor) == null && !retry(doc.monitor) &&
-            (doc.monitor.catalogRegistrations[childName] ?: doc.monitor.catalogRegistration) == control.registration) return
         if (doc.monitor.reports.any { (key, report) -> report.failure == LearningFailure.AUTHENTICATION && doc.monitor.reportFailureSessions[key] == control.ref }) return
         val needsCatalog = retry(doc.monitor) || (failure(doc.monitor) != null && failureSession(doc.monitor) != null && failureSession(doc.monitor) != control.ref) || (failure(doc.monitor) == null &&
             (!doc.monitor.catalogAttempted || doc.monitor.catalogOwner != control.owner || (doc.monitor.catalogRegistrations[childName] ?: doc.monitor.catalogRegistration) != control.registration || doc.monitor.catalogSession != control.ref || doc.monitor.catalogPermissionRevision != control.permission.revision))
+        if (regularSubject == null && initialized && failure(doc.monitor) == null && !needsCatalog) return
         val childBefore = learningCatalog(doc.state, doc.monitor).firstOrNull { it.name == control.child }
-        fun goal(subject: Subject) = control.goals[requireNotNull(control.child) to subject] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
         fun needsInitial(subject: Subject): Boolean {
+            if (goal(subject) == 0) return false
             val key = requireNotNull(control.child) to subject
             val previous = doc.monitor.reports[key]
             return (previous?.failed != true || previous.initialFailure == false || reportRetry(doc.monitor, key) || (doc.monitor.reportFailureSessions[key] != null && doc.monitor.reportFailureSessions[key] != control.ref)) &&
@@ -286,12 +213,11 @@ class InitialMonitor(
             val key = requireNotNull(control.child) to regularSubject
             val previous = doc.monitor.reports[key]
             val hasBaseline = previous?.value != null && previous.date == date && doc.monitor.baselineEpochs[key] == control.owner && doc.monitor.baselineRegistrations[key] == control.registration && doc.monitor.baselineSessions[key] == control.ref && doc.monitor.baselinePermissions[key] == control.permission.revision
-            if (needsCatalog || failure(doc.monitor) != null || childBefore?.userIds?.containsKey(regularSubject) != true ||
+            if (goal(regularSubject) == 0 || needsCatalog || failure(doc.monitor) != null || childBefore?.userIds?.containsKey(regularSubject) != true ||
                 (previous?.failed == true && (previous.initialFailure != false || !hasBaseline)) ||
-                (exitValid == null && hasBaseline && goal(regularSubject) > 0 && previous!!.value!!.count >= goal(regularSubject)) ||
-                (exitValid != null && (!hasBaseline || (goal(regularSubject) > 0 && previous!!.value!!.count < goal(regularSubject))))) return
+                (hasBaseline && previous!!.value!!.count >= goal(regularSubject))) return
         }
-        if (regularSubject != null && exitValid == null) {
+        if (regularSubject != null) {
             val observation = host.refreshObservation()
             val expected = subjectPackages.packageFor(regularSubject)
             if (observation.connection != Connection.CONNECTED || !observation.accessibilityEnabled || observation.screen != Screen.UNLOCKED || observation.foreground != Foreground.Confirmed(expected) || !valid(store.read(), regularSubject)) return
@@ -328,6 +254,7 @@ class InitialMonitor(
             if (learningSubjects(doc.state, doc.monitor, child.name)[subject] != id) continue
             val key = child.name to subject
             val goal = goal(subject)
+            if (goal == 0) continue
             if (!valid(doc, subject)) {
                 if (regularSubject == null && valid(doc)) {
                     restartInitial.set(true)
@@ -345,7 +272,7 @@ class InitialMonitor(
             var achieved = false
             val committed = store.updateMonitor { current ->
                 val old = current.monitor.reports[key]
-                achieved = exitValid == null && regularSubject != null && goal > 0 && !result.failed && result.value != null &&
+                achieved = regularSubject != null && goal > 0 && !result.failed && result.value != null &&
                     old?.value != null && old.date == date && old.value.count < goal && result.value.count >= goal &&
                     current.monitor.baselineEpochs[key] == control.owner && current.monitor.baselineRegistrations[key] == control.registration &&
                     current.monitor.baselineSessions[key] == control.ref && current.monitor.baselinePermissions[key] == control.permission.revision

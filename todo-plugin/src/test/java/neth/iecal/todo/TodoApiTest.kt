@@ -17,14 +17,14 @@ class TodoApiTest {
 
     @Test fun `report uses subject route and counts activities`() {
         val server = MockWebServer()
-        server.enqueue(MockResponse().setBody("""{"result":true,"data":{"contentsHistory":{"daily":[{},{}]},"learningSecondsByCategory":{"study":"61","etc":100}}}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":{"contentsHistory":{"daily":[{},{}]}}}"""))
         server.start()
         try {
             val report = HttpTodoApi(server.url("/").toString()).report(TodoSession("123", "synthetic"), Subject.MATH, "child", "20261105")
             val request = server.takeRequest()
             assertEquals("/v3/todoschool/report/daily/math", request.path)
             assertEquals("Bearer synthetic", request.getHeader("Authorization"))
-            assertEquals(DailyReport(2, 2, 61.0), report)
+            assertEquals(DailyReport(2), report)
         } finally { server.shutdown() }
     }
 

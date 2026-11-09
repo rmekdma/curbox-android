@@ -174,6 +174,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             }
             val failure = if (subject == null) doc.monitor.catalogFailureFor(childName) else doc.monitor.reports[childName to subject]?.failure
             val failedRef = if (subject == null) doc.monitor.catalogFailureSessionFor(childName) else doc.monitor.reportFailureSessions[childName to subject]
+            if (subject != null && (doc.state.goalsByAccount[doc.state.accountId]?.get(childName to subject) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }) == 0) return@updateMonitor null
             if (doc.monitor.authenticationRequired(doc.sessionRef) || doc.sessionRef == null || doc.monitor.accountId != doc.state.accountId || childName !in doc.monitor.registeredChildren() ||
                 (failure == LearningFailure.AUTHENTICATION && doc.sessionRef == failedRef)) null
             else {
@@ -306,6 +307,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         }
         for (child in children) for ((subject, id) in child.userIds) {
             val key = child.name to subject
+            if (goal(child.name, subject) == 0) continue
             if (!includeFailed && state.reports[key]?.failed == true) continue
             val latest = store.read()
             if (learningSubjects(latest.state, latest.monitor, child.name)[subject] != id) continue

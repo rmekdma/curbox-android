@@ -82,13 +82,7 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.MANUAL_ERROR -> R.string.learning_manual_error
             neth.iecal.todo.LearningText.AUTOMATIC_ERROR -> R.string.learning_automatic_error
             neth.iecal.todo.LearningText.PROGRESS_COUNT -> R.string.learning_notification_progress
-            neth.iecal.todo.LearningText.UNKNOWN_MINUTES -> R.string.learning_unknown_minutes
-            neth.iecal.todo.LearningText.MINUTES -> R.string.learning_minutes
-            neth.iecal.todo.LearningText.RELATIVE_MINUTES -> R.string.learning_relative_minutes
-            neth.iecal.todo.LearningText.RELATIVE_HOURS -> R.string.learning_relative_hours
             neth.iecal.todo.LearningText.ZERO_GOAL -> R.string.learning_zero_goal
-            neth.iecal.todo.LearningText.PROGRESS -> R.string.learning_progress
-            neth.iecal.todo.LearningText.PROGRESS_COMPLETE -> R.string.learning_progress_complete
             neth.iecal.todo.LearningText.RETRY -> R.string.learning_retry
             neth.iecal.todo.LearningText.UNKNOWN_PROGRESS -> R.string.learning_unknown_progress
             neth.iecal.todo.LearningText.UNKNOWN -> R.string.learning_unknown
@@ -102,7 +96,6 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.SUBJECT_KOREAN -> R.string.learning_korean
             neth.iecal.todo.LearningText.SUBJECT_MATH -> R.string.learning_math
             neth.iecal.todo.LearningText.SUBJECT_ENGLISH -> R.string.learning_english
-            neth.iecal.todo.LearningText.REPORT -> R.string.learning_report
             neth.iecal.todo.LearningText.REFRESH -> R.string.learning_refresh
             neth.iecal.todo.LearningText.GOAL -> R.string.learning_goal
             neth.iecal.todo.LearningText.SAVE_GOAL -> R.string.learning_save_goal
@@ -111,7 +104,6 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.INCOMPLETE -> R.string.learning_incomplete
             neth.iecal.todo.LearningText.MONITOR_START -> R.string.learning_monitor_start
             neth.iecal.todo.LearningText.MONITOR_STOP -> R.string.learning_monitor_stop
-            neth.iecal.todo.LearningText.MONITOR_REPORT -> R.string.learning_monitor_report
             neth.iecal.todo.LearningText.MONITOR_STATUS -> R.string.learning_monitor_status
             neth.iecal.todo.LearningText.INTERVAL -> R.string.learning_interval
             neth.iecal.todo.LearningText.GENERAL_SETTINGS -> R.string.learning_general_settings

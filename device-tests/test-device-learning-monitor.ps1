@@ -34,7 +34,7 @@ try {
     $window = Get-TestDeviceShellOutput -Command 'dumpsys window'
     if ($window -match 'mCurrentFocus=.*(NotificationShade|Keyguard)') { throw "Unlock the test device and run again." }
     if ((Get-LearningRegistrationCount) -ne 0 -or @(Get-LearningNotifications).Count -ne 0) { throw "Remove existing learning registrations on this dedicated test device first." }
-    $baseline = "{`"revision`":`"baseline`",`"children`":[{`"name`":`"Child1`",`"users`":{`"MATH`":`"user1`"}}],`"reports`":[{`"user`":`"user1`",`"subject`":`"MATH`",`"date`":`"$date`",`"count`":2,`"minutes`":4}]}"
+    $baseline = "{`"revision`":`"baseline`",`"children`":[{`"name`":`"Child1`",`"users`":{`"MATH`":`"user1`"}}],`"reports`":[{`"user`":`"user1`",`"subject`":`"MATH`",`"date`":`"$date`",`"count`":2}]}"
     $fixtureWritten = $true
     Set-LearningFixture $baseline
     Start-TestApp -PackageName 'neth.iecal.curbox.debug' | Out-Null
