@@ -63,7 +63,7 @@ class SyntheticFixture private constructor(val revision: String, val children: L
                             require(kotlin.math.ceil(value / 60).toInt() == minutes)
                         }
                     }
-                    Result.success(DailyReport(count, minutes, seconds))
+                    Result.success(DailyReport(count, minutes, seconds ?: minutes * 60.0))
                 }
                 require(reports.put(Triple(user, subject, date), value) == null)
             }

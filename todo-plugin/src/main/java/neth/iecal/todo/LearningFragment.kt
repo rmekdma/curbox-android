@@ -203,11 +203,7 @@ class LearningFragment : Fragment() {
             card.addView(content)
             b.children.addView(card)
             val subjects = screen.visibleSubjects(child.name)
-            val selectedReports = subjects.associateWith { subject ->
-                val manual = state.reports[child.name to subject]
-                val monitored = screen.monitor.reports[child.name to subject].takeIf { screen.monitor.accountId == state.accountId }
-                latestDisplayReport(manual, monitored, selected)
-            }
+            val selectedReports = learningDisplayReports(state, screen.monitor, child.name, subjects, selected)
             val total = totalLearningMinutes(selectedReports.values)
             val watching = screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()
             val header = android.widget.LinearLayout(requireContext()).apply {
@@ -492,25 +488,8 @@ class LearningFragment : Fragment() {
 
 
 
-internal fun latestDisplayReport(manual: ReportState?, monitor: ReportState?, today: String): ReportState? {
-    return listOfNotNull(manual, monitor).filter { it.value != null && it.date == today }
-        .maxByOrNull { it.checkedAt ?: Long.MIN_VALUE }
-}
-
 internal fun elapsedMinutes(now: Long, checkedAt: Long): Long {
     if (checkedAt >= now) return 0
     val elapsed = try { Math.subtractExact(now, checkedAt) } catch (_: ArithmeticException) { Long.MAX_VALUE }
     return elapsed / 60_000
-}
-
-internal fun totalLearningMinutes(reports: Collection<ReportState?>): Int? {
-    if (reports.isEmpty()) return null
-    var seconds = 0.0
-    for (report in reports) {
-        val value = report?.value?.seconds ?: return null
-        if (!value.isFinite() || value < 0) return null
-        seconds += value
-        if (!seconds.isFinite() || seconds > Int.MAX_VALUE.toDouble() * 60) return null
-    }
-    return kotlin.math.ceil(seconds / 60).toInt()
 }

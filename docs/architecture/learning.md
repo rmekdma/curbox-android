@@ -51,8 +51,9 @@ reports saved before seconds were retained.
   goals show a check mark; missing or older reports show as not checked. A
   failed report does not show a completion check for a positive goal. The
   compact notification uses one line; its expanded text has one line per subject.
-  When monitor catalog data is not yet available, known subjects from the same
-  account's screen catalog supply labels; values still come from monitor reports.
+  The screen and notification use the same selected today report and total.
+  Manual report updates republish the notification silently without restarting
+  monitoring or changing its baseline.
 
 ## Boundaries and lifetime
 

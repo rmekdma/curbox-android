@@ -16,6 +16,47 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class InitialMonitorTest {
+    @Test fun manualReportChangePublishesSilentlyWithoutStartingMonitorWork() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val initial = store.claim()
+        assertTrue(store.commit(initial.revision, LearningState(children = listOf(child), accountId = "account"), "session"))
+        store.updateMonitor { it.monitor.copy(accountId = "account", registrations = mapOf("Child" to 1)) }
+        val apiCalls = AtomicInteger()
+        val achievements = AtomicInteger()
+        val published = MutableStateFlow<ReportState?>(null)
+        val publishCalls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession): List<TodoChild> { apiCalls.incrementAndGet(); return listOf(child) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { apiCalls.incrementAndGet(); return DailyReport(1, 1) }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.DISCONNECTED, accessibilityEnabled = false))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val permission = MutableStateFlow(NotificationPermission(true))
+        val job = launch { InitialMonitor(api, store, permission, { true }, { doc, _ ->
+            publishCalls.incrementAndGet()
+            published.value = doc.state.reports["Child" to Subject.MATH]
+        }, achievement = { _, _, _, _, _ -> achievements.incrementAndGet(); Unit }).run(host) }
+        try {
+            withTimeout(5000) { while (publishCalls.get() == 0) delay(10) }
+            val before = store.read().monitor
+            val claim = store.claim()
+            val report = ReportState(DailyReport(5, 1, 40.0), 123, "20261109")
+            assertTrue(store.commit(claim.revision, claim.state.copy(reports = mapOf(("Child" to Subject.MATH) to report)), "session", "session"))
+            withTimeout(5000) { published.first { it == report } }
+            delay(100)
+            assertEquals(0, apiCalls.get())
+            assertEquals(0, achievements.get())
+            assertEquals(before.baselineEpochs, store.read().monitor.baselineEpochs)
+            assertEquals(before.latestAchievements, store.read().monitor.latestAchievements)
+        } finally { job.cancelAndJoin() }
+    }
+
     @Test fun rejectedCatalogSessionPausesAllRegisteredChildren() = runBlocking {
         val store = MemoryLearningStore()
         val children = listOf(TodoChild("First", mapOf(Subject.MATH to "1")), TodoChild("Second", mapOf(Subject.MATH to "2")))

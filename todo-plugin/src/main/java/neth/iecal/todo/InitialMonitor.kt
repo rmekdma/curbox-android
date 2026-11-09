@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import neth.iecal.plugin.Connection
 import neth.iecal.plugin.CurboxHost
@@ -67,6 +68,13 @@ class InitialMonitor(
                         doc.state.goalsByAccount[doc.state.accountId].orEmpty(),
                         observation.connection == Connection.CONNECTED && observation.accessibilityEnabled, notification, doc.monitor.intervalMinutes)
                 }.distinctUntilChanged().collect { controls.send(it) }
+            }
+            launch {
+                store.changes.map { Triple(it.state.accountId, it.state.children, it.state.reports) }
+                    .distinctUntilChanged().collect {
+                        val latest = withContext(Dispatchers.IO) { store.read() }
+                        if (latest.monitor.ownerEpoch == owner) publish(latest, permission.value)
+                    }
             }
             val wake = Channel<Unit>(Channel.CONFLATED)
             launch { host.observations.collect { wake.trySend(Unit) } }

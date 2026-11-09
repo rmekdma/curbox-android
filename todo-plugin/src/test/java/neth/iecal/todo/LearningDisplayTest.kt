@@ -4,6 +4,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningDisplayTest {
+    @Test fun `projection selects one current report per subject and fences other accounts`() {
+        val key = "Child" to Subject.MATH
+        val old = ReportState(DailyReport(1, 1, 10.0), 1, "today")
+        val newer = ReportState(DailyReport(5, 1, 20.0), 2, "today")
+        val state = LearningState(accountId = "A", reports = mapOf(key to old))
+        val monitor = MonitorState(accountId = "A", reports = mapOf(key to newer))
+        val subjects = setOf(Subject.MATH)
+        assertEquals(newer, learningDisplayReports(state, monitor, "Child", subjects, "today")[Subject.MATH])
+        assertEquals(old, learningDisplayReports(state, monitor.copy(accountId = "B"), "Child", subjects, "today")[Subject.MATH])
+        assertNull(learningDisplayReports(state, monitor, "Child", subjects, "tomorrow")[Subject.MATH])
+        assertEquals(1, totalLearningMinutes(learningDisplayReports(state, monitor, "Child", subjects, "today").values))
+    }
+
     @Test fun `total rounds combined seconds once and requires every report`() {
         val first = ReportState(DailyReport(1, 1, 20.0), 1, "today")
         val second = ReportState(DailyReport(2, 1, 20.0), 2, "today", failed = true)

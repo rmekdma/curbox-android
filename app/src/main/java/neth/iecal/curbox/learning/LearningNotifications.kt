@@ -8,6 +8,9 @@ import androidx.core.app.NotificationManagerCompat
 import neth.iecal.curbox.R
 import neth.iecal.todo.StoredLearning
 import neth.iecal.todo.Subject
+import neth.iecal.todo.ReportState
+import neth.iecal.todo.learningDisplayReports
+import neth.iecal.todo.totalLearningMinutes
 import neth.iecal.todo.registeredChildren
 import neth.iecal.todo.catalogFailureFor
 
@@ -31,62 +34,60 @@ object LearningNotifications {
         if (children.isEmpty()) return@publisher
         manager.createNotificationChannel(NotificationChannel("learning_achievements", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_HIGH))
         for (child in children) {
-        val details = learningNotificationDetails(current.monitor, child,
-            { subject -> context.getString(when (subject) { Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english }) },
-            { failure -> context.getString(when (failure) {
-                neth.iecal.todo.LearningFailure.NETWORK -> R.string.learning_network_error
-                neth.iecal.todo.LearningFailure.SERVER -> R.string.learning_server_error
-                neth.iecal.todo.LearningFailure.INVALID_DATA -> R.string.learning_invalid_error
-                neth.iecal.todo.LearningFailure.STORAGE -> R.string.learning_storage_error
-                neth.iecal.todo.LearningFailure.AUTHENTICATION -> R.string.learning_login_required
-            }) }, current.state.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty(),
-            context.getString(R.string.learning_unknown)) { subject ->
+        val monitorChild = current.monitor.children.firstOrNull { it.name == child }
+        val screenChild = current.state.children.firstOrNull { it.name == child }
+        val subjects = monitorChild?.userIds?.keys.orEmpty() + screenChild?.userIds?.keys.orEmpty()
+        val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
+        val reports = learningDisplayReports(current.state, current.monitor, child, subjects, today)
+        fun failureText(failure: neth.iecal.todo.LearningFailure): String = context.getString(when (failure) {
+            neth.iecal.todo.LearningFailure.NETWORK -> R.string.learning_network_error
+            neth.iecal.todo.LearningFailure.SERVER -> R.string.learning_server_error
+            neth.iecal.todo.LearningFailure.INVALID_DATA -> R.string.learning_invalid_error
+            neth.iecal.todo.LearningFailure.STORAGE -> R.string.learning_storage_error
+            neth.iecal.todo.LearningFailure.AUTHENTICATION -> R.string.learning_login_required
+        })
+        val rows = subjects.map { subject ->
             val key = child to subject
-            val report = current.monitor.reports[key]
             val goal = current.state.goalsByAccount[current.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
-            learningNotificationValue(report, goal, java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE),
-                context.getString(R.string.learning_unknown_progress, goal), context.getString(R.string.learning_notification_complete)) { count, target, complete ->
-                context.getString(if (complete) R.string.learning_notification_progress_complete else R.string.learning_notification_progress, count, target)
-            }
+            val errors = listOfNotNull(
+                current.state.reports[key]?.takeIf { it.failed }?.failure?.let { context.getString(R.string.learning_manual_error, failureText(it)) },
+                current.monitor.reports[key]?.takeIf { it.failed }?.failure?.let { context.getString(R.string.learning_automatic_error, failureText(it)) },
+                current.monitor.catalogFailureFor(child)?.let(::failureText)
+            )
+            LearningNotificationRow(context.getString(when (subject) { Subject.KOREAN -> R.string.learning_korean; Subject.MATH -> R.string.learning_math; Subject.ENGLISH -> R.string.learning_english }), goal, reports[subject], errors)
         }
+        val pending = current.monitor.catalogFailureFor(child)?.let(::failureText) ?: context.getString(R.string.learning_unknown)
+        fun line(row: LearningNotificationRow, expanded: Boolean) = learningNotificationLine(row, expanded,
+            context.getString(R.string.learning_notification_complete),
+            { goal -> context.getString(R.string.learning_unknown_progress, goal) },
+            { count, goal -> context.getString(R.string.learning_notification_progress, count, goal) },
+            { minutes -> context.getString(R.string.learning_minutes, minutes) })
+        val compact = if (rows.isEmpty()) pending else rows.joinToString(" · ") { line(it, false) }
+        val details = if (rows.isEmpty()) pending else rows.joinToString("\n") { line(it, true) }
+        val total = totalLearningMinutes(reports.values)
+        val totalText = if (total == null) context.getString(R.string.learning_unknown_minutes) else context.getString(R.string.learning_minutes, total)
         val notification = NotificationCompat.Builder(context, "learning_achievements")
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(child)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentText(details.replace("\n", " · ")).setStyle(NotificationCompat.BigTextStyle().bigText(details))
+            .setContentText(compact).setStyle(NotificationCompat.BigTextStyle().setBigContentTitle("$child  $totalText").bigText(details))
             .setOngoing(true).setSilent(child != achievementChild).build()
         if (permission.value == expected && expected.granted && notifications.areNotificationsEnabled() && (child != achievementChild || stillValid())) notifications.notify(tag(child), 0x4c454152, notification)
         }
     }
 }
 
-internal fun learningNotificationDetails(
-    monitor: neth.iecal.todo.MonitorState, child: String,
-    label: (Subject) -> String, failureText: (neth.iecal.todo.LearningFailure) -> String,
-    knownSubjects: Set<Subject> = emptySet(), pending: String = "",
-    value: (Subject) -> String
-): String {
-    val subjects = monitor.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty() + knownSubjects
-    if (subjects.isEmpty()) return monitor.catalogFailureFor(child)?.let(failureText) ?: pending
-    val result = StringBuilder()
-    for (subject in subjects) {
-        if (result.isNotEmpty()) result.append('\n')
-        val failure = (monitor.reports[child to subject]?.failure ?: monitor.catalogFailureFor(child))?.let(failureText).orEmpty()
-        result.append(label(subject)).append(": ")
-        val progress = value(subject)
-        result.append(progress)
-        if (failure.isNotEmpty()) result.append(' ').append(failure)
-    }
-    return result.toString()
-}
+internal data class LearningNotificationRow(val label: String, val goal: Int, val report: ReportState?, val errors: List<String> = emptyList())
 
-internal fun learningNotificationValue(
-    report: neth.iecal.todo.ReportState?, goal: Int, today: String, unknown: String, complete: String,
-    progress: (Int, Int, Boolean) -> String
+internal fun learningNotificationLine(
+    row: LearningNotificationRow, expanded: Boolean, check: String,
+    unknown: (Int) -> String, progress: (Int, Int) -> String, minutes: (Int) -> String
 ): String {
-    val value = report?.value
-    return when {
-        goal == 0 -> complete
-        value == null || report.date != today -> unknown
-        else -> progress(value.count, goal, !report.failed && value.count >= goal)
-    }
+    val value = row.report?.value
+    val complete = row.goal == 0 || (value != null && row.report.failed == false && value.count >= row.goal)
+    val parts = mutableListOf(row.label)
+    if (complete) parts.add(check)
+    if (row.goal != 0 && (!complete || expanded)) parts.add(if (value == null) unknown(row.goal) else progress(value.count, row.goal))
+    if (expanded && value != null) parts.add(minutes(value.minutes))
+    if (expanded) parts.addAll(row.errors)
+    return parts.joinToString(" ")
 }

@@ -10,7 +10,7 @@ class SyntheticFixtureTest {
         val prefix = """{"revision":"r","children":[{"name":"Child1","users":{"MATH":"user1"}}],"reports":[{"user":"user1","subject":"MATH","date":"20261106","count":2,"minutes":1"""
         val exact = SyntheticFixture.parse(prefix + ""","seconds":40}]}""")
         assertEquals(40.0, exact.report("user1", neth.iecal.todo.Subject.MATH, "20261106").seconds!!, 0.0)
-        assertNull(SyntheticFixture.parse(prefix + "}]}").report("user1", neth.iecal.todo.Subject.MATH, "20261106").seconds)
+        assertEquals(60.0, SyntheticFixture.parse(prefix + "}]}").report("user1", neth.iecal.todo.Subject.MATH, "20261106").seconds!!, 0.0)
         assertTrue(runCatching { SyntheticFixture.parse(prefix + ""","seconds":61}]}""") }.isFailure)
     }
 
