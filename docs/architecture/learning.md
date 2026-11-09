@@ -34,6 +34,14 @@ reports saved before seconds were retained.
 - A zero goal is locally complete while reports track learning time. An unknown report is not a
   zero count. A later incomplete to complete transition requests an achievement
   notification; a baseline or completion caused by lowering a goal is silent.
+- After leaving a Todo app, the monitor waits one second and rechecks the
+  foreground. If the same app has not returned, it makes one silent final report
+  request for registered children whose subject has a valid completed baseline
+  or a zero goal. The final check bypasses the interval but uses the same
+  serialized worker and does not retry an initial failure. Screen off, lock,
+  disconnection and a return to the same app cancel pending checks. Foreground
+  observations can be conflated, so this is best effort; it does not guarantee
+  the server has received the last activity by the time of the request.
 - An initial catalog or report failure waits for an explicit retry; an explicit
   sign in can also start a new initial check. Pulling down on the signed in
   dashboard refreshes today and explicitly retries eligible failed
