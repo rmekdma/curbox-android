@@ -14,12 +14,13 @@ class LearningDisplayTest {
         assertTrue(elapsedMinutes(Long.MAX_VALUE, Long.MIN_VALUE) > 0)
     }
 
-    @Test fun `latest today report wins and older report is fallback`() {
+    @Test fun `latest today report wins and older reports are not displayed`() {
         val manual = ReportState(DailyReport(2, 3), 100, "today")
         val monitor = ReportState(DailyReport(5, 6), 200, "today", failed = true)
         assertEquals(monitor, latestDisplayReport(manual, monitor, "today"))
         assertEquals(manual, latestDisplayReport(manual, monitor.copy(date = "yesterday"), "today"))
-        assertEquals(monitor.copy(date = "yesterday"), latestDisplayReport(null, monitor.copy(date = "yesterday"), "today"))
+        assertNull(latestDisplayReport(null, monitor.copy(date = "yesterday"), "today"))
+        assertNull(latestDisplayReport(manual.copy(date = "yesterday"), monitor.copy(date = "yesterday"), "today"))
         assertNull(latestDisplayReport(ReportState(failed = true), null, "today"))
     }
 }

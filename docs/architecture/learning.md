@@ -13,7 +13,7 @@ not add a subscription or report request.
 The dashboard uses today in Seoul and has no date selector. Each subject row
 shows the newest available report for today from manual checks or the same
 account's monitor, with the count and relative check time from that same report.
-Older values are identified as previous checks. A selected successful report
+Older report values and check times are not displayed. A selected successful report
 at its goal shows a green check; a zero goal shows a local check without a
 fabricated count. Manual and automatic errors are labeled separately. The
 relative time updates without rebuilding the settings dialog.

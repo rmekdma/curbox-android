@@ -27,7 +27,7 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, LAST_REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, WATCHING_PAUSED, WATCHING_ISSUE, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, LAST_VALUE, LAST_PROGRESS, MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, WATCHING_PAUSED, WATCHING_ISSUE, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
@@ -253,7 +253,7 @@ class LearningFragment : Fragment() {
                 }
                 content.addView(row)
                 row.addView(TextView(requireContext()).apply { text = subjectLabel(subject); textSize = 20f })
-                val todayValue = value?.takeIf { selectedReport?.date == selected }
+                val todayValue = value
                 if (goal != 0 && todayValue != null) {
                     row.addView(TextView(requireContext()).apply {
                         text = "  " + this@LearningFragment.text(LearningText.PROGRESS_COUNT, todayValue.count, goal)
@@ -276,9 +276,7 @@ class LearningFragment : Fragment() {
                     row.addView(time)
                 }
                 if (value != null) {
-                    val details = if (selectedReport?.date == selected) text(LearningText.MINUTES, value.minutes)
-                        else text(LearningText.LAST_VALUE, text(LearningText.LAST_PROGRESS, value.count, value.minutes))
-                    content.addView(TextView(requireContext()).apply { text = details })
+                    content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.MINUTES, value.minutes) })
                 }
                 if (report?.failed == true) content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.MANUAL_ERROR, failureText(report.failure)) })
                 if (monitored?.failed == true) content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.AUTOMATIC_ERROR, failureText(monitored.failure)) })
@@ -454,8 +452,8 @@ class LearningFragment : Fragment() {
 
 
 internal fun latestDisplayReport(manual: ReportState?, monitor: ReportState?, today: String): ReportState? {
-    val reports = listOfNotNull(manual, monitor).filter { it.value != null }
-    return (reports.filter { it.date == today }.ifEmpty { reports }).maxByOrNull { it.checkedAt ?: Long.MIN_VALUE }
+    return listOfNotNull(manual, monitor).filter { it.value != null && it.date == today }
+        .maxByOrNull { it.checkedAt ?: Long.MIN_VALUE }
 }
 
 internal fun elapsedMinutes(now: Long, checkedAt: Long): Long {
