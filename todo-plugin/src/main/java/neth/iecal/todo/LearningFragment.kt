@@ -185,7 +185,8 @@ class LearningFragment : Fragment() {
         b.emailLayout.visibility = loginVisibility
         b.passwordLayout.visibility = loginVisibility
         b.signIn.visibility = loginVisibility
-        b.status.text = when { screen.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); showLogin -> ""; state.catalogCheckedAt == null -> text(LearningText.UNKNOWN); state.children.isEmpty() -> text(LearningText.EMPTY); else -> "" }
+        val monitorCatalogKnown = state.accountId != null && screen.monitor.accountId == state.accountId && (screen.monitor.monitorCatalogOrder ?: 0) > (screen.monitor.manualCatalogOrder ?: 0)
+        b.status.text = when { screen.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); showLogin -> ""; state.catalogCheckedAt == null && !monitorCatalogKnown -> text(LearningText.UNKNOWN); learningCatalog(state, screen.monitor).isEmpty() -> text(LearningText.EMPTY); else -> "" }
         b.swipeRefresh.isEnabled = !showLogin
         renderAvailability()
         checkedTimes.clear()
