@@ -77,8 +77,6 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.CONFIRM -> R.string.learning_confirm
             neth.iecal.todo.LearningText.WATCHING -> R.string.learning_watching
             neth.iecal.todo.LearningText.NOT_WATCHING -> R.string.learning_not_watching
-            neth.iecal.todo.LearningText.WATCHING_ISSUE -> R.string.learning_watching_issue
-            neth.iecal.todo.LearningText.WATCHING_PAUSED -> R.string.learning_watching_paused
             neth.iecal.todo.LearningText.SETTINGS_CHANGED -> R.string.learning_settings_changed
             neth.iecal.todo.LearningText.MONITOR_PROGRESS -> R.string.learning_monitor_progress
             neth.iecal.todo.LearningText.MANUAL_ERROR -> R.string.learning_manual_error
@@ -91,6 +89,7 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.PROGRESS -> R.string.learning_progress
             neth.iecal.todo.LearningText.PROGRESS_COMPLETE -> R.string.learning_progress_complete
             neth.iecal.todo.LearningText.RETRY -> R.string.learning_retry
+            neth.iecal.todo.LearningText.UNKNOWN_PROGRESS -> R.string.learning_unknown_progress
             neth.iecal.todo.LearningText.UNKNOWN -> R.string.learning_unknown
             neth.iecal.todo.LearningText.EMPTY -> R.string.learning_empty
             neth.iecal.todo.LearningText.ERROR -> R.string.learning_error

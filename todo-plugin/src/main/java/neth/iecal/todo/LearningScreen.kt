@@ -239,11 +239,16 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         } catch (e: Exception) { storageFailure() }
     }
 
-    fun signIn(email: String, password: String, date: String) {
+    val accountEmail: String? get() = synchronized(lock) { session?.email }
+
+    private fun today(): String = java.time.Instant.ofEpochMilli(now()).atZone(java.time.ZoneId.of("Asia/Seoul")).toLocalDate().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
+
+    fun signIn(email: String, password: String) {
+        val date = today()
         val local = synchronized(lock) { session = null; sessionRef = null; ++generation }
         val claim = store.claim()
         try {
-            val authenticated = api.signIn(email, password)
+            val authenticated = api.signIn(email, password).copy(email = email)
             val ref = UUID.randomUUID().toString()
             store.writeSession(ref, authenticated)
             synchronized(lock) {
@@ -265,7 +270,8 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         }
     }
 
-    fun refresh(date: String, includeFailed: Boolean = false, expectedSessionRef: String? = null) {
+    fun refresh(includeFailed: Boolean = false, expectedSessionRef: String? = null) {
+        val date = today()
         val local: Long
         val current: TodoSession
         val ref: String
@@ -274,38 +280,6 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         if (claim.sessionRef != ref) { restore(); return }
         if (claim.monitor.accountId == claim.state.accountId && claim.monitor.authenticationRequired(ref)) { monitor = claim.monitor; return }
         refreshForRequest(date, current, local, claim.revision, ref, includeFailed)
-    }
-
-    fun retryReport(childName: String, subject: Subject, date: String) {
-        val local: Long
-        val current: TodoSession
-        val ref: String
-        val userId: String
-        synchronized(lock) {
-            if (goal(childName, subject) == 0) return
-            current = session ?: return
-            ref = sessionRef ?: return
-            userId = state.children.firstOrNull { it.name == childName }?.userIds?.get(subject) ?: return
-            local = ++generation
-        }
-        val claim = store.claim()
-        if (claim.sessionRef != ref) { restore(); return }
-        if (claim.monitor.accountId == claim.state.accountId && claim.monitor.authenticationRequired(ref)) { monitor = claim.monitor; return }
-        var authFailure = false
-        val key = childName to subject
-        val result = try { ReportState(api.report(current, subject, userId, date), now(), date) }
-        catch (e: TodoApiException) {
-            authFailure = e.authenticationRequired
-            synchronized(lock) { (state.reports[key] ?: ReportState(date = date)).copy(failed = true, failure = e.kind) }
-        }
-        synchronized(lock) {
-            if (local != generation || !dateIsCurrent(date)) return
-            val next = state.copy(reports = state.reports + (key to result), loginRequired = authFailure)
-            val nextRef = if (authFailure) null else ref
-            if (!store.commit(claim.revision, next, nextRef, ref)) return
-            state = next
-            if (authFailure) { session = null; sessionRef = null }
-        }
     }
 
     private fun refreshForRequest(date: String, current: TodoSession, local: Long, revision: Long, ref: String, includeFailed: Boolean) {
@@ -327,6 +301,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         for (child in children) for ((subject, id) in child.userIds) {
             val key = child.name to subject
             if (goal(child.name, subject) == 0 || (!includeFailed && state.reports[key]?.failed == true)) continue
+            if (!dateIsCurrent(date)) return
             var authFailure = false
             val result = try { ReportState(api.report(current, subject, id, date), now(), date) }
             catch (e: TodoApiException) {

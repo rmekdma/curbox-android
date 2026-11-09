@@ -1880,6 +1880,7 @@
     <string name="learning_password">Password</string>
     <string name="learning_sign_in">Sign in</string>
     <string name="learning_retry">Check again</string>
+    <string name="learning_unknown_progress">? / %1$d</string>
     <string name="learning_unknown">Not checked yet</string>
     <string name="learning_empty">No children found</string>
     <string name="learning_error">Could not check. Try again.</string>
@@ -1908,8 +1909,6 @@
     <string name="learning_confirm">Confirm</string>
     <string name="learning_watching">Watching</string>
     <string name="learning_not_watching">Not watching</string>
-    <string name="learning_watching_issue">Some checks need attention</string>
-    <string name="learning_watching_paused">Watching is paused</string>
     <string name="learning_settings_changed">Settings changed. Close this and try again.</string>
     <string name="learning_monitor_start">Start watching</string>
     <string name="learning_monitor_stop">Stop watching</string>

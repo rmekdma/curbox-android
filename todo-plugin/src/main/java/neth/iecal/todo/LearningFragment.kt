@@ -27,18 +27,17 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, WATCHING_PAUSED, WATCHING_ISSUE, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, UNKNOWN_PROGRESS, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
     private lateinit var screen: LearningScreen
-    private var changingAccount = false
+    private var accountSubmitting = false
     private var showingLogin = false
     private var refreshing = false
     private var availability: LearningAvailability? = null
     private var availabilityJob: kotlinx.coroutines.Job? = null
     private var settingsDialog: androidx.appcompat.app.AlertDialog? = null
-    private val childStatuses = mutableMapOf<String, TextView>()
     private val checkedTimes = mutableMapOf<TextView, Long>()
     private var renderedDay = LocalDate.now(ZoneId.of("Asia/Seoul"))
     private val host get() = requireActivity() as LearningHost
@@ -69,10 +68,8 @@ class LearningFragment : Fragment() {
         b.emailLayout.hint = text(LearningText.EMAIL)
         b.passwordLayout.hint = text(LearningText.PASSWORD)
         b.signIn.text = text(LearningText.SIGN_IN)
-        b.changeAccount.text = text(LearningText.CHANGE_ACCOUNT)
-        b.cancelAccountChange.text = text(LearningText.CANCEL)
-        b.changeAccount.setOnClickListener { changingAccount = true; render() }
-        b.cancelAccountChange.setOnClickListener { changingAccount = false; b.password.text?.clear(); render() }
+        b.changeAccount.contentDescription = text(LearningText.CHANGE_ACCOUNT)
+        b.changeAccount.setOnClickListener { showAccountDialog() }
         b.intervalSettings.contentDescription = text(LearningText.INTERVAL)
         b.intervalSettings.setOnClickListener { showIntervalDialog() }
         b.swipeRefresh.setOnRefreshListener { refreshFromGesture() }
@@ -84,14 +81,7 @@ class LearningFragment : Fragment() {
             val email = b.email.text.toString()
             val password = b.password.text.toString()
             b.password.text?.clear()
-            val requested = date()
-            b.cancelAccountChange.isEnabled = false
-            runRequest(onComplete = {
-                binding?.cancelAccountChange?.isEnabled = true
-                if (screen.signedIn) changingAccount = false
-            }) {
-                screen.signIn(email, password, requested)
-            }
+            runRequest { screen.signIn(email, password) }
         }
         runRequest { screen.restore() }
         viewLifecycleOwner.lifecycleScope.launch {
@@ -130,12 +120,11 @@ class LearningFragment : Fragment() {
 
     private fun refreshFromGesture() {
         val b = binding ?: return
-        if (refreshing || !screen.signedIn || changingAccount) {
+        if (refreshing || !screen.signedIn || accountSubmitting) {
             if (!refreshing) b.swipeRefresh.isRefreshing = false
             return
         }
         refreshing = true
-        val requested = date()
         val scope = screen.retryScope() ?: run {
             refreshing = false
             b.swipeRefresh.isRefreshing = false
@@ -146,7 +135,7 @@ class LearningFragment : Fragment() {
             binding?.swipeRefresh?.isRefreshing = false
         }) {
             screen.retryFailures(scope)
-            screen.refresh(requested, includeFailed = true, expectedSessionRef = scope.sessionRef)
+            screen.refresh(includeFailed = true, expectedSessionRef = scope.sessionRef)
         }
     }
 
@@ -180,7 +169,7 @@ class LearningFragment : Fragment() {
         val state = screen.state
         val selected = date()
         val signedIn = screen.signedIn
-        val showLogin = !signedIn || changingAccount
+        val showLogin = !signedIn && !accountSubmitting
         if (showLogin) settingsDialog?.dismiss()
         if (showingLogin && !showLogin) {
             val focused = b.root.findFocus()
@@ -192,15 +181,13 @@ class LearningFragment : Fragment() {
         val loginVisibility = if (showLogin) View.VISIBLE else View.GONE
         b.dashboard.visibility = if (showLogin) View.GONE else View.VISIBLE
         b.intervalSettings.visibility = if (showLogin) View.GONE else View.VISIBLE
-        b.changeAccount.visibility = if (signedIn && !changingAccount) View.VISIBLE else View.GONE
-        b.cancelAccountChange.visibility = if (signedIn && changingAccount) View.VISIBLE else View.GONE
+        b.changeAccount.visibility = if (signedIn || accountSubmitting) View.VISIBLE else View.GONE
         b.emailLayout.visibility = loginVisibility
         b.passwordLayout.visibility = loginVisibility
         b.signIn.visibility = loginVisibility
         b.status.text = when { screen.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); showLogin -> ""; state.catalogCheckedAt == null -> text(LearningText.UNKNOWN); state.children.isEmpty() -> text(LearningText.EMPTY); else -> "" }
         b.swipeRefresh.isEnabled = !showLogin
         renderAvailability()
-        childStatuses.clear()
         checkedTimes.clear()
         b.children.removeAllViews()
         for (child in state.children) {
@@ -224,9 +211,6 @@ class LearningFragment : Fragment() {
                 androidx.core.view.ViewCompat.setStateDescription(this, text(if (watching) LearningText.WATCHING else LearningText.NOT_WATCHING))
             })
             b.children.addView(header)
-            val childStatus = TextView(requireContext())
-            childStatuses[child.name] = childStatus
-            b.children.addView(childStatus)
             if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && screen.monitor.catalogFailureFor(child.name) != null) {
                 b.children.addView(TextView(requireContext()).apply { text = failureText(screen.monitor.catalogFailureFor(child.name)) })
             }
@@ -259,7 +243,7 @@ class LearningFragment : Fragment() {
                         text = "  " + this@LearningFragment.text(LearningText.PROGRESS_COUNT, todayValue.count, goal)
                     })
                 } else if (goal != 0 && todayValue == null) {
-                    row.addView(TextView(requireContext()).apply { text = "  " + this@LearningFragment.text(LearningText.UNKNOWN) })
+                    row.addView(TextView(requireContext()).apply { text = "  " + this@LearningFragment.text(LearningText.UNKNOWN_PROGRESS, goal) })
                 }
                 if (goal == 0 || (todayValue != null && selectedReport?.failed == false && todayValue.count >= goal)) {
                     row.addView(android.widget.ImageView(requireContext()).apply {
@@ -283,7 +267,6 @@ class LearningFragment : Fragment() {
 
             }
         }
-        updateChildStatuses()
         updateCheckedTimes()
     }
 
@@ -325,6 +308,60 @@ class LearningFragment : Fragment() {
         inputType = android.text.InputType.TYPE_CLASS_NUMBER
         setText(value)
         layoutParams = android.widget.LinearLayout.LayoutParams((120 * resources.displayMetrics.density).toInt(), -2)
+    }
+
+    private fun showAccountDialog() {
+        val content = dialogContent()
+        fun field(hint: String, inputType: Int, initial: String): com.google.android.material.textfield.TextInputEditText {
+            val layout = com.google.android.material.textfield.TextInputLayout(requireContext()).apply {
+                this.hint = hint
+                endIconMode = com.google.android.material.textfield.TextInputLayout.END_ICON_CLEAR_TEXT
+            }
+            val input = com.google.android.material.textfield.TextInputEditText(layout.context).apply {
+                setSingleLine()
+                this.inputType = inputType
+                setText(initial)
+            }
+            layout.addView(input)
+            content.addView(layout)
+            return input
+        }
+        val email = field(text(LearningText.EMAIL), android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS, screen.accountEmail.orEmpty())
+        val password = field(text(LearningText.PASSWORD), android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD, "")
+        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(text(LearningText.CHANGE_ACCOUNT)).setView(content)
+            .setNegativeButton(text(LearningText.CANCEL), null)
+            .setPositiveButton(text(LearningText.SIGN_IN), null).create()
+        settingsDialog = dialog
+        dialog.setOnDismissListener {
+            password.text?.clear()
+            if (settingsDialog === dialog) settingsDialog = null
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val address = email.text.toString()
+                val secret = password.text.toString()
+                password.text?.clear()
+                accountSubmitting = true
+                dialog.setCancelable(false)
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).isEnabled = false
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE).isEnabled = false
+                val owner = viewLifecycleOwner
+                owner.lifecycleScope.launch {
+                    try { withContext(Dispatchers.IO) { screen.signIn(address, secret) } }
+                    catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                    catch (e: Exception) { screen.storageFailure() }
+                    finally {
+                        if (binding != null && viewLifecycleOwner === owner) {
+                            accountSubmitting = false
+                            if (dialog.isShowing) dialog.dismiss()
+                            render()
+                        }
+                    }
+                }
+            }
+        }
+        dialog.show()
     }
 
     private fun showIntervalDialog() {
@@ -409,20 +446,6 @@ class LearningFragment : Fragment() {
         dialog.show()
     }
 
-    private fun updateChildStatuses() {
-        val current = availability
-        for ((child, view) in childStatuses) {
-            val watching = screen.monitor.accountId == screen.state.accountId && child in screen.monitor.registeredChildren()
-            val status = when {
-                !watching -> LearningText.NOT_WATCHING
-                current == null || !current.accessibilityEnabled || !current.notificationsEnabled || current.serviceConnected != true -> LearningText.WATCHING_PAUSED
-                screen.monitor.catalogFailureFor(child) != null || screen.monitor.reports.any { it.key.first == child && it.value.failed } -> LearningText.WATCHING_ISSUE
-                else -> LearningText.WATCHING
-            }
-            view.text = text(status)
-        }
-    }
-
     private fun renderAvailability() {
         val b = binding ?: return
         val status = availability
@@ -435,16 +458,15 @@ class LearningFragment : Fragment() {
         }
         b.accessibilitySettings.visibility = if (status?.accessibilityEnabled == false) View.VISIBLE else View.GONE
         b.notificationSettings.visibility = if (status?.notificationsEnabled == false) View.VISIBLE else View.GONE
-        updateChildStatuses()
     }
 
     override fun onDestroyView() {
         settingsDialog?.dismiss()
         settingsDialog = null
-        childStatuses.clear()
         checkedTimes.clear()
         binding = null
         showingLogin = false
+        accountSubmitting = false
         super.onDestroyView()
     }
 }

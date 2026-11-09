@@ -8,7 +8,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
-data class TodoSession(val accountId: String, val token: String) {
+data class TodoSession(val accountId: String, val token: String, val email: String? = null) {
     override fun toString(): String = "TodoSession(redacted)"
 }
 

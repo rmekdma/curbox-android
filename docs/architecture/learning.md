@@ -4,7 +4,7 @@ Curbox hosts the TODO School screen and monitor in the same APK. The screen
 supports sign in, goals, manual reports for today. Watching is enabled
 per child; the automatic monitor uses today in `Asia/Seoul`, as does the dashboard. Learning goals do not change Curbox blocking rules.
 
-The dashboard opens the check interval and each child’s subject goals in separate
+The dashboard opens account changes, the check interval and each child’s subject goals in separate
 settings dialogs. Goal changes are validated and saved together for the account,
 session and subject identities captured when the dialog opened. All three subject
 goals can be configured, including unsubscribed subjects; saving a goal does
@@ -13,7 +13,8 @@ not add a subscription or report request.
 The dashboard uses today in Seoul and has no date selector. Each subject row
 shows the newest available report for today from manual checks or the same
 account's monitor, with the count and relative check time from that same report.
-Older report values and check times are not displayed. A selected successful report
+When today has no valid report, the row shows `? / goal`. Older report values
+and check times are not displayed. A selected successful report
 at its goal shows a green check; a zero goal shows a local check without a
 fabricated count. Manual and automatic errors are labeled separately. The
 relative time updates without rebuilding the settings dialog.

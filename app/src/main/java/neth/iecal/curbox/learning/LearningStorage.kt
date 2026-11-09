@@ -85,10 +85,7 @@ class LearningStorage(context: Context) : LearningStore {
         require(bytes.size > 12)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(ref, false), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
-        val decoded = JsonParser.parseString(cipher.doFinal(bytes.copyOfRange(12, bytes.size)).decodeToString()).asJsonObject
-        val account = decoded.get("accountId")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString?.takeIf { it.isNotBlank() }
-        val token = decoded.get("token")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString?.takeIf { it.isNotBlank() }
-        TodoSession(requireNotNull(account), requireNotNull(token))
+        decodeLearningSession(cipher.doFinal(bytes.copyOfRange(12, bytes.size)).decodeToString())
     }
     override fun writeSession(ref: String, session: TodoSession) { runBlocking {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -118,3 +115,11 @@ class LearningStorage(context: Context) : LearningStore {
 
 
 
+
+internal fun decodeLearningSession(raw: String): TodoSession {
+    val decoded = JsonParser.parseString(raw).asJsonObject
+    val account = decoded.get("accountId")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString?.takeIf { it.isNotBlank() }
+    val token = decoded.get("token")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString?.takeIf { it.isNotBlank() }
+    val email = decoded.get("email")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+    return TodoSession(requireNotNull(account), requireNotNull(token), email)
+}
