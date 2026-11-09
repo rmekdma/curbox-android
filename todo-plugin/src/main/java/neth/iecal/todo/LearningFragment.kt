@@ -388,7 +388,7 @@ class LearningFragment : Fragment() {
         val soundKeys = mutableListOf<String?>(null, "silent")
         val soundNames = mutableListOf(text(LearningText.SOUND_DEFAULT), text(LearningText.SOUND_SILENT))
         runCatching {
-            val ringtoneManager = android.media.RingtoneManager(requireActivity()).apply { setType(android.media.RingtoneManager.TYPE_NOTIFICATION) }
+            val ringtoneManager = android.media.RingtoneManager(requireContext()).apply { setType(android.media.RingtoneManager.TYPE_NOTIFICATION) }
             ringtoneManager.cursor.use { cursor ->
                 while (cursor.moveToNext()) {
                     val uri = ringtoneManager.getRingtoneUri(cursor.position)?.toString() ?: continue
