@@ -59,10 +59,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
     }
 
     fun visibleSubjects(childName: String): Set<Subject> {
-        val manual = state.children.firstOrNull { it.name == childName }?.userIds?.keys.orEmpty()
-        val additional = if (state.accountId != null && monitor.accountId == state.accountId && childName in monitor.registeredChildren() && state.children.any { it.name == childName })
-            monitor.children.firstOrNull { it.name == childName }?.userIds?.keys.orEmpty() else emptySet()
-        return manual + additional
+        return learningSubjects(state, monitor, childName).keys
     }
 
     fun saveGoal(childName: String, subject: Subject, input: String): Boolean {
@@ -84,10 +81,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
     }
 
     private fun subjectIds(state: LearningState, monitor: MonitorState, childName: String): Map<Subject, String> {
-        val child = state.children.firstOrNull { it.name == childName } ?: return emptyMap()
-        val monitored = if (state.accountId != null && monitor.accountId == state.accountId)
-            monitor.children.firstOrNull { it.name == childName }?.userIds.orEmpty() else emptyMap()
-        return monitored + child.userIds
+        return learningSubjects(state, monitor, childName)
     }
 
     fun goalScope(childName: String): LearningGoalScope? = synchronized(lock) {
@@ -95,13 +89,13 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         val ref = sessionRef ?: return@synchronized null
         if (session == null || loginRequired) return@synchronized null
         val subjects = subjectIds(state, monitor, childName)
-        if (state.children.none { it.name == childName }) return@synchronized null
+        if (learningCatalog(state, monitor).none { it.name == childName }) return@synchronized null
         LearningGoalScope(account, ref, childName, subjects)
     }
 
     /** Saves every goal together only if the original account, session and subjects still match. */
     fun saveGoals(scope: LearningGoalScope, inputs: Map<Subject, String>): Boolean {
-        if (inputs.keys != Subject.entries.toSet()) return false
+        if (inputs.keys != scope.subjects.keys) return false
         val values = inputs.mapValues { (_, input) ->
             val value = input.trim()
             if (!value.matches(Regex("[0-9]+"))) return false
@@ -111,7 +105,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             if (sessionRef != scope.sessionRef || state.accountId != scope.accountId || session == null || loginRequired) return false
             val claim = store.claim()
             if (claim.sessionRef != scope.sessionRef || claim.state.accountId != scope.accountId ||
-                claim.state.children.none { it.name == scope.childName } ||
+                learningCatalog(claim.state, claim.monitor).none { it.name == scope.childName } ||
                 subjectIds(claim.state, claim.monitor, scope.childName) != scope.subjects ||
                 (claim.monitor.accountId == scope.accountId && claim.monitor.authenticationRequired(scope.sessionRef))) return false
             val goals = claim.state.goalsByAccount[scope.accountId].orEmpty() + values.mapKeys { scope.childName to it.key }
@@ -173,7 +167,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             else {
                 val old = doc.monitor.migrateRetries(doc.sessionRef)
                 val key = subject?.let { childName to it }
-                if (key == null && old.catalogFailureFor(childName) == null || key != null && (old.reports[key]?.failed != true || (doc.state.goalsByAccount[doc.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8; null -> 0 }) == 0)) null
+                if (key == null && old.catalogFailureFor(childName) == null || key != null && old.reports[key]?.failed != true) null
                 else {
                     val revision = Math.addExact(old.retryRevision, 1)
                     val intent = RetryIntent(old.registeredChildren().getValue(childName), revision, requireNotNull(doc.sessionRef))
@@ -192,7 +186,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
     fun toggleMonitor(childName: String) {
         val updated = store.updateMonitor { doc ->
             val account = doc.state.accountId
-            if (account == null || doc.sessionRef == null || doc.state.children.none { it.name == childName }) null
+            if (account == null || doc.sessionRef == null || learningCatalog(doc.state, doc.monitor).none { it.name == childName }) null
             else {
                 val savedMonitor = doc.monitor.migrateRetries(doc.sessionRef)
                 val legacyChild = savedMonitor.childName
@@ -201,11 +195,11 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
                     savedMonitor.copy(catalogFailures = mapOf(legacyChild to legacyFailure),
                         catalogFailureSessions = savedMonitor.catalogFailureSession?.let { mapOf(legacyChild to it) }.orEmpty())
                 } else savedMonitor
-                val accounts = old.accountId?.let { old.accounts + (it to MonitorAccountSnapshot(old.catalogFailure, old.catalogFailureSession, old.catalogAttempted, old.children, old.reports, old.reportFailureSessions, old.registeredChildren(), old.catalogFailures, old.catalogFailureSessions, old.catalogRegistrations)) } ?: old.accounts
+                val accounts = old.accountId?.let { old.accounts + (it to MonitorAccountSnapshot(old.catalogFailure, old.catalogFailureSession, old.catalogAttempted, old.children, old.reports, old.reportFailureSessions, old.registeredChildren(), old.catalogFailures, old.catalogFailureSessions, old.catalogRegistrations, old.catalogCheckedAt, old.manualCatalogOrder, old.monitorCatalogOrder)) } ?: old.accounts
                 val previous = if (old.accountId == account) old else {
                     val saved = accounts[account] ?: MonitorAccountSnapshot()
                     old.copy(accountId = account, childName = null, registrations = saved.registrations, catalogFailures = saved.catalogFailures, catalogFailureSessions = saved.catalogFailureSessions, catalogRegistrations = saved.catalogRegistrations, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
-                        catalogAttempted = saved.catalogAttempted, children = saved.children, reports = saved.reports, reportFailureSessions = saved.reportFailureSessions,
+                        catalogAttempted = saved.catalogAttempted, catalogCheckedAt = saved.catalogCheckedAt, manualCatalogOrder = saved.manualCatalogOrder, monitorCatalogOrder = saved.monitorCatalogOrder, children = saved.children, reports = saved.reports, reportFailureSessions = saved.reportFailureSessions,
                         baselineEpochs = emptyMap(), baselineRegistrations = emptyMap(), baselineSessions = emptyMap(), baselinePermissions = emptyMap(),
                         catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null,
                         catalogRetries = emptyMap(), reportRetries = emptyMap())
@@ -295,12 +289,14 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         synchronized(lock) {
             if (local != generation) return
             val next = state.copy(children = children, error = false, loginRequired = false, catalogCheckedAt = now(), failure = null)
-            if (!store.commit(revision, next, ref, ref)) return
+            if (!store.commit(revision, next, ref, ref, catalogSuccess = true)) return
             state = next
         }
         for (child in children) for ((subject, id) in child.userIds) {
             val key = child.name to subject
-            if (goal(child.name, subject) == 0 || (!includeFailed && state.reports[key]?.failed == true)) continue
+            if (!includeFailed && state.reports[key]?.failed == true) continue
+            val latest = store.read()
+            if (learningSubjects(latest.state, latest.monitor, child.name)[subject] != id) continue
             if (!dateIsCurrent(date)) return
             var authFailure = false
             val result = try { ReportState(api.report(current, subject, id, date), now(), date) }

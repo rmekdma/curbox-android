@@ -102,17 +102,16 @@ class LearningScreenTest {
         val screen = testLearningScreen(api, store)
         screen.signIn("fake", "fake", "20261108")
         val scope = requireNotNull(screen.goalScope("Child"))
-        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "100", Subject.KOREAN to "7")))
+        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "100")))
         assertEquals(5, screen.goal("Child", Subject.MATH))
         assertEquals(8, screen.goal("Child", Subject.ENGLISH))
-        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "0", Subject.KOREAN to "7")))
+        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "0")))
         assertEquals(3, screen.goal("Child", Subject.MATH))
         assertEquals(0, screen.goal("Child", Subject.ENGLISH))
-        assertEquals(7, screen.goal("Child", Subject.KOREAN))
         assertEquals(setOf(Subject.MATH, Subject.ENGLISH), screen.visibleSubjects("Child"))
         requested.clear()
         screen.refresh("20261108")
-        assertEquals(setOf(Subject.MATH), requested.toSet())
+        assertEquals(setOf(Subject.MATH, Subject.ENGLISH), requested.toSet())
     }
 
     @Test fun `goal dialog cannot write after session or subject identity changes`() {
@@ -129,12 +128,12 @@ class LearningScreenTest {
         val claim = store.claim()
         val changed = claim.state.copy(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "new"))))
         assertTrue(store.commit(claim.revision, changed, claim.sessionRef, claim.sessionRef))
-        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "8", Subject.KOREAN to "6")))
+        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3")))
         assertTrue(store.read().state.goalsByAccount.isEmpty())
         screen.signIn("fake", "fake", "20261108")
         val oldSession = requireNotNull(screen.goalScope("Child"))
         screen.signIn("fake", "fake", "20261108")
-        assertFalse(screen.saveGoals(oldSession, mapOf(Subject.MATH to "3", Subject.ENGLISH to "8", Subject.KOREAN to "6")))
+        assertFalse(screen.saveGoals(oldSession, mapOf(Subject.MATH to "3")))
         assertTrue(store.read().state.goalsByAccount.isEmpty())
     }
 
@@ -149,7 +148,7 @@ class LearningScreenTest {
         screen.signIn("fake", "fake", "20261108")
         val scope = requireNotNull(screen.goalScope("Child"))
         screen.toggleMonitor("Child")
-        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "8", Subject.KOREAN to "6")))
+        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3")))
     }
 
     @Test fun `monitor authentication failure blocks manual refresh until sign in`() {
@@ -602,6 +601,25 @@ class LearningAccountScopeTest {
 }
 
 class LearningGoalTest {
+    @Test fun `zero goal still fetches the subscribed report on manual refresh`() {
+        val requests = mutableListOf<Subject>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requests.add(subject)
+                return DailyReport(2, 4, 240.0)
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("sample", "sample", "20261105")
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "0"))
+        requests.clear()
+        screen.refresh("20261105")
+        assertEquals(listOf(Subject.MATH), requests)
+        assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
+    }
+
     @Test fun `goal persists and zero completes without a report`() {
         val store = MemoryLearningStore()
         val api = object : TodoApi {
@@ -713,7 +731,7 @@ class LearningHistoryGoalTest {
         assertEquals(DailyReport(7, 0), screen.state.reports["Child" to Subject.MATH]?.value)
     }
 
-    @Test fun `zero goal keeps last count and failure latch without retry`() {
+    @Test fun `zero goal retries explicitly and keeps last count on failure`() {
         var calls = 0
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = TodoSession("A", "token")
@@ -729,12 +747,12 @@ class LearningHistoryGoalTest {
         screen.refresh("20261105")
         screen.saveGoal("Child", Subject.MATH, "0")
         screen.refresh("20261105", includeFailed = true)
-        assertEquals(2, calls)
+        assertEquals(3, calls)
         assertEquals(DailyReport(2, 1), screen.state.reports["Child" to Subject.MATH]?.value)
         assertTrue(screen.state.reports["Child" to Subject.MATH]!!.failed)
         screen.saveGoal("Child", Subject.MATH, "5")
         screen.refresh("20261104")
-        assertEquals(2, calls)
+        assertEquals(3, calls)
     }
 }
 
@@ -776,7 +794,7 @@ class MonitorSubjectVisibilityTest {
         val screen = testLearningScreen(api, store)
         screen.signIn("A", "password", "20261105")
         screen.toggleMonitor("Child")
-        store.updateMonitor { it.monitor.copy(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "math", Subject.ENGLISH to "english"))), reports = mapOf(("Child" to Subject.ENGLISH) to ReportState(failed = true, failure = LearningFailure.NETWORK))) }
+        store.updateMonitor { it.monitor.copy(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "math", Subject.ENGLISH to "english"))), monitorCatalogOrder = 2, reports = mapOf(("Child" to Subject.ENGLISH) to ReportState(failed = true, failure = LearningFailure.NETWORK))) }
         screen.acceptMonitor(store.read().monitor)
         org.junit.Assert.assertEquals(setOf(Subject.MATH, Subject.ENGLISH), screen.visibleSubjects("Child"))
         org.junit.Assert.assertEquals(setOf(Subject.MATH), screen.state.children.single().userIds.keys)

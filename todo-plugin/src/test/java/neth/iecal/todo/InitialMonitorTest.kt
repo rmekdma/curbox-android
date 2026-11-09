@@ -16,6 +16,77 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class InitialMonitorTest {
+    @Test fun newerManualCatalogControlsRegularSubjects() = runBlocking {
+        val store = MemoryLearningStore()
+        val math = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val english = TodoChild("Child", mapOf(Subject.ENGLISH to "e"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val initial = store.claim()
+        assertTrue(store.commit(initial.revision, LearningState(children = listOf(math), accountId = "account"), "session", catalogSuccess = true))
+        val requested = java.util.Collections.synchronizedList(mutableListOf<Subject>())
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(math)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(subject)
+                return DailyReport(1, 1)
+            }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val screen = testLearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Child")
+        val elapsed = java.util.concurrent.atomic.AtomicLong(0)
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = elapsed::get).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Child" to Subject.MATH]?.value != null } }
+            val claim = store.claim()
+            assertTrue(store.commit(claim.revision, claim.state.copy(children = listOf(english)), "session", "session", catalogSuccess = true))
+            elapsed.set(120_000)
+            host.observations.value = HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true, screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todoenglish"))
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Child" to Subject.ENGLISH]?.value != null } }
+            assertEquals(listOf(Subject.MATH, Subject.ENGLISH), requested.toList())
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test fun zeroGoalReceivesInitialAndRegularReportsWithoutAchievement() = runBlocking {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val initial = store.claim()
+        val state = LearningState(children = listOf(child), accountId = "account", goalsByAccount = mapOf("account" to mapOf(("Child" to Subject.MATH) to 0)))
+        assertTrue(store.commit(initial.revision, state, "session"))
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { val n = calls.incrementAndGet(); return DailyReport(n, n, n * 60.0) }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val screen = testLearningScreen(api, store)
+        screen.restore()
+        screen.toggleMonitor("Child")
+        val achievements = AtomicInteger()
+        val elapsed = java.util.concurrent.atomic.AtomicLong(0)
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = elapsed::get, achievement = { _, _, _, _, _ -> achievements.incrementAndGet(); Unit }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Child" to Subject.MATH]?.value?.seconds == 60.0 } }
+            elapsed.set(120_000)
+            host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Child" to Subject.MATH]?.value?.seconds == 120.0 } }
+            assertEquals(2, calls.get())
+            assertEquals(0, achievements.get())
+        } finally { job.cancelAndJoin() }
+    }
+
     @Test fun manualReportChangePublishesSilentlyWithoutStartingMonitorWork() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
@@ -123,7 +194,7 @@ class InitialMonitorTest {
     }
 
 
-    @Test fun retryAtZeroDoesNotAuthorizeARequestAfterGoalIsRaised() = runBlocking {
+    @Test fun retryAtZeroIsExplicitAndPreservesFailureAfterGoalIsRaised() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
         val session = TodoSession("account", "token")
@@ -151,9 +222,10 @@ class InitialMonitorTest {
             withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.failed == true } }
             assertTrue(screen.saveGoal("Sample", Subject.MATH, "0"))
             screen.retryMonitor("Sample", Subject.MATH)
+            withTimeout(5000) { while (calls.get() < 2) delay(10) }
             assertTrue(screen.saveGoal("Sample", Subject.MATH, "5"))
             delay(200)
-            assertEquals(1, calls.get())
+            assertEquals(2, calls.get())
             assertTrue(store.read().monitor.reports.getValue("Sample" to Subject.MATH).failed)
         } finally { job.cancelAndJoin() }
     }
@@ -193,7 +265,7 @@ class InitialMonitorTest {
         Unit
     }
 
-    @Test fun previouslyZeroGoalWaitsForAnEligibleRegularQuery() = runBlocking {
+    @Test fun zeroGoalInitialReportIsPreservedWhenGoalRaised() = runBlocking {
         val store = MemoryLearningStore()
         val child = TodoChild("Sample", mapOf(Subject.MATH to "m"))
         val session = TodoSession("account", "token")
@@ -217,11 +289,10 @@ class InitialMonitorTest {
         screen.toggleMonitor("Sample")
         val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }, elapsed = clock::get, achievement = { _, _, _, subject, _ -> effects.add(subject) }).run(host) }
         try {
-            withTimeout(5000) { store.changes.first { it.monitor.catalogOwner != 0L } }
-            delay(100)
+            withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value != null } }
             assertTrue(screen.saveGoal("Sample", Subject.MATH, "5"))
             delay(200)
-            assertEquals(0, calls.get())
+            assertEquals(1, calls.get())
             clock.set(61000)
             host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
             withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 5 } }
@@ -256,7 +327,7 @@ class InitialMonitorTest {
             assertTrue(screen.saveGoal("One", Subject.MATH, "5"))
             screen.toggleMonitor("Two")
             withTimeout(5000) { store.changes.first { it.monitor.reports["Two" to Subject.MATH]?.value != null } }
-            assertEquals(listOf("two"), requests.toList())
+            assertEquals(listOf("one", "two"), requests.toList())
         } finally { job.cancelAndJoin() }
     }
 
@@ -291,7 +362,7 @@ class InitialMonitorTest {
             assertTrue(screen.saveGoal("One", Subject.ENGLISH, "8"))
             screen.retryMonitor("One", Subject.MATH)
             withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.MATH]?.value != null } }
-            assertEquals(listOf("math", "math"), requests.toList())
+            assertEquals(listOf("math", "english", "math"), requests.toList())
         } finally { job.cancelAndJoin() }
     }
 
@@ -522,7 +593,7 @@ class InitialMonitorTest {
             assertTrue(screen.saveGoal("One", Subject.ENGLISH, "0"))
             release.countDown()
             withTimeout(5000) { store.changes.first { it.monitor.reports["One" to Subject.KOREAN]?.value != null } }
-            assertEquals(listOf("math", "korean"), requests.toList())
+            assertEquals(listOf("math", "english", "korean"), requests.toList())
         } finally { release.countDown(); job.cancelAndJoin() }
     }
 
@@ -992,7 +1063,8 @@ class InitialMonitorTest {
         withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.failed == true } }
         assertEquals(1, mathCalls.get())
         host.observations.value = host.observations.value.copy(screen = neth.iecal.plugin.Screen.UNLOCKED, foreground = neth.iecal.plugin.Foreground.Confirmed("com.enuma.todomath"))
-        assertEquals(0, englishCalls.get())
+        withTimeout(5000) { while (englishCalls.get() < 1) delay(10) }
+        assertEquals(1, englishCalls.get())
         assertEquals(6, store.read().monitor.reports["Sample" to Subject.KOREAN]?.value?.count)
         screen.toggleMonitor("Sample")
         screen.toggleMonitor("Sample")
@@ -1005,7 +1077,8 @@ class InitialMonitorTest {
         screen.retryMonitor("Sample", Subject.MATH)
         withTimeout(5000) { store.changes.first { it.monitor.reports["Sample" to Subject.MATH]?.value?.count == 5 } }
         assertEquals(2, mathCalls.get())
-        assertEquals(0, englishCalls.get())
+        withTimeout(5000) { while (englishCalls.get() < 2) delay(10) }
+        assertEquals(2, englishCalls.get())
         job.cancelAndJoin()
     }
 

@@ -190,7 +190,7 @@ class LearningFragment : Fragment() {
         renderAvailability()
         checkedTimes.clear()
         b.children.removeAllViews()
-        for (child in state.children) {
+        for (child in learningCatalog(state, screen.monitor)) {
             val card = com.google.android.material.card.MaterialCardView(requireContext()).apply {
                 val margin = (8 * resources.displayMetrics.density).toInt()
                 layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply { topMargin = margin }
@@ -410,7 +410,7 @@ class LearningFragment : Fragment() {
     private fun showGoalsDialog(childName: String) {
         val scope = screen.goalScope(childName) ?: return
         val content = dialogContent()
-        val inputs = Subject.entries.associateWith { subject ->
+        val inputs = scope.subjects.keys.associateWith { subject ->
             val row = android.widget.LinearLayout(requireContext()).apply {
                 orientation = android.widget.LinearLayout.HORIZONTAL
                 gravity = android.view.Gravity.CENTER_VERTICAL

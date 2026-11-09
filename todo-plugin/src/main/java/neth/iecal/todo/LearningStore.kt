@@ -13,7 +13,10 @@ data class MonitorAccountSnapshot(
     val registrations: Map<String, Long> = emptyMap(),
     val catalogFailures: Map<String, LearningFailure> = emptyMap(),
     val catalogFailureSessions: Map<String, String> = emptyMap(),
-    val catalogRegistrations: Map<String, Long> = emptyMap()
+    val catalogRegistrations: Map<String, Long> = emptyMap(),
+    val catalogCheckedAt: Long? = null,
+    val manualCatalogOrder: Long? = null,
+    val monitorCatalogOrder: Long? = null
 )
 
 data class RetryIntent(val registration: Long, val revision: Long, val sessionRef: String)
@@ -44,6 +47,9 @@ data class MonitorState(
     val catalogRegistration: Long = 0,
     val catalogSession: String? = null,
     val catalogPermissionRevision: Long = 0,
+    val catalogCheckedAt: Long? = null,
+    val manualCatalogOrder: Long? = null,
+    val monitorCatalogOrder: Long? = null,
     val children: List<TodoChild> = emptyList(),
     val reports: Map<Pair<String, Subject>, ReportState> = emptyMap(),
     val reportFailureSessions: Map<Pair<String, Subject>, String> = emptyMap(),
@@ -77,7 +83,8 @@ interface LearningStore {
     val changes: Flow<StoredLearning>
     fun read(): StoredLearning
     fun claim(): StoredLearning
-    fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String? = null): Boolean
+    /** Set catalogSuccess only for a successful full catalog; its ordering is stamped atomically. */
+    fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String? = null, catalogSuccess: Boolean = false): Boolean
     /** Applies a monitor change atomically against the latest document. Null rejects the update. */
     fun updateMonitor(change: (StoredLearning) -> MonitorState?): StoredLearning?
     fun readSession(ref: String): TodoSession
@@ -91,9 +98,9 @@ class MemoryLearningStore : LearningStore {
     private val sessions = mutableMapOf<String, TodoSession>()
     @Synchronized override fun read() = document
     @Synchronized override fun claim(): StoredLearning { document = document.copy(revision = document.revision + 1); updates.value = document; return document }
-    @Synchronized override fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String?): Boolean {
+    @Synchronized override fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String?, catalogSuccess: Boolean): Boolean {
         if (document.revision != revision || !document.acceptsApiResult(expectedSessionRef)) return false
-        document = document.withManualState(state, sessionRef)
+        document = document.withManualState(state, sessionRef, catalogSuccess)
         updates.value = document
         return true
     }
@@ -135,7 +142,7 @@ fun MonitorState.authenticationRequired(sessionRef: String?): Boolean {
 }
 
 /** Commits manual state while fencing only goals whose effective value changed. */
-fun StoredLearning.withManualState(next: LearningState, ref: String?): StoredLearning {
+fun StoredLearning.withManualState(next: LearningState, ref: String?, catalogSuccess: Boolean = false): StoredLearning {
     var versions = monitor.goalVersions
     var retries = monitor.migrateRetries(sessionRef).reportRetries
     for (account in state.goalsByAccount.keys + next.goalsByAccount.keys) {
@@ -146,7 +153,6 @@ fun StoredLearning.withManualState(next: LearningState, ref: String?): StoredLea
             val default = when (key.second) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             if ((before[key] ?: default) != (after[key] ?: default)) {
                 scoped = scoped + (key to Math.addExact(scoped[key] ?: 0, 1))
-                if (account == monitor.accountId && after[key] == 0) retries = retries - key
             }
         }
         versions = versions + (account to scoped)
@@ -158,13 +164,13 @@ fun StoredLearning.withManualState(next: LearningState, ref: String?): StoredLea
             val accounts = updated.accountId?.let { account ->
                 updated.accounts + (account to MonitorAccountSnapshot(updated.catalogFailure, updated.catalogFailureSession, updated.catalogAttempted,
                     updated.children, updated.reports, updated.reportFailureSessions, updated.registeredChildren(), updated.catalogFailures,
-                    updated.catalogFailureSessions, updated.catalogRegistrations))
+                    updated.catalogFailureSessions, updated.catalogRegistrations, updated.catalogCheckedAt, updated.manualCatalogOrder, updated.monitorCatalogOrder))
             } ?: updated.accounts
             val saved = accounts[next.accountId] ?: MonitorAccountSnapshot()
             updated = updated.copy(accounts = accounts, accountId = next.accountId, childName = saved.registrations.keys.firstOrNull(),
                 registrations = saved.registrations, catalogFailure = saved.catalogFailure, catalogFailureSession = saved.catalogFailureSession,
                 catalogFailures = saved.catalogFailures, catalogFailureSessions = saved.catalogFailureSessions, catalogRegistrations = saved.catalogRegistrations,
-                catalogAttempted = saved.catalogAttempted, children = saved.children, reports = saved.reports,
+                catalogAttempted = saved.catalogAttempted, catalogCheckedAt = saved.catalogCheckedAt, manualCatalogOrder = saved.manualCatalogOrder, monitorCatalogOrder = saved.monitorCatalogOrder, children = saved.children, reports = saved.reports,
                 reportFailureSessions = saved.reportFailureSessions, zeroGoalInitials = emptyMap(), reportVersions = emptyMap())
         }
         updated = updated.resetLearningBaselines().copy(
@@ -174,6 +180,7 @@ fun StoredLearning.withManualState(next: LearningState, ref: String?): StoredLea
             catalogAttempted = false, catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null,
             zeroGoalInitials = emptyMap(), controlRevision = Math.addExact(updated.controlRevision, 1))
     }
+    if (catalogSuccess) updated = updated.copy(manualCatalogOrder = Math.addExact(maxOf(updated.manualCatalogOrder ?: 0, updated.monitorCatalogOrder ?: 0), 1))
     return copy(state = next, sessionRef = ref, monitor = updated)
 }
 

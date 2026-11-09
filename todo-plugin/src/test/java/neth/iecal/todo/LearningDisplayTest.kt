@@ -4,6 +4,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningDisplayTest {
+    @Test fun `latest successful catalog wins without reviving removed subjects`() {
+        val math = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val english = TodoChild("Child", mapOf(Subject.ENGLISH to "e"))
+        val state = LearningState(accountId = "A", children = listOf(math), catalogCheckedAt = 500)
+        val monitor = MonitorState(accountId = "A", children = listOf(english), manualCatalogOrder = 1, monitorCatalogOrder = 2, catalogCheckedAt = 100)
+        assertEquals(setOf(Subject.ENGLISH), learningSubjects(state, monitor, "Child").keys)
+        assertEquals(setOf(Subject.MATH), learningSubjects(state, monitor.copy(manualCatalogOrder = 3), "Child").keys)
+        assertEquals(setOf(Subject.MATH), learningSubjects(state, monitor.copy(accountId = "B"), "Child").keys)
+        assertEquals(setOf(Subject.MATH), learningSubjects(state, monitor.copy(monitorCatalogOrder = null, manualCatalogOrder = null), "Child").keys)
+    }
+
     @Test fun `projection selects one current report per subject and fences other accounts`() {
         val key = "Child" to Subject.MATH
         val old = ReportState(DailyReport(1, 1, 10.0), 1, "today")

@@ -58,13 +58,13 @@ class LearningStorage(context: Context) : LearningStore {
             gson.toJson(previous.copy(revision = Math.addExact(previous.revision, 1)))
         })
     }
-    override fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String?): Boolean = runBlocking {
+    override fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String?, catalogSuccess: Boolean): Boolean = runBlocking {
         var committed = false
         stateStore.updateData { raw ->
             val previous = document(raw)
             if (previous.revision == revision && previous.acceptsApiResult(expectedSessionRef)) {
                 committed = true
-                gson.toJson(previous.withManualState(state, sessionRef))
+                gson.toJson(previous.withManualState(state, sessionRef, catalogSuccess))
             } else raw
         }
         committed

@@ -10,6 +10,7 @@ import neth.iecal.todo.StoredLearning
 import neth.iecal.todo.Subject
 import neth.iecal.todo.ReportState
 import neth.iecal.todo.learningDisplayReports
+import neth.iecal.todo.learningSubjects
 import neth.iecal.todo.totalLearningMinutes
 import neth.iecal.todo.registeredChildren
 import neth.iecal.todo.catalogFailureFor
@@ -34,9 +35,7 @@ object LearningNotifications {
         if (children.isEmpty()) return@publisher
         manager.createNotificationChannel(NotificationChannel("learning_achievements", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_HIGH))
         for (child in children) {
-        val monitorChild = current.monitor.children.firstOrNull { it.name == child }
-        val screenChild = current.state.children.firstOrNull { it.name == child }
-        val subjects = monitorChild?.userIds?.keys.orEmpty() + screenChild?.userIds?.keys.orEmpty()
+        val subjects = learningSubjects(current.state, current.monitor, child).keys
         val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
         val reports = learningDisplayReports(current.state, current.monitor, child, subjects, today)
         fun failureText(failure: neth.iecal.todo.LearningFailure): String = context.getString(when (failure) {

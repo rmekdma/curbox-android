@@ -6,9 +6,8 @@ per child; the automatic monitor uses today in `Asia/Seoul`, as does the dashboa
 
 The dashboard opens account changes, the check interval and each child’s subject goals in separate
 settings dialogs. Goal changes are validated and saved together for the account,
-session and subject identities captured when the dialog opened. All three subject
-goals can be configured, including unsubscribed subjects; saving a goal does
-not add a subscription or report request.
+session and subject identities captured when the dialog opened. Only subscribed
+subjects are offered; saving a goal does not add a subscription.
 
 The dashboard uses today in Seoul and has no date selector. Each subject row
 shows the newest available report for today from manual checks or the same
@@ -24,15 +23,15 @@ reports saved before seconds were retained.
 
 ## Monitoring behavior
 
-- Registration starts an initial check of subscribed subjects with positive
-  goals. It does not require the subject app to be in front or the screen to be
+- Registration starts an initial check of subscribed subjects, including those
+  with zero goals. It does not require the subject app to be in front or the screen to be
   on, but authentication, service availability and applicable permissions are
   required. The first valid report is a silent baseline.
 - Regular checks require an unlocked screen and a confirmed foreground subject
   app. They exclude unregistered children, unsubscribed subjects, completed
-  goals and zero goals. Initial and regular report work is serialized and shares
+  positive goals. Zero goals remain eligible. Initial and regular report work is serialized and shares
   the configured interval; an initial check consumes the common interval.
-- A zero goal is locally complete without a report. An unknown report is not a
+- A zero goal is locally complete while reports track learning time. An unknown report is not a
   zero count. A later incomplete to complete transition requests an achievement
   notification; a baseline or completion caused by lowering a goal is silent.
 - An initial catalog or report failure waits for an explicit retry; an explicit
