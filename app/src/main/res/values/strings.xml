@@ -1865,7 +1865,7 @@
     <string name="unit_hours">Hours</string>
     <string name="unit_days">Days</string>
     <string name="learning_notification_progress">%1$d/%2$d</string>
-    <string name="learning_notification_complete">✅</string>
+    <string name="learning_notification_complete">✓</string>
     <string name="learning_change_account">Change account</string>
     <string name="learning_cancel">Cancel</string>
     <string name="learning_manual_error">Manual check · %1$s</string>
@@ -1902,7 +1902,13 @@
     <string name="learning_invalid_goal">Enter a number from 0 to 99</string>
     <string name="learning_complete">Complete</string>
     <string name="learning_incomplete">Not complete</string>
-    <string name="learning_interval">Check interval in minutes</string>
+    <string name="learning_interval">Check interval in seconds</string>
+    <string name="learning_general_settings">Learning settings</string>
+    <string name="learning_alerts">Notify when a subject is complete</string>
+    <string name="learning_sound">Notification sound</string>
+    <string name="learning_sound_default">Default</string>
+    <string name="learning_sound_silent">Silent</string>
+    <string name="learning_sound_selected">Selected sound</string>
     <string name="learning_save_interval">Save</string>
     <string name="learning_invalid_interval">Enter a number above zero</string>
     <string name="learning_subject_settings">Subject settings</string>

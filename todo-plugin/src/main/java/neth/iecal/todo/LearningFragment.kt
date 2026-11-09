@@ -27,7 +27,7 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, UNKNOWN_PROGRESS, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, MINUTES, UNKNOWN_MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, UNKNOWN_PROGRESS, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, MINUTES, UNKNOWN_MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT, GENERAL_SETTINGS, ALERTS, SOUND, SOUND_DEFAULT, SOUND_SILENT, SOUND_SELECTED }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
@@ -70,7 +70,7 @@ class LearningFragment : Fragment() {
         b.signIn.text = text(LearningText.SIGN_IN)
         b.changeAccount.contentDescription = text(LearningText.CHANGE_ACCOUNT)
         b.changeAccount.setOnClickListener { showAccountDialog() }
-        b.intervalSettings.contentDescription = text(LearningText.INTERVAL)
+        b.intervalSettings.contentDescription = text(LearningText.GENERAL_SETTINGS)
         b.intervalSettings.setOnClickListener { showIntervalDialog() }
         b.swipeRefresh.setOnRefreshListener { refreshFromGesture() }
         androidx.core.view.ViewCompat.addAccessibilityAction(b.swipeRefresh, text(LearningText.REFRESH)) { _, _ ->
@@ -216,7 +216,7 @@ class LearningFragment : Fragment() {
                 textSize = 20f
                 layoutParams = android.widget.LinearLayout.LayoutParams(0, -2, 1f)
             })
-            header.addView(iconButton(R.drawable.learning_tune, text(LearningText.SUBJECT_SETTINGS), R.id.learning_subject_settings) {
+            header.addView(iconButton(R.drawable.learning_sliders, text(LearningText.SUBJECT_SETTINGS), R.id.learning_subject_settings) {
                 showGoalsDialog(child.name)
             })
             val watchAction = text(if (watching) LearningText.MONITOR_STOP else LearningText.MONITOR_START)
@@ -382,10 +382,36 @@ class LearningFragment : Fragment() {
 
     private fun showIntervalDialog() {
         val content = dialogContent()
-        val input = numberInput(screen.monitor.intervalMinutes)
+        val input = numberInput(screen.monitor.effectiveIntervalSeconds())
+        content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.INTERVAL) })
         content.addView(input)
+        val alerts = com.google.android.material.checkbox.MaterialCheckBox(requireContext()).apply {
+            text = this@LearningFragment.text(LearningText.ALERTS)
+            isChecked = screen.monitor.completionAlerts ?: true
+        }
+        content.addView(alerts)
+        content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.SOUND) })
+        val soundKeys = mutableListOf<String?>(null, "silent")
+        val soundNames = mutableListOf(text(LearningText.SOUND_DEFAULT), text(LearningText.SOUND_SILENT))
+        runCatching {
+            val ringtoneManager = android.media.RingtoneManager(requireActivity()).apply { setType(android.media.RingtoneManager.TYPE_NOTIFICATION) }
+            ringtoneManager.cursor.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val uri = ringtoneManager.getRingtoneUri(cursor.position)?.toString() ?: continue
+                    soundKeys.add(uri)
+                    soundNames.add(cursor.getString(android.media.RingtoneManager.TITLE_COLUMN_INDEX))
+                }
+            }
+        }
+        val selectedSound = screen.monitor.alertSound
+        if (selectedSound != null && selectedSound !in soundKeys) { soundKeys.add(selectedSound); soundNames.add(text(LearningText.SOUND_SELECTED)) }
+        val sound = android.widget.Spinner(requireContext()).apply {
+            adapter = android.widget.ArrayAdapter(requireContext(), android.R.layout.simple_spinner_dropdown_item, soundNames)
+            setSelection(soundKeys.indexOf(selectedSound).coerceAtLeast(0))
+        }
+        content.addView(sound)
         val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
-            .setTitle(text(LearningText.INTERVAL)).setView(content)
+            .setTitle(text(LearningText.GENERAL_SETTINGS)).setView(content)
             .setNegativeButton(text(LearningText.CANCEL), null)
             .setPositiveButton(text(LearningText.CONFIRM), null).create()
         settingsDialog = dialog
@@ -393,9 +419,11 @@ class LearningFragment : Fragment() {
         dialog.setOnShowListener {
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val value = input.text.toString()
+                val enabled = alerts.isChecked
+                val soundKey = soundKeys[sound.selectedItemPosition]
                 dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).isEnabled = false
                 viewLifecycleOwner.lifecycleScope.launch {
-                    val saved = try { withContext(Dispatchers.IO) { screen.saveInterval(value) } }
+                    val saved = try { withContext(Dispatchers.IO) { screen.saveLearningSettings(value, enabled, soundKey) } }
                         catch (e: kotlinx.coroutines.CancellationException) { throw e }
                         catch (e: Exception) { screen.storageFailure(); false }
                     if (dialog.isShowing) {

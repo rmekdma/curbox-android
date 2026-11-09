@@ -51,7 +51,15 @@ class InitialMonitor(
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     override suspend fun run(host: CurboxHost) {
         val owner = withContext(Dispatchers.IO) {
-            requireNotNull(store.updateMonitor { it.monitor.resetLearningBaselines().copy(ownerEpoch = Math.addExact(it.monitor.ownerEpoch, 1)) }).monitor.ownerEpoch
+            requireNotNull(store.updateMonitor { doc ->
+                var monitor = doc.monitor.resetLearningBaselines().copy(ownerEpoch = Math.addExact(doc.monitor.ownerEpoch, 1))
+                val sameAccount = doc.state.accountId != null && doc.state.accountId == monitor.accountId
+                val monitorKnown = (monitor.monitorCatalogOrder ?: 0) > (monitor.manualCatalogOrder ?: 0)
+                if (sameAccount && (monitorKnown || doc.state.catalogCheckedAt != null)) {
+                    monitor = monitor.reconcileCatalog(learningCatalog(doc.state, monitor), doc.sessionRef)
+                }
+                monitor
+            }).monitor.ownerEpoch
         }
         coroutineScope {
             val controls = Channel<Control>(Channel.CONFLATED)
@@ -66,11 +74,11 @@ class InitialMonitor(
                     Control(owner, doc.monitor.controlRevision, doc.monitor.goalVersions[doc.state.accountId].orEmpty(), doc.monitor.registrationEpoch,
                         doc.state.accountId, doc.monitor.childName, doc.monitor.registeredChildren(), doc.sessionRef,
                         doc.state.goalsByAccount[doc.state.accountId].orEmpty(),
-                        observation.connection == Connection.CONNECTED && observation.accessibilityEnabled, notification, doc.monitor.intervalMinutes)
+                        observation.connection == Connection.CONNECTED && observation.accessibilityEnabled, notification, doc.monitor.effectiveIntervalSeconds())
                 }.distinctUntilChanged().collect { controls.send(it) }
             }
             launch {
-                store.changes.map { listOf(it.state.accountId, it.state.children, it.state.reports, it.monitor.manualCatalogOrder) }
+                store.changes.map { listOf(it.state.accountId, it.state.children, it.state.reports, it.monitor.manualCatalogOrder, it.monitor.alertSettingsRevision) }
                     .distinctUntilChanged().collect {
                         val latest = withContext(Dispatchers.IO) { store.read() }
                         if (latest.monitor.ownerEpoch == owner) publish(latest, permission.value)
@@ -87,7 +95,7 @@ class InitialMonitor(
             while (isActive) {
                 val waitMillis = current?.let { control ->
                     val doc = withContext(Dispatchers.IO) { store.read() }
-                    val interval = runCatching { BigInteger(control.interval).multiply(BigInteger.valueOf(60_000)).min(BigInteger.valueOf(Long.MAX_VALUE)).toLong() }.getOrDefault(60_000)
+                    val interval = runCatching { BigInteger(control.interval).multiply(BigInteger.valueOf(1_000)).min(BigInteger.valueOf(Long.MAX_VALUE)).toLong() }.getOrDefault(60_000)
                     val age = if (doc.monitor.cycleOwner == owner) (elapsed() - doc.monitor.cycleStartedElapsedMillis).coerceAtLeast(0) else interval
                     if (age >= interval) 60_000L else interval - age
                 } ?: 60_000L
@@ -101,8 +109,8 @@ class InitialMonitor(
                         if (old?.connected == true && !control.connected) {
                             withContext(Dispatchers.IO) { store.updateMonitor { doc -> if (doc.monitor.ownerEpoch == owner) doc.monitor.resetLearningBaselines() else null } }
                         }
-                        val goalOnly = old != null && old.copy(goals = control.goals, goalVersions = control.goalVersions) == control
-                        pending = pending || !goalOnly
+                        val schedulingOnly = old != null && old.copy(goals = control.goals, goalVersions = control.goalVersions, interval = control.interval) == control
+                        pending = pending || !schedulingOnly
                         current = control
                         launch {
                             val latest = withContext(Dispatchers.IO) { store.read() }
@@ -135,7 +143,7 @@ class InitialMonitor(
                     val observation = host.observations.value
                     val subject = if (observation.screen == Screen.UNLOCKED) subjectPackages.subjectFor((observation.foreground as? Foreground.Confirmed)?.packageName) else null
                     val doc = withContext(Dispatchers.IO) { store.read() }
-                    val interval = runCatching { BigInteger(control.interval).multiply(BigInteger.valueOf(60_000)).min(BigInteger.valueOf(Long.MAX_VALUE)).toLong() }.getOrDefault(60_000)
+                    val interval = runCatching { BigInteger(control.interval).multiply(BigInteger.valueOf(1_000)).min(BigInteger.valueOf(Long.MAX_VALUE)).toLong() }.getOrDefault(60_000)
                     val due = doc.monitor.cycleOwner != owner || elapsed() - doc.monitor.cycleStartedElapsedMillis >= interval
                     if ((initial || (subject != null && due)) && doc.monitor.goalVersions[control.account].orEmpty() == control.goalVersions) {
                         pending = false
@@ -232,7 +240,7 @@ class InitialMonitor(
             doc = store.updateMonitor { current ->
                 if (!valid(current)) null else current.monitor.copy(catalogAttempted = true, catalogFailure = null, catalogFailureSession = null, catalogFailures = current.monitor.catalogFailures - childName, catalogFailureSessions = current.monitor.catalogFailureSessions - childName, catalogRetries = if (catalogIntent != null && current.monitor.catalogRetries[childName] == catalogIntent) current.monitor.catalogRetries - childName else current.monitor.catalogRetries,
                     catalogRegistrations = current.monitor.catalogRegistrations + (childName to control.registration), catalogOwner = control.owner, catalogRegistration = control.registration, catalogSession = control.ref,
-                    catalogPermissionRevision = control.permission.revision, catalogCheckedAt = now(), monitorCatalogOrder = Math.addExact(maxOf(current.monitor.manualCatalogOrder ?: 0, current.monitor.monitorCatalogOrder ?: 0), 1), children = children)
+                    catalogPermissionRevision = control.permission.revision, catalogCheckedAt = now(), monitorCatalogOrder = Math.addExact(maxOf(current.monitor.manualCatalogOrder ?: 0, current.monitor.monitorCatalogOrder ?: 0), 1), children = children).reconcileCatalog(children, current.sessionRef)
             } ?: return
             if (valid(store.read())) publish(doc, control.permission)
         }

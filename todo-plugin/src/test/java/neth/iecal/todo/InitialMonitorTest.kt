@@ -16,6 +16,32 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class InitialMonitorTest {
+    @Test fun cachedSuccessfulCatalogRemovesOrphanWithoutRetryingFailure() = runBlocking {
+        val store = MemoryLearningStore()
+        val sample = TodoChild("Sample", mapOf(Subject.MATH to "m"))
+        val session = TodoSession("account", "token")
+        store.writeSession("session", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(accountId = "account", children = listOf(sample), catalogCheckedAt = 1), "session"))
+        store.updateMonitor { it.monitor.copy(accountId = "account", childName = "Child1", registrations = mapOf("Child1" to 1), catalogFailure = LearningFailure.NETWORK, catalogFailureSession = "session") }
+        val calls = AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession): List<TodoChild> { calls.incrementAndGet(); return listOf(sample) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport { calls.incrementAndGet(); return DailyReport(0, 0) }
+        }
+        val host = object : CurboxHost {
+            override val observations = MutableStateFlow(HostObservation(connection = Connection.CONNECTED, accessibilityEnabled = true))
+            override suspend fun refreshObservation() = observations.value
+        }
+        val job = launch { InitialMonitor(api, store, MutableStateFlow(NotificationPermission(true)), { true }, { _, _ -> }).run(host) }
+        try {
+            withTimeout(5000) { store.changes.first { it.monitor.ownerEpoch > 0 && it.monitor.registeredChildren().isEmpty() } }
+            assertEquals(0, calls.get())
+            assertEquals(LearningFailure.NETWORK, store.read().monitor.catalogFailure)
+        } finally { job.cancelAndJoin() }
+    }
+
     @Test fun newerManualCatalogControlsRegularSubjects() = runBlocking {
         val store = MemoryLearningStore()
         val math = TodoChild("Child", mapOf(Subject.MATH to "m"))

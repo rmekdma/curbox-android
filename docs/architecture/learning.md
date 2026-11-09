@@ -4,7 +4,7 @@ Curbox hosts the TODO School screen and monitor in the same APK. The screen
 supports sign in, goals, manual reports for today. Watching is enabled
 per child; the automatic monitor uses today in `Asia/Seoul`, as does the dashboard. Learning goals do not change Curbox blocking rules.
 
-The dashboard opens account changes, the check interval and each child’s subject goals in separate
+The dashboard opens account changes, learning settings and each child’s subject goals in separate
 settings dialogs. Goal changes are validated and saved together for the account,
 session and subject identities captured when the dialog opened. Only subscribed
 subjects are offered; saving a goal does not add a subscription.
@@ -43,6 +43,11 @@ reports saved before seconds were retained.
   subsequent eligible cycle. Authentication failure requires sign in again.
   Missing accessibility or notification permission pauses monitoring while
   retaining registrations.
+- A successful account catalog removes registrations for children it no longer
+  contains. A failed catalog leaves registrations and saved learning data intact.
+- The shared check interval uses seconds; stored minute settings remain valid.
+  Completion alerts and their sound can be changed independently of the ongoing
+  status notification. Android channel settings can affect sound and heads up.
 - Each registered child has a status notification. A new achievement updates
   that child's notification; actual sound and heads up depend on Android and
   the user's notification channel settings. The title is the child name. Each

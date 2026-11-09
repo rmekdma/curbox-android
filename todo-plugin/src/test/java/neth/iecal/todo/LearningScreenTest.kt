@@ -4,6 +4,52 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningScreenTest {
+    @Test fun `successful catalog removes only missing registrations and keeps saved data`() {
+        val stale = "Child1" to Subject.MATH
+        val original = StoredLearning(state = LearningState(accountId = "A", goalsByAccount = mapOf("A" to mapOf(stale to 7))), sessionRef = "s",
+            monitor = MonitorState(accountId = "A", childName = "Child1", registrations = mapOf("Child1" to 1, "Sample" to 2),
+                reports = mapOf(stale to ReportState(failed = true, failure = LearningFailure.NETWORK)), controlRevision = 2))
+        val success = original.withManualState(original.state.copy(children = listOf(TodoChild("Sample", mapOf(Subject.MATH to "m")))), "s", catalogSuccess = true)
+        assertEquals(setOf("Sample"), success.monitor.registeredChildren().keys)
+        assertEquals(7, success.state.goalsByAccount["A"]?.get(stale))
+        assertTrue(success.monitor.reports.getValue(stale).failed)
+        assertEquals(3L, success.monitor.controlRevision)
+        val failed = original.withManualState(original.state.copy(error = true), "s")
+        assertEquals(setOf("Child1", "Sample"), failed.monitor.registeredChildren().keys)
+        val legacy = original.monitor.copy(childName = "Child1", registrations = emptyMap())
+            .reconcileCatalog(listOf(TodoChild("Sample", emptyMap())), "s")
+        assertTrue(legacy.registeredChildren().isEmpty())
+        assertTrue(legacy.reports.getValue(stale).failed)
+    }
+
+    @Test fun `legacy minute interval and new seconds preserve large values`() {
+        assertEquals("60", MonitorState().effectiveIntervalSeconds())
+        assertEquals("120", MonitorState(intervalMinutes = "2").effectiveIntervalSeconds())
+        assertEquals("999999999999999999999999999900", MonitorState(intervalMinutes = "16666666666666666666666666665").effectiveIntervalSeconds())
+        assertEquals("7", MonitorState(intervalMinutes = "2", intervalSeconds = "7").effectiveIntervalSeconds())
+    }
+
+    @Test fun `learning settings validate atomically and track alert changes`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = emptyList<TodoChild>()
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0, 0)
+        }
+        val screen = testLearningScreen(api, store)
+        assertFalse(screen.saveLearningSettings("0", false, "silent"))
+        assertEquals("60", store.read().monitor.effectiveIntervalSeconds())
+        assertTrue(screen.saveLearningSettings("007", false, "silent"))
+        assertEquals("7", store.read().monitor.effectiveIntervalSeconds())
+        assertEquals(false, store.read().monitor.completionAlerts)
+        assertEquals("silent", store.read().monitor.alertSound)
+        assertEquals(1L, store.read().monitor.alertSettingsRevision)
+        assertTrue(screen.saveLearningSettings("8", false, "silent"))
+        assertEquals(1L, store.read().monitor.alertSettingsRevision)
+        assertTrue(screen.saveLearningSettings("8", true, null))
+        assertEquals(2L, store.read().monitor.alertSettingsRevision)
+    }
+
     @Test fun `restored session supplies saved email without password`() {
         val store = MemoryLearningStore()
         val api = object : TodoApi {

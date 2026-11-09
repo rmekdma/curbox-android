@@ -33,7 +33,8 @@ object LearningNotifications {
             if (active.tag?.startsWith("learning:") == true && active.tag !in tags) manager.cancel(active.tag, active.id)
         }
         if (children.isEmpty()) return@publisher
-        manager.createNotificationChannel(NotificationChannel("learning_achievements", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_HIGH))
+        val statusChannel = NotificationChannel("learning_status_v2", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) }
+        manager.createNotificationChannel(statusChannel)
         for (child in children) {
         val subjects = learningSubjects(current.state, current.monitor, child).keys
         val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
@@ -65,15 +66,55 @@ object LearningNotifications {
         val details = if (rows.isEmpty()) pending else rows.joinToString("\n") { line(it, true) }
         val total = totalLearningMinutes(reports.values)
         val totalText = if (total == null) context.getString(R.string.learning_unknown_minutes) else context.getString(R.string.learning_minutes, total)
-        val notification = NotificationCompat.Builder(context, "learning_achievements")
+        val alert = child == achievementChild && allowsLearningAlert(committed.monitor, current.monitor)
+        val sound = current.monitor.alertSound
+        val channelId = if (!alert) statusChannel.id else if (sound == null) "learning_achievements" else {
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(sound.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }
+            "learning_achievement_${digest.take(24)}"
+        }
+        if (alert) {
+            val channel = NotificationChannel(channelId, context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_HIGH)
+            if (sound != null) channel.setSound(if (sound == "silent") null else android.net.Uri.parse(sound), android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION).build())
+            manager.createNotificationChannel(channel)
+        }
+        fun remote(expanded: Boolean): android.widget.RemoteViews {
+            val view = android.widget.RemoteViews(context.packageName, if (expanded) R.layout.learning_notification_expanded else R.layout.learning_notification_compact)
+            view.setTextViewText(R.id.learning_notification_title, if (expanded) "$child  $totalText" else child)
+            val rowIds = intArrayOf(R.id.learning_notification_row_0, R.id.learning_notification_row_1, R.id.learning_notification_row_2)
+            val labelIds = intArrayOf(R.id.learning_notification_label_0, R.id.learning_notification_label_1, R.id.learning_notification_label_2)
+            val checkIds = intArrayOf(R.id.learning_notification_check_0, R.id.learning_notification_check_1, R.id.learning_notification_check_2)
+            val valueIds = intArrayOf(R.id.learning_notification_value_0, R.id.learning_notification_value_1, R.id.learning_notification_value_2)
+            if (rows.isEmpty()) { view.setViewVisibility(R.id.learning_notification_pending, android.view.View.VISIBLE); view.setTextViewText(R.id.learning_notification_pending, pending) }
+            rows.take(3).forEachIndexed { index, row ->
+                val value = row.report?.value
+                val complete = row.goal == 0 || (value != null && !row.report.failed && value.count >= row.goal)
+                val raw = line(row, expanded)
+                val suffix = raw.removePrefix(row.label).replace(context.getString(R.string.learning_notification_complete), "").trim()
+                view.setViewVisibility(rowIds[index], android.view.View.VISIBLE)
+                view.setTextViewText(labelIds[index], row.label)
+                view.setViewVisibility(checkIds[index], if (complete) android.view.View.VISIBLE else android.view.View.GONE)
+                view.setContentDescription(checkIds[index], context.getString(R.string.learning_checked_complete))
+                view.setTextViewText(valueIds[index], if (suffix.isEmpty()) "" else " $suffix")
+            }
+            return view
+        }
+        val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(child)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentText(compact).setStyle(NotificationCompat.BigTextStyle().setBigContentTitle("$child  $totalText").bigText(details))
-            .setOngoing(true).setSilent(child != achievementChild).build()
+            .setContentText(compact).setStyle(NotificationCompat.DecoratedCustomViewStyle())
+            .addExtras(android.os.Bundle().apply { putCharSequence(android.app.Notification.EXTRA_BIG_TEXT, details); putCharSequence(android.app.Notification.EXTRA_TITLE_BIG, "$child  $totalText") })
+            .setCustomContentView(remote(false)).setCustomBigContentView(remote(true)).setCustomHeadsUpContentView(remote(false))
+            .setOngoing(true).setSilent(!alert).build()
+        val latest = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { store.read() }
+        if (latest.monitor.alertSettingsRevision != current.monitor.alertSettingsRevision) continue
         if (permission.value == expected && expected.granted && notifications.areNotificationsEnabled() && (child != achievementChild || stillValid())) notifications.notify(tag(child), 0x4c454152, notification)
         }
     }
 }
+
+internal fun allowsLearningAlert(committed: neth.iecal.todo.MonitorState, current: neth.iecal.todo.MonitorState): Boolean =
+    current.completionAlerts != false && committed.alertSettingsRevision == current.alertSettingsRevision &&
+        committed.completionAlerts == current.completionAlerts && committed.alertSound == current.alertSound
 
 internal data class LearningNotificationRow(val label: String, val goal: Int, val report: ReportState?, val errors: List<String> = emptyList())
 

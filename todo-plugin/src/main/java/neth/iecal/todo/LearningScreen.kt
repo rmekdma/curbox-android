@@ -58,6 +58,18 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         return true
     }
 
+    fun saveLearningSettings(seconds: String, alerts: Boolean, sound: String?): Boolean {
+        val value = seconds.trim()
+        if (!value.matches(Regex("[0-9]+")) || value.all { it == '0' }) return false
+        val updated = store.updateMonitor {
+            val current = it.monitor
+            val revision = if ((current.completionAlerts ?: true) != alerts || current.alertSound != sound) Math.addExact(current.alertSettingsRevision ?: 0, 1) else current.alertSettingsRevision
+            current.copy(intervalSeconds = value.trimStart('0'), completionAlerts = alerts, alertSound = sound, alertSettingsRevision = revision)
+        } ?: return false
+        monitor = updated.monitor
+        return true
+    }
+
     fun visibleSubjects(childName: String): Set<Subject> {
         return learningSubjects(state, monitor, childName).keys
     }

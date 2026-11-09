@@ -5,6 +5,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningNotificationContentTest {
+    @Test fun `disabled or superseded settings do not alert`() {
+        val original = MonitorState()
+        assertTrue(allowsLearningAlert(original, original))
+        assertFalse(allowsLearningAlert(original, original.copy(completionAlerts = false, alertSettingsRevision = 1)))
+        assertFalse(allowsLearningAlert(original, original.copy(alertSettingsRevision = 2)))
+        assertTrue(allowsLearningAlert(original.copy(alertSound = "silent"), original.copy(alertSound = "silent")))
+    }
     private fun line(row: LearningNotificationRow, expanded: Boolean) = learningNotificationLine(row, expanded, "✅",
         { "? / $it" }, { count, goal -> "$count/$goal" }, { "$it min" })
 

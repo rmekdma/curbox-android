@@ -5,7 +5,7 @@
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
             <TextView android:id="@+id/title" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:textAppearance="?attr/textAppearanceHeadlineMedium" />
             <ImageButton android:id="@+id/changeAccount" android:layout_width="48dp" android:layout_height="48dp" android:background="?attr/selectableItemBackgroundBorderless" android:src="@drawable/learning_account" android:visibility="gone" />
-            <ImageButton android:id="@+id/intervalSettings" android:layout_width="48dp" android:layout_height="48dp" android:background="?attr/selectableItemBackgroundBorderless" android:src="@drawable/learning_clock" android:visibility="gone" />
+            <ImageButton android:id="@+id/intervalSettings" android:layout_width="48dp" android:layout_height="48dp" android:background="?attr/selectableItemBackgroundBorderless" android:src="@drawable/learning_tune" android:visibility="gone" />
         </LinearLayout>
         <com.google.android.material.textfield.TextInputLayout android:id="@+id/emailLayout" style="@style/Widget.Material3.TextInputLayout.OutlinedBox" android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone">
             <com.google.android.material.textfield.TextInputEditText android:id="@+id/email" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textEmailAddress" />

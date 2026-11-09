@@ -32,6 +32,10 @@ data class MonitorState(
     val registrations: Map<String, Long> = emptyMap(),
     val accounts: Map<String, MonitorAccountSnapshot> = emptyMap(),
     val intervalMinutes: String = "1",
+    val intervalSeconds: String? = null,
+    val completionAlerts: Boolean? = null,
+    val alertSound: String? = null,
+    val alertSettingsRevision: Long? = null,
     val cycleOwner: Long = 0,
     val cycleStartedElapsedMillis: Long = 0,
     val accountId: String? = null,
@@ -117,6 +121,29 @@ class MemoryLearningStore : LearningStore {
 /** Registrations persisted before multiple children were supported remain active. */
 fun MonitorState.registeredChildren(): Map<String, Long> = if (registrations.isEmpty() && childName != null) mapOf(childName to registrationEpoch) else registrations
 
+fun MonitorState.effectiveIntervalSeconds(): String = intervalSeconds ?: runCatching {
+    java.math.BigInteger(intervalMinutes).multiply(java.math.BigInteger.valueOf(60)).toString()
+}.getOrDefault("60")
+
+/** Removes registrations absent from a successful catalog without erasing saved learning data. */
+fun MonitorState.reconcileCatalog(children: List<TodoChild>, sessionRef: String?): MonitorState {
+    val names = children.mapTo(mutableSetOf()) { it.name }
+    val registered = registeredChildren()
+    val remaining = registered.filterKeys { it in names }
+    if (remaining.size == registered.size) return this
+    val removed = registered.keys - remaining.keys
+    val next = migrateRetries(sessionRef)
+    return next.copy(
+        registrations = remaining,
+        childName = remaining.keys.firstOrNull(),
+        catalogRetries = next.catalogRetries.filterKeys { it !in removed },
+        reportRetries = next.reportRetries.filterKeys { it.first !in removed },
+        catalogRegistrations = next.catalogRegistrations.filterKeys { it !in removed },
+        controlRevision = Math.addExact(next.controlRevision, 1),
+        registrationEpoch = Math.addExact(next.registrationEpoch, 1)
+    )
+}
+
 fun MonitorState.catalogFailureFor(child: String): LearningFailure? = catalogFailures[child] ?: if (catalogFailures.isEmpty() && childName == child) catalogFailure else null
 fun MonitorState.catalogFailureSessionFor(child: String): String? = catalogFailureSessions[child] ?: if (catalogFailures.isEmpty() && childName == child) catalogFailureSession else null
 
@@ -180,7 +207,10 @@ fun StoredLearning.withManualState(next: LearningState, ref: String?, catalogSuc
             catalogAttempted = false, catalogRetryRequested = false, catalogRetryChild = null, reportRetryRequested = null,
             zeroGoalInitials = emptyMap(), controlRevision = Math.addExact(updated.controlRevision, 1))
     }
-    if (catalogSuccess) updated = updated.copy(manualCatalogOrder = Math.addExact(maxOf(updated.manualCatalogOrder ?: 0, updated.monitorCatalogOrder ?: 0), 1))
+    if (catalogSuccess) {
+        updated = updated.copy(manualCatalogOrder = Math.addExact(maxOf(updated.manualCatalogOrder ?: 0, updated.monitorCatalogOrder ?: 0), 1))
+        if (updated.accountId == next.accountId && next.accountId != null) updated = updated.reconcileCatalog(next.children, ref)
+    }
     return copy(state = next, sessionRef = ref, monitor = updated)
 }
 

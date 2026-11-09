@@ -114,6 +114,12 @@ class FragmentActivity : AppCompatActivity(), neth.iecal.todo.LearningHost {
             neth.iecal.todo.LearningText.MONITOR_REPORT -> R.string.learning_monitor_report
             neth.iecal.todo.LearningText.MONITOR_STATUS -> R.string.learning_monitor_status
             neth.iecal.todo.LearningText.INTERVAL -> R.string.learning_interval
+            neth.iecal.todo.LearningText.GENERAL_SETTINGS -> R.string.learning_general_settings
+            neth.iecal.todo.LearningText.ALERTS -> R.string.learning_alerts
+            neth.iecal.todo.LearningText.SOUND -> R.string.learning_sound
+            neth.iecal.todo.LearningText.SOUND_DEFAULT -> R.string.learning_sound_default
+            neth.iecal.todo.LearningText.SOUND_SILENT -> R.string.learning_sound_silent
+            neth.iecal.todo.LearningText.SOUND_SELECTED -> R.string.learning_sound_selected
             neth.iecal.todo.LearningText.SAVE_INTERVAL -> R.string.learning_save_interval
             neth.iecal.todo.LearningText.INVALID_INTERVAL -> R.string.learning_invalid_interval
         }
