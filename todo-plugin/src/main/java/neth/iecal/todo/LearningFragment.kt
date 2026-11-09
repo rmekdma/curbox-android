@@ -191,6 +191,17 @@ class LearningFragment : Fragment() {
         checkedTimes.clear()
         b.children.removeAllViews()
         for (child in state.children) {
+            val card = com.google.android.material.card.MaterialCardView(requireContext()).apply {
+                val margin = (8 * resources.displayMetrics.density).toInt()
+                layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply { topMargin = margin }
+            }
+            val content = android.widget.LinearLayout(requireContext()).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+                val padding = (16 * resources.displayMetrics.density).toInt()
+                setPadding(padding, padding, padding, padding)
+            }
+            card.addView(content)
+            b.children.addView(card)
             val watching = screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()
             val header = android.widget.LinearLayout(requireContext()).apply {
                 orientation = android.widget.LinearLayout.HORIZONTAL
@@ -210,22 +221,11 @@ class LearningFragment : Fragment() {
                 isSelected = watching
                 androidx.core.view.ViewCompat.setStateDescription(this, text(if (watching) LearningText.WATCHING else LearningText.NOT_WATCHING))
             })
-            b.children.addView(header)
+            content.addView(header)
             if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && screen.monitor.catalogFailureFor(child.name) != null) {
-                b.children.addView(TextView(requireContext()).apply { text = failureText(screen.monitor.catalogFailureFor(child.name)) })
+                content.addView(TextView(requireContext()).apply { text = failureText(screen.monitor.catalogFailureFor(child.name)) })
             }
             for (subject in screen.visibleSubjects(child.name)) {
-                val card = com.google.android.material.card.MaterialCardView(requireContext()).apply {
-                    val margin = (8 * resources.displayMetrics.density).toInt()
-                    layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply { topMargin = margin }
-                }
-                val content = android.widget.LinearLayout(requireContext()).apply {
-                    orientation = android.widget.LinearLayout.VERTICAL
-                    val padding = (16 * resources.displayMetrics.density).toInt()
-                    setPadding(padding, padding, padding, padding)
-                }
-                card.addView(content)
-                b.children.addView(card)
                 val report = state.reports[child.name to subject]
                 val monitored = screen.monitor.reports[child.name to subject].takeIf { screen.monitor.accountId == state.accountId }
                 val selectedReport = latestDisplayReport(report, monitored, selected)
@@ -234,16 +234,26 @@ class LearningFragment : Fragment() {
                 val row = android.widget.LinearLayout(requireContext()).apply {
                     orientation = android.widget.LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
+                    layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply {
+                        topMargin = (8 * resources.displayMetrics.density).toInt()
+                    }
                 }
                 content.addView(row)
-                row.addView(TextView(requireContext()).apply { text = subjectLabel(subject); textSize = 20f })
+                row.addView(TextView(requireContext()).apply { text = subjectLabel(subject); textSize = 20f; setSingleLine() })
+                if (value != null) {
+                    row.addView(TextView(requireContext()).apply {
+                        text = "  " + this@LearningFragment.text(LearningText.MINUTES, value.minutes)
+                        setSingleLine()
+                    })
+                }
                 val todayValue = value
                 if (goal != 0 && todayValue != null) {
                     row.addView(TextView(requireContext()).apply {
                         text = "  " + this@LearningFragment.text(LearningText.PROGRESS_COUNT, todayValue.count, goal)
+                        setSingleLine()
                     })
                 } else if (goal != 0 && todayValue == null) {
-                    row.addView(TextView(requireContext()).apply { text = "  " + this@LearningFragment.text(LearningText.UNKNOWN_PROGRESS, goal) })
+                    row.addView(TextView(requireContext()).apply { text = "  " + this@LearningFragment.text(LearningText.UNKNOWN_PROGRESS, goal); setSingleLine() })
                 }
                 if (goal == 0 || (todayValue != null && selectedReport?.failed == false && todayValue.count >= goal)) {
                     row.addView(android.widget.ImageView(requireContext()).apply {
@@ -255,12 +265,14 @@ class LearningFragment : Fragment() {
                 }
                 row.addView(View(requireContext()), android.widget.LinearLayout.LayoutParams(0, 1, 1f))
                 selectedReport?.checkedAt?.let { checkedAt ->
-                    val time = TextView(requireContext())
+                    val time = TextView(requireContext()).apply {
+                        setSingleLine()
+                        layoutParams = android.widget.LinearLayout.LayoutParams(-2, -2).apply {
+                            marginStart = (8 * resources.displayMetrics.density).toInt()
+                        }
+                    }
                     checkedTimes[time] = checkedAt
                     row.addView(time)
-                }
-                if (value != null) {
-                    content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.MINUTES, value.minutes) })
                 }
                 if (report?.failed == true) content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.MANUAL_ERROR, failureText(report.failure)) })
                 if (monitored?.failed == true) content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.AUTOMATIC_ERROR, failureText(monitored.failure)) })
