@@ -4,7 +4,7 @@ import com.google.gson.JsonParser
 
 /** A subject uses its own user identifier and daily report format. */
 enum class Subject { KOREAN, MATH, ENGLISH }
-data class DailyReport(val count: Int, val minutes: Int)
+data class DailyReport(val count: Int, val minutes: Int, val seconds: Double? = null)
 
 object TodoReportParser {
     /** Rejects incomplete reports; only a valid empty activity list means zero. */
@@ -22,6 +22,6 @@ object TodoReportParser {
             seconds += number
         }
         require(seconds.isFinite() && seconds <= Int.MAX_VALUE.toDouble() * 60)
-        return DailyReport(activities.size(), kotlin.math.ceil(seconds / 60).toInt())
+        return DailyReport(activities.size(), kotlin.math.ceil(seconds / 60).toInt(), seconds)
     }
 }

@@ -24,7 +24,7 @@ class TodoApiTest {
             val request = server.takeRequest()
             assertEquals("/v3/todoschool/report/daily/math", request.path)
             assertEquals("Bearer synthetic", request.getHeader("Authorization"))
-            assertEquals(DailyReport(2, 2), report)
+            assertEquals(DailyReport(2, 2, 61.0), report)
         } finally { server.shutdown() }
     }
 

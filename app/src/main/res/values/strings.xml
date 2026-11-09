@@ -1871,6 +1871,7 @@
     <string name="learning_cancel">Cancel</string>
     <string name="learning_manual_error">Manual check: %1$s</string>
     <string name="learning_automatic_error">Automatic check: %1$s</string>
+    <string name="learning_unknown_minutes">\? min</string>
     <string name="learning_minutes">%1$d min</string>
     <string name="learning_relative_minutes">%1$dm ago</string>
     <string name="learning_relative_hours">%1$dh %2$dm ago</string>

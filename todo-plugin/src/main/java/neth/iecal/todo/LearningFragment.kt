@@ -27,7 +27,7 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, UNKNOWN_PROGRESS, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, UNKNOWN_PROGRESS, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REPORT, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_REPORT, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, SETTINGS_CHANGED, PROGRESS, PROGRESS_COMPLETE, ZERO_GOAL, MINUTES, UNKNOWN_MINUTES, RELATIVE_MINUTES, RELATIVE_HOURS, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
@@ -202,13 +202,20 @@ class LearningFragment : Fragment() {
             }
             card.addView(content)
             b.children.addView(card)
+            val subjects = screen.visibleSubjects(child.name)
+            val selectedReports = subjects.associateWith { subject ->
+                val manual = state.reports[child.name to subject]
+                val monitored = screen.monitor.reports[child.name to subject].takeIf { screen.monitor.accountId == state.accountId }
+                latestDisplayReport(manual, monitored, selected)
+            }
+            val total = totalLearningMinutes(selectedReports.values)
             val watching = screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren()
             val header = android.widget.LinearLayout(requireContext()).apply {
                 orientation = android.widget.LinearLayout.HORIZONTAL
                 gravity = android.view.Gravity.CENTER_VERTICAL
             }
             header.addView(TextView(requireContext()).apply {
-                text = child.name
+                text = child.name + "  " + if (total == null) this@LearningFragment.text(LearningText.UNKNOWN_MINUTES) else this@LearningFragment.text(LearningText.MINUTES, total)
                 textSize = 20f
                 layoutParams = android.widget.LinearLayout.LayoutParams(0, -2, 1f)
             })
@@ -225,10 +232,10 @@ class LearningFragment : Fragment() {
             if (screen.monitor.accountId == state.accountId && child.name in screen.monitor.registeredChildren() && screen.monitor.catalogFailureFor(child.name) != null) {
                 content.addView(TextView(requireContext()).apply { text = failureText(screen.monitor.catalogFailureFor(child.name)) })
             }
-            for (subject in screen.visibleSubjects(child.name)) {
+            for (subject in subjects) {
                 val report = state.reports[child.name to subject]
                 val monitored = screen.monitor.reports[child.name to subject].takeIf { screen.monitor.accountId == state.accountId }
-                val selectedReport = latestDisplayReport(report, monitored, selected)
+                val selectedReport = selectedReports[subject]
                 val value = selectedReport?.value
                 val goal = screen.goal(child.name, subject)
                 val row = android.widget.LinearLayout(requireContext()).apply {
@@ -240,13 +247,15 @@ class LearningFragment : Fragment() {
                 }
                 content.addView(row)
                 row.addView(TextView(requireContext()).apply { text = subjectLabel(subject); textSize = 20f; setSingleLine() })
-                if (value != null) {
-                    row.addView(TextView(requireContext()).apply {
-                        text = "  " + this@LearningFragment.text(LearningText.MINUTES, value.minutes)
-                        setSingleLine()
+                val todayValue = value
+                if (goal == 0 || (todayValue != null && selectedReport?.failed == false && todayValue.count >= goal)) {
+                    row.addView(android.widget.ImageView(requireContext()).apply {
+                        val size = (24 * resources.displayMetrics.density).toInt()
+                        layoutParams = android.widget.LinearLayout.LayoutParams(size, size)
+                        setImageResource(R.drawable.learning_check)
+                        contentDescription = this@LearningFragment.text(LearningText.COMPLETE)
                     })
                 }
-                val todayValue = value
                 if (goal != 0 && todayValue != null) {
                     row.addView(TextView(requireContext()).apply {
                         text = "  " + this@LearningFragment.text(LearningText.PROGRESS_COUNT, todayValue.count, goal)
@@ -255,12 +264,10 @@ class LearningFragment : Fragment() {
                 } else if (goal != 0 && todayValue == null) {
                     row.addView(TextView(requireContext()).apply { text = "  " + this@LearningFragment.text(LearningText.UNKNOWN_PROGRESS, goal); setSingleLine() })
                 }
-                if (goal == 0 || (todayValue != null && selectedReport?.failed == false && todayValue.count >= goal)) {
-                    row.addView(android.widget.ImageView(requireContext()).apply {
-                        val size = (24 * resources.displayMetrics.density).toInt()
-                        layoutParams = android.widget.LinearLayout.LayoutParams(size, size)
-                        setImageResource(R.drawable.learning_check)
-                        contentDescription = this@LearningFragment.text(LearningText.COMPLETE)
+                if (value != null) {
+                    row.addView(TextView(requireContext()).apply {
+                        text = "  " + this@LearningFragment.text(LearningText.MINUTES, value.minutes)
+                        setSingleLine()
                     })
                 }
                 row.addView(View(requireContext()), android.widget.LinearLayout.LayoutParams(0, 1, 1f))
@@ -494,4 +501,16 @@ internal fun elapsedMinutes(now: Long, checkedAt: Long): Long {
     if (checkedAt >= now) return 0
     val elapsed = try { Math.subtractExact(now, checkedAt) } catch (_: ArithmeticException) { Long.MAX_VALUE }
     return elapsed / 60_000
+}
+
+internal fun totalLearningMinutes(reports: Collection<ReportState?>): Int? {
+    if (reports.isEmpty()) return null
+    var seconds = 0.0
+    for (report in reports) {
+        val value = report?.value?.seconds ?: return null
+        if (!value.isFinite() || value < 0) return null
+        seconds += value
+        if (!seconds.isFinite() || seconds > Int.MAX_VALUE.toDouble() * 60) return null
+    }
+    return kotlin.math.ceil(seconds / 60).toInt()
 }

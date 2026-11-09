@@ -39,19 +39,20 @@ object LearningNotifications {
                 neth.iecal.todo.LearningFailure.INVALID_DATA -> R.string.learning_invalid_error
                 neth.iecal.todo.LearningFailure.STORAGE -> R.string.learning_storage_error
                 neth.iecal.todo.LearningFailure.AUTHENTICATION -> R.string.learning_login_required
-            }) }) { subject ->
+            }) }, current.state.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty(),
+            context.getString(R.string.learning_unknown)) { subject ->
             val key = child to subject
             val report = current.monitor.reports[key]
             val goal = current.state.goalsByAccount[current.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
             learningNotificationValue(report, goal, java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE),
-                context.getString(R.string.learning_unknown), context.getString(R.string.learning_notification_complete)) { count, target, complete ->
+                context.getString(R.string.learning_unknown_progress, goal), context.getString(R.string.learning_notification_complete)) { count, target, complete ->
                 context.getString(if (complete) R.string.learning_notification_progress_complete else R.string.learning_notification_progress, count, target)
             }
         }
         val notification = NotificationCompat.Builder(context, "learning_achievements")
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(child)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentText(details).setStyle(NotificationCompat.BigTextStyle().bigText(details))
+            .setContentText(details.replace("\n", " · ")).setStyle(NotificationCompat.BigTextStyle().bigText(details))
             .setOngoing(true).setSilent(child != achievementChild).build()
         if (permission.value == expected && expected.granted && notifications.areNotificationsEnabled() && (child != achievementChild || stillValid())) notifications.notify(tag(child), 0x4c454152, notification)
         }
@@ -61,10 +62,11 @@ object LearningNotifications {
 internal fun learningNotificationDetails(
     monitor: neth.iecal.todo.MonitorState, child: String,
     label: (Subject) -> String, failureText: (neth.iecal.todo.LearningFailure) -> String,
+    knownSubjects: Set<Subject> = emptySet(), pending: String = "",
     value: (Subject) -> String
 ): String {
-    val subjects = monitor.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty()
-    if (subjects.isEmpty()) return monitor.catalogFailureFor(child)?.let(failureText).orEmpty()
+    val subjects = monitor.children.firstOrNull { it.name == child }?.userIds?.keys.orEmpty() + knownSubjects
+    if (subjects.isEmpty()) return monitor.catalogFailureFor(child)?.let(failureText) ?: pending
     val result = StringBuilder()
     for (subject in subjects) {
         if (result.isNotEmpty()) result.append('\n')

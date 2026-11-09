@@ -50,12 +50,20 @@ class SyntheticFixture private constructor(val revision: String, val children: L
                     require(obj.keySet() == setOf("user", "subject", "date", "failure"))
                     Result.failure(TodoApiException(kind = LearningFailure.valueOf(obj.get("failure").asString)))
                 } else {
-                    require(obj.keySet() == setOf("user", "subject", "date", "count", "minutes"))
+                    require(obj.keySet() == setOf("user", "subject", "date", "count", "minutes") ||
+                        obj.keySet() == setOf("user", "subject", "date", "count", "minutes", "seconds"))
                     require(obj.get("count").toString().matches(Regex("[0-9]{1,6}")) && obj.get("minutes").toString().matches(Regex("[0-9]{1,6}")))
                     val count = obj.get("count").asInt
                     val minutes = obj.get("minutes").asInt
                     require(count in 0..100000 && minutes in 0..100000)
-                    Result.success(DailyReport(count, minutes))
+                    val seconds = obj.get("seconds")?.let {
+                        require(it.isJsonPrimitive && it.asJsonPrimitive.isNumber)
+                        it.asDouble.also { value ->
+                            require(value.isFinite() && value >= 0 && value <= Int.MAX_VALUE.toDouble() * 60)
+                            require(kotlin.math.ceil(value / 60).toInt() == minutes)
+                        }
+                    }
+                    Result.success(DailyReport(count, minutes, seconds))
                 }
                 require(reports.put(Triple(user, subject, date), value) == null)
             }
@@ -95,7 +103,7 @@ object LearningComposition {
     fun createApi(context: Context): TodoApi = object : TodoApi {
         override fun signIn(email: String, password: String) = TodoSession("fake", "fake")
         override fun catalog(session: TodoSession) = SyntheticFixtureFile.read(context)?.children ?: listOf(TodoChild("Sample", mapOf(Subject.MATH to "fake")))
-        override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = SyntheticFixtureFile.read(context)?.report(userId, subject, date) ?: DailyReport(2, 4)
+        override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = SyntheticFixtureFile.read(context)?.report(userId, subject, date) ?: DailyReport(2, 4, 240.0)
     }
     fun subjectPackages() = SubjectPackages(math = "neth.iecal.curbox.apitester")
     fun createScreen(context: Context) = LearningScreen(createApi(context), LearningStorage(context))

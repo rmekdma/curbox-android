@@ -17,7 +17,10 @@ When today has no valid report, the row shows `? / goal`. Older report values
 and check times are not displayed. A selected successful report
 at its goal shows a green check; a zero goal shows a local check without a
 fabricated count. Manual and automatic errors are labeled separately. The
-relative time updates without rebuilding the settings dialog.
+relative time updates without rebuilding the settings dialog. The child total
+sums each visible subject's selected report in seconds and rounds once. It is
+unknown until every visible subject has a current report with seconds, including
+reports saved before seconds were retained.
 
 ## Monitoring behavior
 
@@ -46,7 +49,10 @@ relative time updates without rebuilding the settings dialog.
   the user's notification channel settings. The title is the child name. Each
   subject shows today's count and goal, with a check mark when complete. Zero
   goals show a check mark; missing or older reports show as not checked. A
-  failed report does not show a completion check for a positive goal.
+  failed report does not show a completion check for a positive goal. The
+  compact notification uses one line; its expanded text has one line per subject.
+  When monitor catalog data is not yet available, known subjects from the same
+  account's screen catalog supply labels; values still come from monitor reports.
 
 ## Boundaries and lifetime
 

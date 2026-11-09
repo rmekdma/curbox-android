@@ -4,6 +4,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningDisplayTest {
+    @Test fun `total rounds combined seconds once and requires every report`() {
+        val first = ReportState(DailyReport(1, 1, 20.0), 1, "today")
+        val second = ReportState(DailyReport(2, 1, 20.0), 2, "today", failed = true)
+        assertEquals(1, totalLearningMinutes(listOf(first, second)))
+        assertEquals(0, totalLearningMinutes(listOf(first.copy(value = DailyReport(0, 0, 0.0)))))
+        assertNull(totalLearningMinutes(emptyList()))
+        assertNull(totalLearningMinutes(listOf(first, null)))
+        assertNull(totalLearningMinutes(listOf(first.copy(value = DailyReport(1, 1)))))
+        assertNull(totalLearningMinutes(listOf(first.copy(value = DailyReport(1, 1, Double.NaN)))))
+        assertNull(totalLearningMinutes(listOf(first.copy(value = DailyReport(1, 1, -1.0)))))
+        assertNull(totalLearningMinutes(listOf(first.copy(value = DailyReport(1, 1, Int.MAX_VALUE.toDouble() * 60)), second)))
+    }
+
     @Test fun `elapsed time clamps future and handles hour boundaries`() {
         val now = 10_000_000L
         assertEquals(0L, elapsedMinutes(now, now + 1))
