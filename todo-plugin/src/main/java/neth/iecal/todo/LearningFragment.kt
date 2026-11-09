@@ -38,6 +38,8 @@ class LearningFragment : Fragment() {
     private var availability: LearningAvailability? = null
     private var availabilityJob: kotlinx.coroutines.Job? = null
     private var settingsDialog: androidx.appcompat.app.AlertDialog? = null
+    private var soundPreview: android.media.Ringtone? = null
+    private var soundPreviewJob: kotlinx.coroutines.Job? = null
     private val checkedTimes = mutableMapOf<TextView, Long>()
     private var renderedDay = LocalDate.now(ZoneId.of("Asia/Seoul"))
     private val host get() = requireActivity() as LearningHost
@@ -110,6 +112,7 @@ class LearningFragment : Fragment() {
     }
 
     override fun onPause() {
+        stopSoundPreview()
         availabilityJob?.cancel()
         availabilityJob = null
         availability = null
@@ -326,6 +329,31 @@ class LearningFragment : Fragment() {
         layoutParams = android.widget.LinearLayout.LayoutParams((120 * resources.displayMetrics.density).toInt(), -2)
     }
 
+    private fun stopSoundPreview() {
+        soundPreviewJob?.cancel()
+        soundPreviewJob = null
+        soundPreview?.let { runCatching { it.stop() } }
+        soundPreview = null
+    }
+
+    private fun previewSound(key: String?) {
+        stopSoundPreview()
+        if (key == "silent") return
+        val uri = if (key == null) android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION) else android.net.Uri.parse(key)
+        val ringtone = runCatching { android.media.RingtoneManager.getRingtone(requireContext(), uri) }.getOrNull() ?: return
+        soundPreview = ringtone
+        runCatching {
+            ringtone.audioAttributes = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
+            ringtone.play()
+        }.onFailure { stopSoundPreview(); return }
+        soundPreviewJob = viewLifecycleOwner.lifecycleScope.launch {
+            kotlinx.coroutines.delay(3000)
+            stopSoundPreview()
+        }
+    }
+
     private fun showAccountDialog() {
         val content = dialogContent()
         fun field(hint: String, inputType: Int, initial: String): com.google.android.material.textfield.TextInputEditText {
@@ -383,14 +411,10 @@ class LearningFragment : Fragment() {
     private fun showIntervalDialog() {
         val content = dialogContent()
         val input = numberInput(screen.monitor.effectiveIntervalSeconds())
-        content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.INTERVAL) })
-        content.addView(input)
         val alerts = com.google.android.material.checkbox.MaterialCheckBox(requireContext()).apply {
-            text = this@LearningFragment.text(LearningText.ALERTS)
+            contentDescription = this@LearningFragment.text(LearningText.ALERTS)
             isChecked = screen.monitor.completionAlerts ?: true
         }
-        content.addView(alerts)
-        content.addView(TextView(requireContext()).apply { text = this@LearningFragment.text(LearningText.SOUND) })
         val soundKeys = mutableListOf<String?>(null, "silent")
         val soundNames = mutableListOf(text(LearningText.SOUND_DEFAULT), text(LearningText.SOUND_SILENT))
         runCatching {
@@ -405,22 +429,98 @@ class LearningFragment : Fragment() {
         }
         val selectedSound = screen.monitor.alertSound
         if (selectedSound != null && selectedSound !in soundKeys) { soundKeys.add(selectedSound); soundNames.add(text(LearningText.SOUND_SELECTED)) }
-        val sound = android.widget.Spinner(requireContext()).apply {
-            adapter = android.widget.ArrayAdapter(requireContext(), android.R.layout.simple_spinner_dropdown_item, soundNames)
-            setSelection(soundKeys.indexOf(selectedSound).coerceAtLeast(0))
+        var selectedIndex = soundKeys.indexOf(selectedSound).coerceAtLeast(0)
+        val rowHeight = (48 * resources.displayMetrics.density).toInt()
+        val sound = TextView(requireContext()).apply {
+            text = soundNames[selectedIndex]
+            gravity = android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.END
+            minHeight = rowHeight
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            isClickable = true
+            isFocusable = true
+            contentDescription = this@LearningFragment.text(LearningText.SOUND)
+            setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0)
         }
-        content.addView(sound)
+        val soundPopup = android.widget.ListPopupWindow(requireContext()).apply {
+            anchorView = sound
+            width = (240 * resources.displayMetrics.density).toInt()
+            val padding = android.graphics.Rect()
+            background?.getPadding(padding)
+            height = minOf(soundNames.size * rowHeight, (288 * resources.displayMetrics.density).toInt()) + padding.top + padding.bottom
+            setDropDownGravity(android.view.Gravity.END)
+            isModal = true
+        }
+        val soundAdapter = object : android.widget.ArrayAdapter<String>(requireContext(), android.R.layout.simple_list_item_1, soundNames) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val item = (convertView as? android.widget.CheckedTextView) ?: android.widget.CheckedTextView(context).apply {
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding((16 * resources.displayMetrics.density).toInt(), 0, (16 * resources.displayMetrics.density).toInt(), 0)
+                    layoutParams = android.widget.AbsListView.LayoutParams(-1, rowHeight)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }
+                item.text = getItem(position)
+                item.isChecked = position == selectedIndex
+                item.setCheckMarkDrawable(if (position == selectedIndex) R.drawable.learning_check else 0)
+                return item
+            }
+        }
+        soundPopup.setAdapter(soundAdapter)
+        soundPopup.setOnItemClickListener { _, _, position, _ ->
+            selectedIndex = position
+            sound.text = soundNames[position]
+            soundPopup.dismiss()
+            previewSound(soundKeys[position])
+        }
+        sound.setOnClickListener {
+            soundAdapter.notifyDataSetChanged()
+            soundPopup.show()
+            soundPopup.listView?.apply {
+                divider = null
+                dividerHeight = 0
+                setPadding(0, 0, 0, 0)
+            }
+            soundPopup.listView?.post {
+                val list = soundPopup.listView ?: return@post
+                val viewport = list.height - list.paddingTop - list.paddingBottom
+                val scroll = soundListScroll(selectedIndex, soundNames.size, rowHeight, viewport)
+                list.setSelectionFromTop(scroll / rowHeight, -(scroll % rowHeight))
+            }
+        }
+        fun addSetting(label: String, widget: View, widthDp: Int) {
+            val row = android.widget.LinearLayout(requireContext()).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+            row.addView(TextView(requireContext()).apply {
+                text = label
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, -2, 1f)
+            })
+            val right = android.widget.FrameLayout(requireContext()).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams((widthDp * resources.displayMetrics.density).toInt(), -2)
+            }
+            right.addView(widget, android.widget.FrameLayout.LayoutParams((widthDp * resources.displayMetrics.density).toInt(), -2, android.view.Gravity.END or android.view.Gravity.CENTER_VERTICAL))
+            row.addView(right)
+            content.addView(row)
+        }
+        addSetting(text(LearningText.INTERVAL), input, 96)
+        addSetting(text(LearningText.ALERTS), alerts, 48)
+        addSetting(text(LearningText.SOUND), sound, 160)
         val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
             .setTitle(text(LearningText.GENERAL_SETTINGS)).setView(content)
             .setNegativeButton(text(LearningText.CANCEL), null)
             .setPositiveButton(text(LearningText.CONFIRM), null).create()
         settingsDialog = dialog
-        dialog.setOnDismissListener { if (settingsDialog === dialog) settingsDialog = null }
+        dialog.setOnDismissListener { soundPopup.dismiss(); stopSoundPreview(); if (settingsDialog === dialog) settingsDialog = null }
         dialog.setOnShowListener {
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val value = input.text.toString()
                 val enabled = alerts.isChecked
-                val soundKey = soundKeys[sound.selectedItemPosition]
+                val soundKey = soundKeys[selectedIndex]
+                stopSoundPreview()
                 dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).isEnabled = false
                 viewLifecycleOwner.lifecycleScope.launch {
                     val saved = try { withContext(Dispatchers.IO) { screen.saveLearningSettings(value, enabled, soundKey) } }
@@ -505,6 +605,7 @@ class LearningFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        stopSoundPreview()
         settingsDialog?.dismiss()
         settingsDialog = null
         checkedTimes.clear()
@@ -521,4 +622,9 @@ internal fun elapsedMinutes(now: Long, checkedAt: Long): Long {
     if (checkedAt >= now) return 0
     val elapsed = try { Math.subtractExact(now, checkedAt) } catch (_: ArithmeticException) { Long.MAX_VALUE }
     return elapsed / 60_000
+}
+
+internal fun soundListScroll(selected: Int, count: Int, rowHeight: Int, viewport: Int): Int {
+    val maxScroll = (count * rowHeight - viewport).coerceAtLeast(0)
+    return (selected * rowHeight - (viewport - rowHeight) / 2).coerceIn(0, maxScroll)
 }

@@ -47,7 +47,8 @@ reports saved before seconds were retained.
   contains. A failed catalog leaves registrations and saved learning data intact.
 - The shared check interval uses seconds; stored minute settings remain valid.
   Completion alerts and their sound can be changed independently of the ongoing
-  status notification. Android channel settings can affect sound and heads up.
+  status notification. Selecting a sound previews it briefly; opening the
+  settings does not play it. Android channel settings can affect sound and heads up.
 - Each registered child has a status notification. A new achievement updates
   that child's notification; actual sound and heads up depend on Android and
   the user's notification channel settings. The title is the child name. Each

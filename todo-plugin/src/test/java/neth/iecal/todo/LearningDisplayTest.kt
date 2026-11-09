@@ -4,6 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LearningDisplayTest {
+    @Test fun `sound list centers selection and clamps both ends`() {
+        assertEquals(0, soundListScroll(0, 10, 48, 240))
+        assertEquals(144, soundListScroll(5, 10, 48, 240))
+        assertEquals(240, soundListScroll(9, 10, 48, 240))
+        assertEquals(0, soundListScroll(1, 2, 48, 240))
+    }
     @Test fun `latest successful catalog wins without reviving removed subjects`() {
         val math = TodoChild("Child", mapOf(Subject.MATH to "m"))
         val english = TodoChild("Child", mapOf(Subject.ENGLISH to "e"))
