@@ -47,7 +47,7 @@ object LearningNotifications {
         })
         val rows = subjects.map { subject ->
             val key = child to subject
-            val goal = current.state.goalsByAccount[current.state.accountId]?.get(key) ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
+            val goal = current.state.goalsByAccount[current.state.accountId]?.get(key) ?: subject.defaultGoal
             val errors = listOfNotNull(
                 current.state.reports[key]?.takeIf { it.failed }?.failure?.let { context.getString(R.string.learning_manual_error, failureText(it)) },
                 current.monitor.reports[key]?.takeIf { it.failed }?.failure?.let { context.getString(R.string.learning_automatic_error, failureText(it)) },

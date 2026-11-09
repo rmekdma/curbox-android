@@ -186,7 +186,7 @@ class InitialMonitor(
         fun eligible(intent: RetryIntent?) = intent?.registration == control.registration && intent.sessionRef == control.ref
         fun retry(monitor: MonitorState) = eligible(monitor.catalogRetries[childName])
         fun reportRetry(monitor: MonitorState, key: Pair<String, Subject>) = eligible(monitor.reportRetries[key])
-        fun goal(subject: Subject) = control.goals[requireNotNull(control.child) to subject] ?: when (subject) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
+        fun goal(subject: Subject) = control.goals[requireNotNull(control.child) to subject] ?: subject.defaultGoal
         val knownChild = learningCatalog(doc.state, doc.monitor).firstOrNull { it.name == control.child }
         val initialized = knownChild != null && knownChild.userIds.keys.all { subject ->
             val key = knownChild.name to subject

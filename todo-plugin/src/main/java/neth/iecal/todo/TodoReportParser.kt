@@ -3,7 +3,7 @@ package neth.iecal.todo
 import com.google.gson.JsonParser
 
 /** A subject uses its own user identifier and daily report format. */
-enum class Subject { KOREAN, MATH, ENGLISH }
+enum class Subject(val defaultGoal: Int) { KOREAN(6), MATH(5), ENGLISH(8) }
 data class DailyReport(val count: Int)
 
 object TodoReportParser {

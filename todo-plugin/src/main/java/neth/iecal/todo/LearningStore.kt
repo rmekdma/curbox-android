@@ -174,7 +174,7 @@ fun StoredLearning.withManualState(next: LearningState, ref: String?, catalogSuc
         val after = next.goalsByAccount[account].orEmpty()
         var scoped = versions[account].orEmpty()
         for (key in before.keys + after.keys) {
-            val default = when (key.second) { Subject.KOREAN -> 6; Subject.MATH -> 5; Subject.ENGLISH -> 8 }
+            val default = key.second.defaultGoal
             if ((before[key] ?: default) != (after[key] ?: default)) {
                 scoped = scoped + (key to Math.addExact(scoped[key] ?: 0, 1))
                 if (account == monitor.accountId && (after[key] ?: default) == 0) retries = retries - key
