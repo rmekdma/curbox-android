@@ -46,7 +46,10 @@ import neth.iecal.curbox.services.BaseBlockingService
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.GuardianSessionRegistry
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -353,85 +356,84 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
-    fun addTimeFlowKeepsTheOriginalRuleAfterValidReplacement() {
+    fun completedOldGrantCannotAffectReplacementScreen() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val grantRuleId = "lifecycle-grant-${java.util.UUID.randomUUID()}"
-        val grantRuleName = "Rule ${java.util.UUID.randomUUID()}"
-        val originalSnapshot = seedEligibleGrantRule(context, grantRuleId, grantRuleName)
-        val approvalRequests = LinkedBlockingQueue<Intent>()
-        val requestReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED ||
-                    intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY ||
-                    intent?.action == GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER
-                ) {
-                    approvalRequests.offer(intent)
+        val dataStore = DataStoreManager(context)
+        val originalSettings = runBlocking { dataStore.settings.first() }
+        assumeTrue("This UI test requires an unset guardian PIN", !originalSettings.guardianAuthConfig.isConfigured)
+        val ruleA = "replacement-grant-a-${java.util.UUID.randomUUID()}"
+        val ruleB = "replacement-grant-b-${java.util.UUID.randomUUID()}"
+        val ruleName = "Rule ${java.util.UUID.randomUUID()}"
+        val originalSnapshot = seedEligibleGrantRule(context, ruleA, ruleName)
+        val committed = CountDownLatch(1)
+        val releaseWrite = CompletableDeferred<Unit>()
+        val writerJob = AtomicReference<Job?>()
+        val launchLookups = AtomicInteger(0)
+        val requests = LinkedBlockingQueue<Intent>()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) { intent?.let(requests::offer) }
+        }
+        ContextCompat.registerReceiver(context, receiver, IntentFilter().apply {
+            addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
+            addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
+        }, ContextCompat.RECEIVER_NOT_EXPORTED)
+        GuardianApprovalActivity.launchIntentLookupForTest = { launchLookups.incrementAndGet(); null }
+        try {
+            seedActiveRuleWithoutRefresh(context, ruleB, "Rule B")
+            DataStoreManager.guardianApprovalWriteCommitObserverForTest = { settings ->
+                if (settings.appRuleOverrideState.grants.any { it.ruleId == ruleA }) {
+                    writerJob.set(coroutineContext[Job])
+                    committed.countDown()
+                    releaseWrite.await()
                 }
             }
-        }
-        ContextCompat.registerReceiver(
-            context,
-            requestReceiver,
-            IntentFilter().apply {
-                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
-                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
-                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
-            },
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
-        try {
-            resetGuardianOverrides(context)
             ActivityScenario.launch<GuardianApprovalActivity>(
-                approvalIntent(ruleId = grantRuleId, ruleName = grantRuleName)
+                approvalIntent(ruleId = ruleA, ruleName = ruleName, targetPackageName = "com.example.guardian.target")
             ).use { scenario ->
                 awaitDisplayed(R.id.approval_add_time)
                 onView(withId(R.id.approval_add_time)).perform(click())
                 awaitDisplayed(R.id.rule_picker, inDialog = true)
-                onView(withId(R.id.rule_picker))
-                    .inRoot(isDialog())
-                    .perform(click())
-                onView(withText(grantRuleName))
-                    .inRoot(isPlatformPopup())
-                    .perform(click())
-                onView(withId(R.id.additional_minutes_input))
-                    .inRoot(isDialog())
-                    .perform(replaceText("5"))
-                    .check(matches(withText("5")))
-
-                InstrumentationRegistry.getInstrumentation().targetContext.startActivity(
-                    approvalIntent(ruleId = "rule_b", ruleName = "Rule B")
-                )
+                onView(withId(R.id.rule_picker)).inRoot(isDialog()).perform(click())
+                onView(withText(ruleName)).inRoot(isPlatformPopup()).perform(click())
+                onView(withId(R.id.additional_minutes_input)).inRoot(isDialog()).perform(replaceText("5"))
+                onView(withText(R.string.guardian_apply)).inRoot(isDialog()).perform(click())
+                assertTrue("the original grant must commit before replacement", committed.await(5, TimeUnit.SECONDS))
+                val committedState = awaitOverrideState(context) { state -> state.grants.any { it.ruleId == ruleA } }
+                assertEquals(1, committedState.grants.count { it.ruleId == ruleA })
+                lateinit var originalActivity: GuardianApprovalActivity
+                scenario.onActivity { originalActivity = it }
+                context.startActivity(approvalIntent(ruleId = ruleB, ruleName = "Rule B", targetPackageName = "com.example.guardian.target"))
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-
-                onView(withText(R.string.common_continue))
-                    .inRoot(isDialog())
-                    .perform(click())
-
-                val state = awaitOverrideState(context) { it.grants.isNotEmpty() }
-                assertEquals(listOf(grantRuleId), state.grants.map { it.ruleId })
-                assertTrue(state.skips.isEmpty())
-                assertTrue(
-                    "a stored grant from the replaced screen must not start confirmation for the new screen",
-                    approvalRequests.poll(500, TimeUnit.MILLISECONDS) == null
-                )
                 scenario.onActivity { activity ->
+                    assertSame(originalActivity, activity)
                     assertDenialReason(activity, "Rule B")
-                    assertFalse(
-                        "the old write callback must not replace the current screen with a confirmation wait",
-                        activity.findViewById<android.view.View>(R.id.approval_confirmation_progress)
-                            .isShown
-                    )
                 }
+                releaseWrite.complete(Unit)
+                val job = checkNotNull(writerJob.get()) { "the committed write did not expose its coroutine" }
+                runBlocking { withTimeout(5_000L) { job.join() } }
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity ->
+                    assertFalse("the old completion must not finish the replacement screen", activity.isFinishing)
+                    assertDenialReason(activity, "Rule B")
+                    assertFalse(activity.findViewById<android.view.View>(R.id.approval_confirmation_progress).isShown)
+                }
+                val state = runBlocking { dataStore.settings.first().appRuleOverrideState }
+                assertEquals(committedState, state)
+                assertTrue(state.grants.none { it.ruleId == ruleB })
+                assertTrue(state.skips.none { it.ruleId == ruleB })
+                assertTrue("the old completion must not start confirmation for B", requests.poll(500, TimeUnit.MILLISECONDS) == null)
+                assertEquals("the old completion must not attempt to launch an app", 0, launchLookups.get())
             }
         } finally {
+            releaseWrite.complete(Unit)
+            DataStoreManager.guardianApprovalWriteCommitObserverForTest = null
+            GuardianApprovalActivity.launchIntentLookupForTest = null
             try {
-                resetGuardianOverrides(context)
+                assertTrue(runBlocking { dataStore.writeAppRuleOverrideState("", originalSettings.appRuleOverrideState) })
             } finally {
-                try {
-                    restoreAppRuleSnapshot(context, originalSnapshot)
-                } finally {
-                    context.unregisterReceiver(requestReceiver)
-                }
+                try { writeAppRuleSnapshotDirectlyForTest(context, originalSnapshot) }
+                finally { context.unregisterReceiver(receiver) }
             }
         }
     }
@@ -520,30 +522,86 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
-    fun skipFlowKeepsTheOriginalRuleAfterValidReplacement() {
+    fun completedOldSkipCannotAffectReplacementScreen() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        resetGuardianOverrides(context)
+        val dataStore = DataStoreManager(context)
+        val originalSettings = runBlocking { dataStore.settings.first() }
+        assumeTrue("This UI test requires an unset guardian PIN", !originalSettings.guardianAuthConfig.isConfigured)
+        val ruleA = "replacement-skip-a-${java.util.UUID.randomUUID()}"
+        val ruleB = "replacement-skip-b-${java.util.UUID.randomUUID()}"
+        val originalSnapshot = seedActiveRuleWithoutRefresh(context, ruleA, "Rule A")
+        val committed = CountDownLatch(1)
+        val releaseWrite = CompletableDeferred<Unit>()
+        val writerJob = AtomicReference<Job?>()
+        val launchLookups = AtomicInteger(0)
+        val requests = LinkedBlockingQueue<Intent>()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) { intent?.let(requests::offer) }
+        }
+        ContextCompat.registerReceiver(
+            context, receiver,
+            IntentFilter().apply {
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_STORED)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_CHECK_RETRY)
+                addAction(GuardianApprovalActivity.INTENT_ACTION_APPROVAL_RECOVER)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        GuardianApprovalActivity.launchIntentLookupForTest = { launchLookups.incrementAndGet(); null }
         try {
+            seedActiveRuleWithoutRefresh(context, ruleB, "Rule B")
+            DataStoreManager.guardianApprovalWriteCommitObserverForTest = { settings ->
+                if (settings.appRuleOverrideState.skips.any { it.ruleId == ruleA }) {
+                    writerJob.set(coroutineContext[Job])
+                    committed.countDown()
+                    releaseWrite.await()
+                }
+            }
             ActivityScenario.launch<GuardianApprovalActivity>(
-                approvalIntent(ruleId = "rule_a", ruleName = "Rule A")
-            ).use {
+                approvalIntent(ruleId = ruleA, ruleName = "Rule A", targetPackageName = "com.example.guardian.target")
+            ).use { scenario ->
+                awaitDisplayed(R.id.approval_skip_rule)
                 onView(withId(R.id.approval_skip_rule)).perform(click())
-
-                InstrumentationRegistry.getInstrumentation().targetContext.startActivity(
-                    approvalIntent(ruleId = "rule_b", ruleName = "Rule B")
+                onView(withText(R.string.guardian_skip_15_minutes)).inRoot(isDialog()).perform(click())
+                assertTrue("the original skip must commit before replacement", committed.await(5, TimeUnit.SECONDS))
+                val committedState = awaitOverrideState(context) { state -> state.skips.any { it.ruleId == ruleA } }
+                assertEquals(1, committedState.skips.count { it.ruleId == ruleA })
+                lateinit var originalActivity: GuardianApprovalActivity
+                scenario.onActivity { originalActivity = it }
+                context.startActivity(
+                    approvalIntent(ruleId = ruleB, ruleName = "Rule B", targetPackageName = "com.example.guardian.target")
                 )
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-
-                onView(withText(R.string.guardian_skip_15_minutes))
-                    .inRoot(isDialog())
-                    .perform(click())
-
-                val state = awaitOverrideState(context) { it.skips.isNotEmpty() }
-                assertEquals(listOf("rule_a"), state.skips.map { it.ruleId })
-                assertTrue(state.grants.isEmpty())
+                scenario.onActivity { activity ->
+                    assertSame(originalActivity, activity)
+                    assertDenialReason(activity, "Rule B")
+                }
+                releaseWrite.complete(Unit)
+                val job = checkNotNull(writerJob.get()) { "the committed write did not expose its coroutine" }
+                runBlocking { withTimeout(5_000L) { job.join() } }
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                scenario.onActivity { activity ->
+                    assertFalse("the old completion must not finish the replacement screen", activity.isFinishing)
+                    assertDenialReason(activity, "Rule B")
+                    assertFalse(activity.findViewById<android.view.View>(R.id.approval_confirmation_progress).isShown)
+                }
+                val state = runBlocking { dataStore.settings.first().appRuleOverrideState }
+                assertEquals(committedState, state)
+                assertTrue(state.skips.none { it.ruleId == ruleB })
+                assertTrue(state.grants.none { it.ruleId == ruleB })
+                assertTrue("the old completion must not start a confirmation for B", requests.poll(500, TimeUnit.MILLISECONDS) == null)
+                assertEquals("the old completion must not attempt to launch an app", 0, launchLookups.get())
             }
         } finally {
-            resetGuardianOverrides(context)
+            releaseWrite.complete(Unit)
+            DataStoreManager.guardianApprovalWriteCommitObserverForTest = null
+            GuardianApprovalActivity.launchIntentLookupForTest = null
+            try {
+                assertTrue(runBlocking { dataStore.writeAppRuleOverrideState("", originalSettings.appRuleOverrideState) })
+            } finally {
+                try { writeAppRuleSnapshotDirectlyForTest(context, originalSnapshot) }
+                finally { context.unregisterReceiver(receiver) }
+            }
         }
     }
 
@@ -678,10 +736,8 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalActivity.CONFIRMATION_STATUS_FAILED
                         )
                 )
-                scenario.onActivity { activity ->
-                    assertViewVisibility(activity, R.id.approval_confirmation_retry, android.view.View.VISIBLE)
-                    activity.findViewById<android.view.View>(R.id.approval_confirmation_retry).performClick()
-                }
+                awaitDisplayed(R.id.approval_confirmation_retry)
+                onView(withId(R.id.approval_confirmation_retry)).perform(click())
 
                 val retry = requests.poll(5, TimeUnit.SECONDS)
                     ?: error("The skip check retry or recovery was not sent")

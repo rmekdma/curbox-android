@@ -160,3 +160,5 @@ app blocker, free app blocker, open source app blocker, screen time app, screen 
 StayFree alternative, Opal alternative, Freedom app alternative, Forest app alternative, Cold Turkey alternative, AppBlock alternative, ScreenZen alternative, one sec alternative, BlockSite alternative, Stay Focused alternative, ActionDash alternative, Digital Wellbeing alternative, Brick alternative, Unpluq alternative, Refocus alternative, Roots app alternative, Clearspace alternative, Jomo alternative, LockMeOut alternative, Detox app alternative, ZenScreen alternative, Minimalist Phone alternative, RescueTime alternative, Offtime alternative, Flipd alternative, Forest focus alternative, free StayFree alternative, open source Freedom alternative, no subscription app blocker, offline app blocker, private screen time app, app blocker without internet, Android app blocker, F-Droid app blocker, Shizuku app blocker.
 
 </details>
+
+Instrumentation test execution: [functional and P95 runs](device-tests/INSTRUMENTATION.md).

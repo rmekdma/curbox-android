@@ -251,8 +251,7 @@ class AppRuleBlockerRefreshOrderingRedTest {
                 blocker,
                 "postVisibleApplicationCheck",
                 0L,
-                1L,
-                ObservationKind.REFRESH
+                1L
             )
             assertEquals(1, visibleReconciliations.size)
             timeline += "replacement visible reconciliation posted"
