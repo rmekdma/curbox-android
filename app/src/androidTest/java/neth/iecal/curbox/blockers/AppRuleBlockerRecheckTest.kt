@@ -2913,7 +2913,7 @@ class AppRuleBlockerRecheckTest {
             recheckPlanDeliveryObserver = { update ->
                 observedWorkerPlans += update
                 workerPlanEntered.countDown()
-                releaseWorkerPlan.await(5, TimeUnit.SECONDS)
+                releaseWorkerPlan.await()
             }
             visibleApplicationCheckPostDelayed = { runnable, _ ->
                 queued.addLast(runnable)
