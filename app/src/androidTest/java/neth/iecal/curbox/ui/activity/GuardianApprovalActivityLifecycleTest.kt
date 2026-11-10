@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.SystemClock
+import android.view.View
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import androidx.test.espresso.Espresso.onView
@@ -52,6 +53,8 @@ import kotlinx.coroutines.flow.first
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.hamcrest.Matcher
+import org.hamcrest.Matchers.containsString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -1199,7 +1202,7 @@ class GuardianApprovalActivityLifecycleTest {
                             GuardianApprovalConfirmationState.SUPERSEDED.name.lowercase()
                         )
                 )
-                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+                awaitDisplayed(withText(containsString("Updated test rule")))
                 scenario.onActivity { activity -> assertDenialReason(activity, "Updated test rule") }
                 onView(withId(R.id.approval_confirmation_retry))
                     .check(matches(withEffectiveVisibility(Visibility.GONE)))
@@ -2412,6 +2415,12 @@ class GuardianApprovalActivityLifecycleTest {
         viewId: Int,
         inDialog: Boolean = false,
         timeoutMs: Long = 5_000L
+    ) = awaitDisplayed(withId(viewId), inDialog, timeoutMs)
+
+    private fun awaitDisplayed(
+        matcher: Matcher<View>,
+        inDialog: Boolean = false,
+        timeoutMs: Long = 5_000L
     ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val deadline = SystemClock.uptimeMillis() + timeoutMs
@@ -2419,7 +2428,7 @@ class GuardianApprovalActivityLifecycleTest {
         do {
             instrumentation.waitForIdleSync()
             try {
-                val interaction = onView(withId(viewId))
+                val interaction = onView(matcher)
                 if (inDialog) interaction.inRoot(isDialog())
                 interaction.check(matches(isDisplayed()))
                 return
@@ -2432,7 +2441,7 @@ class GuardianApprovalActivityLifecycleTest {
             }
             SystemClock.sleep(50L)
         } while (SystemClock.uptimeMillis() < deadline)
-        throw AssertionError("Timed out waiting for view $viewId to be displayed", lastFailure)
+        throw AssertionError("Timed out waiting for $matcher to be displayed", lastFailure)
     }
 
     private fun awaitDialogViewDismissed(viewId: Int, timeoutMs: Long = 5_000L) {
