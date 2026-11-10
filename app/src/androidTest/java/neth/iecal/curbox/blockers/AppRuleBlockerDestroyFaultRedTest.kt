@@ -67,7 +67,7 @@ import java.util.concurrent.atomic.AtomicReference
 @RunWith(AndroidJUnit4::class)
 class AppRuleBlockerDestroyFaultRedTest {
     @Test
-    fun sameHostSetupDestroySetupPublishesOnlyLatestGeneration() {
+    fun sameHostReconnectRejectsStaleQueuedCallbackAndProcessesNewEvent() {
         val service = recordingService()
         val originalSnapshot = runBlocking {
             service.dataStoreManager.settings.first().appRuleSnapshot
@@ -81,10 +81,9 @@ class AppRuleBlockerDestroyFaultRedTest {
         val blocker = AppRuleBlocker()
         val postedCallbacks = CopyOnWriteArrayList<Runnable>()
         val applicationWindowReads = AtomicInteger(0)
-        val evaluationGenerations = CopyOnWriteArrayList<Long>()
+        val evaluationCount = AtomicInteger(0)
         val evaluationAllowed = AtomicReference<Boolean>()
-        val notificationGenerations = CopyOnWriteArrayList<Long>()
-        val publishedNotificationGenerations = CopyOnWriteArrayList<Long>()
+        val publishedNotificationCount = AtomicInteger(0)
         val reconnectStarted = AtomicBoolean(false)
         val reconnectNotificationPublished = CountDownLatch(1)
         val firstEvaluation = AtomicBoolean(true)
@@ -95,7 +94,6 @@ class AppRuleBlockerDestroyFaultRedTest {
         val oldNotificationEntered = CountDownLatch(1)
         val oldNotificationCompleted = CountDownLatch(1)
         val oldNotificationRelease = CountDownLatch(1)
-        val latestEvaluation = CountDownLatch(1)
 
         blocker.screenInteractiveProvider = { true }
         blocker.keyguardLockedProvider = { false }
@@ -119,8 +117,7 @@ class AppRuleBlockerDestroyFaultRedTest {
         // delivered deliberately after the second setup.
         blocker.visibleApplicationCheckRemoveCallbacks = {}
         blocker.evaluationResultObserver = { evaluation ->
-            val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
-            evaluationGenerations += generation
+            evaluationCount.incrementAndGet()
             evaluationAllowed.set(evaluation.isAllowed)
             if (firstEvaluation.compareAndSet(true, false)) {
                 oldEvaluationEntered.countDown()
@@ -129,8 +126,6 @@ class AppRuleBlockerDestroyFaultRedTest {
                 } finally {
                     oldEvaluationCompleted.countDown()
                 }
-            } else {
-                latestEvaluation.countDown()
             }
         }
         blocker.notificationPostObserver = { _ ->
@@ -143,13 +138,8 @@ class AppRuleBlockerDestroyFaultRedTest {
                 }
             }
         }
-        blocker.notificationUpdateObserver = {
-            val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
-            notificationGenerations += generation
-        }
         blocker.notificationPublicationObserver = {
-            val generation = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
-            publishedNotificationGenerations += generation
+            publishedNotificationCount.incrementAndGet()
             if (reconnectStarted.get()) reconnectNotificationPublished.countDown()
         }
         fun installDeterministicRuntime() {
@@ -172,6 +162,8 @@ class AppRuleBlockerDestroyFaultRedTest {
             check(oldNotificationEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 "first real-host setup did not reach notification publication"
             }
+            val oldNotificationJob = getField(blocker, "liveNotificationJob") as Job
+            setField(blocker, "currentForegroundPackage", TARGET_PACKAGE)
             val firstCallback = checkNotNull(postedCallbacks.firstOrNull()) {
                 "first real-host setup did not post a visible handler callback"
             }
@@ -181,11 +173,15 @@ class AppRuleBlockerDestroyFaultRedTest {
             check(oldEvaluationEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 "first real-host setup did not reach evaluator publication"
             }
-            val readsBeforeDestroy = applicationWindowReads.get()
+            val oldWorker = getField(blocker, "decisionWorker") as SerializedDecisionWorker
+            check(oldNotificationCompleted.count == 1L && !oldNotificationJob.isCompleted) {
+                "old notification must still be in flight at stop"
+            }
+            check(oldEvaluationCompleted.count == 1L && oldWorker.drainSnapshot().hasWork) {
+                "old evaluation must still be in flight at stop"
+            }
 
             blocker.onDestroy()
-            val updatesBeforeReconnect = notificationGenerations.size
-            val publicationsBeforeReconnect = publishedNotificationGenerations.size
             check(oldEvaluationCompleted.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 "destroy did not complete the cancelled old evaluator callback"
             }
@@ -194,42 +190,65 @@ class AppRuleBlockerDestroyFaultRedTest {
             }
             oldEvaluationRelease.countDown()
             oldNotificationRelease.countDown()
+            check(awaitJobCompleted(oldNotificationJob)) { "old notification job did not finish" }
+            val oldWorkerDeadline = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+            while (oldWorker.drainSnapshot().hasWork && android.os.SystemClock.elapsedRealtime() < oldWorkerDeadline) {
+                Thread.yield()
+            }
+            check(!oldWorker.drainSnapshot().hasWork) { "old worker did not finish" }
 
             reconnectStarted.set(true)
             blocker.setup(service)
             blocker.setupReceivers()
             installDeterministicRuntime()
-            val latestGeneration = (getField(blocker, "lifecycleGeneration") as AtomicLong).get()
-
-            // The first setup's callback is now stale. It must not perform another framework
-            // window read or enqueue a decision into the latest worker.
-            firstCallback.run()
-            check(applicationWindowReads.get() == readsBeforeDestroy) {
-                "stale first-generation handler performed a window read"
+            check(reconnectNotificationPublished.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                "new setup did not publish its notification"
             }
+            val newNotificationJob = getField(blocker, "liveNotificationJob") as Job
+            check(awaitJobCompleted(newNotificationJob)) { "new setup notification did not finish" }
+            val newWorker = getField(blocker, "decisionWorker") as SerializedDecisionWorker
+            val newWorkerDeadline = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+            while (newWorker.drainSnapshot().hasWork && android.os.SystemClock.elapsedRealtime() < newWorkerDeadline) {
+                Thread.yield()
+            }
+            check(!newWorker.drainSnapshot().hasWork) { "new setup worker did not settle" }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            val readsBeforeStaleDelivery = applicationWindowReads.get()
+            val evaluationsBeforeStaleDelivery = evaluationCount.get()
+            val notificationsBeforeStaleDelivery = publishedNotificationCount.get()
+            val warningsBeforeStaleDelivery = service.startedActivities.size
+            firstCallback.run()
+            val staleWorkerDeadline = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+            while (newWorker.drainSnapshot().hasWork && android.os.SystemClock.elapsedRealtime() < staleWorkerDeadline) {
+                Thread.yield()
+            }
+            check(!newWorker.drainSnapshot().hasWork) { "work after stale delivery did not finish" }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            check(applicationWindowReads.get() == readsBeforeStaleDelivery) { "stale callback read a window" }
+            check(evaluationCount.get() == evaluationsBeforeStaleDelivery) { "stale callback published an evaluation" }
+            check(publishedNotificationCount.get() == notificationsBeforeStaleDelivery) { "stale callback published a notification" }
+            check(service.startedActivities.size == warningsBeforeStaleDelivery) { "stale callback requested a warning" }
 
             sendWindowEvent(blocker, TARGET_PACKAGE)
-            check(latestEvaluation.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                "latest real-host setup did not publish an evaluator result"
+            val evaluationDeadline = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+            while (evaluationCount.get() <= evaluationsBeforeStaleDelivery &&
+                android.os.SystemClock.elapsedRealtime() < evaluationDeadline) {
+                Thread.yield()
             }
-            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-            check(evaluationGenerations.last() == latestGeneration) {
-                "latest evaluator publication used a stale generation: $evaluationGenerations"
+            check(evaluationCount.get() > evaluationsBeforeStaleDelivery) {
+                "new real-host event did not publish an evaluator result"
             }
-            check(reconnectNotificationPublished.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                "latest real-host setup did not publish a notification"
+            val warningDeadline = android.os.SystemClock.elapsedRealtime() + WAIT_TIMEOUT_MS
+            while (service.startedActivities.size <= warningsBeforeStaleDelivery &&
+                android.os.SystemClock.elapsedRealtime() < warningDeadline) {
+                Thread.yield()
             }
-            check(notificationGenerations.drop(updatesBeforeReconnect).all { it == latestGeneration } &&
-                publishedNotificationGenerations.drop(publicationsBeforeReconnect).all { it == latestGeneration }
-            ) {
-                "notification publication escaped the latest generation: $notificationGenerations / " +
-                    publishedNotificationGenerations
-            }
-            check(awaitNonEmpty(service.startedActivities)) {
-                "latest real-host setup did not publish its warning; allowed=" +
-                    evaluationAllowed.get()
+            check(service.startedActivities.size > warningsBeforeStaleDelivery) {
+                "new event did not request its warning; allowed=" + evaluationAllowed.get()
             }
         } finally {
+            oldEvaluationRelease.countDown()
+            oldNotificationRelease.countDown()
             blocker.onDestroy()
             runCatching {
                 runBlocking {

@@ -43,7 +43,7 @@ function Invoke-CurboxInstrumentation {
         Assert-AdbDevice
         $serial = (Get-TestDeviceShellOutput -Command 'getprop ro.serialno').Trim()
         if ($serial -cne $DeviceId) { throw 'Selected device serial does not match.' }
-        $enabledServices = Get-TestDeviceShellOutput -Command 'settings get secure enabled_accessibility_services'
+        $enabledServices = Get-DeviceSecureSetting -Name 'enabled_accessibility_services'
         if ([string]::IsNullOrWhiteSpace($enabledServices)) { throw 'Cannot read enabled accessibility services.' }
         if ($enabledServices -match '(?i)neth\.iecal\.curbox\.debug/') { throw 'Disable the Curbox accessibility service before instrumentation.' }
         Assert-LearningFakeApk $LearningApkPath $ExpectedApkSha256 $BuildToolsDirectory

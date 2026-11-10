@@ -4,6 +4,7 @@ Describe 'Instrumentation entrypoint' {
         Mock Assert-AdbDevice {}
         Mock Assert-LearningFakeApk {}
         Mock Assert-InstrumentationApk {}
+        Mock Get-DeviceSecureSetting { 'null' }
         Mock Get-TestDeviceShellOutput {
             param($Command)
             if ($Command -eq 'getprop ro.serialno') { 'serial' }
