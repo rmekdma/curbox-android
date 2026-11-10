@@ -31,6 +31,7 @@ import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
 import neth.iecal.curbox.domain.apprules.LifecycleGeneration
 import neth.iecal.curbox.domain.apprules.ObservationKind
 import neth.iecal.curbox.domain.apprules.RecheckPlanUpdate
+import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
 import neth.iecal.curbox.domain.apprules.RuntimeRevision
 import neth.iecal.curbox.domain.apprules.SignalFact
 import neth.iecal.curbox.domain.apprules.SourceOrderIdentity
@@ -2872,6 +2873,9 @@ class AppRuleBlockerRecheckTest {
             initialElapsedRealtimeMs = 5_000L
         )
         val queued = ArrayDeque<Runnable>()
+        val workerPlanEntered = CountDownLatch(1)
+        val releaseWorkerPlan = CountDownLatch(1)
+        val observedWorkerPlans = CopyOnWriteArrayList<RecheckPlanUpdate>()
         var replacementToken = Long.MIN_VALUE
         var otherReplacementToken = Long.MIN_VALUE
         val blocker = AppRuleBlocker(wakeScheduler = fakeScheduler).apply {
@@ -2906,6 +2910,11 @@ class AppRuleBlockerRecheckTest {
                     applicationWindowCount = 1
                 )
             }
+            recheckPlanDeliveryObserver = { update ->
+                observedWorkerPlans += update
+                workerPlanEntered.countDown()
+                releaseWorkerPlan.await(5, TimeUnit.SECONDS)
+            }
             visibleApplicationCheckPostDelayed = { runnable, _ ->
                 queued.addLast(runnable)
                 true
@@ -2932,33 +2941,57 @@ class AppRuleBlockerRecheckTest {
             )
         }
 
-        invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
-        invokePrivate(blocker, "scheduleRecheck", OTHER_PACKAGE, 1_000L, 20_000L, 0L)
-        assertTrue(fakeScheduler.triggerWake(PACKAGE))
-        assertTrue(fakeScheduler.triggerWake(OTHER_PACKAGE))
-        repeat(4) { queued.removeFirst().run() }
+        try {
+            invokePrivate(blocker, "scheduleRecheck", PACKAGE, 1_000L, 20_000L, 0L)
+            invokePrivate(blocker, "scheduleRecheck", OTHER_PACKAGE, 1_000L, 20_000L, 0L)
+            assertTrue(fakeScheduler.triggerWake(PACKAGE))
+            assertTrue(fakeScheduler.triggerWake(OTHER_PACKAGE))
+            queued.removeFirst().run()
+            assertTrue("the visible result must reach the worker plan boundary", workerPlanEntered.await(5, TimeUnit.SECONDS))
+            assertEquals("the visible target must reach the worker plan boundary", PACKAGE, observedWorkerPlans.first().packageName)
+            repeat(3) { queued.removeFirst().run() }
 
-        assertTrue("the observation must install a replacement worker plan", replacementToken != Long.MIN_VALUE)
-        assertEquals(
-            "a Visible result must not let an unrelated unknown window overwrite the new plan",
-            replacementToken,
-            scheduledAlarmToken(blocker)
-        )
-        assertTrue("an unresolved pending package must keep its new worker plan", otherReplacementToken != Long.MIN_VALUE)
-        assertEquals(
-            "fallback recovery must not replace a plan installed during observation",
-            otherReplacementToken,
-            scheduledAlarmToken(blocker, OTHER_PACKAGE)
-        )
-        assertEquals(
-            fakeScheduler.currentWallClockMs + 7_000L,
-            fakeScheduler.getScheduled(PACKAGE)?.dueAtWallClockMs
-        )
-        assertEquals(
-            fakeScheduler.currentWallClockMs + 9_000L,
-            fakeScheduler.getScheduled(OTHER_PACKAGE)?.dueAtWallClockMs
-        )
-        blocker.onDestroy()
+            assertTrue("the observation must install a replacement worker plan", replacementToken != Long.MIN_VALUE)
+            assertEquals(
+                "a Visible result must not let an unrelated unknown window overwrite the new plan",
+                replacementToken,
+                scheduledAlarmToken(blocker)
+            )
+            assertTrue("an unresolved pending package must keep its new worker plan", otherReplacementToken != Long.MIN_VALUE)
+            assertEquals(
+                "fallback recovery must not replace a plan installed during observation",
+                otherReplacementToken,
+                scheduledAlarmToken(blocker, OTHER_PACKAGE)
+            )
+            assertEquals(
+                fakeScheduler.currentWallClockMs + 7_000L,
+                fakeScheduler.getScheduled(PACKAGE)?.dueAtWallClockMs
+            )
+            assertEquals(
+                fakeScheduler.currentWallClockMs + 9_000L,
+                fakeScheduler.getScheduled(OTHER_PACKAGE)?.dueAtWallClockMs
+            )
+
+            val worker = getField(blocker, "decisionWorker") as SerializedDecisionWorker
+            releaseWorkerPlan.countDown()
+            check(awaitCondition { !worker.drainSnapshot().hasWork }) {
+                "worker did not finish after the plan boundary was released"
+            }
+            val deliveredPlan = checkNotNull(observedWorkerPlans.last { it.packageName == PACKAGE }.plan)
+            val scheduled = checkNotNull(fakeScheduler.getScheduled(PACKAGE))
+            assertTrue("the worker must replace the earlier target registration", scheduled.token != replacementToken)
+            assertEquals("the worker registration must use its delivered plan", deliveredPlan.dueAtWallClockMs, scheduled.dueAtWallClockMs)
+        } finally {
+            val worker = getField(blocker, "decisionWorker") as? SerializedDecisionWorker
+            releaseWorkerPlan.countDown()
+            try {
+                if (worker != null) check(awaitCondition { !worker.drainSnapshot().hasWork }) {
+                    "worker did not finish after the plan boundary was released"
+                }
+            } finally {
+                blocker.onDestroy()
+            }
+        }
     }
 
     @Test
