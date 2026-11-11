@@ -424,6 +424,7 @@ class AppRuleBlockerFixedFixtureP95MeasurementTest {
     }
 
     @Test
+    @PerformanceMeasurement
     fun measureFixedSyntheticFixtureP95() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext

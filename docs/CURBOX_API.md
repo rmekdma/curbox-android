@@ -227,7 +227,7 @@ The `:apitester` module is a runnable app that drives every call in this doc, in
 "Dump everything" button that lists all groups and status at once.
 
 ```bash
-./gradlew :app:installAndGrantAccessibilityFdroidDebug :apitester:installDebug
+./gradlew :app:installAndGrantAccessibilityFullDebug :apitester:installDebug
 adb shell am start -n neth.iecal.curbox.apitester/.MainActivity
 ```
 

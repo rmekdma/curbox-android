@@ -1,0 +1,4 @@
+<resources>
+    <item name="learning_subject_settings" type="id" />
+    <item name="learning_monitor_toggle" type="id" />
+</resources>

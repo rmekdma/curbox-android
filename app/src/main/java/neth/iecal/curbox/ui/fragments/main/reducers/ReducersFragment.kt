@@ -68,6 +68,10 @@ class ReducersFragment : Fragment() {
             startActivity(intent)
         }
 
+        view.findViewById<MaterialCardView>(R.id.card_learning).setOnClickListener {
+            startActivity(Intent(requireContext(), FragmentActivity::class.java).putExtra("fragment", "learning"))
+        }
+
         val reelCounterCard = view.findViewById<MaterialCardView>(R.id.card_reel_counter)
         reelCounterCard.setOnClickListener {
             val intent = Intent(requireContext(), FragmentActivity::class.java).apply {

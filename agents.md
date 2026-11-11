@@ -6,7 +6,7 @@ This file applies to the whole repository. Preserve more specific instructions i
 
 ## Start here
 
-- Modules: `:app` and `:apitester` (sample client for Curbox AIDL API).
+- Modules: `:app`, `:apitester` (sample client for Curbox AIDL API), `:plugin-contract` (host/plugin contract), and `:todo-plugin` (learning UI and monitoring).
 - Language and UI: Kotlin, classic Views, Fragments, and ViewBinding.
 - Do not add Jetpack Compose or the Navigation component.
 - JVM target: 17.
@@ -79,15 +79,10 @@ Room uses `fallbackToDestructiveMigration()`. Any entity change requires a datab
 
 ### Build variants
 
-Gate optional behavior at every entry point (UI, service lifecycle, manifests, API responses).
+The only configured flavor is `full`; it includes sync, UI hider, anti uninstall, and internet access. Keep optional behavior gated at every entry point (UI, service lifecycle, manifests, API responses).
 
-| Flavor | Sync | UI hider | Anti uninstall | Internet |
-| --- | --- | --- | --- | --- |
-| `full` | Yes | Yes | Yes | Yes |
-| `playstore` | Yes | No | No | Yes |
-| `fdroid` | No | Yes | Yes | No |
-
-Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_SECURE_SETTINGS`, `FDROID_VARIANT`, `SYNC_USE_FCM`. The Play Store manifest removes `AdminReceiver` and `NodePickerService`.
+Learning uses the fake composition by default. `-PlearningReal=true` selects the real composition; test task requests are rejected in that mode. Use fake composition for tests and device verification; never call the real Todo API in tests.
+Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_SECURE_SETTINGS`, `FDROID_VARIANT`, `SYNC_USE_FCM`.
 
 ## UI and product copy
 
@@ -101,16 +96,15 @@ Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_
 ## Build and verification
 
 Use the check that matches the change. Documentation-only changes do not need a Gradle build.
+Use debug builds for development. Build release APKs only when the user explicitly requests them.
 
 ```bash
 ./gradlew testFullDebugUnitTest
 ./gradlew assembleFullDebug
-./gradlew assemblePlaystoreDebug
-./gradlew assembleFdroidDebug
 ./gradlew installAndGrantAccessibilityFullDebug
 ```
 
-- Build all three flavors after changing shared source, source sets, manifests, BuildConfig gates, or optional feature wiring.
+- Build full after changing shared source, source sets, manifests, BuildConfig gates, or optional feature wiring.
 - `testFullDebugUnitTest` includes `CryptoBoxTest` and UI hider `ScriptLanguageTest`.
 - Use the install task only when an emulator or device is available (installs, grants accessibility through adb, and launches Debug Curbox).
 - Lint does not abort builds; inspect relevant warnings rather than treating a successful build as proof that lint is clean.
@@ -137,6 +131,7 @@ Consult these targeted guides when working in corresponding areas:
 | --- | --- |
 | Adding a blocker/tracker, adding app or browser mod support, or updating the database | [`docs/recipes.md`](docs/recipes.md) |
 | Navigating feature subsystems, service protection, or warning/approval screens | [`docs/architecture/features.md`](docs/architecture/features.md) |
+| Changing learning UI, monitoring, storage, or plugin composition | [`docs/architecture/learning.md`](docs/architecture/learning.md) |
 | App rule evaluation, enforcement pipelines, or domain specifications | [`docs/architecture/app-rule-enforcement.md`](docs/architecture/app-rule-enforcement.md) and [`docs/spec/`](docs/spec/) |
 | Understanding system design choices, trade-offs, or historical rationale | [`docs/adr/`](docs/adr/) |
 | Working on multi-device sync, encryption, Supabase REST, Firebase/FCM, or cleanup | [`docs/sync.md`](docs/sync.md) |

@@ -12,7 +12,10 @@ param(
     [string]$TargetActivity = "",
     [string]$ContributorPackage = "com.initialcoms.ridi",
     [string]$OtherPackage = "com.initialcoms.ridi",
-    [string]$DeviceId = ""
+    [string]$DeviceId = "",
+    [string]$LearningApkPath = "",
+    [string]$ExpectedApkSha256 = "",
+    [string]$BuildToolsDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,6 +80,9 @@ try {
     $commonLoaded = $true
 
     Assert-AdbDevice
+    if ($LearningApkPath) {
+        Assert-LearningFakeApk $LearningApkPath $ExpectedApkSha256 $BuildToolsDirectory
+    }
     $suiteBackupDirectory = Split-Path -Parent $suiteBackupPath
     if (-not (Test-Path -LiteralPath $suiteBackupDirectory)) {
         New-Item -ItemType Directory -Path $suiteBackupDirectory | Out-Null
@@ -107,6 +113,11 @@ try {
 
     $testScripts = @(Get-ChildItem -Path $scriptsRoot -Filter "test-device-*.ps1" -File | Sort-Object Name)
     foreach ($scriptFile in $testScripts) {
+        if ($scriptFile.Name -eq "test-device-learning-monitor.ps1" -and -not $LearningApkPath) {
+            $results.Add([PSCustomObject]@{ Name = $scriptFile.Name; Status = "SKIPPED"; Detail = "Fake debug artifact was not provided." })
+            Write-Host "[SKIPPED] $($scriptFile.Name) — fake debug artifact was not provided." -ForegroundColor Yellow
+            continue
+        }
         if ($scriptFile.Name -eq "test-device-deep-sleep.ps1") {
             $results.Add([PSCustomObject]@{
                 Name = $scriptFile.Name
@@ -118,7 +129,10 @@ try {
         }
 
         $childArguments = @("-TargetPackage", $TargetPackage)
-        if (-not [string]::IsNullOrWhiteSpace($TargetActivity)) {
+        if ($scriptFile.Name -eq "test-device-learning-monitor.ps1") {
+            $childArguments = @("-TargetPackage", "neth.iecal.curbox.apitester", "-LearningApkPath", $LearningApkPath, "-ExpectedApkSha256", $ExpectedApkSha256, "-BuildToolsDirectory", $BuildToolsDirectory)
+        }
+        if ($scriptFile.Name -ne "test-device-learning-monitor.ps1" -and -not [string]::IsNullOrWhiteSpace($TargetActivity)) {
             $childArguments += @("-TargetActivity", $TargetActivity)
         }
         if ($knownContributorScripts -contains $scriptFile.Name) {

@@ -2189,7 +2189,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             }
             val needsObservationRetry = result.outcomes.any { outcome ->
                 outcome is ForegroundEvidenceOutcome.Unknown &&
-                    outcome.candidatePackage == null &&
                     outcome.followUp == FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
             }
             val resolvedPackages = (
@@ -2219,7 +2218,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     }
                     is ForegroundEvidenceOutcome.Unknown -> {
                         if (outcome.decisionPermission ==
-                                neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED
+                                neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED &&
+                            (outcome.followUp != FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE ||
+                                observationAttempt >= MAX_VISIBILITY_RETRIES)
                         ) {
                             outcome.candidatePackage?.let { packageName ->
                                 dispatchSyntheticCheck(packageName, observationBoundary)
@@ -2232,12 +2233,23 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 !observationBoundary.foregroundEvidenceSuspended &&
                 observationAttempt < MAX_VISIBILITY_RETRIES
             if (canRetryUnknownVisibility) {
-                postVisibleApplicationCheck(
+                val posted = postVisibleApplicationCheck(
                     delayMillis = VISIBILITY_RETRY_DELAY_MS * (observationAttempt + 1),
                     connectionGeneration = connectionGeneration,
                     observationKind = ObservationKind.SYNTHETIC_RECHECK,
                     observationAttempt = observationAttempt + 1
                 )
+                if (!posted && isCurrentLifecycleBoundary(observationBoundary)) {
+                    result.outcomes.filterIsInstance<ForegroundEvidenceOutcome.Unknown>()
+                        .filter {
+                            it.decisionPermission ==
+                                neth.iecal.curbox.domain.apprules.DecisionPermission.EVALUATE_FAIL_CLOSED &&
+                                it.followUp == FollowUpKind.RETRY_FOR_RELIABLE_EVIDENCE
+                        }
+                        .mapNotNull { it.candidatePackage }
+                        .distinct()
+                        .forEach { dispatchSyntheticCheck(it, observationBoundary) }
+                }
             } else {
                 val recoveryPackage = synchronized(runtimeLock) {
                     if (foregroundEvidenceSuspended) {
@@ -3901,16 +3913,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         )
     }
 
-    /** Posts a guarded main-thread reconciliation used by refresh, reconnect, and wake paths. */
+    /** Returns true when a post is accepted, including synchronous completion; false means
+     *  no post was accepted or the generation was invalidated. */
     private fun postVisibleApplicationCheck(
         delayMillis: Long = 0L,
         connectionGeneration: Long = lifecycleGeneration.get(),
         observationKind: ObservationKind = ObservationKind.RECONNECT,
         observationAttempt: Int = 0
-    ) {
-        if (!isReadyForChecks(connectionGeneration)) return
+    ): Boolean {
+        if (!isReadyForChecks(connectionGeneration)) return false
         val observationGeneration = recheckGeneration.get()
-        postVisibleApplicationAttempt(
+        return postVisibleApplicationAttempt(
             delayMillis = delayMillis,
             connectionGeneration = connectionGeneration,
             observationGeneration = observationGeneration,
@@ -3920,7 +3933,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         )
     }
 
-    /** Retries failed Handler posts without recursive calls or stale-generation callbacks. */
+    /** Uses the same post acceptance result while retrying without stale-generation callbacks. */
     private fun postVisibleApplicationAttempt(
         delayMillis: Long,
         connectionGeneration: Long,
@@ -3928,7 +3941,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         observationKind: ObservationKind,
         observationAttempt: Int,
         postAttempt: Int
-    ) {
+    ): Boolean {
         var attempt = postAttempt
         while (attempt <= MAX_SCHEDULER_POST_ATTEMPTS &&
             isReadyForChecks(connectionGeneration) &&
@@ -4002,11 +4015,11 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 logNonFatal(error)
                 false
             }
-            val armed = armPostedEffect(permit, posted) {
+            armPostedEffect(permit, posted) {
                 isReadyForChecks(connectionGeneration) &&
                     recheckGeneration.get() == observationGeneration
             }
-            if (armed) return
+            if (posted) return true
             attempt++
         }
         val shouldRearmPendingWake = synchronized(runtimeLock) {
@@ -4023,6 +4036,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 observationGeneration = observationGeneration
             )
         }
+        return false
     }
 
     /** Keeps a keyed boundary alive when every main-thread post for its scheduler wake fails. */

@@ -304,6 +304,25 @@ class DataStoreManager(private val context: Context) {
     private val gson = Gson()
 
     companion object {
+        @Volatile private var learningStateStore: androidx.datastore.core.DataStore<String>? = null
+        @Volatile private var learningSessionStore: androidx.datastore.core.DataStore<String>? = null
+
+        fun learningStateDataStore(context: Context): androidx.datastore.core.DataStore<String> =
+            learningStateStore ?: synchronized(this) {
+                learningStateStore ?: MultiProcessDataStoreFactory.create(
+                    serializer = neth.iecal.curbox.learning.LearningStringSerializer,
+                    produceFile = { File(context.applicationContext.filesDir, if (neth.iecal.curbox.BuildConfig.LEARNING_FAKE_ONLY) "datastore/learning-fake-state.json" else "datastore/learning-state.json") }
+                ).also { learningStateStore = it }
+            }
+
+        fun learningSessionDataStore(context: Context): androidx.datastore.core.DataStore<String> =
+            learningSessionStore ?: synchronized(this) {
+                learningSessionStore ?: MultiProcessDataStoreFactory.create(
+                    serializer = neth.iecal.curbox.learning.LearningStringSerializer,
+                    produceFile = { File(context.applicationContext.filesDir, if (neth.iecal.curbox.BuildConfig.LEARNING_FAKE_ONLY) "datastore/learning-fake-session.json" else "datastore/learning-session.json") }
+                ).also { learningSessionStore = it }
+            }
+
         @Volatile
         private var INSTANCE: androidx.datastore.core.DataStore<Settings>? = null
 
@@ -1822,3 +1841,4 @@ internal object GuardianManualPoolWrite {
         )
     }
 }
+

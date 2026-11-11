@@ -1,0 +1,21 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingHorizontal="8dp" android:paddingVertical="2dp">
+<TextView android:id="@+id/learning_notification_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.Compat.Notification.Title" android:maxLines="1" />
+<LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+<LinearLayout android:id="@+id/learning_notification_row_0" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:visibility="gone">
+<TextView android:id="@+id/learning_notification_label_0" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.Compat.Notification" android:maxLines="1" />
+<ImageView android:id="@+id/learning_notification_check_0" android:layout_width="18dp" android:layout_height="18dp" android:src="@drawable/learning_check" android:visibility="gone" />
+<TextView android:id="@+id/learning_notification_value_0" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.Compat.Notification" android:maxLines="1" android:layout_marginEnd="8dp" />
+</LinearLayout>
+<LinearLayout android:id="@+id/learning_notification_row_1" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:visibility="gone">
+<TextView android:id="@+id/learning_notification_label_1" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.Compat.Notification" android:maxLines="1" />
+<ImageView android:id="@+id/learning_notification_check_1" android:layout_width="18dp" android:layout_height="18dp" android:src="@drawable/learning_check" android:visibility="gone" />
+<TextView android:id="@+id/learning_notification_value_1" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.Compat.Notification" android:maxLines="1" android:layout_marginEnd="8dp" />
+</LinearLayout>
+<LinearLayout android:id="@+id/learning_notification_row_2" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:visibility="gone">
+<TextView android:id="@+id/learning_notification_label_2" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.Compat.Notification" android:maxLines="1" />
+<ImageView android:id="@+id/learning_notification_check_2" android:layout_width="18dp" android:layout_height="18dp" android:src="@drawable/learning_check" android:visibility="gone" />
+<TextView android:id="@+id/learning_notification_value_2" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.Compat.Notification" android:maxLines="1" android:layout_marginEnd="8dp" />
+</LinearLayout>
+</LinearLayout>
+<TextView android:id="@+id/learning_notification_pending" android:layout_width="match_parent" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.Compat.Notification" android:visibility="gone" />
+</LinearLayout>

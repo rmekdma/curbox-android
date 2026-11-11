@@ -61,6 +61,10 @@ class AppBlockerService : BaseBlockingService() {
     private var appUsageTrackerReady = false
     private var appRuleBlockerReady = false
 
+    private var learningHost: neth.iecal.curbox.learning.LearningServiceHost? = null
+    private var learningPermission: neth.iecal.curbox.learning.LearningPermission? = null
+    private var learningJob: kotlinx.coroutines.Job? = null
+
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private val eventChannel = Channel<AccessibilityEvent>(Channel.CONFLATED) { droppedEvent ->
@@ -89,6 +93,7 @@ class AppBlockerService : BaseBlockingService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         super.onAccessibilityEvent(event)
+        try { learningHost?.event(event.eventType) } catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
 
         try {
             if (BuildConfig.SUPPORTS_ANTI_UNINSTALL) {
@@ -189,6 +194,37 @@ class AppBlockerService : BaseBlockingService() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onServiceConnected() {
         super.onServiceConnected()
+        cleanupLearning()
+        try {
+            val host = neth.iecal.curbox.learning.LearningServiceHost(this, serviceScope)
+            learningHost = host
+            host.start()
+            val storage = neth.iecal.curbox.learning.LearningStorage(this)
+            val permission = neth.iecal.curbox.learning.LearningPermission(this, serviceScope)
+            learningPermission = permission
+            permission.start()
+            val plugin = neth.iecal.todo.InitialMonitor(
+                neth.iecal.curbox.learning.LearningComposition.createApi(applicationContext), storage,
+                permission.state, permission::isGranted,
+                { document, expected ->
+                    try { neth.iecal.curbox.learning.LearningNotifications.publish(this, storage, document, permission.state, expected) }
+                    catch (e: CancellationException) { throw e }
+                    catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
+                },
+                elapsed = android.os.SystemClock::elapsedRealtime,
+                subjectPackages = neth.iecal.curbox.learning.LearningComposition.subjectPackages(),
+                achievement = { document, expected, child, subject, stillValid ->
+                    try { neth.iecal.curbox.learning.LearningNotifications.publish(this, storage, document, permission.state, expected, child, subject, stillValid) }
+                    catch (e: CancellationException) { throw e }
+                    catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
+                }
+            )
+            learningJob = serviceScope.launch {
+                try { plugin.run(host) }
+                catch (e: CancellationException) { throw e }
+                catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
+            }
+        } catch (t: Throwable) { cleanupLearning(); crashLogger.logNonFatalError(Exception(t)) }
         focusModeBlocker.setupFocusMode(this)
         autoDnd.setup(this)
         reelBlocker.setupBlocker(this)
@@ -277,7 +313,13 @@ class AppBlockerService : BaseBlockingService() {
         startBackgroundWorker()
     }
 
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        cleanupLearning()
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
+        cleanupLearning()
         super.onDestroy()
         // Each feature owns independent receiver and worker state. Keep one faulty cleanup from
         // skipping the app-rule scheduler, channels, or the remaining service components.
@@ -306,6 +348,15 @@ class AppBlockerService : BaseBlockingService() {
         cleanupFeature("EventChannel") { eventChannel.close() }
         cleanupFeature("WebsiteObservationChannel") { websiteObservationChannel.close() }
         cleanupFeature("ServiceScope") { serviceScope.cancel() }
+    }
+
+    private fun cleanupLearning() {
+        cleanupFeature("Learning host") { learningHost?.stop() }
+        cleanupFeature("Learning permission") { learningPermission?.stop() }
+        cleanupFeature("Learning job") { learningJob?.cancel() }
+        learningHost = null
+        learningPermission = null
+        learningJob = null
     }
 
     private fun cleanupFeature(name: String, action: () -> Unit) {

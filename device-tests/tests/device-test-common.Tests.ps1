@@ -47,6 +47,84 @@ Describe "Device Test Common Helpers" {
         }
     }
 
+    Context "Approved fake learning APK" {
+        It "requires matching hashes, a debug signer, fake markers, and no real endpoint" {
+            $hash = "A" * 64
+            $manifest = 'android:debuggable(0x0101000f)=(type 0x12)0xffffffff android:appComponentFactory Ticket19DebugAppComponentFactory SyntheticFixtureProvider neth.iecal.curbox.debug.synthetic.fixture android.permission.DUMP'
+            $dex = 'LearningComposition$createApi$1 SyntheticFixtureProvider neth.iecal.curbox.apitester'
+            $signer = '2429a67995d6e0a03312ff8f67d7df53c40dbdeb86e454d62f87d8e8243e4c6a'
+            (Test-ApprovedLearningApk $hash $hash $hash $signer $manifest $dex) | Should Be $true
+            (Test-ApprovedLearningApk $hash $hash ("0" * 64) $signer $manifest $dex) | Should Be $false
+            (Test-ApprovedLearningApk $hash $hash $hash $signer $manifest ($dex + ' https://api.todomath.com')) | Should Be $false
+            (Test-ApprovedLearningApk $hash $hash $hash $signer $manifest 'real composition') | Should Be $false
+            (Test-ApprovedLearningApk $hash $hash $hash ("0" * 64) $manifest $dex) | Should Be $false
+        }
+    }
+
+    Context "Learning APK inspection" {
+        It "fails before device access if the artifact does not exist" {
+            $failed = $false
+            try { Assert-LearningFakeApk -ApkPath 'missing.apk' -ExpectedHash ('A' * 64) -BuildToolsDirectory 'missing' } catch { $failed = $true }
+            $failed | Should Be $true
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+    }
+
+    Context "Learning notifications" {
+        It "returns only active child notification records" {
+            $dump = "  Notification List:`n    NotificationRecord(x: pkg=neth.iecal.curbox.debug user=UserHandle{0} id=1279611218 tag=learning:abc importance=2`n title=Child1 Items: 2`n  mArchive=Child1 completed Math Items: 5`n"
+            $script:DeviceTestShellOutputHandler = { param($command) $dump }
+            $records = @(Get-LearningNotifications)
+            $records.Count | Should Be 1
+            $records[0].Tag | Should Be 'learning:abc'
+            $records[0].Id | Should Be '1279611218'
+            ($records[0].Text -match 'completed Math') | Should Be $false
+        }
+    }
+
+    Context "Learning registration precondition" {
+        It "counts current registrations and legacy child without inspecting account snapshots" {
+            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":null,"registrations":{"Child1":1},"accounts":{"other":{"registrations":{"Child2":2}}}}}' }
+            (Get-LearningRegistrationCount) | Should Be 1
+            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":"Child1","registrations":{}}}' }
+            (Get-LearningRegistrationCount) | Should Be 1
+            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":null,"registrations":{}}}' }
+            (Get-LearningRegistrationCount) | Should Be 0
+            $script:DeviceTestShellOutputHandler = { param($command) '__ABSENT__' }
+            (Get-LearningRegistrationCount) | Should Be 0
+        }
+        It "accepts the empty serializer default and omitted null account fields" {
+            $script:DeviceTestShellOutputHandler = { param($command) '' }
+            (Get-LearningRegistrationCount) | Should Be 0
+            $script:DeviceTestShellOutputHandler = { param($command) '{"revision":0,"state":{"children":[],"reports":{}},"monitor":{"registrations":{}}}' }
+            (Get-LearningRegistrationCount) | Should Be 0
+        }
+        It "fails closed on invalid data or mismatched accounts" {
+            foreach ($value in @('STATE: ', '{', '{"state":{"children":[],"reports":{}}}', '{"state":{"accountId":"x"},"monitor":{"accountId":"y","registrations":{}}}')) {
+                $script:DeviceTestShellOutputHandler = { param($command) $value }
+                $failed = $false
+                try { Get-LearningRegistrationCount | Out-Null } catch { $failed = $true }
+                $failed | Should Be $true
+            }
+        }
+    }
+
+    Context "Learning fixture provider" {
+        It "rejects failed provider writes and avoids shell injection" {
+            $script:DeviceTestShellOutputHandler = { param($command) "Bundle[{ok=false}]" }
+            $failed = $false
+            try { Set-LearningFixture -Json "{}" } catch { $failed = $true }
+            $failed | Should Be $true
+            $failed = $false
+            try { Set-LearningFixture -Json "'; rm -rf /; '" } catch { $failed = $true }
+            $failed | Should Be $true
+        }
+        It "accepts a successful provider reset" {
+            $script:DeviceTestShellOutputHandler = { param($command) "Bundle[{ok=true}]" }
+            Reset-LearningFixture
+        }
+    }
+
     Context "New-GuardianPinAuthConfig" {
         It "generates valid salt, verifier, iterations, and algorithm" {
             $auth = New-GuardianPinAuthConfig -Pin "1234" -Iterations 120000
@@ -830,6 +908,22 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
         }
     }
 
+    Context "Device shell failures" {
+        It "propagates a nonzero adb exit" {
+            $original = (Get-Item Function:\adb).ScriptBlock
+            try {
+                Set-Item Function:\adb { $global:LASTEXITCODE = 42 } -Force
+                $script:DeviceTestShellHandler = $null
+                $failed = $false
+                try { Invoke-TestDeviceShell -Command "settings delete secure example" } catch { $failed = $true }
+                $failed | Should Be $true
+            } finally {
+                Set-Item Function:\adb $original -Force
+                $global:LASTEXITCODE = 0
+            }
+        }
+    }
+
     Context "Disable-AccessibilityService" {
         It "removes only Curbox and preserves other enabled services" {
             $serviceName = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
@@ -839,7 +933,7 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             }
             $script:accessibilityCommands = @()
             $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
-            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command; $script:secureValues.enabled_accessibility_services = "com.example/.Reader:com.example/.Magnifier" }
 
             (Disable-AccessibilityService) | Should Be $true
 
@@ -855,7 +949,7 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             }
             $script:accessibilityCommands = @()
             $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
-            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command }
+            $script:DeviceTestShellHandler = { param($Command) $script:accessibilityCommands += $Command; $script:secureValues.enabled_accessibility_services = "null" }
 
             (Disable-AccessibilityService) | Should Be $true
 
@@ -878,6 +972,19 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             $script:accessibilityCommands.Count | Should Be 0
             $global:DeviceTestUnexpectedAdbCalls | Should Be 0
         }
+        It "rejects a failed setting write or mismatched readback" {
+            $script:secureValues = @{ enabled_accessibility_services = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService" }
+            $script:DeviceTestSecureSettingReader = { param($Name) return $script:secureValues[$Name] }
+            $script:DeviceTestShellHandler = { param($Command) throw "write failed" }
+            $failed = $false
+            try { Disable-AccessibilityService } catch { $failed = $true }
+            $failed | Should Be $true
+            $script:DeviceTestShellHandler = { param($Command) }
+            $failed = $false
+            try { Disable-AccessibilityService } catch { $failed = $true }
+            $failed | Should Be $true
+        }
+
     }
 
     Context "Stop-ServiceProcess" {

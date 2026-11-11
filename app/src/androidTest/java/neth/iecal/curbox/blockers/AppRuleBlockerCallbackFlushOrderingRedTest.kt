@@ -261,25 +261,25 @@ class AppRuleBlockerCallbackFlushOrderingRedTest {
                 failures += "ordering trace is missing one of the queued evaluations: $timeline"
             } else {
                 for (requestNumber in 1..2) {
-                    val requestEvents = listOf(
-                        "persistence-commit-complete-$requestNumber",
-                        "persistence-read-$requestNumber",
-                        "evaluation-$requestNumber"
-                    )
-                    val requestIndexes = requestEvents.map(timeline::indexOf)
-                    if (requestIndexes.any { it < 0 } ||
-                        requestIndexes.zipWithNext().any { (first, second) -> first >= second }
+                    val commitIndex = timeline.indexOf("persistence-commit-complete-$requestNumber")
+                    val evaluationIndex = timeline.indexOf("evaluation-$requestNumber")
+                    if (commitIndex < 0 || evaluationIndex <= commitIndex ||
+                        timeline.subList(commitIndex + 1, evaluationIndex).none {
+                            it.startsWith("persistence-read-")
+                        }
                     ) {
-                        failures += "request $requestNumber was not ordered as commit < read < evaluation: $timeline"
+                        failures += "request $requestNumber evaluated without reading after its commit: $timeline"
                     }
                 }
             }
             if (committedObservation == null || committedObservation.evaluation.isAllowed) {
                 failures += "post-commit evaluator did not deny the consumed target session"
             }
-            val committedSession = committedObservation?.persistedSessions?.singleOrNull()
-            if (committedSession != null && committedSession.endedAtMs == committedSession.startedAtMs) {
-                failures += "post-commit evaluator did not observe the committed session end"
+            val committedSession = committedObservation?.persistedSessions?.singleOrNull { it.id == 1L }
+            if (committedSession?.endedAtMs == null ||
+                committedSession.endedAtMs!! <= committedSession.startedAtMs
+            ) {
+                failures += "post-commit evaluator did not observe the committed target session end"
             }
             if (failures.isNotEmpty()) {
                 throw AssertionError(

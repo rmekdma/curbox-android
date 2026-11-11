@@ -1,0 +1,852 @@
+package neth.iecal.todo
+
+import org.junit.Assert.*
+import org.junit.Test
+
+class LearningScreenTest {
+    @Test fun `successful catalog removes only missing registrations and keeps saved data`() {
+        val stale = "Child1" to Subject.MATH
+        val original = StoredLearning(state = LearningState(accountId = "A", goalsByAccount = mapOf("A" to mapOf(stale to 7))), sessionRef = "s",
+            monitor = MonitorState(accountId = "A", childName = "Child1", registrations = mapOf("Child1" to 1, "Sample" to 2),
+                reports = mapOf(stale to ReportState(failed = true, failure = LearningFailure.NETWORK)), controlRevision = 2))
+        val success = original.withManualState(original.state.copy(children = listOf(TodoChild("Sample", mapOf(Subject.MATH to "m")))), "s", catalogSuccess = true)
+        assertEquals(setOf("Sample"), success.monitor.registeredChildren().keys)
+        assertEquals(7, success.state.goalsByAccount["A"]?.get(stale))
+        assertTrue(success.monitor.reports.getValue(stale).failed)
+        assertEquals(3L, success.monitor.controlRevision)
+        val failed = original.withManualState(original.state.copy(error = true), "s")
+        assertEquals(setOf("Child1", "Sample"), failed.monitor.registeredChildren().keys)
+        val legacy = original.monitor.copy(childName = "Child1", registrations = emptyMap())
+            .reconcileCatalog(listOf(TodoChild("Sample", emptyMap())), "s")
+        assertTrue(legacy.registeredChildren().isEmpty())
+        assertTrue(legacy.reports.getValue(stale).failed)
+    }
+
+    @Test fun `legacy minute interval and new seconds preserve large values`() {
+        assertEquals("60", MonitorState().effectiveIntervalSeconds())
+        assertEquals("120", MonitorState(intervalMinutes = "2").effectiveIntervalSeconds())
+        assertEquals("999999999999999999999999999900", MonitorState(intervalMinutes = "16666666666666666666666666665").effectiveIntervalSeconds())
+        assertEquals("7", MonitorState(intervalMinutes = "2", intervalSeconds = "7").effectiveIntervalSeconds())
+    }
+
+    @Test fun `learning settings validate atomically and track alert changes`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = emptyList<TodoChild>()
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0)
+        }
+        val screen = testLearningScreen(api, store)
+        assertFalse(screen.saveLearningSettings("0", false, "silent"))
+        assertEquals("60", store.read().monitor.effectiveIntervalSeconds())
+        assertTrue(screen.saveLearningSettings("007", false, "silent"))
+        assertEquals("7", store.read().monitor.effectiveIntervalSeconds())
+        assertEquals(false, store.read().monitor.completionAlerts)
+        assertEquals("silent", store.read().monitor.alertSound)
+        assertEquals(1L, store.read().monitor.alertSettingsRevision)
+        assertTrue(screen.saveLearningSettings("8", false, "silent"))
+        assertEquals(1L, store.read().monitor.alertSettingsRevision)
+        assertTrue(screen.saveLearningSettings("8", true, null))
+        assertEquals(2L, store.read().monitor.alertSettingsRevision)
+    }
+
+    @Test fun `restored session supplies saved email without password`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = emptyList<TodoChild>()
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0)
+        }
+        testLearningScreen(api, store).signIn("person@example.test", "secret", "20261105")
+        val restored = testLearningScreen(api, store)
+        restored.restore()
+        assertEquals("person@example.test", restored.accountEmail)
+    }
+
+    @Test fun `stale batch stops before sending reports after date changes`() {
+        var current = true
+        val calls = mutableListOf<Subject>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", linkedMapOf(Subject.MATH to "m", Subject.ENGLISH to "e")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                calls.add(subject)
+                current = false
+                return DailyReport(1)
+            }
+        }
+        testLearningScreen(api, isCurrentDate = { current }).signIn("fake", "fake", "20261105")
+        assertEquals(listOf(Subject.MATH), calls)
+    }
+
+    @Test fun `explicit refresh retries failed reports while ordinary refresh leaves them latched`() {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        var calls = 0
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                calls++
+                if (calls == 1) throw TodoApiException(kind = LearningFailure.NETWORK)
+                return DailyReport(3)
+            }
+        }
+        val screen = testLearningScreen(api, store)
+        screen.signIn("example", "example", "20261105")
+        screen.refresh("20261105")
+        assertEquals(1, calls)
+        screen.refresh("20261105", includeFailed = true)
+        assertEquals(2, calls)
+        assertEquals(DailyReport(3), screen.state.reports["Child" to Subject.MATH]?.value)
+    }
+
+    @Test fun `refresh scope cannot retry failures for a new registration or session`() {
+        val store = MemoryLearningStore()
+        val session = TodoSession("account", "token")
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        store.writeSession("old", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(accountId = "account", children = listOf(child)), "old"))
+        val key = "Child" to Subject.MATH
+        store.updateMonitor { it.monitor.copy(accountId = "account", registrations = mapOf("Child" to 1),
+            catalogFailures = mapOf("Child" to LearningFailure.NETWORK),
+            reports = mapOf(key to ReportState(failed = true, failure = LearningFailure.NETWORK))) }
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0)
+        }
+        val screen = testLearningScreen(api, store)
+        screen.restore()
+        val scope = requireNotNull(screen.retryScope())
+        store.updateMonitor { it.monitor.copy(registrations = mapOf("Child" to 2)) }
+        screen.retryFailures(scope)
+        assertTrue(store.read().monitor.catalogRetries.isEmpty())
+        assertTrue(store.read().monitor.reportRetries.isEmpty())
+        store.writeSession("new", session)
+        val next = store.claim()
+        assertTrue(store.commit(next.revision, next.state, "new"))
+        store.updateMonitor { it.monitor.copy(registrations = mapOf("Child" to 1)) }
+        screen.retryFailures(scope)
+        assertTrue(store.read().monitor.catalogRetries.isEmpty())
+        assertTrue(store.read().monitor.reportRetries.isEmpty())
+    }
+
+    @Test fun `goal settings save all values atomically and reject invalid input`() {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m", Subject.ENGLISH to "e"))
+        val requested = mutableListOf<Subject>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(subject)
+                return DailyReport(1)
+            }
+        }
+        val screen = testLearningScreen(api, store)
+        screen.signIn("fake", "fake", "20261108")
+        val scope = requireNotNull(screen.goalScope("Child"))
+        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "100")))
+        assertEquals(5, screen.goal("Child", Subject.MATH))
+        assertEquals(8, screen.goal("Child", Subject.ENGLISH))
+        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3", Subject.ENGLISH to "0")))
+        assertEquals(3, screen.goal("Child", Subject.MATH))
+        assertEquals(0, screen.goal("Child", Subject.ENGLISH))
+        assertEquals(setOf(Subject.MATH, Subject.ENGLISH), screen.visibleSubjects("Child"))
+        requested.clear()
+        screen.refresh("20261108")
+        assertEquals(setOf(Subject.MATH), requested.toSet())
+    }
+
+    @Test fun `goal dialog cannot write after session or subject identity changes`() {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1)
+        }
+        val screen = testLearningScreen(api, store)
+        screen.signIn("fake", "fake", "20261108")
+        val scope = requireNotNull(screen.goalScope("Child"))
+        val claim = store.claim()
+        val changed = claim.state.copy(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "new"))))
+        assertTrue(store.commit(claim.revision, changed, claim.sessionRef, claim.sessionRef))
+        assertFalse(screen.saveGoals(scope, mapOf(Subject.MATH to "3")))
+        assertTrue(store.read().state.goalsByAccount.isEmpty())
+        screen.signIn("fake", "fake", "20261108")
+        val oldSession = requireNotNull(screen.goalScope("Child"))
+        screen.signIn("fake", "fake", "20261108")
+        assertFalse(screen.saveGoals(oldSession, mapOf(Subject.MATH to "3")))
+        assertTrue(store.read().state.goalsByAccount.isEmpty())
+    }
+
+    @Test fun `goal dialog remains valid when watching registration changes`() {
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(1)
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("fake", "fake", "20261108")
+        val scope = requireNotNull(screen.goalScope("Child"))
+        screen.toggleMonitor("Child")
+        assertTrue(screen.saveGoals(scope, mapOf(Subject.MATH to "3")))
+    }
+
+    @Test fun `monitor authentication failure blocks manual refresh until sign in`() {
+        val store = MemoryLearningStore()
+        val session = TodoSession("account", "token")
+        store.writeSession("old", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(accountId = "account"), "old"))
+        store.updateMonitor { it.monitor.copy(accountId = "account", catalogFailure = LearningFailure.AUTHENTICATION, catalogFailureSession = "old") }
+        var calls = 0
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession): List<TodoChild> { calls++; return emptyList() }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0)
+        }
+        val screen = testLearningScreen(api, store)
+        screen.restore()
+        assertFalse(screen.signedIn)
+        screen.refresh("20261105")
+        assertEquals(0, calls)
+        assertTrue(screen.loginRequired)
+        screen.signIn("example", "example", "20261105")
+        assertEquals(1, calls)
+        assertFalse(screen.loginRequired)
+        assertTrue(screen.signedIn)
+    }
+
+    @Test fun `explicit sign in reopens old initial failures without losing reports or registrations`() {
+        val store = MemoryLearningStore()
+        val session = TodoSession("account", "token")
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        store.writeSession("old", session)
+        val claim = store.claim()
+        assertTrue(store.commit(claim.revision, LearningState(accountId = "account", children = listOf(child)), "old"))
+        val key = "Child" to Subject.MATH
+        store.updateMonitor { it.monitor.copy(accountId = "account", childName = "Child", registrations = mapOf("Child" to 7),
+            catalogFailure = LearningFailure.NETWORK, reports = mapOf(key to ReportState(DailyReport(3), 10, "20261104", true, LearningFailure.NETWORK, true)),
+            baselineEpochs = mapOf(key to 1)) }
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = session
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(5)
+        }
+        val screen = testLearningScreen(api, store)
+        screen.restore()
+        screen.signIn("example", "example", "20261105")
+        val monitor = store.read().monitor
+        assertEquals(mapOf("Child" to 7L), monitor.registeredChildren())
+        assertEquals(DailyReport(3), monitor.reports[key]?.value)
+        assertFalse(monitor.reports.getValue(key).failed)
+        assertEquals(null, monitor.catalogFailure)
+        assertTrue(monitor.baselineEpochs.isEmpty())
+    }
+
+    @Test fun `service authentication failure rejects an older manual success`() {
+        val store = MemoryLearningStore()
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (calls.incrementAndGet() == 2) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)); return DailyReport(99) }
+                return DailyReport(1)
+            }
+        }
+        val screen = testLearningScreen(api, store)
+        screen.signIn("example", "example", "20261105")
+        screen.toggleMonitor("Child")
+        val request = Thread { screen.refresh("20261105") }
+        request.start()
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val ref = store.read().sessionRef
+        store.updateMonitor { it.monitor.copy(catalogFailure = LearningFailure.AUTHENTICATION, catalogFailureSession = ref) }
+        release.countDown(); request.join(5000)
+        assertEquals(DailyReport(1), store.read().state.reports["Child" to Subject.MATH]?.value)
+        assertTrue(store.read().monitor.authenticationRequired(ref))
+    }
+
+    @Test fun `sign in restores the matching account registrations and values`() {
+        val store = MemoryLearningStore()
+        val child = TodoChild("Child", mapOf(Subject.MATH to "m"))
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession(email, "token")
+            override fun catalog(session: TodoSession) = listOf(child)
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (calls.incrementAndGet() == 2) { entered.countDown(); check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)); return DailyReport(99) }
+                return DailyReport(1)
+            }
+        }
+        val screen = testLearningScreen(api, store)
+        val key = "Child" to Subject.MATH
+        screen.signIn("A", "example", "20261105"); screen.toggleMonitor("Child")
+        store.updateMonitor { it.monitor.copy(reports = mapOf(key to ReportState(DailyReport(3), 1, "20261105"))) }
+        val old = Thread { screen.refresh("20261105") }
+        old.start()
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        screen.signIn("B", "example", "20261105")
+        assertTrue(store.read().monitor.registeredChildren().isEmpty())
+        screen.toggleMonitor("Child")
+        store.updateMonitor { it.monitor.copy(reports = mapOf(key to ReportState(DailyReport(7), 2, "20261105")), catalogFailure = LearningFailure.NETWORK) }
+        screen.signIn("A", "example", "20261105")
+        release.countDown(); old.join(5000)
+        assertEquals(null, store.read().monitor.catalogFailure)
+        assertEquals("A", store.read().monitor.accountId)
+        assertTrue("Child" in store.read().monitor.registeredChildren())
+        assertEquals(DailyReport(3), store.read().monitor.reports[key]?.value)
+        assertEquals(DailyReport(7), store.read().monitor.accounts["B"]?.reports?.get(key)?.value)
+    }
+
+    @Test fun `polling interval accepts positive minutes of any size`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = emptyList<TodoChild>()
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0)
+        }
+        val screen = testLearningScreen(api, store)
+        screen.restore()
+        assertEquals("1", screen.monitor.intervalMinutes)
+        assertFalse(screen.saveInterval("0"))
+        assertFalse(screen.saveInterval("-2"))
+        assertTrue(screen.saveInterval("999999999999999999999999"))
+        assertEquals("999999999999999999999999", store.read().monitor.intervalMinutes)
+    }
+
+    @Test fun `failed retry keeps last valid report and requires explicit retry`() {
+        val api = object : TodoApi {
+            var reports = 0
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "math")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                reports++
+                if (reports > 1) throw TodoApiException()
+                return DailyReport(2)
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("example", "example", "20261105")
+        screen.refresh("20261105")
+        val state = screen.state
+        assertEquals(DailyReport(2), state.reports["Child" to Subject.MATH]?.value)
+        assertTrue(state.reports["Child" to Subject.MATH]?.failed == true)
+        assertEquals(2, api.reports)
+    }
+}
+
+class LearningScreenRaceTest {
+    @Test fun `older report cannot replace a newer manual check`() {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            var calls = 0
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "math")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                val call = synchronized(this) { ++calls }
+                if (call == 2) { started.countDown(); release.await() }
+                return DailyReport(call)
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("sample", "sample", "20261105")
+        val older = Thread { screen.refresh("20261105") }
+        older.start()
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        screen.refresh("20261105")
+        release.countDown()
+        older.join(5000)
+        assertEquals(DailyReport(3), screen.state.reports["Child" to Subject.MATH]?.value)
+    }
+}
+
+class LearningAuthenticationTest {
+    @Test fun `authentication failure stops remaining reports and asks for login`() {
+        val requested = mutableListOf<Subject>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", linkedMapOf(Subject.MATH to "math", Subject.ENGLISH to "english")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(subject)
+                throw TodoApiException(authenticationRequired = true)
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("sample", "sample", "20261105")
+        assertTrue(screen.state.loginRequired)
+        assertFalse(screen.signedIn)
+        assertEquals(listOf(Subject.MATH), requested)
+        screen.refresh("20261105")
+        assertEquals(listOf(Subject.MATH), requested)
+    }
+}
+
+class LearningDateFailureTest {
+    @Test fun `failed check on a new date preserves the last valid report and its date`() {
+        val api = object : TodoApi {
+            var fail = false
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "math")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (fail) throw TodoApiException()
+                return DailyReport(2)
+            }
+        }
+        val screen = testLearningScreen(api) { 123L }
+        screen.signIn("sample", "sample", "20261105")
+        val checkedAt = screen.state.reports["Child" to Subject.MATH]!!.checkedAt
+        api.fail = true
+        screen.refresh("20261106")
+        val report = screen.state.reports["Child" to Subject.MATH]!!
+        assertEquals(DailyReport(2), report.value)
+        assertEquals("20261105", report.date)
+        assertEquals(checkedAt, report.checkedAt)
+        assertTrue(report.failed)
+    }
+}
+
+class LearningRestoreTest {
+    @Test fun `reopened screen restores last report without making a request`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            var calls = 0
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession): List<TodoChild> { calls++; return listOf(TodoChild("Child", mapOf(Subject.MATH to "math"))) }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2)
+        }
+        val first = testLearningScreen(api, store = store)
+        first.signIn("sample", "sample", "20261105")
+        val reopened = testLearningScreen(api, store = store)
+        reopened.restore()
+        assertTrue(reopened.signedIn)
+        assertEquals(DailyReport(2), reopened.state.reports["Child" to Subject.MATH]?.value)
+        assertEquals(1, api.calls)
+    }
+}
+
+class LearningStoreRaceTest {
+    @Test fun `old request from another screen cannot replace newer saved report`() {
+        val store = MemoryLearningStore()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            var calls = 0
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "math")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                val call = synchronized(this) { ++calls }
+                if (call == 2) { started.countDown(); release.await() }
+                return DailyReport(call)
+            }
+        }
+        val first = testLearningScreen(api, store)
+        first.signIn("sample", "sample", "20261105")
+        val second = testLearningScreen(api, store)
+        second.restore()
+        val older = Thread { first.refresh("20261105") }
+        older.start()
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        second.refresh("20261105")
+        release.countDown()
+        older.join(5000)
+        val reopened = testLearningScreen(api, store)
+        reopened.restore()
+        assertEquals(DailyReport(3), reopened.state.reports["Child" to Subject.MATH]?.value)
+    }
+}
+
+class LearningRetryTest {
+    @Test fun `refresh retries failed and current subjects after restore`() {
+        val store = MemoryLearningStore()
+        val requested = mutableListOf<Subject>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", linkedMapOf(Subject.MATH to "math", Subject.ENGLISH to "english")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(subject)
+                if (subject == Subject.MATH) throw TodoApiException()
+                return DailyReport(1)
+            }
+        }
+        testLearningScreen(api, store).signIn("sample", "sample", "20261105")
+        requested.clear()
+        val reopened = testLearningScreen(api, store)
+        reopened.restore()
+        assertTrue(reopened.state.reports["Child" to Subject.MATH]!!.failed)
+        assertTrue(requested.isEmpty())
+        reopened.refresh("20261105", includeFailed = true)
+        assertEquals(listOf(Subject.MATH, Subject.ENGLISH), requested)
+        assertTrue(reopened.state.reports["Child" to Subject.MATH]!!.failed)
+    }
+}
+
+class LearningFailureLatchTest {
+    @Test fun `catalog retry does not restart a failed subject`() {
+        val requested = mutableListOf<Subject>()
+        val api = object : TodoApi {
+            var failCatalog = false
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession): List<TodoChild> {
+                if (failCatalog) throw TodoApiException()
+                return listOf(TodoChild("Child", mapOf(Subject.MATH to "math")))
+            }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requested.add(subject)
+                throw TodoApiException()
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("sample", "sample", "20261105")
+        api.failCatalog = true
+        screen.refresh("20261105")
+        api.failCatalog = false
+        screen.refresh("20261105")
+        assertEquals(listOf(Subject.MATH), requested)
+        assertTrue(screen.state.reports["Child" to Subject.MATH]!!.failed)
+    }
+}
+
+class LearningFailureReasonTest {
+    @Test fun `report failure reason survives restoration`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "math")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport =
+                throw TodoApiException(kind = LearningFailure.NETWORK)
+        }
+        testLearningScreen(api, store).signIn("sample", "sample", "20261105")
+        val restored = testLearningScreen(api, store)
+        restored.restore()
+        assertEquals(LearningFailure.NETWORK, restored.state.reports["Child" to Subject.MATH]?.failure)
+    }
+}
+
+class LearningAccountIsolationTest {
+    @Test fun `switching accounts with a failed catalog does not show the previous account`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession(email, "token")
+            override fun catalog(session: TodoSession): List<TodoChild> {
+                if (session.accountId == "B") throw TodoApiException()
+                return listOf(TodoChild("Child", mapOf(Subject.MATH to "A-id")))
+            }
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2)
+        }
+        val screen = testLearningScreen(api, store) { 123L }
+        screen.signIn("A", "password", "20261105")
+        screen.signIn("B", "password", "20261105")
+        assertTrue(screen.state.error)
+        assertTrue(screen.state.children.isEmpty())
+        assertTrue(screen.state.reports.isEmpty())
+        assertNull(screen.state.catalogCheckedAt)
+        val restored = testLearningScreen(api, store)
+        restored.restore()
+        assertEquals(screen.state, restored.state)
+    }
+}
+
+class LearningAccountScopeTest {
+    @Test fun `same child name on another account never reuses prior report or identifier`() {
+        val store = MemoryLearningStore()
+        val ids = mutableListOf<String>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession(email, "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "${session.accountId}-id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                ids.add(userId)
+                if (session.accountId == "B") throw TodoApiException()
+                return DailyReport(2)
+            }
+        }
+        val screen = testLearningScreen(api, store)
+        screen.signIn("A", "password", "20261105")
+        screen.signIn("B", "password", "20261105")
+        assertNull(screen.state.reports["Child" to Subject.MATH]?.value)
+        val restored = testLearningScreen(api, store)
+        restored.restore()
+        restored.refresh("20261105", includeFailed = true)
+        assertEquals(listOf("A-id", "B-id", "B-id"), ids)
+        assertNull(restored.state.reports["Child" to Subject.MATH]?.value)
+    }
+
+    @Test fun `same account reauthentication retains own last value after authorization failure`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            var fail = false
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (fail) throw TodoApiException(authenticationRequired = true)
+                return DailyReport(2)
+            }
+        }
+        val screen = testLearningScreen(api, store)
+        screen.signIn("A", "password", "20261105")
+        api.fail = true
+        screen.refresh("20261105")
+        val restored = testLearningScreen(api, store)
+        restored.restore()
+        restored.signIn("A", "password", "20261105")
+        assertEquals(DailyReport(2), restored.state.reports["Child" to Subject.MATH]?.value)
+        assertTrue(restored.state.loginRequired)
+    }
+
+    @Test fun `unknown saved scope never restores or carries data through failed login`() {
+        val store = MemoryLearningStore()
+        val claim = store.claim()
+        store.commit(claim.revision, LearningState(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))), null)
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String): TodoSession = throw TodoApiException(authenticationRequired = true)
+            override fun catalog(session: TodoSession) = emptyList<TodoChild>()
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(0)
+        }
+        val screen = testLearningScreen(api, store)
+        screen.restore()
+        assertTrue(screen.state.children.isEmpty())
+        screen.signIn("B", "password", "20261105")
+        assertTrue(screen.state.children.isEmpty())
+    }
+
+    @Test fun `delayed old account report cannot replace new account data`() {
+        val store = MemoryLearningStore()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession(email, "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to session.accountId)))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (session.accountId == "A") { started.countDown(); release.await() }
+                return if (session.accountId == "A") DailyReport(1) else DailyReport(2)
+            }
+        }
+        val screen = testLearningScreen(api, store)
+        val old = Thread { screen.signIn("A", "password", "20261105") }
+        old.start()
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        screen.signIn("B", "password", "20261105")
+        release.countDown()
+        old.join(5000)
+        val restored = testLearningScreen(api, store)
+        restored.restore()
+        assertEquals(DailyReport(2), restored.state.reports["Child" to Subject.MATH]?.value)
+    }
+}
+
+class LearningGoalTest {
+    @Test fun `zero goal skips the subscribed report on manual refresh`() {
+        val requests = mutableListOf<Subject>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                requests.add(subject)
+                return DailyReport(2)
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("sample", "sample", "20261105")
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "0"))
+        requests.clear()
+        screen.refresh("20261105")
+        assertEquals(emptyList<Subject>(), requests)
+        assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
+    }
+
+    @Test fun `goal persists and zero completes without a report`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("account", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport = throw TodoApiException()
+        }
+        val screen = testLearningScreen(api, store)
+        screen.signIn("sample", "sample", "20261105")
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "0"))
+        val reopened = testLearningScreen(api, store)
+        reopened.restore()
+        assertEquals(0, reopened.goal("Child", Subject.MATH))
+        assertEquals(GoalStatus.COMPLETE, reopened.goalStatus("Child", Subject.MATH, "20261105"))
+        assertNull(reopened.state.reports["Child" to Subject.MATH]?.value)
+    }
+}
+
+class LearningHistoryGoalTest {
+    private fun api() = object : TodoApi {
+        override fun signIn(email: String, password: String) = TodoSession(email, "token")
+        override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+        override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(if (date == "20261104") 4 else 7)
+    }
+
+    @Test fun `today goal changes recalculate and reject invalid input`() {
+        val screen = testLearningScreen(api())
+        screen.signIn("A", "sample", "20261105")
+        assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "9"))
+        assertEquals(GoalStatus.INCOMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
+        assertTrue(screen.saveGoal("Child", Subject.MATH, " 4 "))
+        assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
+        assertFalse(screen.saveGoal("Child", Subject.MATH, "100"))
+        assertFalse(screen.saveGoal("Child", Subject.MATH, "-1"))
+    }
+
+    @Test fun `report finishing after Seoul day changes is not saved`() {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val today = java.util.concurrent.atomic.AtomicReference("20261104")
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                started.countDown(); release.await()
+                return DailyReport(5)
+            }
+        }
+        val screen = testLearningScreen(api, isCurrentDate = { it == today.get() })
+        val request = Thread { screen.signIn("A", "sample", "20261104") }
+        request.start()
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        today.set("20261105")
+        release.countDown()
+        request.join(5000)
+        assertNull(screen.state.reports["Child" to Subject.MATH])
+    }
+
+    @Test fun `default date fence stops stale batch after midnight`() {
+        val clock = java.util.concurrent.atomic.AtomicLong(java.time.Instant.parse("2026-11-04T14:59:59Z").toEpochMilli())
+        val dates = mutableListOf<String>()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", linkedMapOf(Subject.MATH to "m", Subject.ENGLISH to "e")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                dates.add(date)
+                clock.set(java.time.Instant.parse("2026-11-04T15:00:01Z").toEpochMilli())
+                return DailyReport(1)
+            }
+        }
+        val screen = LearningScreen(api, now = { clock.get() })
+        screen.signIn("A", "sample")
+        assertEquals(listOf("20261104"), dates)
+        assertTrue(screen.state.reports.isEmpty())
+    }
+
+    @Test fun `new account does not inherit goals`() {
+        val screen = testLearningScreen(api())
+        screen.signIn("A", "sample", "20261105")
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "9"))
+        screen.signIn("B", "sample", "20261105")
+        assertEquals(5, screen.goal("Child", Subject.MATH))
+        screen.signIn("A", "sample", "20261105")
+        assertEquals(9, screen.goal("Child", Subject.MATH))
+    }
+
+    @Test fun `late past date cannot replace current date`() {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val blockOld = java.util.concurrent.atomic.AtomicBoolean(false)
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (date == "20261104" && blockOld.get()) { started.countDown(); release.await() }
+                return DailyReport(if (date == "20261104") 1 else 7)
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("A", "sample", "20261104")
+        blockOld.set(true)
+        val old = Thread { screen.refresh("20261104") }
+        old.start()
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        screen.refresh("20261105")
+        release.countDown()
+        old.join(5000)
+        assertEquals(DailyReport(7), screen.state.reports["Child" to Subject.MATH]?.value)
+    }
+
+    @Test fun `zero goal skips explicit retry and keeps last count on failure`() {
+        var calls = 0
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                calls++
+                if (calls > 1) throw TodoApiException()
+                return DailyReport(2)
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("A", "sample", "20261105")
+        screen.refresh("20261105")
+        screen.saveGoal("Child", Subject.MATH, "0")
+        screen.refresh("20261105", includeFailed = true)
+        assertEquals(2, calls)
+        assertEquals(DailyReport(2), screen.state.reports["Child" to Subject.MATH]?.value)
+        assertTrue(screen.state.reports["Child" to Subject.MATH]!!.failed)
+        screen.saveGoal("Child", Subject.MATH, "5")
+        screen.refresh("20261104")
+        assertEquals(2, calls)
+    }
+}
+
+class LearningGoalRaceTest {
+    @Test fun `goal change fences an in flight report`() {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val api = object : TodoApi {
+            var calls = 0
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "id")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                calls++
+                if (calls == 2) { started.countDown(); release.await() }
+                return DailyReport(calls)
+            }
+        }
+        val screen = testLearningScreen(api)
+        screen.signIn("A", "sample", "20261105")
+        val old = Thread { screen.refresh("20261105") }
+        old.start()
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue(screen.saveGoal("Child", Subject.MATH, "0"))
+        release.countDown()
+        old.join(5000)
+        assertEquals(DailyReport(1), screen.state.reports["Child" to Subject.MATH]?.value)
+        assertEquals(GoalStatus.COMPLETE, screen.goalStatus("Child", Subject.MATH, "20261105"))
+    }
+}
+
+class MonitorSubjectVisibilityTest {
+    @org.junit.Test fun `new monitor subject is visible and retryable without changing manual history`() {
+        val store = MemoryLearningStore()
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = TodoSession("A", "token")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "math")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String) = DailyReport(2)
+        }
+        val screen = testLearningScreen(api, store)
+        screen.signIn("A", "password", "20261105")
+        screen.toggleMonitor("Child")
+        store.updateMonitor { it.monitor.copy(children = listOf(TodoChild("Child", mapOf(Subject.MATH to "math", Subject.ENGLISH to "english"))), monitorCatalogOrder = 2, reports = mapOf(("Child" to Subject.ENGLISH) to ReportState(failed = true, failure = LearningFailure.NETWORK))) }
+        screen.acceptMonitor(store.read().monitor)
+        org.junit.Assert.assertEquals(setOf(Subject.MATH, Subject.ENGLISH), screen.visibleSubjects("Child"))
+        org.junit.Assert.assertEquals(setOf(Subject.MATH), screen.state.children.single().userIds.keys)
+        screen.retryMonitor("Child", Subject.ENGLISH)
+        org.junit.Assert.assertTrue(("Child" to Subject.ENGLISH) in screen.monitor.reportRetries)
+        screen.acceptMonitor(screen.monitor.copy(accountId = "B"))
+        org.junit.Assert.assertEquals(setOf(Subject.MATH), screen.visibleSubjects("Child"))
+    }
+}
