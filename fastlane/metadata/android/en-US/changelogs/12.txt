@@ -1,0 +1,4 @@
+Connect a TODO School account and view learning goals for each child.
+Watch learning progress and receive notifications when goals are reached.
+Manage learning goals and notification settings in Curbox.
+The Full version now brings the app features together in one build.
