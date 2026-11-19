@@ -432,7 +432,15 @@ class SerializedDecisionWorkerTest {
                 val evaluation = requireNotNull(result.evaluation)
                 assertTrue(evaluation.evaluations.first { it.ruleId == "usage" }.isAllowed)
                 assertEquals(otherAllowance > 0L, evaluation.isAllowed)
-                if (otherAllowance > 0L) assertEquals(receipt.skipUntilMs, result.validUntilWallClockMs)
+                if (otherAllowance > 0L) {
+                    assertEquals(receipt.skipUntilMs, result.validUntilWallClockMs)
+                    assertEquals(SubmissionResult.ACCEPTED, worker.submit(request(84L, 1L, TARGET_PACKAGE, capturedAt + 1_000L)))
+                    assertTrue(outcomes.awaitCount(2))
+                    assertTrue(outcomes.enforcementOutcomes.last().packageDecisions.single().isAllowed)
+                    assertEquals(SubmissionResult.ACCEPTED, worker.submit(request(85L, 1L, TARGET_PACKAGE, receipt.skipUntilMs)))
+                    assertTrue(outcomes.awaitCount(3))
+                    assertFalse(outcomes.enforcementOutcomes.last().packageDecisions.single().isAllowed)
+                }
             } finally {
                 worker.stop(recoveryStop(LifecycleGeneration(1L)))
             }
