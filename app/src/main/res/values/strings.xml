@@ -1922,6 +1922,16 @@
     <string name="learning_service_unknown">Learning may be paused. Could not check the service.</string>
     <string name="learning_accessibility_settings">Open accessibility settings</string>
     <string name="learning_notification_settings">Open notification settings</string>
+    <string name="todo_award_connection">Connect Todo learning time</string>
+    <string name="todo_award_choose_child">Choose a child</string>
+    <string name="todo_award_choose_rule">Choose an app rule</string>
+    <string name="todo_award_disconnect">Disconnect Todo</string>
+    <string name="todo_award_no_choices">Turn on monitoring and choose a rule with weekend rollover first.</string>
+    <string name="todo_award_saved">Todo connection saved.</string>
+    <string name="todo_award_failed">Could not update the Todo connection.</string>
+    <string name="todo_award_manual">Manual time</string>
+    <string name="todo_award_todo">Todo time</string>
+    <string name="todo_award_loading">Checking Todo time</string>
+    <string name="todo_award_unavailable">Could not check Todo time. You can still add manual time.</string>
+    <string name="todo_award_invalid">Enter a value within the available Todo time.</string>
 </resources>
-
-

@@ -468,6 +468,61 @@ class DataStoreManager(private val context: Context) {
         )
     }
 
+    /** Stores an authenticated Todo grant while the caller holds its learning registration fence. */
+    internal suspend fun grantTodoAppRuleTime(
+        password: String,
+        basis: TodoAwardGrantBasis,
+        manualMinutes: Long,
+        todoMinutes: Long
+    ): GuardianExtraTimeGrantWrite.Result {
+        if (manualMinutes < 0 || todoMinutes <= 0 || manualMinutes > Long.MAX_VALUE - todoMinutes) {
+            return GuardianExtraTimeGrantWrite.Result.Rejected
+        }
+        val total = manualMinutes + todoMinutes
+        if (total > Long.MAX_VALUE / 60_000L) return GuardianExtraTimeGrantWrite.Result.Rejected
+        val at = GuardianExtraTimeGrantWrite.nextGrantTimestamp()
+        val receipt = GuardianApprovalGrantReceipt(basis.grant.ruleId, basis.grant.useDayId, at, total * 60_000L)
+        val updated = try {
+            settingsDataStore.updateData { current ->
+                TodoAwardGrantWrite.nextSettings(current, password, basis, manualMinutes, todoMinutes, at, System.currentTimeMillis())
+            }.also { guardianApprovalWriteCommitObserverForTest?.invoke(it) }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logGuardianApprovalWriteFailure(error)
+            return GuardianExtraTimeGrantWrite.Result.Uncertain(receipt)
+        }
+        val result = GuardianExtraTimeGrantWrite.resultFor(updated, basis.grant, total, at, System.currentTimeMillis())
+        if (result == GuardianExtraTimeGrantWrite.Result.Stored) {
+            return GuardianExtraTimeGrantWrite.Result.StoredWithReceipt(receipt)
+        }
+        val latest = GuardianExtraTimeGrantBasis.capture(updated, basis.grant.ruleId, System.currentTimeMillis())
+            ?: return GuardianExtraTimeGrantWrite.Result.Unavailable
+        return if (TodoAwardGrantBasis.capture(updated, latest, basis.reportedMinutes) != basis)
+            GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation(latest) else result
+    }
+
+    /** Saves a new link only while its learning registration is held by the caller. */
+    internal suspend fun setTodoAwardConnection(accountId: String, childName: String, ruleId: String): Boolean {
+        val revision = java.util.UUID.randomUUID().toString()
+        val updated = settingsDataStore.updateData { current ->
+            if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured)) return@updateData current
+            val rule = current.appRuleSnapshot.appRules.singleOrNull { it.id == ruleId }
+            if (accountId.isBlank() || childName.isBlank() || rule == null || !rule.isActive ||
+                !rule.guardianExtraTimeAllowed || !rule.rolloverEnabled || rule.unlockDays != setOf(0, 6)) return@updateData current
+            val day = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime).idAt(System.currentTimeMillis())
+            current.copy(todoAwardConnection = neth.iecal.curbox.data.models.TodoAwardConnection(accountId, childName, ruleId, day, revision))
+        }
+        return updated.todoAwardConnection?.revision == revision
+    }
+
+    internal suspend fun clearTodoAwardConnection(): Boolean {
+        val updated = settingsDataStore.updateData { current ->
+            if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured)) current
+            else current.copy(todoAwardConnection = null)
+        }
+        return updated.todoAwardConnection == null
+    }
     /** Stores a direct grant authorized by the app's current guardian management session. */
     internal suspend fun grantAppRuleTimeFromAuthenticatedSession(
         basis: GuardianExtraTimeGrantBasis,
@@ -837,6 +892,8 @@ class DataStoreManager(private val context: Context) {
                 guardianAuthConfig = current.guardianAuthConfig,
                 appRuleOverrideState = current.appRuleOverrideState,
                 appRuleRolloverState = current.appRuleRolloverState,
+                todoAwardConnection = current.todoAwardConnection,
+                todoAwardLedger = current.todoAwardLedger,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -1343,7 +1400,9 @@ class DataStoreManager(private val context: Context) {
             .toSet()
         val withLocalRuntime = proposed.copy(
             appRuleOverrideState = current.appRuleOverrideState,
-            appRuleRolloverState = current.appRuleRolloverState
+            appRuleRolloverState = current.appRuleRolloverState,
+            todoAwardConnection = current.todoAwardConnection,
+            todoAwardLedger = current.todoAwardLedger
         )
         if (disabledRuleIds.isEmpty()) return withLocalRuntime
 
@@ -1841,4 +1900,3 @@ internal object GuardianManualPoolWrite {
         )
     }
 }
-

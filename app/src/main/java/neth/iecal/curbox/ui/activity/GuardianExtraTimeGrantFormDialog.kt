@@ -19,17 +19,22 @@ import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantFormState
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeInputSource
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeSubmission
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeValidationError
+import neth.iecal.curbox.domain.apprules.TodoAwardFormState
+import neth.iecal.curbox.learning.TodoAwardOffer
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 
 /** Shared form used by the lock screen and the authenticated app rule screen. */
-class GuardianExtraTimeGrantFormDialog(
+internal class GuardianExtraTimeGrantFormDialog(
     private val context: Context,
     private val inflater: LayoutInflater,
     private val scope: CoroutineScope,
     private val readCurrentBasis: suspend (String) -> GuardianExtraTimeGrantBasis?,
     private val readCurrentCandidates: suspend () -> List<GuardianExtraTimeGrantCandidate>,
     private val onSubmit: (GuardianExtraTimeGrantBasis, Long) -> Unit,
-    private val onDismiss: (AlertDialog) -> Unit = {}
+    private val onDismiss: (AlertDialog) -> Unit = {},
+    private val isTodoRule: (String) -> Boolean = { false },
+    private val readTodoOffer: suspend (GuardianExtraTimeGrantBasis) -> TodoAwardOffer? = { null },
+    private val onTodoSubmit: (GuardianExtraTimeGrantBasis, TodoAwardOffer?, Long, Long) -> Unit = { _, _, _, _ -> }
 ) {
     fun show(
         options: List<GuardianExtraTimeGrantCandidate>,
@@ -43,6 +48,59 @@ class GuardianExtraTimeGrantFormDialog(
         var positiveButton: android.widget.Button? = null
         var dialog: AlertDialog? = null
         var updatingDerivedValue = false
+        var todoState = TodoAwardFormState.initial(state.input.currentTotalMinutes)
+        var todoOffer: TodoAwardOffer? = null
+        var todoRequest = 0L
+
+        fun todoMode() = state.basis?.let { isTodoRule(it.ruleId) } == true
+
+        fun renderTodoTotal() {
+            updatingDerivedValue = true
+            binding.totalMinutesInput.setText(todoState.totalMinutes?.toString().orEmpty())
+            updatingDerivedValue = false
+        }
+
+        fun startTodoLookup() {
+            val basis = state.basis ?: return
+            val request = ++todoRequest
+            todoOffer = null
+            todoState = TodoAwardFormState.initial(basis.currentTotalMinutes)
+            val enabled = todoMode()
+            binding.todoMinutesLayout.visibility = if (enabled) android.view.View.VISIBLE else android.view.View.GONE
+            binding.todoStatus.visibility = if (enabled) android.view.View.VISIBLE else android.view.View.GONE
+            binding.additionalMinutesLayout.hint = context.getString(if (enabled) R.string.todo_award_manual else R.string.guardian_extra_minutes)
+            binding.totalMinutesInput.isFocusable = !enabled
+            binding.totalMinutesInput.isFocusableInTouchMode = !enabled
+            if (!enabled) return
+            updatingDerivedValue = true
+            binding.additionalMinutesInput.setText(todoState.manualText)
+            binding.todoMinutesInput.setText(todoState.todoText)
+            updatingDerivedValue = false
+            renderTodoTotal()
+            binding.todoStatus.setText(R.string.todo_award_loading)
+            val editRevision = todoState.todoEditRevision
+            scope.launch {
+                val offer = try {
+                    readTodoOffer(basis)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                if (request != todoRequest || dialog?.isShowing != true || state.basis != basis) return@launch
+                todoOffer = offer
+                if (offer == null) {
+                    binding.todoStatus.setText(R.string.todo_award_unavailable)
+                } else {
+                    todoState = todoState.receiveOffer(editRevision, offer.basis.availableMinutes)
+                    updatingDerivedValue = true
+                    binding.todoMinutesInput.setText(todoState.todoText)
+                    updatingDerivedValue = false
+                    binding.todoStatus.visibility = android.view.View.GONE
+                    renderTodoTotal()
+                }
+            }
+        }
 
         val adapter = ArrayAdapter(
             context,
@@ -81,6 +139,7 @@ class GuardianExtraTimeGrantFormDialog(
             binding.totalMinutesInput.setText("")
             updatingDerivedValue = false
             render()
+            if (basis != null) startTodoLookup() else todoRequest++
         }
 
         binding.additionalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
@@ -103,12 +162,27 @@ class GuardianExtraTimeGrantFormDialog(
 
             override fun afterTextChanged(editable: Editable?) {
                 if (updatingDerivedValue) return
+                if (todoMode()) {
+                    todoState = todoState.editManual(editable?.toString().orEmpty())
+                    renderTodoTotal()
+                    return
+                }
                 state = state.editAdditionalMinutes(editable?.toString().orEmpty())
                 binding.additionalMinutesLayout.error = null
                 binding.totalMinutesLayout.error = null
                 updatingDerivedValue = true
                 binding.totalMinutesInput.setText(state.input.totalMinutesText)
                 updatingDerivedValue = false
+            }
+        })
+        binding.todoMinutesInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(editable: Editable?) {
+                if (updatingDerivedValue || !todoMode()) return
+                todoState = todoState.editTodo(editable?.toString().orEmpty())
+                binding.todoMinutesLayout.error = null
+                renderTodoTotal()
             }
         })
         binding.totalMinutesInput.addTextChangedListener(object : TextWatcher {
@@ -139,6 +213,7 @@ class GuardianExtraTimeGrantFormDialog(
                 if (currentBasis != null) {
                     state = state.receiveBasis(revision, currentBasis)
                     render()
+                    startTodoLookup()
                     return@launch
                 }
 
@@ -181,8 +256,20 @@ class GuardianExtraTimeGrantFormDialog(
         grantDialog.setOnShowListener {
             positiveButton = grantDialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
             positiveButton?.isEnabled = state.basis != null
+            startTodoLookup()
             positiveButton?.setOnClickListener {
                 val basis = state.basis ?: return@setOnClickListener
+                if (todoMode()) {
+                    val submission = todoState.submission()
+                    if (submission == null || (submission.second > 0 && todoOffer == null)) {
+                        binding.todoMinutesLayout.error = context.getString(R.string.todo_award_invalid)
+                        return@setOnClickListener
+                    }
+                    positiveButton?.isEnabled = false
+                    grantDialog.dismiss()
+                    onTodoSubmit(basis, todoOffer, submission.first, submission.second)
+                    return@setOnClickListener
+                }
                 when (val submission = state.input.submit()) {
                     is GuardianExtraTimeSubmission.Invalid -> {
                         val errorLayout = if (

@@ -6,6 +6,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsSyncBoundaryTest {
+    @Test fun todoAwardStateStaysOnDevice() {
+        val local = Settings(
+            todoAwardConnection = TodoAwardConnection("account", "Child", "rule", "2026-11-05", "link"),
+            todoAwardLedger = listOf(TodoAwardLedgerEntry("account", "Child", "2026-11-05", 40))
+        )
+        val uploaded = SettingsSyncBoundary.forUpload(local)
+        assertEquals(null, uploaded.todoAwardConnection)
+        assertTrue(uploaded.todoAwardLedger.isEmpty())
+    }
     @Test
     fun guardianCredentialAndApprovalsAreRemovedFromUploadSnapshot() {
         val local = Settings(

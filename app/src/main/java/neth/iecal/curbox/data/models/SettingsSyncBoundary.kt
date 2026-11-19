@@ -6,6 +6,8 @@ object SettingsSyncBoundary {
         useDayGenerationStartedAtMs = 0L,
         guardianAuthConfig = GuardianAuthConfig(),
         appRuleOverrideState = AppRuleOverrideState(),
-        appRuleRolloverState = AppRuleRolloverState()
+        appRuleRolloverState = AppRuleRolloverState(),
+        todoAwardConnection = null,
+        todoAwardLedger = emptyList()
     )
 }

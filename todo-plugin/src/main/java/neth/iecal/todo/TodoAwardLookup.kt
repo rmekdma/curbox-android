@@ -2,10 +2,11 @@ package neth.iecal.todo
 
 /** Looks up all subscribed subject reports for one child and date, failing if any duration is unavailable. */
 class TodoAwardLookup(private val api: TodoApi) {
-    fun minutes(session: TodoSession, childName: String, date: String): Long {
+    fun minutes(session: TodoSession, childName: String, date: String, expectedSubjects: Map<Subject, String>? = null): Long {
         val child = api.catalog(session).singleOrNull { it.name == childName }
             ?: throw TodoApiException(kind = LearningFailure.INVALID_DATA)
         if (child.userIds.isEmpty()) throw TodoApiException(kind = LearningFailure.INVALID_DATA)
+        if (expectedSubjects != null && child.userIds != expectedSubjects) throw TodoApiException(kind = LearningFailure.INVALID_DATA)
         var seconds = java.math.BigDecimal.ZERO
         try {
             for ((subject, userId) in child.userIds) {
@@ -27,4 +28,3 @@ class TodoAwardLookup(private val api: TodoApi) {
         }
     }
 }
-

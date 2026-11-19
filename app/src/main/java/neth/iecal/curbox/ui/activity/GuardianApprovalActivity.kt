@@ -48,6 +48,8 @@ import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
+import neth.iecal.curbox.learning.TodoAwardRepository
+import neth.iecal.curbox.learning.TodoAwardOffer
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantQueryFactory
 import java.time.Duration
 import java.time.ZoneId
@@ -57,6 +59,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.withContext
 
 /** Internal approval surface. It has no exported intent or broadcast write path. */
@@ -71,6 +75,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private val grantQuery by lazy {
         GuardianExtraTimeGrantQueryFactory.create(applicationContext, dataStore)
     }
+    private val todoAwardRepository by lazy { TodoAwardRepository(applicationContext, dataStore) }
+    private var todoPrefetchKey: String? = null
+    private var todoPrefetch: Deferred<TodoAwardOffer?>? = null
     private var denials: List<AppRuleGuardianDenial> = emptyList()
     private var targetPackageName: String = ""
     private var selectedRuleId: String? = null
@@ -672,6 +679,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         val payload = readValidatedPayload(intent) ?: return
         if (isFinishing) return
         val previousScreenRequestId = screenRequestId
+        grantFormDialog?.dismiss()
         setIntent(intent)
         denials = payload.denials
         targetPackageName = payload.packageName
@@ -785,6 +793,35 @@ class GuardianApprovalActivity : AppCompatActivity() {
         renderConfirmationState()
         updateGuardianGrantButton()
         updateAccumulatedButton(selectedRuleId)
+        startTodoPrefetch()
+    }
+
+    private fun startTodoPrefetch() {
+        val exhausted = denials.filter { it.isAllowanceExhausted }.map { it.ruleId }.sorted()
+        val key = screenRequestId + ":" + exhausted.joinToString(",")
+        if (todoPrefetchKey == key) return
+        todoPrefetch?.cancel()
+        todoPrefetchKey = key
+        todoPrefetch = lifecycleScope.async(Dispatchers.IO) {
+            try {
+                val settings = dataStore.settings.first()
+                val ruleId = settings.todoAwardConnection?.ruleId ?: return@async null
+                if (ruleId !in exhausted) return@async null
+                val basis = GuardianExtraTimeGrantBasis.capture(settings, ruleId, System.currentTimeMillis())
+                    ?: return@async null
+                todoAwardRepository.lookup(basis)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    private suspend fun todoOfferFor(basis: GuardianExtraTimeGrantBasis): TodoAwardOffer? {
+        val cached = todoPrefetch?.await()
+        if (cached != null && todoAwardRepository.isCurrent(cached, basis)) return cached
+        return todoAwardRepository.lookup(basis)
     }
 
     private fun updateGuardianGrantButton() {
@@ -865,11 +902,21 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 toast(R.string.guardian_no_extra_time_rules)
                 return@launch
             }
-            val selectedIndex = options.indexOfFirst { it.rule.id == preferredRuleId }
-                .takeIf { it >= 0 }
-                ?: 0
+            val linkedRuleId = try {
+                dataStore.settings.first().todoAwardConnection?.ruleId
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            if (!isCurrentScreenRequest(requestId)) return@launch
+            val initialRuleId = preferredRuleId ?: linkedRuleId?.takeIf { linked ->
+                linked == selectedRuleId && denials.any { it.ruleId == linked && it.isAllowanceExhausted }
+            }
+            val selectedIndex = options.indexOfFirst { it.rule.id == initialRuleId }
+                .takeIf { it >= 0 } ?: 0
             grantDialogOpen = true
-            showGrantDialog(options, selectedIndex, requestId)
+            showGrantDialog(options, selectedIndex, requestId, linkedRuleId)
         }
     }
 
@@ -881,7 +928,8 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private fun showGrantDialog(
         options: List<GuardianExtraTimeGrantCandidate>,
         selectedIndex: Int,
-        requestId: String
+        requestId: String,
+        linkedRuleId: String? = null
     ) {
         if (!canHandleCallbacks()) {
             grantDialogOpen = false
@@ -912,6 +960,22 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 grantDialogOpen = false
                 ownedDialogs.remove(dismissedDialog)
                 if (grantFormDialog === dismissedDialog) grantFormDialog = null
+            },
+            isTodoRule = { ruleId -> ruleId == linkedRuleId && denials.any { it.ruleId == ruleId && it.isAllowanceExhausted } },
+            readTodoOffer = ::todoOfferFor,
+            onTodoSubmit = { basis, offer, manual, todo ->
+                if (canHandleCallbacks() && !grantInProgress) {
+                    grantInProgress = true
+                    grantInProgressRequestId = requestId
+                    authenticateThen(
+                        ruleId = basis.ruleId,
+                        screenRequestId = requestId,
+                        onCancelled = { clearGrantInProgress(requestId) },
+                        onAuthenticated = { _, password ->
+                            writeGrant(basis, password, manual + todo, requestId, offer, todo)
+                        }
+                    )
+                }
             }
         ).show(options, selectedIndex)
         grantFormDialog = dialog
@@ -1104,12 +1168,18 @@ class GuardianApprovalActivity : AppCompatActivity() {
         basis: GuardianExtraTimeGrantBasis,
         password: String,
         minutes: Long,
-        requestId: String
+        requestId: String,
+        todoOffer: TodoAwardOffer? = null,
+        todoMinutes: Long = 0L
     ) {
         val operationId = UUID.randomUUID().toString()
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
-                dataStore.grantAppRuleTime(password, basis, minutes)
+                if (todoMinutes > 0 && todoOffer != null) {
+                    todoAwardRepository.grant(password, todoOffer, minutes - todoMinutes, todoMinutes)
+                } else {
+                    dataStore.grantAppRuleTime(password, basis, minutes)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {

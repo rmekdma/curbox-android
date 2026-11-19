@@ -105,5 +105,3 @@ object LearningComposition {
     fun subjectPackages() = SubjectPackages(math = "neth.iecal.curbox.apitester")
     fun createScreen(context: Context) = LearningScreen(createApi(context), LearningStorage(context))
 }
-
-

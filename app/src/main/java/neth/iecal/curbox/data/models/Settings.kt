@@ -45,7 +45,9 @@ data class Settings(
     /** Rule-scoped approvals; reset atomically by use-day id. */
     val appRuleOverrideState: AppRuleOverrideState = AppRuleOverrideState(),
     /** Multi-day accumulated rollover state across all app rules. */
-    val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState()
+    val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState(),
+    val todoAwardConnection: TodoAwardConnection? = null,
+    val todoAwardLedger: List<TodoAwardLedgerEntry> = emptyList()
 ) {
     /** Convenient scalar form for settings UIs and deterministic tests. */
     val useDayResetTimeMinutes: Int
@@ -76,3 +78,20 @@ data class AppRuleRolloverState(
         copy(pools = pools + (pool.ruleId to pool))
 }
 
+
+/** The current link is identified separately each time it is saved. */
+data class TodoAwardConnection(
+    val accountId: String = "",
+    val childName: String = "",
+    val ruleId: String = "",
+    val connectedUseDayId: String = "",
+    val revision: String = ""
+)
+
+/** Direct Todo awards survive rule changes and use day resets. */
+data class TodoAwardLedgerEntry(
+    val accountId: String = "",
+    val childName: String = "",
+    val useDayId: String = "",
+    val grantedMinutes: Long = 0
+)

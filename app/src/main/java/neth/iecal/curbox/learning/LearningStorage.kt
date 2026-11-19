@@ -50,6 +50,16 @@ class LearningStorage(context: Context) : LearningStore {
         return requireNotNull(gson.fromJson(root, StoredLearning::class.java))
     }
 
+    /** Runs a settings transaction only while this registration and session remain current. */
+    suspend fun <T> withRegistration(scope: TodoRegistrationScope, action: suspend () -> T): T? {
+        var result: T? = null
+        stateStore.updateData { raw ->
+            if (scope.isCurrent(document(raw))) result = action()
+            raw
+        }
+        return result
+    }
+
     override val changes = stateStore.data.map { document(it) }
     override fun read(): StoredLearning = runBlocking { document(stateStore.data.first()) }
     override fun claim(): StoredLearning = runBlocking {

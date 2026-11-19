@@ -15,5 +15,3 @@ object TodoReportParser {
         return DailyReport(activities.size())
     }
 }
-
-

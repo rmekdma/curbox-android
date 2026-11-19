@@ -24,5 +24,3 @@ class SyntheticFixtureTest {
         assertTrue(runCatching { SyntheticFixture.parse("{}") }.isFailure)
     }
 }
-
-

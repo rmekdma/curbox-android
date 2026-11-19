@@ -20,7 +20,8 @@ data class AppRuleGuardianGrant(
     val useDayId: String = "",
     val grantedAtMs: Long = 0L,
     val grantedMillis: Long = 0L,
-    val isFromAccumulatedPool: Boolean = false
+    val isFromAccumulatedPool: Boolean = false,
+    val todoGrantedMillis: Long = 0L
 )
 
 /** Identifies one grant write when the blocker confirms its accepted settings snapshot. */

@@ -5,6 +5,25 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class TodoAwardLookupTest {
+    @Test fun `an empty report is zero but a failed subject fails the whole lookup`() {
+        var failEnglish = false
+        val api = object : TodoApi {
+            override fun signIn(email: String, password: String) = error("unused")
+            override fun catalog(session: TodoSession) = listOf(TodoChild("Child", mapOf(Subject.MATH to "m", Subject.ENGLISH to "e")))
+            override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                if (subject == Subject.ENGLISH && failEnglish) throw TodoApiException(kind = LearningFailure.NETWORK)
+                return DailyReport(0, emptyMap())
+            }
+        }
+        val lookup = TodoAwardLookup(api)
+        val session = TodoSession("a", "token")
+        assertEquals(0L, lookup.minutes(session, "Child", "20261105"))
+        assertThrows(TodoApiException::class.java) {
+            lookup.minutes(session, "Child", "20261105", mapOf(Subject.MATH to "different"))
+        }
+        failEnglish = true
+        assertThrows(TodoApiException::class.java) { lookup.minutes(session, "Child", "20261105") }
+    }
     @Test fun `fractional seconds are added before rounding`() {
         val api = object : TodoApi {
             override fun signIn(email: String, password: String) = error("unused")
@@ -38,6 +57,3 @@ class TodoAwardLookupTest {
         assertEquals(1L, TodoAwardLookup(api).minutes(TodoSession("a", "token"), "Child", "20261105"))
     }
 }
-
-
-
