@@ -67,6 +67,71 @@ import kotlinx.coroutines.runBlocking
 @RunWith(AndroidJUnit4::class)
 class AppRuleBlockerRecheckTest {
     @Test
+    fun anOpenGuardianDismissesOnlyAfterTheLastScheduledDenialExpires() {
+        val service = RecordingService().also { it.attach(InstrumentationContext.context) }
+        val start = ZonedDateTime.now().withHour(12).withMinute(0).withSecond(30).withNano(0)
+        val startMs = start.toInstant().toEpochMilli()
+        val scheduler = FakeWakeScheduler(initialWallClockMs = startMs)
+        val blocker = AppRuleBlocker(wakeScheduler = scheduler).apply {
+            wallClockMsProvider = { scheduler.currentWallClockMs }
+            elapsedRealtimeMsProvider = { scheduler.currentElapsedRealtimeMs }
+        }
+        scheduler.onWake = blocker::onWakeFromScheduler
+        val repository = EmptySessionRepository()
+        setField(blocker, "service", service)
+        setField(blocker, "sessionRepository", repository)
+        setField(blocker, "enforcement", AppRuleEnforcement(repository))
+        setField(blocker, "setupReady", true)
+        setField(blocker, "launchablePackages", setOf(PACKAGE))
+        val snapshots = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
+        val global = snapshotWithGlobalDeny().appRules.single()
+        snapshots.accept(
+            AppRuleSnapshot(
+                appRules = listOf(
+                    global.copy(timeRanges = listOf(AppRuleTimeRange(720, 721))),
+                    global.copy(id = "later", timeRanges = listOf(AppRuleTimeRange(720, 722)))
+                )
+            )
+        )
+        val requestId = "scheduled-guardian"
+        openGuardianOwnerForTest(blocker, PACKAGE, requestId, TEST_GUARDIAN_CONNECTION_ID)
+        val receiver = getField(blocker, "guardianReceiver") as android.content.BroadcastReceiver
+        val dismissals = {
+            service.sentBroadcasts.filter {
+                it.action == GuardianApprovalActivity.INTENT_ACTION_AUTO_DISMISS
+            }
+        }
+        try {
+            receiver.onReceive(
+                service,
+                guardianLifecycleIntent(
+                    GuardianApprovalActivity.INTENT_ACTION_OPENED,
+                    PACKAGE,
+                    requestId,
+                    TEST_GUARDIAN_CONNECTION_ID
+                )
+            )
+            fun hasWakeAt(atMs: Long) = scheduler.scheduledKeys().any {
+                scheduler.getScheduled(it)?.dueAtWallClockMs == atMs
+            }
+            assertTrue(awaitCondition { hasWakeAt(startMs + 30_000L) })
+            scheduler.advanceTimeBy(30_000L)
+            assertTrue(awaitCondition { hasWakeAt(startMs + 90_000L) })
+            assertTrue(dismissals().isEmpty())
+
+            scheduler.advanceTimeBy(60_000L)
+            assertTrue(awaitCondition { dismissals().isNotEmpty() })
+            assertEquals(
+                requestId,
+                dismissals().single().getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+            )
+            assertTrue(service.startedActivities.isEmpty())
+        } finally {
+            blocker.onDestroy()
+        }
+    }
+
+    @Test
     fun activeZeroAllowanceRuleStartsGuardianApprovalForCurrentPackage() {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         service.lastBackPressTimeStamp = 0L

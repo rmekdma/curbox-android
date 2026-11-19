@@ -417,9 +417,19 @@ class AppRuleGroupsFragment : Fragment() {
         val contributorNames = scopeContributorNames(rule, snapshot)
         val missingContributorIds = snapshot.missingContributorGroupIds(rule)
         val poolMinutes = rolloverPool?.accumulatedMinutes ?: 0L
-        val hasRolloverInfo = rule.guardianExtraTimeAllowed &&
+        val restConfig = rule.restConfig
+        val hasRolloverInfo = restConfig == null && rule.guardianExtraTimeAllowed &&
             (rule.rolloverEnabled || poolMinutes > 0L)
-        val status = buildString {
+        val status = if (restConfig != null) {
+            getString(
+                R.string.app_rules_rest_summary,
+                rule.name,
+                groupName,
+                restConfig.usageLimitMinutes,
+                restConfig.restWindowMinutes,
+                restConfig.requiredRestMinutes
+            )
+        } else buildString {
             append(
                 getString(
                     R.string.app_rules_rule_summary,

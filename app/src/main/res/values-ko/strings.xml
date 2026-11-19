@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_rules_rest_rule">휴식 규칙</string>
+    <string name="app_rules_edit_rest_rule">휴식 규칙 편집</string>
+    <string name="app_rules_rest_usage_limit">사용 한도 (분)</string>
+    <string name="app_rules_rest_window">휴식을 합산할 구간 (분)</string>
+    <string name="app_rules_required_rest">필요한 휴식 (분)</string>
+    <string name="app_rules_invalid_rest_times">세 시간에 모두 1분 이상을 입력하세요. 필요한 휴식은 휴식을 합산할 구간 이하여야 합니다.</string>
+    <string name="app_rules_rest_summary">%1$s\n휴식 규칙 · %2$s\n사용 한도 %3$d분 · 최근 %4$d분 중 %5$d분 휴식</string>
     <string name="app_rules_notification_rule_status">[%1$s] %2$d분 사용 / %3$d분 허용%4$s</string>
     <string name="app_rules_notification_rule_status_with_condition">[%1$s] %2$s %3$d분 사용 / %4$d분 허용%5$s</string>
     <string name="app_rules_condition_progress_format">(%1$d분/%2$d분)</string>

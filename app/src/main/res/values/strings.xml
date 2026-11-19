@@ -1363,6 +1363,13 @@
     <string name="app_rules_edit_group">Edit app group</string>
     <string name="app_rules_add_rule">Add app rule</string>
     <string name="app_rules_edit_rule">Edit app rule</string>
+    <string name="app_rules_rest_rule">Rest rule</string>
+    <string name="app_rules_edit_rest_rule">Edit rest rule</string>
+    <string name="app_rules_rest_usage_limit">Use limit (minutes)</string>
+    <string name="app_rules_rest_window">Time window for counting rest (minutes)</string>
+    <string name="app_rules_required_rest">Required rest (minutes)</string>
+    <string name="app_rules_invalid_rest_times">Enter three positive times. Required rest must fit inside the time window.</string>
+    <string name="app_rules_rest_summary">%1$s\nRest rule · %2$s\nUse limit %3$d min · %5$d min of rest within %4$d min</string>
     <string name="app_rules_groups">App groups</string>
     <string name="app_rules_rules">Rules</string>
     <string name="app_rules_group_summary">%1$s\n%2$d apps</string>
@@ -1371,6 +1378,7 @@
     <string name="app_rules_configuration_error">Some app rules need attention before they can run</string>
     <string name="app_rules_all_apps">All launchable apps</string>
     <string name="app_rules_all_apps_and_groups">All launchable apps and %1$s</string>
+    <string name="app_rules_select_target_group">Select at least one app group</string>
     <string name="app_rules_empty_scope">No apps selected</string>
     <string name="app_rules_group_name_hint">Group name</string>
     <string name="app_rules_group_apply_title">When should this group change apply?</string>

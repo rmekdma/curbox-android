@@ -186,6 +186,7 @@ class AndroidAppRuleWakeScheduler internal constructor(
         }
 
         var alarmPublished = false
+        var exactAlarmPublished = false
         if (pendingIntent != null) {
             try {
                 alarmPublisher.setExactAndAllowWhileIdle(
@@ -194,6 +195,7 @@ class AndroidAppRuleWakeScheduler internal constructor(
                     pendingIntent
                 )
                 alarmPublished = true
+                exactAlarmPublished = true
             } catch (_: SecurityException) {
                 try {
                     alarmPublisher.setAndAllowWhileIdle(
@@ -210,21 +212,13 @@ class AndroidAppRuleWakeScheduler internal constructor(
             }
         }
 
-        val handlerRunnable: Runnable?
-        val handlerDelayMs: Long?
-        if (alarmPublished) {
-            if (remainingDelayMs <= MAX_HANDLER_DELAY_MS) {
-                handlerRunnable = Runnable { handleWake(key, token) }
-                handlerDelayMs = remainingDelayMs.coerceAtLeast(0L)
-            } else {
-                handlerRunnable = null
-                handlerDelayMs = null
-            }
-        } else {
-            // AlarmManager unavailable or failed: fall back to handler with 20s recovery cap
-            handlerRunnable = Runnable { handleWake(key, token) }
-            handlerDelayMs = minOf(remainingDelayMs, MAX_HANDLER_DELAY_MS).coerceAtLeast(0L)
+        val handlerDelayMs = when {
+            // Keep the awake deadline when Android may batch delivery of an inexact alarm.
+            !alarmPublished -> minOf(remainingDelayMs, MAX_HANDLER_DELAY_MS)
+            !exactAlarmPublished || remainingDelayMs <= MAX_HANDLER_DELAY_MS -> remainingDelayMs
+            else -> null
         }
+        val handlerRunnable = handlerDelayMs?.let { Runnable { handleWake(key, token) } }
 
         val oldRegistration = synchronized(lock) {
             ensureReceiverRegistered()
@@ -239,7 +233,7 @@ class AndroidAppRuleWakeScheduler internal constructor(
         }
 
         oldRegistration?.let(::disposeRegistration)
-        if (handlerRunnable != null && handlerDelayMs != null) {
+        if (handlerRunnable != null) {
             handlerPostDelayed(handlerRunnable, handlerDelayMs)
         }
     }

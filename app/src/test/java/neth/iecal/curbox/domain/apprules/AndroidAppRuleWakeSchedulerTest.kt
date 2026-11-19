@@ -167,10 +167,11 @@ class AndroidAppRuleWakeSchedulerTest {
     }
 
     @Test
-    fun scheduleFallsBackToSetAndAllowWhileIdleOnSecurityException() {
+    fun inexactAlarmAlsoKeepsTheAwakeDeadline() {
         val currentWallClock = 1_000_000_000L
         val currentElapsed = 50_000L
         val recordedAlarms = mutableListOf<TestAlarmRecord>()
+        val postedDelays = mutableListOf<Long>()
         val dummyPi = createDummyPendingIntent()
 
         val alarmPublisher = FakeAlarmPublisher(
@@ -184,7 +185,7 @@ class AndroidAppRuleWakeSchedulerTest {
 
         val scheduler = AndroidAppRuleWakeScheduler(
             alarmPublisher = alarmPublisher,
-            handlerPostDelayed = { _, _ -> true },
+            handlerPostDelayed = { _, delay -> postedDelays.add(delay) },
             handlerRemoveCallbacks = { },
             wallClockMs = { currentWallClock },
             elapsedRealtimeMs = { currentElapsed },
@@ -193,13 +194,14 @@ class AndroidAppRuleWakeSchedulerTest {
             onNonFatalError = { }
         )
 
-        scheduler.schedule("pkg.fallback", dueAtWallClockMs = 1_000_010_000L, token = 202L)
+        scheduler.schedule("pkg.fallback", dueAtWallClockMs = 1_000_060_000L, token = 202L)
 
         assertEquals(1, recordedAlarms.size)
         assertEquals(AlarmManager.ELAPSED_REALTIME_WAKEUP, recordedAlarms[0].type)
-        assertEquals(60_000L, recordedAlarms[0].triggerAtMillis)
+        assertEquals(110_000L, recordedAlarms[0].triggerAtMillis)
         assertSame(dummyPi, recordedAlarms[0].operation)
         assertFalse(recordedAlarms[0].exact)
+        assertEquals(listOf(60_000L), postedDelays)
     }
 
     @Test

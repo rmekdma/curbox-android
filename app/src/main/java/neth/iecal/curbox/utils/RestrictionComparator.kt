@@ -126,6 +126,15 @@ object RestrictionComparator {
         // A wider target set adds protection and is safe to apply immediately. Removing a
         // previously covered package weakens the rule and must stay behind the delay.
         if (!appRuleScopeSameOrWider(old, new, oldGroups, newGroups)) return false
+        val oldRest = old.restConfig
+        val newRest = new.restConfig
+        if ((oldRest == null) != (newRest == null)) return false
+        if (oldRest != null && newRest != null) {
+            if (newRest.usageLimitMinutes > oldRest.usageLimitMinutes ||
+                newRest.restWindowMinutes > oldRest.restWindowMinutes ||
+                newRest.requiredRestMinutes < oldRest.requiredRestMinutes
+            ) return false
+        }
         if (new.allowedMinutes > old.allowedMinutes) return false
         if (!appRuleContributionSameOrStricter(old, new, oldGroups, newGroups)) return false
         if (!appRuleRolloverSameOrStricter(old, new)) return false
