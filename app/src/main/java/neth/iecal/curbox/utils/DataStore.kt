@@ -783,6 +783,9 @@ class DataStoreManager(private val context: Context) {
         }
     }
 
+    internal suspend fun pruneTodoSettlements(now: Long, zone: java.time.ZoneId): Settings =
+        settingsDataStore.updateData { neth.iecal.curbox.domain.apprules.TodoSettlement.prunePending(it, now, zone) }
+
     /** Trusted runtime settlement and in-app management use this immediate write path. */
     suspend fun writeAppRuleRolloverState(state: AppRuleRolloverState, basedOn: Settings): Boolean {
         val updated = settingsDataStore.updateData { current ->
@@ -802,7 +805,7 @@ class DataStoreManager(private val context: Context) {
                     mergedPools[ruleId] = newPool
                 }
             }
-            current.copy(appRuleRolloverState = AppRuleRolloverState(mergedPools))
+            neth.iecal.curbox.domain.apprules.TodoSettlement.recordPending(current, AppRuleRolloverState(mergedPools))
         }
         return state.pools.all { (ruleId, pool) ->
             val settled = updated.appRuleRolloverState.pools[ruleId]
@@ -901,6 +904,7 @@ class DataStoreManager(private val context: Context) {
                 appRuleRolloverState = current.appRuleRolloverState,
                 todoAwardConnection = current.todoAwardConnection,
                 todoAwardLedger = current.todoAwardLedger,
+                todoPendingSettlements = current.todoPendingSettlements,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -1409,7 +1413,8 @@ class DataStoreManager(private val context: Context) {
             appRuleOverrideState = current.appRuleOverrideState,
             appRuleRolloverState = current.appRuleRolloverState,
             todoAwardConnection = current.todoAwardConnection,
-            todoAwardLedger = current.todoAwardLedger
+            todoAwardLedger = current.todoAwardLedger,
+            todoPendingSettlements = current.todoPendingSettlements
         )
         if (disabledRuleIds.isEmpty()) return withLocalRuntime
 

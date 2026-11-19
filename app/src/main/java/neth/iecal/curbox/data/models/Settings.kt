@@ -47,7 +47,8 @@ data class Settings(
     /** Multi-day accumulated rollover state across all app rules. */
     val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState(),
     val todoAwardConnection: TodoAwardConnection? = null,
-    val todoAwardLedger: List<TodoAwardLedgerEntry> = emptyList()
+    val todoAwardLedger: List<TodoAwardLedgerEntry> = emptyList(),
+    val todoPendingSettlements: List<TodoPendingSettlement> = emptyList()
 ) {
     /** Convenient scalar form for settings UIs and deterministic tests. */
     val useDayResetTimeMinutes: Int
@@ -95,4 +96,10 @@ data class TodoAwardLedgerEntry(
     val useDayId: String = "",
     val grantedMinutes: Long = 0,
     val settled: Boolean = false
+)
+
+/** An ended report awaiting its first successful settlement. */
+data class TodoPendingSettlement(
+    val connection: TodoAwardConnection = TodoAwardConnection(),
+    val useDayId: String = ""
 )

@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
@@ -264,6 +265,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         return h
     }
+    private val todoSettlementWake = Channel<Unit>(Channel.CONFLATED)
+    private var todoSettlementJob: Job? = null
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var notificationTickJob: kotlinx.coroutines.Job? = null
     private var liveNotificationJob: kotlinx.coroutines.Job? = null
@@ -746,6 +749,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         // already visible while the service is alive.
         postVisibleApplicationCheck(connectionGeneration = connectionGeneration)
         scheduleNextSettlementAlarm()
+        startTodoSettlement()
     }
 
 
@@ -2368,14 +2372,26 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
     }
 
     private fun startTodoSettlement() {
-        scope.launch(Dispatchers.IO) {
-            try {
-                neth.iecal.curbox.learning.TodoAwardRepository(service, service.dataStoreManager)
-                    .settleEndedReports(now = { observationWallClockMs() }, onFailure = ::logNonFatal)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                logNonFatal(IllegalStateException("Todo settlement failed"))
+        todoSettlementWake.trySend(Unit)
+        synchronized(runtimeLock) {
+            if (todoSettlementJob?.isActive == true) return
+            todoSettlementJob = scope.launch(Dispatchers.IO) {
+                while (isActive) {
+                    todoSettlementWake.receive()
+                    val pending = try {
+                        neth.iecal.curbox.learning.TodoAwardRepository(service, service.dataStoreManager)
+                            .settleEndedReports(now = { observationWallClockMs() }, onFailure = ::logNonFatal)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Throwable) {
+                        logNonFatal(IllegalStateException("Todo settlement failed"))
+                        true
+                    }
+                    if (pending) {
+                        withTimeoutOrNull(15 * 60 * 1000L) { todoSettlementWake.receive() }
+                        todoSettlementWake.trySend(Unit)
+                    }
+                }
             }
         }
     }

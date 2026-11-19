@@ -42,12 +42,15 @@ internal class TodoAwardRepository(context: Context, private val settings: DataS
         zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
         onFailure: (Throwable) -> Unit = {}
     ) = withContext(Dispatchers.IO) {
-        val initial = settings.settings.first()
-        val link = initial.todoAwardConnection ?: return@withContext
-        val scope = TodoRegistrationScope.capture(learning.read(), link.childName) ?: return@withContext
-        if (scope.accountId != link.accountId) return@withContext
+        val initial = settings.pruneTodoSettlements(now(), zone)
+        val link = initial.todoAwardConnection ?: return@withContext false
+        if (initial.todoPendingSettlements.isEmpty()) return@withContext false
+        val scope = TodoRegistrationScope.capture(learning.read(), link.childName) ?: return@withContext true
+        if (scope.accountId != link.accountId) return@withContext true
         val lookup = TodoAwardLookup(LearningComposition.createApi(appContext))
-        for (day in neth.iecal.curbox.domain.apprules.TodoSettlement.dates(initial, now(), zone)) {
+        for (pending in initial.todoPendingSettlements) {
+            val day = pending.useDayId
+            if (day !in neth.iecal.curbox.domain.apprules.TodoSettlement.dates(initial, now(), zone)) continue
             if (initial.todoAwardLedger.any { it.accountId == link.accountId && it.childName == link.childName && it.useDayId == day && it.settled }) continue
             val minutes = try {
                 lookup.minutes(learning.readSession(scope.sessionRef), link.childName,
@@ -60,6 +63,7 @@ internal class TodoAwardRepository(context: Context, private val settings: DataS
             }
             learning.withRegistration(scope) { settings.completeTodoSettlement(link, day, minutes, now, zone, initial) }
         }
+        settings.pruneTodoSettlements(now(), zone).todoPendingSettlements.isNotEmpty()
     }
 
     suspend fun isCurrent(offer: TodoAwardOffer, grant: GuardianExtraTimeGrantBasis): Boolean = withContext(Dispatchers.IO) {
