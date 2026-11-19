@@ -1378,6 +1378,7 @@
     <string name="app_rules_configuration_error">Some app rules need attention before they can run</string>
     <string name="app_rules_all_apps">All launchable apps</string>
     <string name="app_rules_all_apps_and_groups">All launchable apps and %1$s</string>
+    <string name="app_rules_select_target_group">Select at least one app group</string>
     <string name="app_rules_empty_scope">No apps selected</string>
     <string name="app_rules_group_name_hint">Group name</string>
     <string name="app_rules_group_apply_title">When should this group change apply?</string>

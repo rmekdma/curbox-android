@@ -68,6 +68,7 @@ class CreateAppRuleFragment : Fragment() {
         binding.deleteRuleButton.setOnClickListener { delete() }
 
         binding.restRuleSwitch.setOnCheckedChangeListener { _, isRestRule ->
+            if (isRestRule && editingRule == null) binding.includeAllAppsSwitch.isChecked = true
             updateRuleType(isRestRule)
         }
         binding.includeAllAppsSwitch.setOnCheckedChangeListener { _, isChecked ->
@@ -149,6 +150,12 @@ class CreateAppRuleFragment : Fragment() {
     private fun populate(rule: AppRule) {
         binding.nameInput.setText(rule.name)
         binding.activeSwitch.isChecked = rule.isActive
+        val scope = rule.effectiveScope()
+        binding.includeAllAppsSwitch.isChecked = scope.includeAllApps
+        selectedIncludedGroupIds.clear()
+        selectedIncludedGroupIds.addAll(scope.includedGroupIds)
+        selectedExcludedGroupIds.clear()
+        selectedExcludedGroupIds.addAll(scope.excludedGroupIds)
         rule.restConfig?.let { config ->
             binding.restRuleSwitch.isChecked = true
             binding.restUsageLimitInput.setText(config.usageLimitMinutes.toString())
@@ -170,12 +177,6 @@ class CreateAppRuleFragment : Fragment() {
         weekdayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.weekdays }
         binding.rolloverSwitch.isChecked = rule.rolloverEnabled
         unlockDayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.unlockDays }
-        val scope = rule.effectiveScope()
-        binding.includeAllAppsSwitch.isChecked = scope.includeAllApps
-        selectedIncludedGroupIds.clear()
-        selectedIncludedGroupIds.addAll(scope.includedGroupIds)
-        selectedExcludedGroupIds.clear()
-        selectedExcludedGroupIds.addAll(scope.excludedGroupIds)
         selectedContributorGroupIds.clear()
         selectedContributorGroupIds.addAll(rule.effectiveContributorGroupIds())
         updateIncludeAllAppsState(scope.includeAllApps)
@@ -194,8 +195,6 @@ class CreateAppRuleFragment : Fragment() {
         val regularVisibility = if (isRestRule) View.GONE else View.VISIBLE
         (weekdayChecks() + listOf(
             binding.allowanceLayout,
-            binding.includeAllAppsSwitch,
-            binding.excludedGroupsSection,
             binding.contributorGroupsSection,
             binding.usageConditionSwitch,
             binding.earnedAllowanceSwitch,
@@ -212,8 +211,9 @@ class CreateAppRuleFragment : Fragment() {
     }
 
     private fun updateIncludeAllAppsState(includeAll: Boolean) {
-        binding.includedGroupsSection.visibility =
-            if (includeAll || binding.restRuleSwitch.isChecked) View.GONE else View.VISIBLE
+        binding.includedGroupsSection.visibility = if (includeAll) View.GONE else View.VISIBLE
+        binding.excludedGroupsSection.visibility =
+            if (!binding.restRuleSwitch.isChecked || includeAll) View.VISIBLE else View.GONE
     }
 
     private fun updateUsageConditionState(enabled: Boolean) {
@@ -468,6 +468,11 @@ class CreateAppRuleFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.app_rules_complete_fields, Toast.LENGTH_SHORT).show()
             return
         }
+        val includeAll = binding.includeAllAppsSwitch.isChecked
+        if (!includeAll && selectedIncludedGroupIds.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.app_rules_select_target_group, Toast.LENGTH_SHORT).show()
+            return
+        }
         val config = AppRuleRestConfig(
             usageLimitMinutes = binding.restUsageLimitInput.text?.toString()?.toLongOrNull() ?: 0L,
             restWindowMinutes = binding.restWindowInput.text?.toString()?.toLongOrNull() ?: 0L,
@@ -478,6 +483,12 @@ class CreateAppRuleFragment : Fragment() {
             name = name,
             isActive = binding.activeSwitch.isChecked,
             guardianExtraTimeAllowed = false,
+            appGroupId = "",
+            scope = AppRuleScope(
+                includeAllApps = includeAll,
+                includedGroupIds = if (includeAll) emptySet() else selectedIncludedGroupIds.toSet(),
+                excludedGroupIds = if (includeAll) selectedExcludedGroupIds.toSet() else emptySet()
+            ),
             restConfig = config
         )
         if (!AppRuleSnapshot(appGroups = groups, appRules = listOf(rule)).isValid) {
