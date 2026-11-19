@@ -4,6 +4,7 @@ import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.data.models.TodoAwardConnection
 import neth.iecal.curbox.data.models.TodoAwardLedgerEntry
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
+import neth.iecal.curbox.domain.apprules.isTodoAwardEligible
 
 /** Captures the report and all persisted authority used by an approval. */
 data class TodoAwardGrantBasis(
@@ -21,8 +22,7 @@ data class TodoAwardGrantBasis(
             if (link.accountId.isBlank() || link.childName.isBlank() || link.revision.isBlank() ||
                 link.connectedUseDayId.isBlank() || grant.ruleId != link.ruleId ||
                 grant.useDayId < link.connectedUseDayId || reportedMinutes < 0 ||
-                rule == null || !rule.isActive || !rule.guardianExtraTimeAllowed ||
-                !rule.rolloverEnabled || rule.unlockDays != setOf(0, 6)) return null
+                rule == null || !rule.isTodoAwardEligible()) return null
             val entries = settings.todoAwardLedger.filter {
                 it.accountId == link.accountId && it.childName == link.childName && it.useDayId == grant.useDayId
             }

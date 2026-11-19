@@ -30,8 +30,7 @@ internal object TodoSettlement {
         val start = runCatching { LocalDate.parse(link.connectedUseDayId) }.getOrNull()
         val end = runCatching { LocalDate.parse(updated?.lastSettledUseDayId) }.getOrNull()
         val old = runCatching { LocalDate.parse(previous?.lastSettledUseDayId) }.getOrNull() ?: start
-        if (rule == null || !rule.isActive || !rule.guardianExtraTimeAllowed || !rule.rolloverEnabled ||
-            rule.unlockDays != setOf(0, 6) || start == null || end == null || old == null || old >= end) {
+        if (rule == null || !rule.isTodoAwardEligible() || start == null || end == null || old == null || old >= end) {
             return current.copy(appRuleRolloverState = next)
         }
         val monday = end.minusDays((end.dayOfWeek.value - 1).toLong())
@@ -62,7 +61,7 @@ internal object TodoSettlement {
             current.useDayGenerationStartedAtMs != basedOn.useDayGenerationStartedAtMs) return current
         if (current.todoAwardConnection != link || reported < 0 || day !in dates(current, now, zone)) return current
         val rule = current.appRuleSnapshot.appRules.singleOrNull { it.id == link.ruleId } ?: return current
-        if (!rule.isActive || !rule.guardianExtraTimeAllowed || !rule.rolloverEnabled || rule.unlockDays != setOf(0, 6)) return current
+        if (!rule.isTodoAwardEligible()) return current
         val pool = current.appRuleRolloverState.pools[rule.id] ?: return current
         val currentDay = ConfigurableUseDayCalculator(zone, current.useDayResetTime).idAt(now)
         if (pool.lastSettledUseDayId != currentDay) return current

@@ -1,7 +1,9 @@
 package neth.iecal.curbox.utils
 
 import neth.iecal.curbox.data.models.*
+import neth.iecal.curbox.domain.apprules.AppRuleRolloverPolicy
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantBasis
+import neth.iecal.curbox.domain.apprules.TodoSettlement
 import neth.iecal.curbox.domain.apprules.TodoAwardFormState
 import neth.iecal.todo.*
 import org.junit.Assert.*
@@ -9,6 +11,8 @@ import org.junit.Test
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
+import java.util.TimeZone
 import java.time.format.DateTimeFormatter
 
 class TodoAwardFlowTest {
@@ -41,4 +45,34 @@ class TodoAwardFlowTest {
         assertEquals(20L, TodoAwardGrantBasis.capture(current, nextGrant, minutes)!!.availableMinutes)
         assertEquals(40L, current.todoAwardLedger.single().grantedMinutes)
     }
+    @Test fun `partial approval survives restart and only unpaid report reaches weekend pool`() {
+        val zone = ZoneId.of("Asia/Seoul")
+        val previousZone = TimeZone.getDefault()
+        TimeZone.setDefault(TimeZone.getTimeZone(zone))
+        try {
+            val friday = Instant.parse("2026-11-06T12:00:00Z").toEpochMilli()
+            val saturday = Instant.parse("2026-11-07T12:00:00Z").toEpochMilli()
+            val day = ConfigurableUseDayCalculator(zone = zone).idAt(friday)
+            val nextDay = ConfigurableUseDayCalculator(zone = zone).idAt(saturday)
+            val link = TodoAwardConnection("account", "Child", "rule", day, "revision")
+            val rule = AppRule(id = "rule", rolloverEnabled = true, unlockDays = setOf(0, 6))
+            val initial = Settings(appRuleSnapshot = AppRuleSnapshot(appRules = listOf(rule)), todoAwardConnection = link,
+                appRuleRolloverState = AppRuleRolloverState(mapOf("rule" to RuleRolloverPool("rule", 0, day))))
+            val basis = GuardianExtraTimeGrantBasis.capture(initial, "rule", friday, zone)!!
+            val offer = TodoAwardGrantBasis.capture(initial, basis, 75)!!
+            val approved = TodoAwardGrantWrite.nextSettings(initial, "", offer, 0, 60, friday, friday)
+            assertEquals(60L, approved.todoAwardLedger.single().grantedMinutes)
+            val pool = AppRuleRolloverPolicy.reconcileSettlement(
+                approved.appRuleRolloverState.pools.getValue("rule"), rule, nextDay, 20).pool
+            val pending = TodoSettlement.recordPending(approved, AppRuleRolloverState(mapOf("rule" to pool)))
+            val restored = com.google.gson.Gson().fromJson(com.google.gson.Gson().toJson(pending), Settings::class.java)
+            val settled = TodoSettlement.complete(restored, link, day, 75, saturday, zone)
+            assertEquals(35L, settled.appRuleRolloverState.pools.getValue("rule").accumulatedMinutes)
+            assertTrue(settled.todoAwardLedger.single().settled)
+            assertEquals(settled, TodoSettlement.complete(settled, link, day, 75, saturday, zone))
+        } finally {
+            TimeZone.setDefault(previousZone)
+        }
+    }
+
 }

@@ -1,5 +1,7 @@
 package neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules
 
+import neth.iecal.curbox.domain.apprules.isTodoAwardEligible
+
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.os.Bundle
@@ -146,7 +148,7 @@ class AppRuleGroupsFragment : Fragment() {
                 TodoRegistrationScope.capture(document, it)
             }
             val rules = settings.appRuleSnapshot.appRules.filter {
-                it.isActive && it.guardianExtraTimeAllowed && it.rolloverEnabled && it.unlockDays == setOf(0, 6)
+                it.isTodoAwardEligible()
             }
             if (!isAdded) return@launch
             val choices = children.map { it.childName } + if (settings.todoAwardConnection != null) listOf(getString(R.string.todo_award_disconnect)) else emptyList()

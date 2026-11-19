@@ -1,5 +1,7 @@
 package neth.iecal.curbox.utils
 
+import neth.iecal.curbox.domain.apprules.isTodoAwardEligible
+
 import android.content.Context
 import android.content.Intent
 import android.os.Handler
@@ -509,8 +511,7 @@ class DataStoreManager(private val context: Context) {
             if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured) ||
                 current.todoAwardConnectionRevision != expectedRevision) return@updateData current
             val rule = current.appRuleSnapshot.appRules.singleOrNull { it.id == ruleId }
-            if (accountId.isBlank() || childName.isBlank() || rule == null || !rule.isActive ||
-                !rule.guardianExtraTimeAllowed || !rule.rolloverEnabled || rule.unlockDays != setOf(0, 6)) return@updateData current
+            if (accountId.isBlank() || childName.isBlank() || rule == null || !rule.isTodoAwardEligible()) return@updateData current
             val day = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime).idAt(System.currentTimeMillis())
             current.copy(todoAwardConnection = neth.iecal.curbox.data.models.TodoAwardConnection(accountId, childName, ruleId, day, revision),
                 todoAwardConnectionRevision = revision)

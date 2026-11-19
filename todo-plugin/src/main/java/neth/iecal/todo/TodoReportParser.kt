@@ -12,6 +12,17 @@ object TodoReportParser {
         val report = JsonParser.parseString(json).asJsonObject
         val history = report.getAsJsonObject("contentsHistory")
         val activities = history.getAsJsonArray(if (subject == Subject.MATH) "daily" else "dailyCourse")
-        return DailyReport(activities.size())
+        val durations = report.get("learningSecondsByCategory")?.let { element ->
+            runCatching {
+                require(element.isJsonObject)
+                element.asJsonObject.entrySet().filterNot { it.key == "etc" }.associate { (category, value) ->
+                    require(value.isJsonPrimitive && (value.asJsonPrimitive.isNumber || value.asJsonPrimitive.isString))
+                    val seconds = value.asString.toBigDecimal()
+                    require(seconds.signum() >= 0)
+                    category to seconds
+                }
+            }.getOrNull()
+        }
+        return DailyReport(activities.size(), durations)
     }
 }
