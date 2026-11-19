@@ -359,11 +359,15 @@ class SerializedDecisionWorker internal constructor(
     private val restStoreSession = restStore.beginSession()
     private var restRestored = false
     private var hasStoredRest = false
+    private var lastRestElapsed: Long? = null
+    private var lastSavedRest: RestCycleSnapshot? = null
 
     private fun recordRest(configs: Map<String, AppRuleRestConfig>, modes: Map<String, Boolean?>, elapsed: Long, wall: Long, suspended: Set<String> = emptySet()) {
+        if (lastRestElapsed?.let { elapsed < it } == true) return
         if (!restRestored) {
             try {
                 restStore.load(restStoreSession)?.let {
+                    lastSavedRest = it
                     hasStoredRest = it.cycles.isNotEmpty()
                     restCycles.restore(it, configs, wall, elapsed)
                 }
@@ -375,10 +379,12 @@ class SerializedDecisionWorker internal constructor(
             restRestored = true
         }
         restCycles.observe(configs, modes, elapsed, suspended)
+        lastRestElapsed = elapsed
         val snapshot = restCycles.snapshot(wall)
-        if (!hasStoredRest && snapshot.cycles.isEmpty()) return
+        if ((!hasStoredRest && snapshot.cycles.isEmpty()) || snapshot == lastSavedRest) return
         try {
             restStore.save(restStoreSession, snapshot)
+            lastSavedRest = snapshot
             hasStoredRest = snapshot.cycles.isNotEmpty()
         } catch (error: CancellationException) {
             throw error
