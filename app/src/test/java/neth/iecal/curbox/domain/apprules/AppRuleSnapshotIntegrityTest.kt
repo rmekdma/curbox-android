@@ -3,6 +3,7 @@ package neth.iecal.curbox.domain.apprules
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleScope
+import neth.iecal.curbox.data.models.AppRuleRestConfig
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import org.junit.Assert.assertEquals
@@ -30,6 +31,20 @@ class AppRuleSnapshotIntegrityTest {
             snapshot.deleteTargetGroup(group.id, removeReferences = true)
                 ?.isValid == true
         )
+    }
+
+    @Test
+    fun removingLastRestTargetLeavesAnEmptyScopeInsteadOfAllApps() {
+        val group = AppRuleAppGroup("group", "Study", listOf("com.reader"))
+        val rule = AppRule(
+            id = "rest", name = "Rest", scope = AppRuleScope(includedGroupIds = setOf(group.id)),
+            restConfig = AppRuleRestConfig(60, 10, 5), guardianExtraTimeAllowed = false
+        )
+        val updated = AppRuleSnapshot(listOf(group), listOf(rule))
+            .deleteTargetGroup(group.id, removeReferences = true)!!
+
+        assertTrue(updated.isValid)
+        assertTrue(updated.appRules.single().effectiveScope().resolve(updated.appGroups, setOf("com.reader")).isEmpty())
     }
 
     @Test
