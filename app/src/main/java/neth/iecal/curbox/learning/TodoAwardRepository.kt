@@ -58,7 +58,7 @@ internal class TodoAwardRepository(context: Context, private val settings: DataS
                 onFailure(IllegalStateException("Todo settlement lookup failed"))
                 continue
             }
-            learning.withRegistration(scope) { settings.completeTodoSettlement(link, day, minutes, now(), zone, initial) }
+            learning.withRegistration(scope) { settings.completeTodoSettlement(link, day, minutes, now, zone, initial) }
         }
     }
 

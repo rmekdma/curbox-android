@@ -50,4 +50,31 @@ class TodoSettlementTest {
         val disabled = base.copy(appRuleSnapshot = AppRuleSnapshot(appRules = listOf(rule.copy(guardianExtraTimeAllowed = false))))
         assertEquals(disabled, TodoSettlement.complete(disabled, link, "2026-11-02", 75, now, ZoneId.of("UTC")))
     }
+    @Test fun fakeReportJoinsOrdinaryRolloverAndExpiresAfterWeekend() {
+        val friday = "2026-11-06"
+        val saturday = "2026-11-07"
+        val sunday = "2026-11-08"
+        val monday = "2026-11-09"
+        val fake = object : neth.iecal.todo.TodoApi {
+            override fun signIn(email: String, password: String) = error("unused")
+            override fun catalog(session: neth.iecal.todo.TodoSession) = listOf(
+                neth.iecal.todo.TodoChild("Child", mapOf(neth.iecal.todo.Subject.MATH to "math")))
+            override fun report(session: neth.iecal.todo.TodoSession, subject: neth.iecal.todo.Subject, userId: String, date: String): neth.iecal.todo.DailyReport {
+                assertEquals("20261106", date)
+                return neth.iecal.todo.DailyReport(0, mapOf("study" to java.math.BigDecimal("4500")))
+            }
+        }
+        val reported = neth.iecal.todo.TodoAwardLookup(fake).minutes(neth.iecal.todo.TodoSession("account", "fake"), "Child", "20261106")
+        val ordinary = AppRuleRolloverPolicy.reconcileSettlement(RuleRolloverPool("rule", 0, friday), rule, saturday, 20)
+        val settings = base.copy(appRuleRolloverState = AppRuleRolloverState(mapOf("rule" to ordinary.pool)),
+            todoAwardLedger = listOf(TodoAwardLedgerEntry("account", "Child", friday, 60)))
+        val now = java.time.Instant.parse("2026-11-07T04:00:00Z").toEpochMilli()
+        val settled = TodoSettlement.complete(settings, link, friday, reported, now, ZoneId.of("UTC"))
+        val pool = settled.appRuleRolloverState.pools.getValue("rule")
+        assertEquals(35L, pool.accumulatedMinutes)
+        val afterApproval = pool.copy(accumulatedMinutes = pool.accumulatedMinutes - 20)
+        val sundayPool = AppRuleRolloverPolicy.reconcileSettlement(afterApproval, rule, sunday, 10).pool
+        assertEquals(25L, sundayPool.accumulatedMinutes)
+        assertEquals(0L, AppRuleRolloverPolicy.reconcileSettlement(sundayPool, rule, monday).pool.accumulatedMinutes)
+    }
 }
