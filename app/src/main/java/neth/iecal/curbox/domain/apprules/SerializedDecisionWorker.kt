@@ -619,8 +619,10 @@ class SerializedDecisionWorker internal constructor(
             policy = accepted.runtime.evidencePolicy
         )
         if (!isCurrent(request, accepted)) return
-        observeRest(accepted, request.observation, evidence, request.guardianShowing)
-        publishRestBoundary(accepted, request.lifecycleGeneration, request.observation.capturedAtWallMs)
+        if (request.runtimePublication == null) {
+            observeRest(accepted, request.observation, evidence, request.guardianShowing)
+            publishRestBoundary(accepted, request.lifecycleGeneration, request.observation.capturedAtWallMs)
+        }
 
         val evaluable = evidence.outcomes.filter { outcome ->
             outcome.packageName != null && (
