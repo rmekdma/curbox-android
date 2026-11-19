@@ -2993,7 +2993,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         workerInstanceToken: AppRuleWorkerInstanceToken
     ) {
         val request = outcome.request
-        scope.launch(Dispatchers.Main.immediate) {
+        scope.launch {
             try {
                 val dismissal = synchronized(runtimeLock) {
                     val owner = guardianApprovalCoordinator.currentOwner()
