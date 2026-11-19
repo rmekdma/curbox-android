@@ -21,7 +21,7 @@ object LiveRuleNotificationStateCalculator {
         essentialExcludedPackages: Set<String> = emptySet(),
         overrides: AppRuleOverrideState = AppRuleOverrideState()
     ): List<LiveRuleNotificationItem> {
-        val activeRules = snapshot.appRules.filter { it.isActive }
+        val activeRules = snapshot.appRules.filter { it.isActive && it.restConfig == null }
         if (activeRules.isEmpty()) return emptyList()
 
         val sessionList = sessions.toList()
