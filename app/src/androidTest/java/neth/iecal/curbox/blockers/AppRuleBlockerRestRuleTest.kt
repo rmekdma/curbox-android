@@ -75,6 +75,46 @@ class AppRuleBlockerRestRuleTest {
     }
 
     @Test
+    fun restBeforeTheBlockAlsoCountsOnTheApprovalScreen() {
+        RestService().use { fixture ->
+            fixture.observe(READER)
+            fixture.advance(20_000L)
+            fixture.observe(fixture.service.packageName)
+            fixture.advance(40_000L)
+            fixture.observe(READER)
+            fixture.awaitWakeIn(40_000L)
+            fixture.advance(40_000L)
+            val request = fixture.awaitApproval(READER)
+            fixture.openApproval(request)
+            fixture.observe(fixture.service.packageName)
+            fixture.awaitWakeIn(20_000L)
+            fixture.advance(20_000L)
+            fixture.awaitDismissal(request)
+        }
+    }
+
+    @Test
+    fun restAgingOutDuringApprovalDoesNotDismissItEarly() {
+        RestService(AppRuleRestConfig(2L, 2L, 1L)).use { fixture ->
+            fixture.observe(READER)
+            fixture.advance(30_000L)
+            fixture.observe(fixture.service.packageName)
+            fixture.advance(40_000L)
+            fixture.observe(READER)
+            fixture.awaitWakeIn(90_000L)
+            fixture.advance(90_000L)
+            val request = fixture.awaitApproval(READER)
+            fixture.openApproval(request)
+            fixture.observe(fixture.service.packageName)
+            fixture.awaitWakeIn(60_000L)
+            fixture.advance(59_999L)
+            assertNull(fixture.dismissal())
+            fixture.advance(1L)
+            fixture.awaitDismissal(request)
+        }
+    }
+
+    @Test
     fun qualifyingRestFragmentsResetBeforeTheLimitIsReached() {
         RestService(AppRuleRestConfig(60L, 10L, 5L)).use { fixture ->
             fixture.observe(READER)
