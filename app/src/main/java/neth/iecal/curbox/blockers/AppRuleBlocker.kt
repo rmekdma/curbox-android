@@ -93,6 +93,7 @@ import neth.iecal.curbox.domain.apprules.GuardianApprovalCoordinator
 import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationRequest
 import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationStatus
 import neth.iecal.curbox.domain.apprules.GuardianApprovalEvaluationWindow
+import neth.iecal.curbox.domain.apprules.GuardianDismissalRequest
 import neth.iecal.curbox.domain.apprules.GuardianApprovalPolicyFingerprint
 import neth.iecal.curbox.domain.apprules.SettlementRequest
 import neth.iecal.curbox.domain.apprules.SerializedDecisionWorker
@@ -202,6 +203,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         private const val EXTERNAL_EFFECT_FINISHED = 4
         private const val OBSERVATION_RECHECK_KEY = "\u0000foreground-observation"
         const val SETTLEMENT_WAKE_KEY = "\u0000app-rule-rollover-settlement"
+        private const val GUARDIAN_DISMISSAL_WAKE_KEY = "\u0000app-rule-guardian-dismissal"
         private const val SCHEDULER_WAKE_ACTION =
             "neth.iecal.curbox.blockers.APP_RULE_SCHEDULER_WAKE"
         private const val EXTRA_SCHEDULER_PACKAGE =
@@ -940,6 +942,9 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                                     workerInstanceToken
                                 )
                             }
+                            is DecisionOutcome.GuardianDismissalReady -> {
+                                publishGuardianDismissal(outcome, workerInstanceToken)
+                            }
                             is DecisionOutcome.RecheckPlanReady -> {
                                 applyRecheckPlan(workerInstanceToken, outcome.update)
                             }
@@ -1042,6 +1047,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 runtimeRevision = runtimeRevision
             )
             enqueueCurrentGuardianApprovalEvaluation(connectionGeneration)
+            enqueueGuardianDismissalCheck()
             scheduleNextSettlementAlarm()
         }
         return accepted
@@ -2316,6 +2322,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         if (key == SETTLEMENT_WAKE_KEY) {
             onSettlementWake()
+        } else if (key == GUARDIAN_DISMISSAL_WAKE_KEY) {
+            enqueueGuardianDismissalCheck()
         } else {
             onSchedulerWake(
                 expectedGeneration = recheckGeneration.get(),
@@ -2562,6 +2570,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                     serviceConnectionId
                 )
         )
+        enqueueGuardianDismissalCheck()
     }
 
     private fun sendGuardianStateRequest() {
@@ -2604,6 +2613,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 return
             }
             guardianApprovalCoordinator.closeScreen(requestId)
+            cancelScheduledRecheck(GUARDIAN_DISMISSAL_WAKE_KEY)
             if (activeGuardianPackage == packageName) {
                 activeGuardianPackage = null
                 lastShownAt = 0L
@@ -2618,6 +2628,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             }
             when (closeReason) {
                 GuardianApprovalActivity.REASON_CONFIRMED -> null
+                GuardianApprovalActivity.REASON_AUTO_DISMISSED -> null
                 GuardianApprovalActivity.REASON_CANCELLED -> 300L
                 else -> 50L
             }
@@ -2958,6 +2969,79 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         if (!accepted) {
             failGuardianCheckIfCurrent(checkIdentity)
+        }
+    }
+
+    private fun enqueueGuardianDismissalCheck() {
+        val request = synchronized(runtimeLock) {
+            if (!isReadyForChecks() || !::sessionRepository.isInitialized) return
+            val owner = guardianApprovalCoordinator.currentOwner() ?: return
+            if (owner.lifecycleGeneration != currentLifecycleGeneration()) return
+            GuardianDismissalRequest(
+                screenRequestId = owner.screenRequestId,
+                packageName = owner.packageName,
+                lifecycleGeneration = owner.lifecycleGeneration,
+                capturedAtWallMs = observationWallClockMs(),
+                capturedAtElapsedMs = observationElapsedRealtimeMs()
+            )
+        }
+        ensureDecisionWorker(request.lifecycleGeneration.value)?.submitGuardianDismissal(request)
+    }
+
+    private fun publishGuardianDismissal(
+        outcome: DecisionOutcome.GuardianDismissalReady,
+        workerInstanceToken: AppRuleWorkerInstanceToken
+    ) {
+        val request = outcome.request
+        scope.launch(Dispatchers.Main.immediate) {
+            try {
+                val dismissal = synchronized(runtimeLock) {
+                    val owner = guardianApprovalCoordinator.currentOwner()
+                    if (!isReadyForChecks() || !workerInstanceMatchesLocked(workerInstanceToken) ||
+                        outcome.runtimeRevision != latestRuntimeRevision ||
+                        request.lifecycleGeneration != currentLifecycleGeneration() ||
+                        owner?.screenRequestId != request.screenRequestId ||
+                        owner.packageName != request.packageName
+                    ) return@launch
+                    val nextCheckAtMs = outcome.nextCheckAtMs ?: Long.MAX_VALUE
+                    val windowCurrent = GuardianApprovalEvaluationWindow.isCurrent(
+                        evaluationZoneId = outcome.zoneId,
+                        currentZoneId = java.time.ZoneId.systemDefault().id,
+                        capturedAtWallClockMs = request.capturedAtWallMs,
+                        capturedAtElapsedRealtimeMs = request.capturedAtElapsedMs,
+                        validUntilWallClockMs = nextCheckAtMs,
+                        nowWallClockMs = observationWallClockMs(),
+                        nowElapsedRealtimeMs = observationElapsedRealtimeMs()
+                    )
+                    if (!windowCurrent) {
+                        scheduleRecheckAtWallClock(
+                            GUARDIAN_DISMISSAL_WAKE_KEY, observationWallClockMs() + 1L
+                        )
+                        return@launch
+                    }
+                    outcome.nextCheckAtMs?.let {
+                        scheduleRecheckAtWallClock(GUARDIAN_DISMISSAL_WAKE_KEY, it)
+                    }
+                    if (!outcome.allowed ||
+                        owner.confirmation?.phase == GuardianApprovalCoordinator.ConfirmationPhase.CHECKING ||
+                        owner.confirmation?.phase == GuardianApprovalCoordinator.ConfirmationPhase.OFFERED
+                    ) return@launch
+                    Intent(GuardianApprovalActivity.INTENT_ACTION_AUTO_DISMISS)
+                        .setPackage(service.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, request.screenRequestId)
+                        .putExtra(GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE, request.packageName)
+                        .putExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID, serviceConnectionId)
+                        .putExtra(
+                            GuardianApprovalActivity.EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
+                            nextCheckAtMs
+                        )
+                }
+                service.sendBroadcast(dismissal)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                logNonFatal(error)
+            }
         }
     }
 
@@ -3558,6 +3642,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             kind = ObservationKind.SCREEN_OFF,
             screenOffPackage = screenOffPackage
         )
+        enqueueGuardianDismissalCheck()
     }
 
     private val packageReceiver = object : BroadcastReceiver() {

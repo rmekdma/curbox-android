@@ -386,8 +386,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
 
     private val guardianScreenRegisteredReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != INTENT_ACTION_SCREEN_REGISTERED ||
-                !canHandleCallbacks() ||
+            if (intent == null || !canHandleCallbacks() ||
                 !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
             ) return
             val requestId = intent.getStringExtra(EXTRA_SCREEN_REQUEST_ID).orEmpty()
@@ -401,6 +400,20 @@ class GuardianApprovalActivity : AppCompatActivity() {
                     requestedServiceConnectionId != connectionId)
             ) return
 
+            if (intent.action == INTENT_ACTION_AUTO_DISMISS) {
+                val validUntilMs = intent.getLongExtra(
+                    EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS, 0L
+                )
+                if (connectionId == registeredServiceConnectionId &&
+                    !confirmationChecking && grantInProgressRequestId == null &&
+                    System.currentTimeMillis() < validUntilMs
+                ) {
+                    closeReason = REASON_AUTO_DISMISSED
+                    finish()
+                }
+                return
+            }
+            if (intent.action != INTENT_ACTION_SCREEN_REGISTERED) return
             requestedServiceConnectionId = connectionId
             registeredServiceConnectionId = connectionId
             testLog(
@@ -483,7 +496,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
         ContextCompat.registerReceiver(
             this,
             guardianScreenRegisteredReceiver,
-            IntentFilter(INTENT_ACTION_SCREEN_REGISTERED),
+            IntentFilter(INTENT_ACTION_SCREEN_REGISTERED).apply {
+                addAction(INTENT_ACTION_AUTO_DISMISS)
+            },
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
         guardianServiceRegisteredReceiverRegistered = true
@@ -1857,6 +1872,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         const val INTENT_ACTION_CLOSED = "neth.iecal.curbox.guardian.approval.closed"
         const val INTENT_ACTION_OPENED = "neth.iecal.curbox.guardian.approval.opened"
         const val INTENT_ACTION_STATE_REQUEST = "neth.iecal.curbox.guardian.approval.state_request"
+        const val INTENT_ACTION_AUTO_DISMISS = "neth.iecal.curbox.guardian.approval.dismiss"
         const val INTENT_ACTION_SCREEN_REGISTERED =
             "neth.iecal.curbox.guardian.approval.screen_registered"
         const val INTENT_ACTION_APPROVAL_STORED =
@@ -1911,5 +1927,6 @@ class GuardianApprovalActivity : AppCompatActivity() {
         const val REASON_CANCELLED = "cancelled"
         const val REASON_INTERRUPTED = "interrupted"
         const val REASON_CONFIRMED = "confirmed"
+        const val REASON_AUTO_DISMISSED = "auto_dismissed"
     }
 }

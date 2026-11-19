@@ -63,6 +63,15 @@ data class DecisionRequest(
     val runtimePublication: RuntimePublication? = null
 )
 
+/** A passive check of the app covered by the current approval screen. */
+data class GuardianDismissalRequest(
+    val screenRequestId: String,
+    val packageName: String,
+    val lifecycleGeneration: LifecycleGeneration,
+    val capturedAtWallMs: Long,
+    val capturedAtElapsedMs: Long
+)
+
 /** An explicit guardian-target check that does not claim the app is visible. */
 data class GuardianApprovalEvaluationRequest(
     val sourceOrderIdentity: SourceOrderIdentity,
@@ -174,6 +183,14 @@ sealed class DecisionOutcome {
 
     data class RecheckPlanReady(
         val update: RecheckPlanUpdate
+    ) : DecisionOutcome()
+
+    data class GuardianDismissalReady(
+        val request: GuardianDismissalRequest,
+        val runtimeRevision: RuntimeRevision,
+        val allowed: Boolean,
+        val nextCheckAtMs: Long?,
+        val zoneId: String
     ) : DecisionOutcome()
 
     data class UsageResetFinished(
@@ -302,6 +319,8 @@ class SerializedDecisionWorker internal constructor(
 
         data class GuardianApproval(val request: GuardianApprovalEvaluationRequest) : Work
 
+        data class GuardianDismissal(val request: GuardianDismissalRequest) : Work
+
         data class UsageReset(
             val request: UsageResetRequest,
             val resetAtElapsedMs: Long
@@ -336,6 +355,7 @@ class SerializedDecisionWorker internal constructor(
                     when (work) {
                         is Work.Decision -> process(work.request)
                         is Work.GuardianApproval -> processGuardianApproval(work.request)
+                        is Work.GuardianDismissal -> processGuardianDismissal(work.request)
                         is Work.UsageReset -> processUsageReset(work)
                         is Work.Settlement -> processSettlement(work)
                     }
@@ -386,16 +406,26 @@ class SerializedDecisionWorker internal constructor(
     /** Queues a target-only rule check behind settings publications in this worker. */
     fun submitGuardianApprovalEvaluation(
         request: GuardianApprovalEvaluationRequest
+    ): SubmissionResult = submitGuardianWork(
+        request.lifecycleGeneration, Work.GuardianApproval(request)
+    )
+
+    fun submitGuardianDismissal(request: GuardianDismissalRequest): SubmissionResult =
+        submitGuardianWork(request.lifecycleGeneration, Work.GuardianDismissal(request))
+
+    private fun submitGuardianWork(
+        lifecycleGeneration: LifecycleGeneration,
+        work: Work
     ): SubmissionResult = synchronized(stateLock) {
         if (!accepting.get() || !workerJob.isActive) {
             accepting.set(false)
             return@synchronized SubmissionResult.REJECTED_NOT_READY
         }
-        if (request.lifecycleGeneration != currentLifecycleGeneration) {
+        if (lifecycleGeneration != currentLifecycleGeneration) {
             return@synchronized SubmissionResult.REJECTED_STALE
         }
         queuedWorkCount.incrementAndGet()
-        if (requests.trySend(Work.GuardianApproval(request)).isSuccess) {
+        if (requests.trySend(work).isSuccess) {
             SubmissionResult.ACCEPTED
         } else {
             queuedWorkCount.decrementAndGet()
@@ -705,6 +735,48 @@ class SerializedDecisionWorker internal constructor(
             commitStatus = commitStatus,
             followUp = evaluable.firstOrNull()?.followUp ?: FollowUpKind.NONE,
             publicationStatus = PublicationStatus.PUBLISHED
+        )
+    }
+
+    private suspend fun processGuardianDismissal(request: GuardianDismissalRequest) {
+        val accepted = synchronized(stateLock) {
+            if (!accepting.get() || request.lifecycleGeneration != currentLifecycleGeneration) return
+            currentAcceptedRuntime
+        }
+        val runtime = accepted.runtime
+        val calculator = ConfigurableUseDayCalculator(resetTime = runtime.resetTime)
+        val useDayId = calculator.idAt(request.capturedAtWallMs)
+        val result = evaluateRequestSafely(
+            snapshot = runtime.snapshot,
+            packageName = request.packageName,
+            useDayId = useDayId,
+            nowMs = request.capturedAtWallMs,
+            calculator = calculator,
+            useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
+            availablePackages = runtime.launchablePackages,
+            essentialExcludedPackages = runtime.evidencePolicy.essentialPackages,
+            overrides = runtime.overrideState
+        )
+        val evaluation = (result as? SafeAppRuleEvaluationResult.Success)?.evaluation
+        val nextCheckAtMs = if (evaluation == null) {
+            request.capturedAtWallMs + 1_000L
+        } else {
+            AppRuleRecheckPlanner.nextPlan(
+                snapshot = runtime.snapshot,
+                evaluation = evaluation,
+                overrideState = runtime.overrideState,
+                useDayId = useDayId,
+                nowMs = request.capturedAtWallMs,
+                useDayGenerationStartedAtMs = runtime.useDayGenerationStartedAtMs,
+                zone = calculator.zone,
+                useDayCalculator = calculator
+            )?.dueAtWallClockMs
+        }
+        outcomeSink.publish(
+            DecisionOutcome.GuardianDismissalReady(
+                request, accepted.runtimeRevision, evaluation?.isAllowed == true,
+                nextCheckAtMs, calculator.zone.id
+            )
         )
     }
 

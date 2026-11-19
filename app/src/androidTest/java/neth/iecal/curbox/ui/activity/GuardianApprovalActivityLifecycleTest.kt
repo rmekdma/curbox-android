@@ -118,6 +118,44 @@ class GuardianApprovalActivityLifecycleTest {
     }
 
     @Test
+    fun automaticDismissalRequiresTheCurrentScreenAndServiceConnection() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val request = approvalIntent(reason = "Scheduled denial")
+        fun dismiss(screen: String?, connection: String) {
+            context.sendBroadcast(
+                Intent(GuardianApprovalActivity.INTENT_ACTION_AUTO_DISMISS)
+                    .setPackage(context.packageName)
+                    .putExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID, screen)
+                    .putExtra(GuardianApprovalActivity.EXTRA_SERVICE_CONNECTION_ID, connection)
+                    .putExtra(
+                        GuardianApprovalActivity.EXTRA_GUARDIAN_PACKAGE,
+                        request.getStringExtra(GuardianApprovalActivity.EXTRA_PACKAGE)
+                    )
+                    .putExtra(
+                        GuardianApprovalActivity.EXTRA_CONFIRMATION_VALID_UNTIL_WALL_CLOCK_MS,
+                        Long.MAX_VALUE
+                    )
+            )
+            instrumentation.waitForIdleSync()
+        }
+        ActivityScenario.launch<GuardianApprovalActivity>(request).use { scenario ->
+            val screen = request.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)
+            dismiss("replaced-screen", fakeServiceConnectionId.get())
+            dismiss(screen, "previous-connection")
+            assertEquals(Lifecycle.State.RESUMED, scenario.state)
+            dismiss(screen, fakeServiceConnectionId.get())
+            val deadline = SystemClock.elapsedRealtime() + 3_000L
+            while (scenario.state != Lifecycle.State.DESTROYED &&
+                SystemClock.elapsedRealtime() < deadline
+            ) {
+                SystemClock.sleep(20L)
+            }
+            assertEquals(Lifecycle.State.DESTROYED, scenario.state)
+        }
+    }
+
+    @Test
     fun repeatedDenialReusesTheVisibleApprovalScreen() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val firstIntent = approvalIntent(reason = "Initial denial")

@@ -46,6 +46,7 @@
         <activity
             android:name=".ui.activity.GuardianApprovalActivity"
             android:launchMode="singleTop"
+            android:taskAffinity="${applicationId}.guardian_approval"
             android:excludeFromRecents="true"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
