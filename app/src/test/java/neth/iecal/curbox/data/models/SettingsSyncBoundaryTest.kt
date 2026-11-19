@@ -10,12 +10,14 @@ class SettingsSyncBoundaryTest {
         val local = Settings(
             todoAwardConnectionRevision = "local-revision",
             todoAwardConnection = TodoAwardConnection("account", "Child", "rule", "2026-11-05", "link"),
-            todoAwardLedger = listOf(TodoAwardLedgerEntry("account", "Child", "2026-11-05", 40))
+            todoAwardLedger = listOf(TodoAwardLedgerEntry("account", "Child", "2026-11-05", 40)),
+            todoPendingSettlements = listOf(TodoPendingSettlement(TodoAwardConnection("account", "Child", "rule", "2026-11-05", "link"), "2026-11-05"))
         )
         val uploaded = SettingsSyncBoundary.forUpload(local)
         assertEquals(null, uploaded.todoAwardConnection)
         assertEquals("", uploaded.todoAwardConnectionRevision)
         assertTrue(uploaded.todoAwardLedger.isEmpty())
+        assertTrue(uploaded.todoPendingSettlements.isEmpty())
     }
     @Test
     fun guardianCredentialAndApprovalsAreRemovedFromUploadSnapshot() {
