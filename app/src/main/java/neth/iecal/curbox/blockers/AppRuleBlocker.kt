@@ -245,6 +245,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
     }
 
+    internal var restCycleStoreProvider: (java.io.File) -> neth.iecal.curbox.domain.apprules.RestCycleStore = { AtomicRestCycleStore(it) }
     private lateinit var service: BaseBlockingService
     /** Captured outside runtimeLock; direct framework property reads never occur under the lock. */
     @Volatile private var servicePackageName: String = BuildConfig.APPLICATION_ID
@@ -984,7 +985,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 enforcement = enforcement,
                 elapsedRealtimeMs = { observationElapsedRealtimeMs() },
                 coordinator = rolloverCoordinator,
-                restStore = AtomicRestCycleStore(service.filesDir)
+                restStore = restCycleStoreProvider(service.filesDir)
             ).also {
 
                 currentWorkerInstanceToken = workerInstanceToken
