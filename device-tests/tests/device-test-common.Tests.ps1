@@ -93,6 +93,12 @@ Describe "Device Test Common Helpers" {
             $script:DeviceTestShellOutputHandler = { param($command) '__ABSENT__' }
             (Get-LearningRegistrationCount) | Should Be 0
         }
+        It "returns only current registration names including a legacy child" {
+            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":null,"registrations":{"Child1":1},"accounts":{"other":{"registrations":{"Child2":2}}}}}' }
+            (@(Get-LearningRegistrationNames) -join ',') | Should Be 'Child1'
+            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":"Child1","registrations":{}}}' }
+            (@(Get-LearningRegistrationNames) -join ',') | Should Be 'Child1'
+        }
         It "accepts the empty serializer default and omitted null account fields" {
             $script:DeviceTestShellOutputHandler = { param($command) '' }
             (Get-LearningRegistrationCount) | Should Be 0
@@ -473,6 +479,52 @@ mCurrentFocus=Window{af23a46 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.act
             $focus.Success | Should Be $true
             $script:focusResponseIndex | Should Be 2
             $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+    }
+
+    Context "Todo settlement failure count" {
+        It "returns only a validated numeric count" {
+            $script:DeviceTestShellOutputHandler = { param($command) '3' }
+            Get-TodoSettlementFailureCount | Should Be 3
+            $script:DeviceTestShellOutputHandler = { param($command) 'invalid' }
+            $failed = $false; try { Get-TodoSettlementFailureCount } catch { $failed = $true }; $failed | Should Be $true
+        }
+    }
+    Context "Private fake learning backup" {
+        It "backs up only the two fake files inside the app and restores absent files safely" {
+            $script:fakeCommands = @()
+            $script:DeviceTestShellHandler = { param($command) $script:fakeCommands += $command }
+            $id = Backup-FakeLearningFiles
+            $id | Should Match '^[a-f0-9]{32}$'
+            Restore-FakeLearningFiles $id
+            $script:fakeCommands.Count | Should Be 2
+            $script:fakeCommands[0] | Should Match 'umask 077'
+            $script:fakeCommands[0] | Should Match 'learning-fake-state.json learning-fake-session.json'
+            $script:fakeCommands[1] | Should Match 'test -d'
+            $script:fakeCommands[1] | Should Match 'mv -f'
+            $script:fakeCommands[1] | Should Match 'else rm -f'
+        }
+        It "rejects a bad backup identifier without a shell command" {
+            $script:DeviceTestShellHandler = { param($command) throw 'unexpected shell command' }
+            $failed = $false; try { Restore-FakeLearningFiles '../other' } catch { $failed = $true }; $failed | Should Be $true
+        }
+    }
+    Context "Global settings preservation" {
+        It "reads and restores numeric and absent values with readback" {
+            $script:globalValue = '0'; $script:globalCommands = @()
+            $script:DeviceTestShellOutputHandler = { param($command) $script:globalValue }
+            $script:DeviceTestShellHandler = { param($command) $script:globalCommands += $command; if ($command -match 'delete') { $script:globalValue = 'null' } else { $script:globalValue = '1' } }
+            Get-DeviceGlobalSetting 'auto_time' | Should Be '0'
+            Set-DeviceGlobalSetting 'auto_time' '1'
+            Set-DeviceGlobalSetting 'auto_time' 'null'
+            $script:globalCommands[0] | Should Be 'settings put global auto_time 1'
+            $script:globalCommands[1] | Should Be 'settings delete global auto_time'
+        }
+        It "rejects unsupported names and failed readback" {
+            $script:DeviceTestShellOutputHandler = { param($command) '0' }
+            $script:DeviceTestShellHandler = { param($command) }
+            $failed = $false; try { Set-DeviceGlobalSetting 'other' '1' } catch { $failed = $true }; $failed | Should Be $true
+            $failed = $false; try { Set-DeviceGlobalSetting 'auto_time' '1' } catch { $failed = $true }; $failed | Should Be $true
         }
     }
 

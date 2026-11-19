@@ -120,19 +120,20 @@ function Assert-LearningFakeApk([string]$ApkPath, [string]$ExpectedHash, [string
     if (-not (Test-ApprovedLearningApk $ExpectedHash $artifactHash $installedHash $signer $manifest $dex.ToString())) { throw "Installed APK did not pass fake debug identity checks." }
 }
 
-function Get-LearningRegistrationCount {
+function Get-LearningRegistrationNames {
     $raw = Get-TestDeviceShellOutput -Command "run-as neth.iecal.curbox.debug sh -c 'if [ -f files/datastore/learning-fake-state.json ]; then if [ -s files/datastore/learning-fake-state.json ]; then printf STATE:; cat files/datastore/learning-fake-state.json; fi; else echo __ABSENT__; fi'"
-    if ($raw -ceq '' -or $raw.Trim() -eq '__ABSENT__') { return 0 }
+    if ($raw -ceq '' -or $raw.Trim() -eq '__ABSENT__') { return }
     if ($raw.StartsWith('STATE:')) { $raw = $raw.Substring(6) }
     try { $document = $raw | ConvertFrom-Json -ErrorAction Stop } catch { throw "Invalid fake learning state." }
     if (-not $document.state -or -not $document.monitor -or
         -not $document.monitor.PSObject.Properties['registrations'] -or
         $document.monitor.registrations -isnot [pscustomobject] -or
         $document.state.accountId -cne $document.monitor.accountId) { throw "Unsupported fake learning state." }
-    $count = @($document.monitor.registrations.PSObject.Properties).Count
-    if ($count -eq 0 -and $document.monitor.childName) { return 1 }
-    return $count
+    $names = @($document.monitor.registrations.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($names.Count -eq 0 -and $document.monitor.childName) { return [string]$document.monitor.childName }
+    return $names
 }
+function Get-LearningRegistrationCount { return @(Get-LearningRegistrationNames).Count }
 
 function Get-LearningNotifications {
     $dump = Get-TestDeviceShellOutput -Command "dumpsys notification --noredact"
@@ -197,6 +198,36 @@ function Start-TestApp(
 ) {
     $launchCommand = Get-TestAppLaunchCommand -PackageName $PackageName -ActivityName $ActivityName -IntentArguments $IntentArguments
     Invoke-TestDeviceShell -Command $launchCommand
+}
+
+# These backups remain private to the Debug app and contain no copied host-side credentials.
+function Get-TodoSettlementFailureCount {
+    $count = (Get-TestDeviceShellOutput -Command "run-as neth.iecal.curbox.debug sh -c 'if [ -f files/crash_log.txt ]; then grep -c `"Todo settlement lookup failed`" files/crash_log.txt || true; else echo 0; fi'").Trim()
+    if ($count -notmatch '^\d+$') { throw 'Cannot read Todo settlement failure count.' }
+    return [long]$count
+}
+function Backup-FakeLearningFiles {
+    $id = [guid]::NewGuid().ToString('N')
+    $directory = "files/.codex-learning-$id"
+    Invoke-TestDeviceShell -Command "run-as neth.iecal.curbox.debug sh -c 'umask 077; mkdir $directory || exit 1; for name in learning-fake-state.json learning-fake-session.json; do if [ -e files/datastore/`$name ]; then cp -p files/datastore/`$name $directory/`$name || exit 1; fi; done'"
+    return $id
+}
+function Restore-FakeLearningFiles([string]$BackupId) {
+    if ($BackupId -notmatch '^[a-f0-9]{32}$') { throw 'Invalid fake learning backup identifier.' }
+    $directory = "files/.codex-learning-$BackupId"
+    Invoke-TestDeviceShell -Command "run-as neth.iecal.curbox.debug sh -c 'test -d $directory || exit 1; for name in learning-fake-state.json learning-fake-session.json; do if [ -e $directory/`$name ]; then cp -p $directory/`$name files/datastore/`$name.restore || exit 1; mv -f files/datastore/`$name.restore files/datastore/`$name || exit 1; else rm -f files/datastore/`$name || exit 1; fi; done; rm -f $directory/learning-fake-state.json $directory/learning-fake-session.json; rmdir $directory'"
+}
+function Get-DeviceGlobalSetting([string]$Name) {
+    if ($Name -notin @('auto_time', 'auto_time_zone', 'stay_on_while_plugged_in')) { throw 'Unsupported global setting.' }
+    $value = (Get-TestDeviceShellOutput -Command "settings get global $Name").Trim()
+    if ($value -notmatch '^(null|[0-9]+)$') { throw "Cannot read global setting $Name." }
+    return $value
+}
+function Set-DeviceGlobalSetting([string]$Name, [string]$Value) {
+    if ($Name -notin @('auto_time', 'auto_time_zone', 'stay_on_while_plugged_in') -or $Value -notmatch '^(null|[0-9]+)$') { throw 'Invalid global setting or value.' }
+    if ($Value -eq 'null') { Invoke-TestDeviceShell -Command "settings delete global $Name" }
+    else { Invoke-TestDeviceShell -Command "settings put global $Name $Value" }
+    if ((Get-DeviceGlobalSetting $Name) -ne $Value) { throw "Failed to set global setting $Name." }
 }
 
 function Backup-DeviceAccessibilitySettings {

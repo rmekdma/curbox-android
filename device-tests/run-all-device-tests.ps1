@@ -74,6 +74,10 @@ $knownOtherPackageScripts = @(
     "test-device-guardian-extra-time.ps1",
     "test-device-main-app-extra-time.ps1"
 )
+$learningScripts = @(
+    "test-device-learning-monitor.ps1",
+    "test-device-todo-extra-time.ps1"
+)
 
 try {
     . "$PSScriptRoot/lib/device-test-common.ps1"
@@ -113,7 +117,7 @@ try {
 
     $testScripts = @(Get-ChildItem -Path $scriptsRoot -Filter "test-device-*.ps1" -File | Sort-Object Name)
     foreach ($scriptFile in $testScripts) {
-        if ($scriptFile.Name -eq "test-device-learning-monitor.ps1" -and -not $LearningApkPath) {
+        if ($learningScripts -contains $scriptFile.Name -and -not $LearningApkPath) {
             $results.Add([PSCustomObject]@{ Name = $scriptFile.Name; Status = "SKIPPED"; Detail = "Fake debug artifact was not provided." })
             Write-Host "[SKIPPED] $($scriptFile.Name) — fake debug artifact was not provided." -ForegroundColor Yellow
             continue
@@ -129,10 +133,13 @@ try {
         }
 
         $childArguments = @("-TargetPackage", $TargetPackage)
-        if ($scriptFile.Name -eq "test-device-learning-monitor.ps1") {
+        if ($learningScripts -contains $scriptFile.Name) {
             $childArguments = @("-TargetPackage", "neth.iecal.curbox.apitester", "-LearningApkPath", $LearningApkPath, "-ExpectedApkSha256", $ExpectedApkSha256, "-BuildToolsDirectory", $BuildToolsDirectory)
         }
-        if ($scriptFile.Name -ne "test-device-learning-monitor.ps1" -and -not [string]::IsNullOrWhiteSpace($TargetActivity)) {
+        if ($scriptFile.Name -eq "test-device-todo-extra-time.ps1") {
+            $childArguments += @("-Scenario", "Daily")
+        }
+        if ($learningScripts -notcontains $scriptFile.Name -and -not [string]::IsNullOrWhiteSpace($TargetActivity)) {
             $childArguments += @("-TargetActivity", $TargetActivity)
         }
         if ($knownContributorScripts -contains $scriptFile.Name) {
