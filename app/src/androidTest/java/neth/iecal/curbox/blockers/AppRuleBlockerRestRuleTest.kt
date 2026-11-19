@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import neth.iecal.curbox.data.models.AppRule
+import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleRestConfig
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleSnapshot
@@ -96,8 +97,45 @@ class AppRuleBlockerRestRuleTest {
         }
     }
 
+    @Test
+    fun excludedGroupUsageCountsAsRestForAllApps() {
+        val excluded = AppRuleAppGroup("excluded", "Excluded", listOf(GAME))
+        RestService(scope = AppRuleScope(includeAllApps = true, excludedGroupIds = setOf(excluded.id)), groups = listOf(excluded)).use { fixture ->
+            fixture.observe(READER)
+            fixture.advance(40_000L)
+            fixture.observe(GAME)
+            fixture.advance(60_000L)
+            assertNull(fixture.approval.get())
+            fixture.observe(READER)
+            fixture.awaitWakeIn(60_000L)
+            fixture.advance(60_000L)
+            fixture.awaitApproval(READER)
+        }
+    }
+
+    @Test
+    fun includedGroupsShareOneLimitAndOutsideUsageCountsAsRest() {
+        val first = AppRuleAppGroup("first", "First", listOf(READER, GAME))
+        val second = AppRuleAppGroup("second", "Second", listOf(GAME))
+        RestService(scope = AppRuleScope(includedGroupIds = setOf(first.id, second.id)), groups = listOf(first, second)).use { fixture ->
+            fixture.observe(READER)
+            fixture.advance(40_000L)
+            fixture.observe(OUTSIDE)
+            fixture.advance(60_000L)
+            assertNull(fixture.approval.get())
+            fixture.observe(READER)
+            fixture.advance(40_000L)
+            fixture.observe(GAME)
+            fixture.awaitWakeIn(20_000L)
+            fixture.advance(20_000L)
+            fixture.awaitApproval(GAME)
+        }
+    }
+
     private class RestService(
-        restConfig: AppRuleRestConfig = AppRuleRestConfig(1L, 2L, 1L)
+        restConfig: AppRuleRestConfig = AppRuleRestConfig(1L, 2L, 1L),
+        scope: AppRuleScope = AppRuleScope.allApps(),
+        groups: List<AppRuleAppGroup> = emptyList()
     ) : AutoCloseable {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         val approval = AtomicReference<Intent?>()
@@ -135,11 +173,12 @@ class AppRuleBlockerRestRuleTest {
             val snapshots = getField(blocker, "snapshot") as AppRuleSnapshotCoordinator
             snapshots.accept(
                 AppRuleSnapshot(
+                    appGroups = groups,
                     appRules = listOf(
                         AppRule(
                             id = "break",
                             name = "Rest",
-                            scope = AppRuleScope.allApps(),
+                            scope = scope,
                             restConfig = restConfig,
                             guardianExtraTimeAllowed = false
                         )
@@ -246,6 +285,7 @@ class AppRuleBlockerRestRuleTest {
     private companion object {
         const val READER = "com.example.reader"
         const val GAME = "com.example.game"
+        const val OUTSIDE = "com.example.outside"
         const val CONNECTION = "rest-test-connection"
         const val MINUTE = 60_000L
     }
