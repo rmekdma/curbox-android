@@ -47,6 +47,11 @@ class AppRuleBlockerRestRuleTest {
             assertNull(fixture.dismissal())
             fixture.advance(1L)
             fixture.awaitDismissal(request)
+
+            fixture.closeApproval(request, GAME)
+            fixture.awaitWakeIn(60_000L)
+            fixture.advance(60_000L)
+            fixture.awaitApproval(GAME)
         }
     }
 
@@ -176,14 +181,27 @@ class AppRuleBlockerRestRuleTest {
         }
 
         fun openApproval(intent: Intent) {
+            receiveApprovalLifecycle(GuardianApprovalActivity.INTENT_ACTION_OPENED, intent)
+        }
+
+        fun closeApproval(intent: Intent, visiblePackage: String) {
+            approval.set(null)
+            rootPackage = visiblePackage
+            receiveApprovalLifecycle(GuardianApprovalActivity.INTENT_ACTION_CLOSED, intent)
+        }
+
+        private fun receiveApprovalLifecycle(action: String, intent: Intent) {
             val receiver = getField(blocker, "guardianReceiver") as BroadcastReceiver
             receiver.onReceive(
                 service,
                 guardianLifecycleIntent(
-                    action = GuardianApprovalActivity.INTENT_ACTION_OPENED,
+                    action = action,
                     packageName = requireNotNull(intent.getStringExtra(GuardianApprovalActivity.EXTRA_PACKAGE)),
                     screenRequestId = requireNotNull(intent.getStringExtra(GuardianApprovalActivity.EXTRA_SCREEN_REQUEST_ID)),
                     connectionId = CONNECTION
+                ).putExtra(
+                    GuardianApprovalActivity.EXTRA_CLOSE_REASON,
+                    GuardianApprovalActivity.REASON_AUTO_DISMISSED
                 )
             )
         }
