@@ -2340,7 +2340,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val coordinator = rolloverCoordinator ?: return
         scope.launch {
             try {
-                coordinator.reconcileSettlement(wallClockMs)
+                val settlement = coordinator.reconcileSettlement(wallClockMs)
+                if (settlement.committed) startTodoSettlement()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -2361,8 +2362,22 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 return
             }
         }
+        if (outcome.succeeded && outcome.result?.committed == true) startTodoSettlement()
         scheduleNextSettlementAlarm()
         postVisibleApplicationCheck(observationKind = ObservationKind.REFRESH)
+    }
+
+    private fun startTodoSettlement() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                neth.iecal.curbox.learning.TodoAwardRepository(service, service.dataStoreManager)
+                    .settleEndedReports(now = { observationWallClockMs() }, onFailure = ::logNonFatal)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                logNonFatal(IllegalStateException("Todo settlement failed"))
+            }
+        }
     }
 
     internal fun scheduleNextSettlementAlarm() {

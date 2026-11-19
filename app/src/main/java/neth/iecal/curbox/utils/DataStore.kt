@@ -776,6 +776,13 @@ class DataStoreManager(private val context: Context) {
         )
     }
 
+    internal suspend fun completeTodoSettlement(link: neth.iecal.curbox.data.models.TodoAwardConnection,
+        day: String, minutes: Long, now: Long, zone: java.time.ZoneId, basedOn: Settings) {
+        settingsDataStore.updateData { current ->
+            neth.iecal.curbox.domain.apprules.TodoSettlement.complete(current, link, day, minutes, now, zone, basedOn)
+        }
+    }
+
     /** Trusted runtime settlement and in-app management use this immediate write path. */
     suspend fun writeAppRuleRolloverState(state: AppRuleRolloverState, basedOn: Settings): Boolean {
         val updated = settingsDataStore.updateData { current ->

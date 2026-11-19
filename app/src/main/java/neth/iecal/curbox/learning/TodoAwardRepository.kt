@@ -37,6 +37,31 @@ internal class TodoAwardRepository(context: Context, private val settings: DataS
         TodoAwardGrantBasis.capture(latest, grant, minutes)?.let { TodoAwardOffer(it, scope) }
     }
 
+    suspend fun settleEndedReports(
+        now: () -> Long = { System.currentTimeMillis() },
+        zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+        onFailure: (Throwable) -> Unit = {}
+    ) = withContext(Dispatchers.IO) {
+        val initial = settings.settings.first()
+        val link = initial.todoAwardConnection ?: return@withContext
+        val scope = TodoRegistrationScope.capture(learning.read(), link.childName) ?: return@withContext
+        if (scope.accountId != link.accountId) return@withContext
+        val lookup = TodoAwardLookup(LearningComposition.createApi(appContext))
+        for (day in neth.iecal.curbox.domain.apprules.TodoSettlement.dates(initial, now(), zone)) {
+            if (initial.todoAwardLedger.any { it.accountId == link.accountId && it.childName == link.childName && it.useDayId == day && it.settled }) continue
+            val minutes = try {
+                lookup.minutes(learning.readSession(scope.sessionRef), link.childName,
+                    LocalDate.parse(day).format(DateTimeFormatter.BASIC_ISO_DATE), scope.subjects)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                onFailure(IllegalStateException("Todo settlement lookup failed"))
+                continue
+            }
+            learning.withRegistration(scope) { settings.completeTodoSettlement(link, day, minutes, now(), zone, initial) }
+        }
+    }
+
     suspend fun isCurrent(offer: TodoAwardOffer, grant: GuardianExtraTimeGrantBasis): Boolean = withContext(Dispatchers.IO) {
         val current = settings.settings.first()
         grant == GuardianExtraTimeGrantBasis.capture(current, grant.ruleId, System.currentTimeMillis()) &&

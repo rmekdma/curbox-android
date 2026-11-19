@@ -93,5 +93,6 @@ data class TodoAwardLedgerEntry(
     val accountId: String = "",
     val childName: String = "",
     val useDayId: String = "",
-    val grantedMinutes: Long = 0
+    val grantedMinutes: Long = 0,
+    val settled: Boolean = false
 )
