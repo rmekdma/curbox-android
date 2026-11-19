@@ -1085,6 +1085,8 @@ class SerializedDecisionWorker internal constructor(
                 .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
                 .firstOrNull { it.sessionEffect == SessionEvidenceEffect.RENEW }?.packageName
         }
+        val useDayId = ConfigurableUseDayCalculator(resetTime = runtime.resetTime).idAt(facts.capturedAtWallMs)
+        val suspended = mutableSetOf<String>()
         val modes = runtime.snapshot.appRules.filter { it.id in configs }.associate { rule ->
             val using = observedPackage?.let { packageName ->
                 packageName.isNotEmpty() && packageName in rule.effectiveScope().resolve(
@@ -1094,9 +1096,14 @@ class SerializedDecisionWorker internal constructor(
                     foregroundPackageFallback = packageName
                 )
             }
-            rule.id to using
+            val skipped = using == true && AppRuleGuardianOverrides.isSkipped(
+                runtime.overrideState, rule.id, useDayId, facts.capturedAtWallMs,
+                runtime.useDayGenerationStartedAtMs
+            )
+            if (skipped) suspended.add(rule.id)
+            rule.id to if (skipped) null else using
         }
-        restCycles.observe(configs, modes, facts.capturedAtElapsedMs)
+        restCycles.observe(configs, modes, facts.capturedAtElapsedMs, suspended)
     }
 
     private fun observeGuardianRest(accepted: AcceptedRuleRuntimeSnapshot, atElapsedMs: Long) {
@@ -1124,10 +1131,10 @@ class SerializedDecisionWorker internal constructor(
             val remaining = (allowance - used).coerceAtLeast(0L)
             result.copy(
                 usedMillis = used, allowanceMillis = allowance, remainingMillis = remaining,
-                isAllowed = !result.isActive || remaining > 0L,
+                isAllowed = !result.isActive || result.isSkipped || remaining > 0L,
                 directAllowanceMillis = allowance, guardianAllowanceMillis = 0L,
                 guardianUsedMillis = 0L, guardianRemainingMillis = 0L,
-                isAllowanceExhausted = result.isActive && remaining == 0L
+                isAllowanceExhausted = result.isActive && !result.isSkipped && remaining == 0L
             )
         }
         return AppRulesEvaluation(results.all { it.isAllowed }, results.filterNot { it.isAllowed }, results)

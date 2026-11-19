@@ -402,6 +402,44 @@ class SerializedDecisionWorkerTest {
     }
 
     @Test
+    fun restRuleSkipAllowsOnlyTheSelectedRuleAndExpiresAtItsBoundary() {
+        val capturedAt = ZonedDateTime.now(ZoneId.systemDefault()).withHour(10).withMinute(30)
+            .withSecond(0).withNano(0).toInstant().toEpochMilli()
+        val useDayId = ConfigurableUseDayCalculator().idAt(capturedAt)
+        val receipt = GuardianApprovalWorkReceipt.RuleSkip(
+            ruleId = "usage", useDayId = useDayId, skipFromMs = capturedAt - 1_000L,
+            skipUntilMs = capturedAt + 60_000L, useDayGenerationStartedAtMs = 0L
+        )
+        for (otherAllowance in listOf(0L, 1_440L)) {
+            val base = approvalRuntime(RuntimeRevision(83L), useDayId, receipt, nightAllowedMinutes = otherAllowance)
+            val rules = base.runtime.snapshot.appRules.map { rule ->
+                if (rule.id == "usage") rule.copy(
+                    guardianExtraTimeAllowed = false,
+                    restConfig = neth.iecal.curbox.data.models.AppRuleRestConfig(1L, 10L, 1L)
+                ) else rule
+            }
+            val accepted = base.copy(runtime = base.runtime.copy(snapshot = base.runtime.snapshot.copy(appRules = rules)))
+            val outcomes = RecordingOutcomeSink()
+            val worker = worker(RecordingRepository(), outcomes, accepted)
+            try {
+                assertEquals(SubmissionResult.ACCEPTED, worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAt - 61_000L)))
+                assertTrue(outcomes.awaitCount(1))
+                assertEquals(SubmissionResult.ACCEPTED, worker.submitGuardianApprovalEvaluation(
+                    guardianApprovalRequest(83L, "skip-rest", "check-rest", receipt, capturedAt)
+                ))
+                assertTrue(outcomes.awaitGuardianApprovalCount(1))
+                val result = outcomes.guardianApprovalEvaluations.single()
+                val evaluation = requireNotNull(result.evaluation)
+                assertTrue(evaluation.evaluations.first { it.ruleId == "usage" }.isAllowed)
+                assertEquals(otherAllowance > 0L, evaluation.isAllowed)
+                if (otherAllowance > 0L) assertEquals(receipt.skipUntilMs, result.validUntilWallClockMs)
+            } finally {
+                worker.stop(recoveryStop(LifecycleGeneration(1L)))
+            }
+        }
+    }
+
+    @Test
     fun guardianApprovalSkipResultExpiresAtItsExistingSkipBoundary() {
         val zone = ZoneId.systemDefault()
         val capturedAt = ZonedDateTime.now(zone)
