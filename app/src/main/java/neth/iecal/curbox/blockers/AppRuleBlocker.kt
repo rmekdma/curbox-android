@@ -2648,7 +2648,6 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
             }
             when (closeReason) {
                 GuardianApprovalActivity.REASON_CONFIRMED -> null
-                GuardianApprovalActivity.REASON_AUTO_DISMISSED -> null
                 GuardianApprovalActivity.REASON_CANCELLED -> 300L
                 else -> 50L
             }
