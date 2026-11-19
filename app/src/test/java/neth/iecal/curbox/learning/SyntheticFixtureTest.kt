@@ -11,6 +11,11 @@ class SyntheticFixtureTest {
         assertEquals(2, fixture.report("user1", Subject.MATH, "20261106").count)
     }
 
+    @Test fun `fixture exposes synthetic category durations`() {
+        val fixture = SyntheticFixture.parse("""{"revision":"r","children":[{"name":"Child1","users":{"MATH":"user1"}}],"reports":[{"user":"user1","subject":"MATH","date":"20261106","count":2,"learningSecondsByCategory":{"course":30,"etc":999}}]}""")
+        assertEquals(mapOf("course" to java.math.BigDecimal("30"), "etc" to java.math.BigDecimal("999")), fixture.report("user1", Subject.MATH, "20261106").learningSecondsByCategory)
+    }
+
     @Test fun configuredReportsAndFailuresAreDistinct() {
         val fixture = SyntheticFixture.parse("""{"revision":"run1","children":[{"name":"Child1","users":{"MATH":"user1"}}],"reports":[{"user":"user1","subject":"MATH","date":"20261106","count":2,"minutes":4},{"user":"user1","subject":"MATH","date":"20261107","failure":"NETWORK"}]}""")
         assertEquals(2, fixture.report("user1", Subject.MATH, "20261106").count)
@@ -19,3 +24,5 @@ class SyntheticFixtureTest {
         assertTrue(runCatching { SyntheticFixture.parse("{}") }.isFailure)
     }
 }
+
+

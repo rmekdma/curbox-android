@@ -51,11 +51,16 @@ class SyntheticFixture private constructor(val revision: String, val children: L
                     Result.failure(TodoApiException(kind = LearningFailure.valueOf(obj.get("failure").asString)))
                 } else {
                     require(obj.keySet().containsAll(setOf("user", "subject", "date", "count")))
-                    require(obj.keySet().all { it in setOf("user", "subject", "date", "count", "minutes", "seconds") })
+                    require(obj.keySet().all { it in setOf("user", "subject", "date", "count", "minutes", "seconds", "learningSecondsByCategory") })
                     require(obj.get("count").toString().matches(Regex("[0-9]{1,6}")))
                     val count = obj.get("count").asInt
                     require(count in 0..100000)
-                    Result.success(DailyReport(count))
+                    val durations = obj.get("learningSecondsByCategory")?.asJsonObject?.entrySet()?.associate { (category, value) ->
+                        require(category.matches(Regex("[A-Za-z0-9_]{1,32}")))
+                        require(value.toString().matches(Regex("[0-9]{1,12}(\\.[0-9]{1,6})?")))
+                        category to value.asBigDecimal
+                    }
+                    Result.success(DailyReport(count, durations))
                 }
                 require(reports.put(Triple(user, subject, date), value) == null)
             }
@@ -100,3 +105,5 @@ object LearningComposition {
     fun subjectPackages() = SubjectPackages(math = "neth.iecal.curbox.apitester")
     fun createScreen(context: Context) = LearningScreen(createApi(context), LearningStorage(context))
 }
+
+
