@@ -233,7 +233,7 @@ class AndroidAppRuleWakeScheduler internal constructor(
         }
 
         oldRegistration?.let(::disposeRegistration)
-        if (handlerRunnable != null && handlerDelayMs != null) {
+        if (handlerRunnable != null) {
             handlerPostDelayed(handlerRunnable, handlerDelayMs)
         }
     }

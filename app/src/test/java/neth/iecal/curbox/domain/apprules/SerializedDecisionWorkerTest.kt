@@ -1183,14 +1183,18 @@ class SerializedDecisionWorkerTest {
         repository.startFailure = IllegalStateException("injected persistence failure")
         val outcomes = RecordingOutcomeSink()
         val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val failureLogged = CountDownLatch(1)
         val worker = worker(
             repository = repository,
             sink = outcomes,
-            onNonFatalError = { errors += it }
+            onNonFatalError = {
+                errors += it
+                failureLogged.countDown()
+            }
         )
         try {
             worker.submit(request(1L, 1L, TARGET_PACKAGE, capturedAtMs = 1_000L))
-            assertTrue(outcomes.awaitIdle())
+            assertTrue(failureLogged.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
             assertTrue(outcomes.values.isEmpty())
             assertEquals(1, errors.size)
 
