@@ -47,7 +47,8 @@ data class Settings(
     /** Multi-day accumulated rollover state across all app rules. */
     val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState(),
     val todoAwardConnection: TodoAwardConnection? = null,
-    val todoAwardLedger: List<TodoAwardLedgerEntry> = emptyList()
+    val todoAwardLedger: List<TodoAwardLedgerEntry> = emptyList(),
+    val todoAwardConnectionRevision: String = ""
 ) {
     /** Convenient scalar form for settings UIs and deterministic tests. */
     val useDayResetTimeMinutes: Int

@@ -160,7 +160,7 @@ class AppRuleGroupsFragment : Fragment() {
                     if (childIndex >= children.size) {
                         viewLifecycleOwner.lifecycleScope.launch {
                             val saved = try {
-                                dataStore.clearTodoAwardConnection()
+                                dataStore.clearTodoAwardConnection(settings.todoAwardConnectionRevision)
                             } catch (error: CancellationException) {
                                 throw error
                             } catch (_: Exception) {
@@ -176,9 +176,15 @@ class AppRuleGroupsFragment : Fragment() {
                             .setTitle(R.string.todo_award_choose_rule)
                             .setItems(rules.map { it.name.ifBlank { it.id } }.toTypedArray()) { _, ruleIndex ->
                                 viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                                    val saved = storage.withRegistration(scope) {
-                                        dataStore.setTodoAwardConnection(scope.accountId, scope.childName, rules[ruleIndex].id)
-                                    } == true
+                                    val saved = try {
+                                        storage.withRegistration(scope) {
+                                            dataStore.setTodoAwardConnection(scope.accountId, scope.childName, rules[ruleIndex].id, settings.todoAwardConnectionRevision)
+                                        } == true
+                                    } catch (error: CancellationException) {
+                                        throw error
+                                    } catch (_: Exception) {
+                                        false
+                                    }
                                     withContext(Dispatchers.Main) {
                                         if (isAdded) Toast.makeText(requireContext(), if (saved) R.string.todo_award_saved else R.string.todo_award_failed, Toast.LENGTH_SHORT).show()
                                     }

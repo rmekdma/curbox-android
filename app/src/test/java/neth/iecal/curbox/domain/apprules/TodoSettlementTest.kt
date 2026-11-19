@@ -2,6 +2,7 @@ package neth.iecal.curbox.domain.apprules
 
 import java.time.ZoneId
 import neth.iecal.curbox.data.models.*
+import neth.iecal.curbox.utils.clearGuardianExtraTimeForRules
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -50,6 +51,15 @@ class TodoSettlementTest {
         val disabled = base.copy(appRuleSnapshot = AppRuleSnapshot(appRules = listOf(rule.copy(guardianExtraTimeAllowed = false))))
         assertEquals(disabled, TodoSettlement.complete(disabled, link, "2026-11-02", 75, now, ZoneId.of("UTC")))
     }
+    @Test fun disablingAndReenablingCannotRestoreClearedBalanceFromLateReport() {
+        val now = java.time.Instant.parse("2026-11-03T04:00:00Z").toEpochMilli()
+        val disabled = base.clearGuardianExtraTimeForRules(setOf("rule"), "2026-11-03")
+        assertEquals("2026-11-03", disabled.todoAwardConnection?.connectedUseDayId)
+        val reenabled = disabled.copy(appRuleSnapshot = base.appRuleSnapshot)
+        assertEquals(emptyList<String>(), TodoSettlement.dates(reenabled, now, ZoneId.of("UTC")))
+        assertEquals(reenabled, TodoSettlement.complete(reenabled, link, "2026-11-02", 75, now, ZoneId.of("UTC"), base))
+    }
+
     @Test fun fakeReportJoinsOrdinaryRolloverAndExpiresAfterWeekend() {
         val friday = "2026-11-06"
         val saturday = "2026-11-07"

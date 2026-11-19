@@ -8,11 +8,13 @@ import org.junit.Test
 class SettingsSyncBoundaryTest {
     @Test fun todoAwardStateStaysOnDevice() {
         val local = Settings(
+            todoAwardConnectionRevision = "local-revision",
             todoAwardConnection = TodoAwardConnection("account", "Child", "rule", "2026-11-05", "link"),
             todoAwardLedger = listOf(TodoAwardLedgerEntry("account", "Child", "2026-11-05", 40))
         )
         val uploaded = SettingsSyncBoundary.forUpload(local)
         assertEquals(null, uploaded.todoAwardConnection)
+        assertEquals("", uploaded.todoAwardConnectionRevision)
         assertTrue(uploaded.todoAwardLedger.isEmpty())
     }
     @Test

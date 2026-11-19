@@ -503,25 +503,29 @@ class DataStoreManager(private val context: Context) {
     }
 
     /** Saves a new link only while its learning registration is held by the caller. */
-    internal suspend fun setTodoAwardConnection(accountId: String, childName: String, ruleId: String): Boolean {
+    internal suspend fun setTodoAwardConnection(accountId: String, childName: String, ruleId: String, expectedRevision: String): Boolean {
         val revision = java.util.UUID.randomUUID().toString()
         val updated = settingsDataStore.updateData { current ->
-            if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured)) return@updateData current
+            if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured) ||
+                current.todoAwardConnectionRevision != expectedRevision) return@updateData current
             val rule = current.appRuleSnapshot.appRules.singleOrNull { it.id == ruleId }
             if (accountId.isBlank() || childName.isBlank() || rule == null || !rule.isActive ||
                 !rule.guardianExtraTimeAllowed || !rule.rolloverEnabled || rule.unlockDays != setOf(0, 6)) return@updateData current
             val day = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime).idAt(System.currentTimeMillis())
-            current.copy(todoAwardConnection = neth.iecal.curbox.data.models.TodoAwardConnection(accountId, childName, ruleId, day, revision))
+            current.copy(todoAwardConnection = neth.iecal.curbox.data.models.TodoAwardConnection(accountId, childName, ruleId, day, revision),
+                todoAwardConnectionRevision = revision)
         }
         return updated.todoAwardConnection?.revision == revision
     }
 
-    internal suspend fun clearTodoAwardConnection(): Boolean {
+    internal suspend fun clearTodoAwardConnection(expectedRevision: String): Boolean {
+        val revision = java.util.UUID.randomUUID().toString()
         val updated = settingsDataStore.updateData { current ->
-            if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured)) current
-            else current.copy(todoAwardConnection = null)
+            if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured) ||
+                current.todoAwardConnectionRevision != expectedRevision) current
+            else current.copy(todoAwardConnection = null, todoAwardConnectionRevision = revision)
         }
-        return updated.todoAwardConnection == null
+        return updated.todoAwardConnectionRevision == revision
     }
     /** Stores a direct grant authorized by the app's current guardian management session. */
     internal suspend fun grantAppRuleTimeFromAuthenticatedSession(
@@ -901,6 +905,7 @@ class DataStoreManager(private val context: Context) {
                 appRuleRolloverState = current.appRuleRolloverState,
                 todoAwardConnection = current.todoAwardConnection,
                 todoAwardLedger = current.todoAwardLedger,
+                todoAwardConnectionRevision = current.todoAwardConnectionRevision,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -1409,7 +1414,8 @@ class DataStoreManager(private val context: Context) {
             appRuleOverrideState = current.appRuleOverrideState,
             appRuleRolloverState = current.appRuleRolloverState,
             todoAwardConnection = current.todoAwardConnection,
-            todoAwardLedger = current.todoAwardLedger
+            todoAwardLedger = current.todoAwardLedger,
+            todoAwardConnectionRevision = current.todoAwardConnectionRevision
         )
         if (disabledRuleIds.isEmpty()) return withLocalRuntime
 
@@ -1662,7 +1668,13 @@ internal fun Settings.clearGuardianExtraTimeForRules(
             lastSettledUseDayId = currentUseDayId
         )
     }
+    val link = todoAwardConnection
+    val invalidatedLink = link?.takeIf { it.ruleId in ruleIds }?.copy(
+        connectedUseDayId = currentUseDayId, revision = java.util.UUID.randomUUID().toString()
+    )
     return copy(
+        todoAwardConnection = invalidatedLink ?: link,
+        todoAwardConnectionRevision = invalidatedLink?.revision ?: todoAwardConnectionRevision,
         appRuleOverrideState = appRuleOverrideState.copy(
             grants = appRuleOverrideState.grants.filterNot { it.ruleId in ruleIds }
         ),
