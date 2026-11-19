@@ -1,5 +1,7 @@
 package neth.iecal.curbox.blockers
 
+import neth.iecal.curbox.domain.apprules.AtomicRestCycleStore
+
 import android.app.AlarmManager
 import android.app.KeyguardManager
 import android.app.PendingIntent
@@ -981,7 +983,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 usageResetRepository = usageResetRepository,
                 enforcement = enforcement,
                 elapsedRealtimeMs = { observationElapsedRealtimeMs() },
-                coordinator = rolloverCoordinator
+                coordinator = rolloverCoordinator,
+                restStore = AtomicRestCycleStore(service.filesDir)
             ).also {
 
                 currentWorkerInstanceToken = workerInstanceToken

@@ -16,6 +16,31 @@ internal class RestCycleTracker {
 
     private val cycles = mutableMapOf<String, Cycle>()
 
+    fun snapshot(wallAt: Long): RestCycleSnapshot = RestCycleSnapshot(
+        wallAt = wallAt,
+        cycles = cycles.filterValues { it.started }.mapValues { (_, cycle) ->
+            RestCycleSaved(cycle.used, cycle.rests.map { RestIntervalSaved(cycle.lastAt - it.start, cycle.lastAt - it.end) })
+        }
+    )
+
+    fun restore(snapshot: RestCycleSnapshot, configs: Map<String, AppRuleRestConfig>, wallAt: Long, elapsedAt: Long) {
+        val downtime = (wallAt - snapshot.wallAt).coerceAtLeast(0L)
+        snapshot.cycles.forEach { (id, saved) ->
+            val config = configs[id] ?: return@forEach
+            val cycle = Cycle(config, elapsedAt, null, started = true, used = saved.used.coerceAtLeast(0L))
+            saved.rests.forEach { interval ->
+                val start = subtractSaturated(subtractSaturated(elapsedAt, downtime), interval.startAge)
+                val end = subtractSaturated(subtractSaturated(elapsedAt, downtime), interval.endAge)
+                if (start < end && end <= elapsedAt) cycle.rests.add(Interval(start, end))
+            }
+            prune(cycle, elapsedAt)
+            cycles[id] = cycle
+        }
+    }
+
+    private fun subtractSaturated(value: Long, amount: Long): Long =
+        if (amount < 0L || value < Long.MIN_VALUE + amount) Long.MIN_VALUE else value - amount
+
     /** Null mode ends observation without inventing time during an unknown interval. */
     fun observe(configs: Map<String, AppRuleRestConfig>, modes: Map<String, Boolean?>, at: Long) {
         cycles.keys.retainAll(configs.keys)
@@ -91,7 +116,7 @@ internal class RestCycleTracker {
 
     private fun restAt(cycle: Cycle, delay: Long, window: Long): Long {
         val end = safeAdd(cycle.lastAt, delay)
-        val windowStart = (end - window).coerceAtLeast(0L)
+        val windowStart = subtractSaturated(end, window)
         var total = (end - maxOf(cycle.lastAt, windowStart)).coerceAtLeast(0L)
         cycle.rests.forEach { interval ->
             total = safeAdd(total, (minOf(interval.end, end) - maxOf(interval.start, windowStart)).coerceAtLeast(0L))
@@ -100,7 +125,7 @@ internal class RestCycleTracker {
     }
 
     private fun prune(cycle: Cycle, at: Long) {
-        val start = (at - millis(cycle.config.restWindowMinutes)).coerceAtLeast(0L)
+        val start = subtractSaturated(at, millis(cycle.config.restWindowMinutes))
         cycle.rests.removeAll { it.end <= start }
     }
 
