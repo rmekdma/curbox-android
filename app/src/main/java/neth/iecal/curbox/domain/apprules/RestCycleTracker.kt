@@ -42,7 +42,7 @@ internal class RestCycleTracker {
         if (amount < 0L || value < Long.MIN_VALUE + amount) Long.MIN_VALUE else value - amount
 
     /** Null mode ends observation without inventing time during an unknown interval. */
-    fun observe(configs: Map<String, AppRuleRestConfig>, modes: Map<String, Boolean?>, at: Long) {
+    fun observe(configs: Map<String, AppRuleRestConfig>, modes: Map<String, Boolean?>, at: Long, suspended: Set<String> = emptySet()) {
         cycles.keys.retainAll(configs.keys)
         configs.forEach { (id, config) ->
             var cycle = cycles[id]
@@ -52,7 +52,7 @@ internal class RestCycleTracker {
             }
             if (at < cycle.lastAt) return@forEach
             val mode = modes[id]
-            if (mode != null) advance(cycle, at)
+            if (mode != null || id in suspended) advance(cycle, at)
             cycle.lastAt = at
             cycle.config = config
             if (cycle.started && restAt(cycle, 0L, millis(config.restWindowMinutes)) >= millis(config.requiredRestMinutes)) {

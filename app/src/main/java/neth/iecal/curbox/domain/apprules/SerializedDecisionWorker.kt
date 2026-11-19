@@ -360,7 +360,7 @@ class SerializedDecisionWorker internal constructor(
     private var restRestored = false
     private var hasStoredRest = false
 
-    private fun recordRest(configs: Map<String, AppRuleRestConfig>, modes: Map<String, Boolean?>, elapsed: Long, wall: Long) {
+    private fun recordRest(configs: Map<String, AppRuleRestConfig>, modes: Map<String, Boolean?>, elapsed: Long, wall: Long, suspended: Set<String> = emptySet()) {
         if (!restRestored) {
             try {
                 restStore.load(restStoreSession)?.let {
@@ -374,7 +374,7 @@ class SerializedDecisionWorker internal constructor(
             }
             restRestored = true
         }
-        restCycles.observe(configs, modes, elapsed)
+        restCycles.observe(configs, modes, elapsed, suspended)
         val snapshot = restCycles.snapshot(wall)
         if (!hasStoredRest && snapshot.cycles.isEmpty()) return
         try {
@@ -1121,6 +1121,8 @@ class SerializedDecisionWorker internal constructor(
                 .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
                 .firstOrNull { it.sessionEffect == SessionEvidenceEffect.RENEW }?.packageName
         }
+        val useDayId = ConfigurableUseDayCalculator(resetTime = runtime.resetTime).idAt(facts.capturedAtWallMs)
+        val suspended = mutableSetOf<String>()
         val modes = runtime.snapshot.appRules.filter { it.id in configs }.associate { rule ->
             val using = observedPackage?.let { packageName ->
                 packageName.isNotEmpty() && packageName in rule.effectiveScope().resolve(
@@ -1130,9 +1132,14 @@ class SerializedDecisionWorker internal constructor(
                     foregroundPackageFallback = packageName
                 )
             }
-            rule.id to using
+            val skipped = using == true && AppRuleGuardianOverrides.isSkipped(
+                runtime.overrideState, rule.id, useDayId, facts.capturedAtWallMs,
+                runtime.useDayGenerationStartedAtMs
+            )
+            if (skipped) suspended.add(rule.id)
+            rule.id to if (skipped) null else using
         }
-        recordRest(configs, modes, facts.capturedAtElapsedMs, facts.capturedAtWallMs)
+        recordRest(configs, modes, facts.capturedAtElapsedMs, facts.capturedAtWallMs, suspended)
     }
 
     private fun observeGuardianRest(accepted: AcceptedRuleRuntimeSnapshot, atElapsedMs: Long, atWallMs: Long) {
@@ -1162,10 +1169,10 @@ class SerializedDecisionWorker internal constructor(
             val remaining = (allowance - used).coerceAtLeast(0L)
             result.copy(
                 usedMillis = used, allowanceMillis = allowance, remainingMillis = remaining,
-                isAllowed = !result.isActive || remaining > 0L,
+                isAllowed = !result.isActive || result.isSkipped || remaining > 0L,
                 directAllowanceMillis = allowance, guardianAllowanceMillis = 0L,
                 guardianUsedMillis = 0L, guardianRemainingMillis = 0L,
-                isAllowanceExhausted = result.isActive && remaining == 0L
+                isAllowanceExhausted = result.isActive && !result.isSkipped && remaining == 0L
             )
         }
         return AppRulesEvaluation(results.all { it.isAllowed }, results.filterNot { it.isAllowed }, results)
