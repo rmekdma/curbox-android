@@ -48,7 +48,8 @@ data class Settings(
     val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState(),
     val todoAwardConnection: TodoAwardConnection? = null,
     val todoAwardLedger: List<TodoAwardLedgerEntry> = emptyList(),
-    val todoPendingSettlements: List<TodoPendingSettlement> = emptyList()
+    val todoPendingSettlements: List<TodoPendingSettlement> = emptyList(),
+    val todoAwardConnectionRevision: String = ""
 ) {
     /** Convenient scalar form for settings UIs and deterministic tests. */
     val useDayResetTimeMinutes: Int

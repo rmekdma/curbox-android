@@ -26,7 +26,7 @@ data class TodoAwardGrantBasis(
             val entries = settings.todoAwardLedger.filter {
                 it.accountId == link.accountId && it.childName == link.childName && it.useDayId == grant.useDayId
             }
-            if (entries.size > 1) return null
+            if (entries.size > 1 || entries.singleOrNull()?.settled == true) return null
             val granted = entries.singleOrNull()?.grantedMinutes ?: 0
             if (granted < 0) return null
             return TodoAwardGrantBasis(link, grant, reportedMinutes, granted)

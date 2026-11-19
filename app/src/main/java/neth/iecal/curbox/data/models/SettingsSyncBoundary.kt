@@ -9,6 +9,7 @@ object SettingsSyncBoundary {
         appRuleRolloverState = AppRuleRolloverState(),
         todoAwardConnection = null,
         todoAwardLedger = emptyList(),
-        todoPendingSettlements = emptyList()
+        todoPendingSettlements = emptyList(),
+        todoAwardConnectionRevision = ""
     )
 }

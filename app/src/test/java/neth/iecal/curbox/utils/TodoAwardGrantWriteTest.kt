@@ -25,4 +25,17 @@ class TodoAwardGrantWriteTest {
         assertEquals(relinked, TodoAwardGrantWrite.nextSettings(relinked, "", award, 20, 40, now, now))
         assertEquals(committed, TodoAwardGrantWrite.nextSettings(committed, "", award, 20, 40, now + 2, now + 2))
     }
+    @Test fun `relink preserves the report ledger and never reopens settled reports`() {
+        val now = Instant.parse("2026-11-05T12:00:00Z").toEpochMilli()
+        val day = ConfigurableUseDayCalculator().idAt(now)
+        val link = TodoAwardConnection("account", "Child", "new-rule", day, "new-link")
+        val current = Settings(appRuleSnapshot = AppRuleSnapshot(appRules = listOf(
+            AppRule(id = "new-rule", rolloverEnabled = true, unlockDays = setOf(0, 6))
+        )), todoAwardConnection = link,
+            todoAwardLedger = listOf(TodoAwardLedgerEntry("account", "Child", day, 40)))
+        val grant = GuardianExtraTimeGrantBasis.capture(current, "new-rule", now)!!
+        assertEquals(20L, TodoAwardGrantBasis.capture(current, grant, 60)?.availableMinutes)
+        val settled = current.copy(todoAwardLedger = listOf(TodoAwardLedgerEntry("account", "Child", day, 40, true)))
+        assertNull(TodoAwardGrantBasis.capture(settled, grant, 60))
+    }
 }
