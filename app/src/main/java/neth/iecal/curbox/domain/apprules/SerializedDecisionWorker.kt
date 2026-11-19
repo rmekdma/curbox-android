@@ -1,5 +1,7 @@
 package neth.iecal.curbox.domain.apprules
 
+import neth.iecal.curbox.data.models.AppRuleRestConfig
+
 import java.util.concurrent.atomic.AtomicBoolean
 import java.time.Instant
 import java.time.ZoneId
@@ -319,7 +321,8 @@ class SerializedDecisionWorker internal constructor(
     private val onNonFatalError: (Throwable) -> Unit = {},
     private val onRequestCancellation: ((CancellationException) -> Unit)? = null,
     private val enforcement: AppRuleEnforcement = AppRuleEnforcement(repository),
-    private val coordinator: AppRuleRolloverCoordinator? = null
+    private val coordinator: AppRuleRolloverCoordinator? = null,
+    private val restStore: RestCycleStore = RestCycleStore.None
 ) {
     private sealed interface Work {
         data class Decision(val request: DecisionRequest) : Work
@@ -353,6 +356,36 @@ class SerializedDecisionWorker internal constructor(
     private var evidenceModule = ForegroundEvidenceModule()
     private val sessionPersistence = SerializedForegroundSessionPersistence(repository)
     private val restCycles = RestCycleTracker()
+    private val restStoreSession = restStore.beginSession()
+    private var restRestored = false
+    private var hasStoredRest = false
+
+    private fun recordRest(configs: Map<String, AppRuleRestConfig>, modes: Map<String, Boolean?>, elapsed: Long, wall: Long) {
+        if (!restRestored) {
+            try {
+                restStore.load(restStoreSession)?.let {
+                    hasStoredRest = it.cycles.isNotEmpty()
+                    restCycles.restore(it, configs, wall, elapsed)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                reportNonFatal(error)
+            }
+            restRestored = true
+        }
+        restCycles.observe(configs, modes, elapsed)
+        val snapshot = restCycles.snapshot(wall)
+        if (!hasStoredRest && snapshot.cycles.isEmpty()) return
+        try {
+            restStore.save(restStoreSession, snapshot)
+            hasStoredRest = snapshot.cycles.isNotEmpty()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportNonFatal(error)
+        }
+    }
     private var restBoundaryPublished = false
     private val workerJob: Job = workerScope.launch {
         try {
@@ -757,7 +790,7 @@ class SerializedDecisionWorker internal constructor(
             currentAcceptedRuntime
         }
         val runtime = accepted.runtime
-        observeGuardianRest(accepted, request.capturedAtElapsedMs)
+        observeGuardianRest(accepted, request.capturedAtElapsedMs, request.capturedAtWallMs)
         publishRestBoundary(accepted, request.lifecycleGeneration, request.capturedAtWallMs)
         val calculator = ConfigurableUseDayCalculator(resetTime = runtime.resetTime)
         val useDayId = calculator.idAt(request.capturedAtWallMs)
@@ -803,7 +836,7 @@ class SerializedDecisionWorker internal constructor(
             currentAcceptedRuntime
         }
         if (!isCurrentGuardianApproval(request, accepted)) return
-        observeGuardianRest(accepted, request.capturedAtElapsedMs)
+        observeGuardianRest(accepted, request.capturedAtElapsedMs, request.capturedAtWallMs)
         publishRestBoundary(accepted, request.lifecycleGeneration, request.capturedAtWallMs)
 
         val committed = sessionPersistence.reconcile(
@@ -1099,13 +1132,13 @@ class SerializedDecisionWorker internal constructor(
             }
             rule.id to using
         }
-        restCycles.observe(configs, modes, facts.capturedAtElapsedMs)
+        recordRest(configs, modes, facts.capturedAtElapsedMs, facts.capturedAtWallMs)
     }
 
-    private fun observeGuardianRest(accepted: AcceptedRuleRuntimeSnapshot, atElapsedMs: Long) {
+    private fun observeGuardianRest(accepted: AcceptedRuleRuntimeSnapshot, atElapsedMs: Long, atWallMs: Long) {
         val configs = accepted.runtime.snapshot.appRules.filter { it.isActive && it.restConfig != null }
             .associate { it.id to requireNotNull(it.restConfig) }
-        restCycles.observe(configs, configs.keys.associateWith { false }, atElapsedMs)
+        recordRest(configs, configs.keys.associateWith { false }, atElapsedMs, atWallMs)
     }
 
     private fun publishRestBoundary(

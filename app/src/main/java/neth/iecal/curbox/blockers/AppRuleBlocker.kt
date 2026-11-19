@@ -1,5 +1,7 @@
 package neth.iecal.curbox.blockers
 
+import neth.iecal.curbox.domain.apprules.AtomicRestCycleStore
+
 import android.app.AlarmManager
 import android.app.KeyguardManager
 import android.app.PendingIntent
@@ -243,6 +245,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
     }
 
+    internal var restCycleStoreProvider: (java.io.File) -> neth.iecal.curbox.domain.apprules.RestCycleStore = { AtomicRestCycleStore(it) }
     private lateinit var service: BaseBlockingService
     /** Captured outside runtimeLock; direct framework property reads never occur under the lock. */
     @Volatile private var servicePackageName: String = BuildConfig.APPLICATION_ID
@@ -981,7 +984,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 usageResetRepository = usageResetRepository,
                 enforcement = enforcement,
                 elapsedRealtimeMs = { observationElapsedRealtimeMs() },
-                coordinator = rolloverCoordinator
+                coordinator = rolloverCoordinator,
+                restStore = restCycleStoreProvider(service.filesDir)
             ).also {
 
                 currentWorkerInstanceToken = workerInstanceToken

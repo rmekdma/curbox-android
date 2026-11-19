@@ -11,6 +11,7 @@ import neth.iecal.curbox.data.models.AppRuleRestConfig
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.ForegroundSession
+import neth.iecal.curbox.domain.apprules.AtomicRestCycleStore
 import neth.iecal.curbox.domain.apprules.AppRuleEnforcement
 import neth.iecal.curbox.domain.apprules.AppRuleSnapshotCoordinator
 import neth.iecal.curbox.domain.apprules.CurrentUseDaySessionRepository
@@ -53,6 +54,22 @@ class AppRuleBlockerRestRuleTest {
             fixture.awaitWakeIn(60_000L)
             fixture.advance(60_000L)
             fixture.awaitApproval(GAME)
+        }
+    }
+
+    @Test
+    fun reconnectKeepsConfirmedUseWithoutCountingItTwice() {
+        RestService().use { fixture ->
+            fixture.observe(READER)
+            fixture.advance(30_000L)
+            fixture.observe(GAME)
+            fixture.reconnect()
+            fixture.observe(READER)
+            fixture.awaitWakeIn(30_000L)
+            fixture.advance(29_999L)
+            assertNull(fixture.approval.get())
+            fixture.advance(1L)
+            fixture.awaitApproval(READER)
         }
     }
 
@@ -179,12 +196,14 @@ class AppRuleBlockerRestRuleTest {
     ) : AutoCloseable {
         val service = RecordingService().also { it.attach(InstrumentationContext.context) }
         val approval = AtomicReference<Intent?>()
+        private val storageDirectory = java.io.File(service.cacheDir, "rest-rule-test-${System.nanoTime()}").apply { mkdirs() }
         private val clock = FakeWakeScheduler(initialWallClockMs = System.currentTimeMillis())
         private val processed = AtomicInteger()
         @Volatile private var rootPackage = READER
         @Volatile private var interactive = true
 
         private val blocker = AppRuleBlocker(wakeScheduler = clock).apply {
+            restCycleStoreProvider = { AtomicRestCycleStore(storageDirectory) }
             wallClockMsProvider = { clock.currentWallClockMs }
             elapsedRealtimeMsProvider = { clock.currentElapsedRealtimeMs }
             screenInteractiveProvider = { interactive }
@@ -241,6 +260,10 @@ class AppRuleBlockerRestRuleTest {
                 AccessibilityFrameworkTestObjects.releaseEvent(event)
             }
             await("foreground observation for $packageName") { processed.get() > before }
+        }
+
+        fun reconnect() {
+            invokePrivate(blocker, "createDecisionWorker", 1L)
         }
 
         fun advance(millis: Long) = clock.advanceTimeBy(millis)
@@ -311,7 +334,10 @@ class AppRuleBlockerRestRuleTest {
             assertTrue("No $description", ready())
         }
 
-        override fun close() = blocker.onDestroy()
+        override fun close() {
+            blocker.onDestroy()
+            storageDirectory.deleteRecursively()
+        }
     }
 
     private class EmptySessions : CurrentUseDaySessionRepository {
