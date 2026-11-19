@@ -386,6 +386,7 @@ class SerializedDecisionWorker internal constructor(
             reportNonFatal(error)
         }
     }
+    private var restBoundaryPublished = false
     private val workerJob: Job = workerScope.launch {
         try {
             for (work in requests) {
@@ -1146,6 +1147,8 @@ class SerializedDecisionWorker internal constructor(
         nowWallMs: Long
     ) {
         val delay = restCycles.nextDelayMillis()
+        if (delay == null && !restBoundaryPublished) return
+        restBoundaryPublished = delay != null
         val due = delay?.let { if (nowWallMs > Long.MAX_VALUE - it) Long.MAX_VALUE else nowWallMs + it }
         outcomeSink.publish(DecisionOutcome.RestBoundaryReady(generation, accepted.runtimeRevision, due))
     }
