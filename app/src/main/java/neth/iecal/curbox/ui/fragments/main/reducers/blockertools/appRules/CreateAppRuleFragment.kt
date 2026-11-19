@@ -18,7 +18,9 @@ import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleRestConfig
 import neth.iecal.curbox.data.models.AppRuleScope
+import neth.iecal.curbox.data.models.AppRuleSnapshot
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.databinding.FragmentCreateAppRuleBinding
 import neth.iecal.curbox.databinding.ItemAppRuleGroupConditionBinding
@@ -65,6 +67,9 @@ class CreateAppRuleFragment : Fragment() {
         binding.saveRuleButton.setOnClickListener { save() }
         binding.deleteRuleButton.setOnClickListener { delete() }
 
+        binding.restRuleSwitch.setOnCheckedChangeListener { _, isRestRule ->
+            updateRuleType(isRestRule)
+        }
         binding.includeAllAppsSwitch.setOnCheckedChangeListener { _, isChecked ->
             updateIncludeAllAppsState(isChecked)
         }
@@ -105,7 +110,11 @@ class CreateAppRuleFragment : Fragment() {
             val id = requireActivity().intent.getStringExtra("app_rule_id")
             editingRule = snapshot.appRules.find { it.id == id }
             editingRule?.let {
-                binding.screenTitle.setText(R.string.app_rules_edit_rule)
+                binding.screenTitle.setText(
+                    if (it.restConfig == null) R.string.app_rules_edit_rule
+                    else R.string.app_rules_edit_rest_rule
+                )
+                binding.restRuleSwitch.visibility = View.GONE
                 populate(it)
             }
             updateIncludeAllAppsState(binding.includeAllAppsSwitch.isChecked)
@@ -139,6 +148,14 @@ class CreateAppRuleFragment : Fragment() {
 
     private fun populate(rule: AppRule) {
         binding.nameInput.setText(rule.name)
+        binding.activeSwitch.isChecked = rule.isActive
+        rule.restConfig?.let { config ->
+            binding.restRuleSwitch.isChecked = true
+            binding.restUsageLimitInput.setText(config.usageLimitMinutes.toString())
+            binding.restWindowInput.setText(config.restWindowMinutes.toString())
+            binding.requiredRestInput.setText(config.requiredRestMinutes.toString())
+            return
+        }
         binding.allowanceInput.setText(rule.allowedMinutes.toString())
         binding.usageConditionSwitch.isChecked = rule.usageConditionEnabled
         if (rule.usageConditionMinutes > 0L) {
@@ -149,7 +166,6 @@ class CreateAppRuleFragment : Fragment() {
         contributorGroupConditionMinutesMap.clear()
         contributorGroupConditionMinutesMap.putAll(rule.effectiveContributorGroupConditionMinutes())
         binding.earnedAllowanceSwitch.isChecked = rule.earnedAllowanceEnabled
-        binding.activeSwitch.isChecked = rule.isActive
         binding.guardianExtraTimeAllowed.isChecked = rule.guardianExtraTimeAllowed
         weekdayChecks().forEachIndexed { index, check -> check.isChecked = index in rule.weekdays }
         binding.rolloverSwitch.isChecked = rule.rolloverEnabled
@@ -173,16 +189,41 @@ class CreateAppRuleFragment : Fragment() {
         ranges.forEach(::addTimeRange)
     }
 
+    private fun updateRuleType(isRestRule: Boolean) {
+        binding.restRuleInputs.visibility = if (isRestRule) View.VISIBLE else View.GONE
+        val regularVisibility = if (isRestRule) View.GONE else View.VISIBLE
+        (weekdayChecks() + listOf(
+            binding.allowanceLayout,
+            binding.includeAllAppsSwitch,
+            binding.excludedGroupsSection,
+            binding.contributorGroupsSection,
+            binding.usageConditionSwitch,
+            binding.earnedAllowanceSwitch,
+            binding.timeRangesContainer,
+            binding.timeRangesSummary,
+            binding.addTimeRangeButton,
+            binding.guardianExtraTimeAllowed,
+            binding.guardianExtraTimeDescription,
+            binding.rolloverSwitch
+        )).forEach { it.visibility = regularVisibility }
+        updateIncludeAllAppsState(binding.includeAllAppsSwitch.isChecked)
+        updateUsageConditionState(binding.usageConditionSwitch.isChecked)
+        updateRolloverState(binding.rolloverSwitch.isChecked)
+    }
+
     private fun updateIncludeAllAppsState(includeAll: Boolean) {
-        binding.includedGroupsSection.visibility = if (includeAll) View.GONE else View.VISIBLE
+        binding.includedGroupsSection.visibility =
+            if (includeAll || binding.restRuleSwitch.isChecked) View.GONE else View.VISIBLE
     }
 
     private fun updateUsageConditionState(enabled: Boolean) {
-        binding.usageConditionSection.visibility = if (enabled) View.VISIBLE else View.GONE
+        binding.usageConditionSection.visibility =
+            if (enabled && !binding.restRuleSwitch.isChecked) View.VISIBLE else View.GONE
     }
 
     private fun updateRolloverState(enabled: Boolean) {
-        binding.unlockDaysSection.visibility = if (enabled) View.VISIBLE else View.GONE
+        binding.unlockDaysSection.visibility =
+            if (enabled && !binding.restRuleSwitch.isChecked) View.VISIBLE else View.GONE
     }
 
     private fun renderContributorGroupConditionInputs() {
@@ -340,6 +381,10 @@ class CreateAppRuleFragment : Fragment() {
 
     private fun save() {
         val name = binding.nameInput.text?.toString()?.trim().orEmpty()
+        if (binding.restRuleSwitch.isChecked) {
+            saveRestRule(name)
+            return
+        }
         val allowance = binding.allowanceInput.text?.toString()?.toLongOrNull()
         val totalConditionMinutes =
             binding.usageConditionMinutesInput.text?.toString()?.trim()?.toLongOrNull() ?: 0L
@@ -415,6 +460,34 @@ class CreateAppRuleFragment : Fragment() {
             unlockDays = unlockDays,
             guardianExtraTimeAllowed = binding.guardianExtraTimeAllowed.isChecked
         )
+        persist(rule)
+    }
+
+    private fun saveRestRule(name: String) {
+        if (name.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.app_rules_complete_fields, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val config = AppRuleRestConfig(
+            usageLimitMinutes = binding.restUsageLimitInput.text?.toString()?.toLongOrNull() ?: 0L,
+            restWindowMinutes = binding.restWindowInput.text?.toString()?.toLongOrNull() ?: 0L,
+            requiredRestMinutes = binding.requiredRestInput.text?.toString()?.toLongOrNull() ?: 0L
+        )
+        val baseRule = editingRule ?: AppRule(scope = AppRuleScope.allApps())
+        val rule = baseRule.copy(
+            name = name,
+            isActive = binding.activeSwitch.isChecked,
+            guardianExtraTimeAllowed = false,
+            restConfig = config
+        )
+        if (!AppRuleSnapshot(appGroups = groups, appRules = listOf(rule)).isValid) {
+            Toast.makeText(requireContext(), R.string.app_rules_invalid_rest_times, Toast.LENGTH_SHORT).show()
+            return
+        }
+        persist(rule)
+    }
+
+    private fun persist(rule: AppRule) {
         viewLifecycleOwner.lifecycleScope.launch {
             val current = dataStore.settingsForEditing.first().appRuleSnapshot
             val rules = current.appRules.filterNot { it.id == rule.id } + rule

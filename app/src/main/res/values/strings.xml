@@ -1363,6 +1363,13 @@
     <string name="app_rules_edit_group">Edit app group</string>
     <string name="app_rules_add_rule">Add app rule</string>
     <string name="app_rules_edit_rule">Edit app rule</string>
+    <string name="app_rules_rest_rule">Rest rule</string>
+    <string name="app_rules_edit_rest_rule">Edit rest rule</string>
+    <string name="app_rules_rest_usage_limit">Use limit (minutes)</string>
+    <string name="app_rules_rest_window">Time window for counting rest (minutes)</string>
+    <string name="app_rules_required_rest">Required rest (minutes)</string>
+    <string name="app_rules_invalid_rest_times">Enter three positive times. Required rest must fit inside the time window.</string>
+    <string name="app_rules_rest_summary">%1$s\nRest rule · %2$s\nUse limit %3$d min · %5$d min of rest within %4$d min</string>
     <string name="app_rules_groups">App groups</string>
     <string name="app_rules_rules">Rules</string>
     <string name="app_rules_group_summary">%1$s\n%2$d apps</string>

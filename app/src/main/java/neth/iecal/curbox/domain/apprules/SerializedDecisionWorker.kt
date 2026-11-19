@@ -60,7 +60,8 @@ data class DecisionRequest(
     val lifecycleGeneration: LifecycleGeneration,
     val reason: ObservationKind,
     val observation: ForegroundFacts,
-    val runtimePublication: RuntimePublication? = null
+    val runtimePublication: RuntimePublication? = null,
+    val guardianShowing: Boolean = false
 )
 
 /** A passive check of the app covered by the current approval screen. */
@@ -183,6 +184,12 @@ sealed class DecisionOutcome {
 
     data class RecheckPlanReady(
         val update: RecheckPlanUpdate
+    ) : DecisionOutcome()
+
+    data class RestBoundaryReady(
+        val lifecycleGeneration: LifecycleGeneration,
+        val runtimeRevision: RuntimeRevision,
+        val dueAtWallMs: Long?
     ) : DecisionOutcome()
 
     data class GuardianDismissalReady(
@@ -345,6 +352,7 @@ class SerializedDecisionWorker internal constructor(
     private var currentAcceptedRuntime = acceptedRuntime
     private var evidenceModule = ForegroundEvidenceModule()
     private val sessionPersistence = SerializedForegroundSessionPersistence(repository)
+    private val restCycles = RestCycleTracker()
     private val workerJob: Job = workerScope.launch {
         try {
             for (work in requests) {
@@ -585,6 +593,8 @@ class SerializedDecisionWorker internal constructor(
             policy = accepted.runtime.evidencePolicy
         )
         if (!isCurrent(request, accepted)) return
+        observeRest(accepted, request.observation, evidence, request.guardianShowing)
+        publishRestBoundary(accepted, request.lifecycleGeneration, request.observation.capturedAtWallMs)
 
         val evaluable = evidence.outcomes.filter { outcome ->
             outcome.packageName != null && (
@@ -744,6 +754,8 @@ class SerializedDecisionWorker internal constructor(
             currentAcceptedRuntime
         }
         val runtime = accepted.runtime
+        observeGuardianRest(accepted, request.capturedAtElapsedMs)
+        publishRestBoundary(accepted, request.lifecycleGeneration, request.capturedAtWallMs)
         val calculator = ConfigurableUseDayCalculator(resetTime = runtime.resetTime)
         val useDayId = calculator.idAt(request.capturedAtWallMs)
         val result = evaluateRequestSafely(
@@ -788,6 +800,8 @@ class SerializedDecisionWorker internal constructor(
             currentAcceptedRuntime
         }
         if (!isCurrentGuardianApproval(request, accepted)) return
+        observeGuardianRest(accepted, request.capturedAtElapsedMs)
+        publishRestBoundary(accepted, request.lifecycleGeneration, request.capturedAtWallMs)
 
         val committed = sessionPersistence.reconcile(
             visiblePackages = emptySet(),
@@ -1023,7 +1037,7 @@ class SerializedDecisionWorker internal constructor(
         val requestJob = SupervisorJob(owningWorkerJob)
         val requestScope = CoroutineScope(workerContext + requestJob)
         return try {
-            requestScope.async {
+            val result = requestScope.async {
                 enforcement.checkSafely(
                     snapshot = snapshot,
                     packageName = packageName,
@@ -1037,6 +1051,9 @@ class SerializedDecisionWorker internal constructor(
                     onNonFatalError = ::reportNonFatal
                 )
             }.await()
+            if (result is SafeAppRuleEvaluationResult.Success && snapshot.isValid) {
+                SafeAppRuleEvaluationResult.Success(applyRestCycles(snapshot, result.evaluation))
+            } else result
         } catch (error: CancellationException) {
             if (owningWorkerJob?.isActive != true) throw error
             try {
@@ -1050,6 +1067,70 @@ class SerializedDecisionWorker internal constructor(
         } finally {
             requestJob.cancel()
         }
+    }
+
+    private fun observeRest(
+        accepted: AcceptedRuleRuntimeSnapshot,
+        facts: ForegroundFacts,
+        evidence: ForegroundEvidenceResult,
+        guardianShowing: Boolean
+    ) {
+        val runtime = accepted.runtime
+        val configs = runtime.snapshot.appRules.filter { it.isActive && it.restConfig != null }
+            .associate { it.id to requireNotNull(it.restConfig) }
+        val observedPackage = if (guardianShowing) "" else when (facts.displayState) {
+            DisplayState.SCREEN_OFF, DisplayState.KEYGUARD -> ""
+            DisplayState.UNKNOWN -> null
+            DisplayState.UNLOCKED -> facts.activeRoot.packageName ?: evidence.outcomes
+                .filterIsInstance<ForegroundEvidenceOutcome.Visible>()
+                .firstOrNull { it.sessionEffect == SessionEvidenceEffect.RENEW }?.packageName
+        }
+        val modes = runtime.snapshot.appRules.filter { it.id in configs }.associate { rule ->
+            val using = observedPackage?.let { packageName ->
+                packageName.isNotEmpty() && packageName in rule.effectiveScope().resolve(
+                    runtime.snapshot.appGroups, runtime.launchablePackages,
+                    runtime.evidencePolicy.essentialPackages,
+                    atMs = facts.capturedAtWallMs,
+                    foregroundPackageFallback = packageName
+                )
+            }
+            rule.id to using
+        }
+        restCycles.observe(configs, modes, facts.capturedAtElapsedMs)
+    }
+
+    private fun observeGuardianRest(accepted: AcceptedRuleRuntimeSnapshot, atElapsedMs: Long) {
+        val configs = accepted.runtime.snapshot.appRules.filter { it.isActive && it.restConfig != null }
+            .associate { it.id to requireNotNull(it.restConfig) }
+        restCycles.observe(configs, configs.keys.associateWith { false }, atElapsedMs)
+    }
+
+    private fun publishRestBoundary(
+        accepted: AcceptedRuleRuntimeSnapshot,
+        generation: LifecycleGeneration,
+        nowWallMs: Long
+    ) {
+        val delay = restCycles.nextDelayMillis()
+        val due = delay?.let { if (nowWallMs > Long.MAX_VALUE - it) Long.MAX_VALUE else nowWallMs + it }
+        outcomeSink.publish(DecisionOutcome.RestBoundaryReady(generation, accepted.runtimeRevision, due))
+    }
+
+    private fun applyRestCycles(snapshot: AppRuleSnapshot, evaluation: AppRulesEvaluation): AppRulesEvaluation {
+        val configs = snapshot.appRules.associate { it.id to it.restConfig }
+        val results = evaluation.evaluations.map { result ->
+            val config = configs[result.ruleId] ?: return@map result
+            val allowance = config.usageLimitMinutes.coerceAtMost(Long.MAX_VALUE / 60_000L) * 60_000L
+            val used = restCycles.usedMillis(result.ruleId)
+            val remaining = (allowance - used).coerceAtLeast(0L)
+            result.copy(
+                usedMillis = used, allowanceMillis = allowance, remainingMillis = remaining,
+                isAllowed = !result.isActive || remaining > 0L,
+                directAllowanceMillis = allowance, guardianAllowanceMillis = 0L,
+                guardianUsedMillis = 0L, guardianRemainingMillis = 0L,
+                isAllowanceExhausted = result.isActive && remaining == 0L
+            )
+        }
+        return AppRulesEvaluation(results.all { it.isAllowed }, results.filterNot { it.isAllowed }, results)
     }
 
     private suspend fun publishRecheckPlan(

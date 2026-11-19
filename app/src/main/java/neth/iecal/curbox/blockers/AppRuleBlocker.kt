@@ -203,6 +203,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         private const val EXTERNAL_EFFECT_FINISHED = 4
         private const val OBSERVATION_RECHECK_KEY = "\u0000foreground-observation"
         const val SETTLEMENT_WAKE_KEY = "\u0000app-rule-rollover-settlement"
+        private const val REST_WAKE_KEY = "\u0000app-rule-rest"
         private const val GUARDIAN_DISMISSAL_WAKE_KEY = "\u0000app-rule-guardian-dismissal"
         private const val SCHEDULER_WAKE_ACTION =
             "neth.iecal.curbox.blockers.APP_RULE_SCHEDULER_WAKE"
@@ -942,6 +943,17 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                                     workerInstanceToken
                                 )
                             }
+                            is DecisionOutcome.RestBoundaryReady -> {
+                                synchronized(runtimeLock) {
+                                    if (isReadyForChecks() && workerInstanceMatchesLocked(workerInstanceToken) &&
+                                        outcome.lifecycleGeneration == currentLifecycleGeneration() &&
+                                        outcome.runtimeRevision == latestRuntimeRevision
+                                    ) {
+                                        if (outcome.dueAtWallMs == null) cancelScheduledRecheck(REST_WAKE_KEY)
+                                        else scheduleRecheckAtWallClock(REST_WAKE_KEY, outcome.dueAtWallMs)
+                                    }
+                                }
+                            }
                             is DecisionOutcome.GuardianDismissalReady -> {
                                 publishGuardianDismissal(outcome, workerInstanceToken)
                             }
@@ -1502,7 +1514,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 sourceOrderIdentity = captured.sourceOrderIdentity,
                 lifecycleGeneration = LifecycleGeneration(connectionGeneration),
                 reason = kind,
-                observation = captured.facts
+                observation = captured.facts,
+                guardianShowing = guardianApprovalCoordinator.currentOwner() != null
             )
             if (kind == ObservationKind.REAL_EVENT) {
                 // The serialized worker remains the decision authority. Keep the host-side
@@ -2322,6 +2335,13 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         if (key == SETTLEMENT_WAKE_KEY) {
             onSettlementWake()
+        } else if (key == REST_WAKE_KEY) {
+            if (isScreenInteractive() == false) {
+                submitForegroundDecision(null, ObservationKind.SCREEN_OFF, suspendedForegroundPackage)
+            } else {
+                submitForegroundDecision(null, ObservationKind.SYNTHETIC_RECHECK)
+            }
+            enqueueGuardianDismissalCheck()
         } else if (key == GUARDIAN_DISMISSAL_WAKE_KEY) {
             enqueueGuardianDismissalCheck()
         } else {

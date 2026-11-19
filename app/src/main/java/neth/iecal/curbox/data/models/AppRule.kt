@@ -84,6 +84,13 @@ data class AppRuleAppGroup(
     }
 }
 
+/** Settings for a repeating usage and rest cycle, in minutes. */
+data class AppRuleRestConfig(
+    val usageLimitMinutes: Long = 0L,
+    val restWindowMinutes: Long = 0L,
+    val requiredRestMinutes: Long = 0L
+)
+
 /** A semantic active interval. Equal endpoints deliberately mean a full 24 hours. */
 data class AppRuleTimeRange(
     val startMinute: Int = 0,
@@ -190,7 +197,8 @@ data class AppRule(
     /** Days of week when accumulated rollover time can be unlocked (Sunday=0..Saturday=6). */
     val unlockDays: Set<Int> = emptySet(),
     /** When enabled, guardian extra time can be granted and used for this rule. */
-    val guardianExtraTimeAllowed: Boolean = true
+    val guardianExtraTimeAllowed: Boolean = true,
+    val restConfig: AppRuleRestConfig? = null
 ) {
     companion object {
         fun create(
@@ -342,6 +350,14 @@ data class AppRuleSnapshot(
                 }
                 if (range.endMinute !in 0..24 * 60) {
                     errors += "App rule ${rule.id} has an invalid end time"
+                }
+            }
+            rule.restConfig?.let { rest ->
+                if (rest.usageLimitMinutes <= 0L || rest.restWindowMinutes <= 0L ||
+                    rest.requiredRestMinutes <= 0L || rest.requiredRestMinutes > rest.restWindowMinutes ||
+                    rule.guardianExtraTimeAllowed
+                ) {
+                    errors += "App rule ${rule.id} has invalid rest settings"
                 }
             }
             if (rule.allowedMinutes < 0L) {

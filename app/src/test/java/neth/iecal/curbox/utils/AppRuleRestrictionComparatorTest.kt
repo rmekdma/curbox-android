@@ -10,6 +10,7 @@ import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
 import neth.iecal.curbox.data.models.AppRuleRolloverState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
+import neth.iecal.curbox.data.models.AppRuleRestConfig
 import neth.iecal.curbox.data.models.AppRuleScope
 import neth.iecal.curbox.data.models.AppRuleTimeRange
 import neth.iecal.curbox.data.models.GatedSettingsField
@@ -31,6 +32,21 @@ class AppRuleRestrictionComparatorTest {
         appGroupId = group.id,
         allowedMinutes = 30
     )
+
+    @Test
+    fun restSettingsAreValidatedAndWeakeningIsDelayed() {
+        val rest = rule.copy(restConfig = AppRuleRestConfig(60, 10, 5), guardianExtraTimeAllowed = false)
+        fun snapshot(config: AppRuleRestConfig) = AppRuleSnapshot(listOf(group), listOf(rest.copy(restConfig = config)))
+        assertTrue(snapshot(AppRuleRestConfig(60, 10, 5)).isValid)
+        assertFalse(snapshot(AppRuleRestConfig(0, 10, 5)).isValid)
+        assertFalse(snapshot(AppRuleRestConfig(60, 0, 5)).isValid)
+        assertFalse(snapshot(AppRuleRestConfig(60, 10, 0)).isValid)
+        assertFalse(snapshot(AppRuleRestConfig(60, 10, 11)).isValid)
+        assertTrue(RestrictionComparator.appRuleSnapshots(snapshot(AppRuleRestConfig(60, 10, 5)), snapshot(AppRuleRestConfig(50, 10, 6))))
+        assertFalse(RestrictionComparator.appRuleSnapshots(snapshot(AppRuleRestConfig(60, 10, 5)), snapshot(AppRuleRestConfig(61, 10, 5))))
+        assertFalse(RestrictionComparator.appRuleSnapshots(snapshot(AppRuleRestConfig(60, 10, 5)), snapshot(AppRuleRestConfig(60, 11, 5))))
+        assertFalse(RestrictionComparator.appRuleSnapshots(snapshot(AppRuleRestConfig(60, 10, 5)), snapshot(AppRuleRestConfig(60, 10, 4))))
+    }
 
     @Test
     fun reducingAllowanceIsSameOrStricter() {
