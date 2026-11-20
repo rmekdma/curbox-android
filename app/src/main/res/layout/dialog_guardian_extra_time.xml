@@ -46,21 +46,20 @@
     </com.google.android.material.textfield.TextInputLayout>
 
     <TextView
-        android:id="@+id/todo_status"
+        android:id="@+id/offer_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:visibility="gone" />
 
     <com.google.android.material.textfield.TextInputLayout
-        android:id="@+id/todo_minutes_layout"
+        android:id="@+id/offer_minutes_layout"
         style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:hint="@string/todo_award_todo"
         android:visibility="gone">
         <com.google.android.material.textfield.TextInputEditText
-            android:id="@+id/todo_minutes_input"
+            android:id="@+id/offer_minutes_input"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:inputType="number" />

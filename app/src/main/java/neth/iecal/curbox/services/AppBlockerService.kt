@@ -61,9 +61,8 @@ class AppBlockerService : BaseBlockingService() {
     private var appUsageTrackerReady = false
     private var appRuleBlockerReady = false
 
-    private var learningHost: neth.iecal.curbox.learning.LearningServiceHost? = null
-    private var learningPermission: neth.iecal.curbox.learning.LearningPermission? = null
-    private var learningJob: kotlinx.coroutines.Job? = null
+    private var pluginHost: neth.iecal.curbox.plugins.PluginServiceHost? = null
+    private var pluginJob: kotlinx.coroutines.Job? = null
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -93,7 +92,7 @@ class AppBlockerService : BaseBlockingService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         super.onAccessibilityEvent(event)
-        try { learningHost?.event(event.eventType) } catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
+        try { pluginHost?.event(event.eventType) } catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
 
         try {
             if (BuildConfig.SUPPORTS_ANTI_UNINSTALL) {
@@ -194,37 +193,17 @@ class AppBlockerService : BaseBlockingService() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onServiceConnected() {
         super.onServiceConnected()
-        cleanupLearning()
+        cleanupPlugins()
         try {
-            val host = neth.iecal.curbox.learning.LearningServiceHost(this, serviceScope)
-            learningHost = host
+            val host = neth.iecal.curbox.plugins.PluginServiceHost(this, serviceScope)
+            pluginHost = host
             host.start()
-            val storage = neth.iecal.curbox.learning.LearningStorage(this)
-            val permission = neth.iecal.curbox.learning.LearningPermission(this, serviceScope)
-            learningPermission = permission
-            permission.start()
-            val plugin = neth.iecal.todo.InitialMonitor(
-                neth.iecal.curbox.learning.LearningComposition.createApi(applicationContext), storage,
-                permission.state, permission::isGranted,
-                { document, expected ->
-                    try { neth.iecal.curbox.learning.LearningNotifications.publish(this, storage, document, permission.state, expected) }
-                    catch (e: CancellationException) { throw e }
-                    catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
-                },
-                elapsed = android.os.SystemClock::elapsedRealtime,
-                subjectPackages = neth.iecal.curbox.learning.LearningComposition.subjectPackages(),
-                achievement = { document, expected, child, subject, stillValid ->
-                    try { neth.iecal.curbox.learning.LearningNotifications.publish(this, storage, document, permission.state, expected, child, subject, stillValid) }
-                    catch (e: CancellationException) { throw e }
-                    catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
-                }
-            )
-            learningJob = serviceScope.launch {
-                try { plugin.run(host) }
+            pluginJob = serviceScope.launch {
+                try { neth.iecal.curbox.plugins.PluginRuntime(applicationContext).run(host) }
                 catch (e: CancellationException) { throw e }
                 catch (t: Throwable) { crashLogger.logNonFatalError(Exception(t)) }
             }
-        } catch (t: Throwable) { cleanupLearning(); crashLogger.logNonFatalError(Exception(t)) }
+        } catch (t: Throwable) { cleanupPlugins(); crashLogger.logNonFatalError(Exception(t)) }
         focusModeBlocker.setupFocusMode(this)
         autoDnd.setup(this)
         reelBlocker.setupBlocker(this)
@@ -314,12 +293,12 @@ class AppBlockerService : BaseBlockingService() {
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
-        cleanupLearning()
+        cleanupPlugins()
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        cleanupLearning()
+        cleanupPlugins()
         super.onDestroy()
         // Each feature owns independent receiver and worker state. Keep one faulty cleanup from
         // skipping the app-rule scheduler, channels, or the remaining service components.
@@ -350,13 +329,11 @@ class AppBlockerService : BaseBlockingService() {
         cleanupFeature("ServiceScope") { serviceScope.cancel() }
     }
 
-    private fun cleanupLearning() {
-        cleanupFeature("Learning host") { learningHost?.stop() }
-        cleanupFeature("Learning permission") { learningPermission?.stop() }
-        cleanupFeature("Learning job") { learningJob?.cancel() }
-        learningHost = null
-        learningPermission = null
-        learningJob = null
+    private fun cleanupPlugins() {
+        cleanupFeature("Plugin host") { pluginHost?.stop() }
+        cleanupFeature("Plugin job") { pluginJob?.cancel() }
+        pluginHost = null
+        pluginJob = null
     }
 
     private fun cleanupFeature(name: String, action: () -> Unit) {

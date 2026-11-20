@@ -41,7 +41,17 @@ class LearningFragment : Fragment() {
     private var soundPreview: android.media.Ringtone? = null
     private var soundPreviewJob: kotlinx.coroutines.Job? = null
     private var renderedDay = LocalDate.now(ZoneId.of("Asia/Seoul"))
-    private val host get() = requireActivity() as LearningHost
+    private val pluginHost get() = neth.iecal.plugin.PluginHostAccess.require(requireContext(), TodoPluginFactory::class.java)
+    private val host: LearningHost get() = object : LearningHost {
+        override suspend fun learningAvailability(): LearningAvailability {
+            val observation = pluginHost.serviceObservation()
+            val notifications = androidx.core.app.NotificationManagerCompat.from(requireContext()).areNotificationsEnabled()
+            return LearningAvailability(observation.accessibilityEnabled, notifications,
+                if (!observation.accessibilityEnabled) false else if (observation.connection == neth.iecal.plugin.Connection.CONNECTED) true else null)
+        }
+        override fun createLearningScreen() = neth.iecal.curbox.learning.LearningComposition.createScreen(requireContext(), pluginHost)
+        override fun learningText(key: LearningText, vararg args: Any) = LearningTextResources(requireContext()).learningText(key, *args)
+    }
     private fun text(key: LearningText, vararg args: Any) = host.learningText(key, *args)
 
     override fun onCreate(savedInstanceState: Bundle?) {

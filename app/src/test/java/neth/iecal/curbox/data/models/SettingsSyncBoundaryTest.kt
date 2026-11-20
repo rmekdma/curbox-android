@@ -1,23 +1,18 @@
 package neth.iecal.curbox.data.models
 
+import neth.iecal.curbox.plugins.StoredPluginTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsSyncBoundaryTest {
-    @Test fun todoAwardStateStaysOnDevice() {
+    @Test fun pluginTimeStateStaysOnDevice() {
         val local = Settings(
-            todoAwardConnectionRevision = "local-revision",
-            todoAwardConnection = TodoAwardConnection("account", "Child", "rule", "2026-11-05", "link"),
-            todoAwardLedger = listOf(TodoAwardLedgerEntry("account", "Child", "2026-11-05", 40)),
-            todoPendingSettlements = listOf(TodoPendingSettlement(TodoAwardConnection("account", "Child", "rule", "2026-11-05", "link"), "2026-11-05"))
+            pluginTimes = mapOf("sample" to StoredPluginTime("local data", "rule", "local-revision"))
         )
         val uploaded = SettingsSyncBoundary.forUpload(local)
-        assertEquals(null, uploaded.todoAwardConnection)
-        assertEquals("", uploaded.todoAwardConnectionRevision)
-        assertTrue(uploaded.todoAwardLedger.isEmpty())
-        assertTrue(uploaded.todoPendingSettlements.isEmpty())
+        assertTrue(uploaded.pluginTimes.isEmpty())
     }
     @Test
     fun guardianCredentialAndApprovalsAreRemovedFromUploadSnapshot() {

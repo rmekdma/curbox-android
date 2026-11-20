@@ -1,6 +1,5 @@
 package neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules
 
-import neth.iecal.curbox.domain.apprules.isTodoAwardEligible
 
 import android.content.BroadcastReceiver
 import android.content.Intent
@@ -24,16 +23,13 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import neth.iecal.curbox.learning.LearningStorage
-import neth.iecal.curbox.learning.TodoRegistrationScope
-import neth.iecal.todo.registeredChildren
 import neth.iecal.curbox.R
+import neth.iecal.curbox.plugins.PluginRuntime
 import neth.iecal.curbox.data.models.RuleRolloverPool
 import neth.iecal.curbox.databinding.DialogGuardianAccumulatedTimeBinding
 import neth.iecal.curbox.domain.apprules.InAppAccumulatedTimeFormState
@@ -105,7 +101,21 @@ class AppRuleGroupsFragment : Fragment() {
         binding.addGroupButton.setOnClickListener { open(CreateAppRuleGroupFragment.FRAGMENT_ID) }
         binding.addRuleButton.setOnClickListener { open(CreateAppRuleFragment.FRAGMENT_ID) }
         binding.changeExtraTimeButton.setOnClickListener { requestGuardianExtraTimeGrant() }
-        binding.todoAwardConnectionButton.setOnClickListener { chooseTodoAwardConnection() }
+        val pluginSettings = PluginRuntime(requireContext()).ruleSettings()
+        pluginSettings.forEachIndexed { index, settings ->
+            val button = MaterialButton(requireContext()).apply {
+                id = if (index == 0) R.id.plugin_settings_button else View.generateViewId()
+                text = settings.label
+                setOnClickListener {
+                    settings.open(requireActivity()) {
+                        viewLifecycleOwner.lifecycleScope.launch { latestSettings?.let { refresh(it) } }
+                    }
+                }
+            }
+            binding.pluginSettingsList.addView(button, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
@@ -124,80 +134,6 @@ class AppRuleGroupsFragment : Fragment() {
         }
     }
 
-    private fun chooseTodoAwardConnection() {
-        val context = requireContext().applicationContext
-        val storage = LearningStorage(context)
-        viewLifecycleOwner.lifecycleScope.launch {
-            val document = try {
-                withContext(Dispatchers.IO) { storage.read() }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                if (isAdded) Toast.makeText(requireContext(), R.string.todo_award_failed, Toast.LENGTH_SHORT).show()
-                return@launch
-            }
-            val settings = try {
-                dataStore.settings.first()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                if (isAdded) Toast.makeText(requireContext(), R.string.todo_award_failed, Toast.LENGTH_SHORT).show()
-                return@launch
-            }
-            val children = document.monitor.registeredChildren().keys.mapNotNull {
-                TodoRegistrationScope.capture(document, it)
-            }
-            val rules = settings.appRuleSnapshot.appRules.filter {
-                it.isTodoAwardEligible()
-            }
-            if (!isAdded) return@launch
-            val choices = children.map { it.childName } + if (settings.todoAwardConnection != null) listOf(getString(R.string.todo_award_disconnect)) else emptyList()
-            if (choices.isEmpty() || (rules.isEmpty() && settings.todoAwardConnection == null)) {
-                Toast.makeText(requireContext(), R.string.todo_award_no_choices, Toast.LENGTH_LONG).show()
-                return@launch
-            }
-            val dialog = MaterialAlertDialogBuilder(requireContext())
-                .setTitle(R.string.todo_award_choose_child)
-                .setItems(choices.toTypedArray()) { _, childIndex ->
-                    if (childIndex >= children.size) {
-                        viewLifecycleOwner.lifecycleScope.launch {
-                            val saved = try {
-                                dataStore.clearTodoAwardConnection(settings.todoAwardConnectionRevision)
-                            } catch (error: CancellationException) {
-                                throw error
-                            } catch (_: Exception) {
-                                false
-                            }
-                            if (isAdded) Toast.makeText(requireContext(), if (saved) R.string.todo_award_saved else R.string.todo_award_failed, Toast.LENGTH_SHORT).show()
-                        }
-                    } else if (rules.isEmpty()) {
-                        Toast.makeText(requireContext(), R.string.todo_award_no_choices, Toast.LENGTH_LONG).show()
-                    } else {
-                        val scope = children[childIndex]
-                        val ruleDialog = MaterialAlertDialogBuilder(requireContext())
-                            .setTitle(R.string.todo_award_choose_rule)
-                            .setItems(rules.map { it.name.ifBlank { it.id } }.toTypedArray()) { _, ruleIndex ->
-                                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                                    val saved = try {
-                                        storage.withRegistration(scope) {
-                                            dataStore.setTodoAwardConnection(scope.accountId, scope.childName, rules[ruleIndex].id, settings.todoAwardConnectionRevision)
-                                        } == true
-                                    } catch (error: CancellationException) {
-                                        throw error
-                                    } catch (_: Exception) {
-                                        false
-                                    }
-                                    withContext(Dispatchers.Main) {
-                                        if (isAdded) Toast.makeText(requireContext(), if (saved) R.string.todo_award_saved else R.string.todo_award_failed, Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            }.setNegativeButton(R.string.cancel, null).create()
-                        showOwnedDialog(ruleDialog)
-                    }
-                }.setNegativeButton(R.string.cancel, null).create()
-            showOwnedDialog(dialog)
-        }
-    }
     override fun onStart() {
         super.onStart()
         ContextCompat.registerReceiver(

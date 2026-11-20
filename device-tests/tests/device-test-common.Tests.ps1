@@ -47,90 +47,6 @@ Describe "Device Test Common Helpers" {
         }
     }
 
-    Context "Approved fake learning APK" {
-        It "requires matching hashes, a debug signer, fake markers, and no real endpoint" {
-            $hash = "A" * 64
-            $manifest = 'android:debuggable(0x0101000f)=(type 0x12)0xffffffff android:appComponentFactory Ticket19DebugAppComponentFactory SyntheticFixtureProvider neth.iecal.curbox.debug.synthetic.fixture android.permission.DUMP'
-            $dex = 'LearningComposition$createApi$1 SyntheticFixtureProvider neth.iecal.curbox.apitester'
-            $signer = '2429a67995d6e0a03312ff8f67d7df53c40dbdeb86e454d62f87d8e8243e4c6a'
-            (Test-ApprovedLearningApk $hash $hash $hash $signer $manifest $dex) | Should Be $true
-            (Test-ApprovedLearningApk $hash $hash ("0" * 64) $signer $manifest $dex) | Should Be $false
-            (Test-ApprovedLearningApk $hash $hash $hash $signer $manifest ($dex + ' https://api.todomath.com')) | Should Be $false
-            (Test-ApprovedLearningApk $hash $hash $hash $signer $manifest 'real composition') | Should Be $false
-            (Test-ApprovedLearningApk $hash $hash $hash ("0" * 64) $manifest $dex) | Should Be $false
-        }
-    }
-
-    Context "Learning APK inspection" {
-        It "fails before device access if the artifact does not exist" {
-            $failed = $false
-            try { Assert-LearningFakeApk -ApkPath 'missing.apk' -ExpectedHash ('A' * 64) -BuildToolsDirectory 'missing' } catch { $failed = $true }
-            $failed | Should Be $true
-            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
-        }
-    }
-
-    Context "Learning notifications" {
-        It "returns only active child notification records" {
-            $dump = "  Notification List:`n    NotificationRecord(x: pkg=neth.iecal.curbox.debug user=UserHandle{0} id=1279611218 tag=learning:abc importance=2`n title=Child1 Items: 2`n  mArchive=Child1 completed Math Items: 5`n"
-            $script:DeviceTestShellOutputHandler = { param($command) $dump }
-            $records = @(Get-LearningNotifications)
-            $records.Count | Should Be 1
-            $records[0].Tag | Should Be 'learning:abc'
-            $records[0].Id | Should Be '1279611218'
-            ($records[0].Text -match 'completed Math') | Should Be $false
-        }
-    }
-
-    Context "Learning registration precondition" {
-        It "counts current registrations and legacy child without inspecting account snapshots" {
-            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":null,"registrations":{"Child1":1},"accounts":{"other":{"registrations":{"Child2":2}}}}}' }
-            (Get-LearningRegistrationCount) | Should Be 1
-            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":"Child1","registrations":{}}}' }
-            (Get-LearningRegistrationCount) | Should Be 1
-            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":null,"registrations":{}}}' }
-            (Get-LearningRegistrationCount) | Should Be 0
-            $script:DeviceTestShellOutputHandler = { param($command) '__ABSENT__' }
-            (Get-LearningRegistrationCount) | Should Be 0
-        }
-        It "returns only current registration names including a legacy child" {
-            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":null,"registrations":{"Child1":1},"accounts":{"other":{"registrations":{"Child2":2}}}}}' }
-            (@(Get-LearningRegistrationNames) -join ',') | Should Be 'Child1'
-            $script:DeviceTestShellOutputHandler = { param($command) '{"state":{"accountId":"fake"},"monitor":{"accountId":"fake","childName":"Child1","registrations":{}}}' }
-            (@(Get-LearningRegistrationNames) -join ',') | Should Be 'Child1'
-        }
-        It "accepts the empty serializer default and omitted null account fields" {
-            $script:DeviceTestShellOutputHandler = { param($command) '' }
-            (Get-LearningRegistrationCount) | Should Be 0
-            $script:DeviceTestShellOutputHandler = { param($command) '{"revision":0,"state":{"children":[],"reports":{}},"monitor":{"registrations":{}}}' }
-            (Get-LearningRegistrationCount) | Should Be 0
-        }
-        It "fails closed on invalid data or mismatched accounts" {
-            foreach ($value in @('STATE: ', '{', '{"state":{"children":[],"reports":{}}}', '{"state":{"accountId":"x"},"monitor":{"accountId":"y","registrations":{}}}')) {
-                $script:DeviceTestShellOutputHandler = { param($command) $value }
-                $failed = $false
-                try { Get-LearningRegistrationCount | Out-Null } catch { $failed = $true }
-                $failed | Should Be $true
-            }
-        }
-    }
-
-    Context "Learning fixture provider" {
-        It "rejects failed provider writes and avoids shell injection" {
-            $script:DeviceTestShellOutputHandler = { param($command) "Bundle[{ok=false}]" }
-            $failed = $false
-            try { Set-LearningFixture -Json "{}" } catch { $failed = $true }
-            $failed | Should Be $true
-            $failed = $false
-            try { Set-LearningFixture -Json "'; rm -rf /; '" } catch { $failed = $true }
-            $failed | Should Be $true
-        }
-        It "accepts a successful provider reset" {
-            $script:DeviceTestShellOutputHandler = { param($command) "Bundle[{ok=true}]" }
-            Reset-LearningFixture
-        }
-    }
-
     Context "New-GuardianPinAuthConfig" {
         It "generates valid salt, verifier, iterations, and algorithm" {
             $auth = New-GuardianPinAuthConfig -Pin "1234" -Iterations 120000
@@ -482,33 +398,6 @@ mCurrentFocus=Window{af23a46 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.act
         }
     }
 
-    Context "Todo settlement failure count" {
-        It "returns only a validated numeric count" {
-            $script:DeviceTestShellOutputHandler = { param($command) '3' }
-            Get-TodoSettlementFailureCount | Should Be 3
-            $script:DeviceTestShellOutputHandler = { param($command) 'invalid' }
-            $failed = $false; try { Get-TodoSettlementFailureCount } catch { $failed = $true }; $failed | Should Be $true
-        }
-    }
-    Context "Private fake learning backup" {
-        It "backs up only the two fake files inside the app and restores absent files safely" {
-            $script:fakeCommands = @()
-            $script:DeviceTestShellHandler = { param($command) $script:fakeCommands += $command }
-            $id = Backup-FakeLearningFiles
-            $id | Should Match '^[a-f0-9]{32}$'
-            Restore-FakeLearningFiles $id
-            $script:fakeCommands.Count | Should Be 2
-            $script:fakeCommands[0] | Should Match 'umask 077'
-            $script:fakeCommands[0] | Should Match 'learning-fake-state.json learning-fake-session.json'
-            $script:fakeCommands[1] | Should Match 'test -d'
-            $script:fakeCommands[1] | Should Match 'mv -f'
-            $script:fakeCommands[1] | Should Match 'else rm -f'
-        }
-        It "rejects a bad backup identifier without a shell command" {
-            $script:DeviceTestShellHandler = { param($command) throw 'unexpected shell command' }
-            $failed = $false; try { Restore-FakeLearningFiles '../other' } catch { $failed = $true }; $failed | Should Be $true
-        }
-    }
     Context "Global settings preservation" {
         It "reads and restores numeric and absent values with readback" {
             $script:globalValue = '0'; $script:globalCommands = @()
@@ -835,7 +724,7 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
 u0_a1351     13837   964 0 20:00 ?        00:03:11 neth.iecal.curbox.debug:app_blocker_service
 shell        10788 10785 1 10:28 ?        00:00:00 ps -ef
 "@
-            $pidFound = Get-DeviceProcessPid -ProcessOutput $psEf -ProcessName ":app_blocker_service"
+            $pidFound = Get-DeviceProcessPid -ProcessOutput $psEf -ProcessName "neth.iecal.curbox.debug:app_blocker_service"
             $pidFound | Should Be 13837
         }
 
@@ -846,7 +735,7 @@ root             1      0   24480   3120 0                   0 S init
 u0_a1351      6271    964 17063660 220392 do_epoll_wait      0 S neth.iecal.curbox.debug
 u0_a1351     13837    964 16799000 116600 do_epoll_wait      0 S neth.iecal.curbox.debug:app_blocker_service
 "@
-            $pidFound = Get-DeviceProcessPid -ProcessOutput $psStd -ProcessName ":app_blocker_service"
+            $pidFound = Get-DeviceProcessPid -ProcessOutput $psStd -ProcessName "neth.iecal.curbox.debug:app_blocker_service"
             $pidFound | Should Be 13837
         }
 
@@ -859,54 +748,54 @@ u0_a1351     25432   964 0 20:00 ?        00:03:11 neth.iecal.curbox.debug:app_b
             $pidFound | Should Be 25432
         }
 
+        It "defaults to the exact Debug process when Release appears first" {
+            $processes = @"
+UID PID PPID CMD
+u0_a100 100 1 neth.iecal.curbox:app_blocker_service
+u0_a101 101 1 neth.iecal.curbox.debug:app_blocker_service
+"@
+            (Get-DeviceProcessPid -ProcessOutput $processes) | Should Be 101
+        }
+
+        It "does not match another package by suffix" {
+            $processes = "u0_a100 100 1 other.neth.iecal.curbox.debug:app_blocker_service"
+            (Get-DeviceProcessPid -ProcessOutput $processes -ProcessName "neth.iecal.curbox.debug:app_blocker_service") | Should Be $null
+        }
+
         It "returns null when process name is not found" {
             $psEf = @"
 UID            PID  PPID C STIME TTY          TIME CMD
 u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
 "@
-            $pidFound = Get-DeviceProcessPid -ProcessOutput $psEf -ProcessName ":app_blocker_service"
+            $pidFound = Get-DeviceProcessPid -ProcessOutput $psEf -ProcessName "neth.iecal.curbox.debug:app_blocker_service"
             $pidFound | Should Be $null
         }
 
         It "returns null for empty or whitespace output" {
-            $pidFound = Get-DeviceProcessPid -ProcessOutput "" -ProcessName ":app_blocker_service"
+            $pidFound = Get-DeviceProcessPid -ProcessOutput "" -ProcessName "neth.iecal.curbox.debug:app_blocker_service"
             $pidFound | Should Be $null
         }
     }
 
     Context "Test-AccessibilityServiceBound" {
-        It "returns true when service is listed in Bound services" {
+        It "recognizes the exact Debug service bound to the system" {
             $dump = @"
-  Bound services:{Service[label=Curbox App Blocker, feedbackType[FEEDBACK_GENERIC], capabilities=1, eventTypes=TYPES_ALL_MASK, notificationTimeout=0, requestA11yBtn=false]}
-  Enabled services:{{neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService}}
-  Binding services:{}
-  Crashed services:{}
+* ServiceRecord{abc u0 neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService}
+  app=ProcessRecord{def 6141:neth.iecal.curbox.debug:app_blocker_service/u0a221}
+  requested=true received=true hasBound=true doRebind=false
+  * Client AppBindRecord{xyz ProcessRecord{abc 1676:system/1000}}
+  ConnectionRecord{xyz u0 CR neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService:@abc}
 "@
-            (Test-AccessibilityServiceBound -DumpsysOutput $dump -ServiceName "AppBlockerService") | Should Be $true
+            (Test-AccessibilityServiceBound -ActivityServicesOutput $dump) | Should Be $true
+            (Test-AccessibilityServiceBound -ActivityServicesOutput $dump -PackageName "neth.iecal.curbox") | Should Be $false
+            (Test-AccessibilityServiceBound -ActivityServicesOutput ($dump -replace 'neth\.iecal\.curbox\.debug', 'neth.iecal.curbox') -PackageName "neth.iecal.curbox") | Should Be $true
+            (Test-AccessibilityServiceBound -ActivityServicesOutput ($dump -replace 'hasBound=true', 'hasBound=false')) | Should Be $false
+            (Test-AccessibilityServiceBound -ActivityServicesOutput ($dump -replace '1676:system/1000', '2222:other/1000')) | Should Be $false
         }
 
-        It "returns false when service is listed in Crashed services" {
-            $dump = @"
-  Bound services:{}
-  Enabled services:{{neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService}}
-  Binding services:{}
-  Crashed services:{Service[label=Curbox App Blocker]}
-"@
-            (Test-AccessibilityServiceBound -DumpsysOutput $dump -ServiceName "AppBlockerService") | Should Be $false
-        }
-
-        It "returns false when Bound services does not contain the service" {
-            $dump = @"
-  Bound services:{}
-  Enabled services:{{neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService}}
-  Binding services:{}
-  Crashed services:{}
-"@
-            (Test-AccessibilityServiceBound -DumpsysOutput $dump -ServiceName "AppBlockerService") | Should Be $false
-        }
-
-        It "returns false for null or empty dumpsys output" {
-            (Test-AccessibilityServiceBound -DumpsysOutput "" -ServiceName "AppBlockerService") | Should Be $false
+        It "rejects a label alone and an empty service dump" {
+            (Test-AccessibilityServiceBound -ActivityServicesOutput 'Bound services:{Service[label=Curbox App Blocker]}') | Should Be $false
+            (Test-AccessibilityServiceBound -ActivityServicesOutput '') | Should Be $false
         }
     }
 
@@ -1044,6 +933,17 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             (Stop-ServiceProcess -TargetPid 0) | Should Be $false
             (Stop-ServiceProcess -TargetPid -1) | Should Be $false
         }
+
+        It "refuses to kill a stale PID or a process belonging to another package" {
+            $original = (Get-Item Function:\Get-DeviceProcessPid).ScriptBlock
+            try {
+                Set-Item Function:\Get-DeviceProcessPid { return 456 }
+                (Stop-ServiceProcess -TargetPid 123) | Should Be $false
+                $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+            } finally {
+                Set-Item Function:\Get-DeviceProcessPid $original
+            }
+        }
     }
 
     Context "Restart-DeviceAccessibilityServiceIfEnabled" {
@@ -1051,6 +951,7 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             $script:servicePidReads = 0
             $script:stoppedServicePid = 0
             Mock Get-DeviceProcessPid {
+                $script:queriedServiceProcessName = $ProcessName
                 $script:servicePidReads++
                 if ($script:servicePidReads -eq 1) { return 123 }
                 return 456
@@ -1070,6 +971,7 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             $result.Skipped | Should Be $false
             $result.ProcessId | Should Be 456
             $script:stoppedServicePid | Should Be 123
+            $script:queriedServiceProcessName | Should Be "neth.iecal.curbox.debug:app_blocker_service"
             $global:DeviceTestUnexpectedAdbCalls | Should Be 0
         }
 
@@ -1089,6 +991,7 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             $script:serviceProcessQueried | Should Be $false
             $global:DeviceTestUnexpectedAdbCalls | Should Be 0
         }
+
     }
 
     Context "New-RolloverAppRuleConfig" {
@@ -1202,6 +1105,72 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
     }
 
     Context "Submit-GuardianPin" {
+        AfterEach {
+            $script:DeviceTestPinUiDumpHandler = $null
+            $script:DeviceTestUiWaitHandler = $null
+            $script:DeviceTestShellHandler = $null
+            $script:DeviceTestShellOutputHandler = $null
+        }
+        It "uses the reflowed field, clears it and submits only after the entry appears" {
+            $initial = '<hierarchy><node text="Guardian authentication"/><node password="true" text="Password" bounds="[0,0][40,40]"/></hierarchy>'
+            $script:pinText = 'Password'
+            $script:pinCommands = @()
+            $script:DeviceTestUiWaitHandler = { param($Pattern, $TimeoutSeconds) $initial }
+            $script:DeviceTestPinUiDumpHandler = {
+                '<hierarchy><node text="Guardian authentication"/><node password="true" text="' + $script:pinText + '" bounds="[100,100][140,140]"/><node resource-id="android:id/button1" enabled="true" bounds="[200,200][240,240]"/></hierarchy>'
+            }
+            $script:DeviceTestShellHandler = {
+                param($command)
+                $script:pinCommands += $command
+                if ($command -match '^input keyevent 123 ') { $script:pinText = '' }
+                if ($command -match '^input text ') { $script:pinText = '••••' }
+            }
+            $script:DeviceTestShellOutputHandler = { param($command) 'mInputShown=false' }
+            (Submit-GuardianPin -PinValue '9999') | Should Be $true
+            ($script:pinCommands -contains 'input tap 120 120') | Should Be $true
+            ($script:pinCommands -contains 'input tap 220 220') | Should Be $true
+            (@($script:pinCommands | Where-Object { $_ -match '^input keyevent 123 ' }).Count) | Should Be 1
+        }
+        It "waits for a localized enabled button after the keyboard closes" {
+            $initial = '<hierarchy><node text="Guardian authentication"/><node password="true" text="Password" bounds="[0,0][40,40]"/></hierarchy>'
+            $script:pinText = 'Password'
+            $script:pinCommands = @()
+            $script:afterHideDumps = 0
+            $script:keyboardHidden = $false
+            $script:DeviceTestUiWaitHandler = { param($Pattern, $TimeoutSeconds) $initial }
+            $script:DeviceTestPinUiDumpHandler = {
+                $button = ''
+                if ($script:keyboardHidden) {
+                    $script:afterHideDumps++
+                    if ($script:afterHideDumps -ge 2) { $button = '<node class="android.widget.Button" text="Continue" enabled="true" bounds="[200,200][240,240]"/>' }
+                }
+                '<hierarchy><node text="Guardian authentication"/><node password="true" text="' + $script:pinText + '" bounds="[100,100][140,140]"/>' + $button + '</hierarchy>'
+            }
+            $script:DeviceTestShellHandler = {
+                param($command)
+                $script:pinCommands += $command
+                if ($command -match '^input keyevent 123 ') { $script:pinText = '' }
+                if ($command -match '^input text ') { $script:pinText = '••••' }
+                if ($command -eq 'input keyevent 4') { $script:keyboardHidden = $true }
+            }
+            $script:DeviceTestShellOutputHandler = { param($command) 'mInputShown=true' }
+            (Submit-GuardianPin -PinValue '9999') | Should Be $true
+            ($script:afterHideDumps -ge 2) | Should Be $true
+            ($script:pinCommands -contains 'input tap 220 220') | Should Be $true
+        }
+        It "rejects disabled and invisible submit buttons" {
+            $xml = '<hierarchy><node resource-id="android:id/button1" enabled="false" bounds="[0,0][40,40]"/><node class="android.widget.Button" text="계속" enabled="true" visible-to-user="false" bounds="[0,0][40,40]"/></hierarchy>'
+            (Get-GuardianPinSubmitButton -Xml $xml).Found | Should Be $false
+        }
+        It "rejects malformed PINs before any device operation" {
+            (Submit-GuardianPin -PinValue '12;34') | Should Be $false
+            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+        }
+        It "requires the expected number of characters in the password field" {
+            (Test-GuardianPinEntry -Xml '<hierarchy><node password="true" text="••••" /></hierarchy>' -ExpectedLength 4) | Should Be $true
+            (Test-GuardianPinEntry -Xml '<hierarchy><node password="true" text="••" /></hierarchy>' -ExpectedLength 4) | Should Be $false
+            (Test-GuardianPinEntry -Xml '<hierarchy><node text="••••" /></hierarchy>' -ExpectedLength 4) | Should Be $false
+        }
         It "returns false when PIN dialog is not found in UI" {
             $script:DeviceTestUiWaitHandler = { param($Pattern, $TimeoutSeconds) return "<empty/>" }
             $res = Submit-GuardianPin -PinValue "1234"

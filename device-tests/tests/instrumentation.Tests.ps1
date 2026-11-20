@@ -2,7 +2,7 @@
 Describe 'Instrumentation entrypoint' {
     BeforeEach {
         Mock Assert-AdbDevice {}
-        Mock Assert-LearningFakeApk {}
+        Mock Assert-TargetApk {}
         Mock Assert-InstrumentationApk {}
         Mock Get-DeviceSecureSetting { 'null' }
         Mock Get-TestDeviceShellOutput {
@@ -12,10 +12,11 @@ Describe 'Instrumentation entrypoint' {
             elseif ($Command -like 'sha256sum*') { ('b' * 64) + '  /data/app/test/base.apk' }
             else { 'OK (128 tests)' }
         }
-        $script:params = @{ DeviceId='serial'; LearningApkPath='fake.apk'; ExpectedApkSha256=('a' * 64); BuildToolsDirectory='tools'; InstrumentationApkPath='test.apk'; InstrumentationApkSha256=('b' * 64) }
+        $script:params = @{ DeviceId='serial'; TargetApkPath='fake.apk'; ExpectedApkSha256=('a' * 64); BuildToolsDirectory='tools'; InstrumentationApkPath='test.apk'; InstrumentationApkSha256=('b' * 64) }
     }
     It 'excludes only the measurement from functional runs' {
         Invoke-CurboxInstrumentation -Mode Functional @script:params
+        Assert-MockCalled Assert-TargetApk -Times 1 -Scope It
         Assert-MockCalled Get-TestDeviceShellOutput -ParameterFilter { $Command -match '-e notAnnotation neth.iecal.curbox.blockers.PerformanceMeasurement' } -Times 1
     }
     It 'rejects missing measurement identity before accessing a device' {
@@ -44,5 +45,13 @@ Describe 'Instrumentation entrypoint' {
         $failed = $false
         try { Invoke-CurboxInstrumentation -Mode Functional @script:params } catch { $failed = $true }
         $failed | Should Be $true
+    }
+}
+
+Describe 'Target APK verifier discovery' {
+    It 'runs the plugin verifier and rejects a missing artifact before device access' {
+        $message = ''
+        try { Assert-TargetApk 'missing.apk' ('a' * 64) 'missing' } catch { $message = $_.Exception.Message }
+        $message | Should Be 'Fake debug APK not found.'
     }
 }

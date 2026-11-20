@@ -35,11 +35,11 @@
             android:text="@string/guardian_add_time"
             android:visibility="gone" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/todo_award_connection_button"
+        <LinearLayout
+            android:id="@+id/plugin_settings_list"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/todo_award_connection" />
+            android:orientation="vertical" />
         <TextView
             android:id="@+id/configuration_status"
             android:layout_width="match_parent"

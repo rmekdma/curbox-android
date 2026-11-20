@@ -140,7 +140,7 @@ class AppRulePersistedSkipReplayTest {
         val useDay = ConfigurableUseDayCalculator(zone, settings.useDayResetTime).idAt(now)
         return AppRuleEvaluator.evaluateRule(
             rule = rule,
-            targetPackages = setOf("example.todo"),
+            targetPackages = setOf("example.target"),
             useDayId = useDay,
             sessions = emptyList(),
             nowMs = now,

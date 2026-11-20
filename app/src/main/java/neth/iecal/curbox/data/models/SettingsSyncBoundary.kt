@@ -7,9 +7,6 @@ object SettingsSyncBoundary {
         guardianAuthConfig = GuardianAuthConfig(),
         appRuleOverrideState = AppRuleOverrideState(),
         appRuleRolloverState = AppRuleRolloverState(),
-        todoAwardConnection = null,
-        todoAwardLedger = emptyList(),
-        todoPendingSettlements = emptyList(),
-        todoAwardConnectionRevision = ""
+        pluginTimes = emptyMap()
     )
 }

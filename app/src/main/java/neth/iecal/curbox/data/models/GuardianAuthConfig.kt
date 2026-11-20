@@ -21,7 +21,7 @@ data class AppRuleGuardianGrant(
     val grantedAtMs: Long = 0L,
     val grantedMillis: Long = 0L,
     val isFromAccumulatedPool: Boolean = false,
-    val todoGrantedMillis: Long = 0L
+    val contributedMillisByPlugin: Map<String, Long> = emptyMap()
 )
 
 /** Identifies one grant write when the blocker confirms its accepted settings snapshot. */

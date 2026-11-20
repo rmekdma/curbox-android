@@ -1,0 +1,10 @@
+<resources>
+    <string name="todo_award_source_label">Todo</string>
+    <string name="todo_award_connection">Connect Todo learning time</string>
+    <string name="todo_award_disconnect">Disconnect Todo</string>
+    <string name="todo_award_no_choices">Turn on monitoring and choose a rule with weekend rollover first.</string>
+    <string name="todo_award_choose_child">Choose a child</string>
+    <string name="todo_award_choose_rule">Choose an app rule</string>
+    <string name="todo_award_saved">Todo connection saved.</string>
+    <string name="todo_award_failed">Could not update the Todo connection.</string>
+</resources>

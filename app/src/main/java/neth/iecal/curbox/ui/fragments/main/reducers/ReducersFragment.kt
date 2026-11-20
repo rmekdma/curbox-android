@@ -68,8 +68,14 @@ class ReducersFragment : Fragment() {
             startActivity(intent)
         }
 
-        view.findViewById<MaterialCardView>(R.id.card_learning).setOnClickListener {
-            startActivity(Intent(requireContext(), FragmentActivity::class.java).putExtra("fragment", "learning"))
+        val destinations = view.findViewById<android.widget.LinearLayout>(R.id.plugin_destinations)
+        for (destination in neth.iecal.curbox.plugins.PluginRuntime(requireContext()).destinations()) {
+            val card = inflater.inflate(R.layout.item_plugin_destination, destinations, false)
+            card.findViewById<android.widget.TextView>(R.id.plugin_title).text = destination.label
+            card.setOnClickListener {
+                startActivity(Intent(requireContext(), FragmentActivity::class.java).putExtra("fragment", destination.route))
+            }
+            destinations.addView(card)
         }
 
         val reelCounterCard = view.findViewById<MaterialCardView>(R.id.card_reel_counter)

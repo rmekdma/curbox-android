@@ -89,7 +89,7 @@ Wait-DeviceMinute -TargetMinute $targetMinute
 
 ### 5. Process control & SELinux / non-root resilience
 On Android 14+ or non-root devices, executing `kill -9 <PID>` under the adb `shell` user (UID 2000) against an app process running under another UID (`u0_a...`) fails with `Operation not permitted`.
-`Stop-ServiceProcess` implements automatic fallback: attempts `kill -9` first, and if the process remains alive after 300ms, executes `adb shell "am crash $TargetPid"`. The `ActivityManager` `am crash` command holds system permissions to terminate any app process cleanly without requiring root.
+`Stop-ServiceProcess` first verifies that the PID belongs to the exact requested process. It tries `run-as <package> kill -9`, then falls back to `am crash $TargetPid` if that same process remains alive after 300ms.
 
 ---
 
@@ -97,7 +97,7 @@ On Android 14+ or non-root devices, executing `kill -9 <PID>` under the adb `she
 
 ```powershell
 # 1. Harness Pester unit tests
-Invoke-Pester device-tests/tests/device-test-common.Tests.ps1
+./device-tests/run-all-harness-tests.ps1
 
 # 2. Target device test execution
 powershell -File device-tests/test-device-guardian-dialog-ui.ps1

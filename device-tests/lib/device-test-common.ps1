@@ -55,6 +55,7 @@ $script:DeviceTestTempStringPushHandler = $null
 $script:DeviceTestSettingsReader = $null
 $script:DeviceTestSecureSettingReader = $null
 $script:DeviceTestUiWaitHandler = $null
+$script:DeviceTestPinUiDumpHandler = $null
 $script:DeviceTestSettingsBackupPath = $null
 
 function Write-Step([string]$Msg) {
@@ -67,94 +68,6 @@ function Write-Success([string]$Msg) {
 
 function Write-Fail([string]$Msg) {
     Write-Host "[FAIL] $Msg" -ForegroundColor Red
-}
-
-function Test-ApprovedLearningApk([string]$ExpectedHash, [string]$ArtifactHash, [string]$InstalledHash, [string]$Signer, [string]$Manifest, [string]$Dex) {
-    $expectedSigner = "2429a67995d6e0a03312ff8f67d7df53c40dbdeb86e454d62f87d8e8243e4c6a"
-    return ($ExpectedHash -match '^[0-9a-fA-F]{64}$' -and $ArtifactHash -eq $ExpectedHash -and
-        $InstalledHash -eq $ExpectedHash -and $Signer -eq $expectedSigner -and
-        $Manifest.Contains('android:debuggable(0x0101000f)=(type 0x12)0xffffffff') -and
-        $Manifest.Contains('Ticket19DebugAppComponentFactory') -and
-        $Manifest.Contains('SyntheticFixtureProvider') -and $Manifest.Contains('neth.iecal.curbox.debug.synthetic.fixture') -and
-        $Manifest.Contains('android.permission.DUMP') -and $Dex.Contains('LearningComposition$createApi$1') -and
-        $Dex.Contains('SyntheticFixtureProvider') -and $Dex.Contains('neth.iecal.curbox.apitester') -and
-        -not $Dex.Contains('https://api.todomath.com'))
-}
-
-function Assert-LearningFakeApk([string]$ApkPath, [string]$ExpectedHash, [string]$BuildToolsDirectory) {
-    if (-not (Test-Path -LiteralPath $ApkPath -PathType Leaf)) { throw "Fake debug APK not found." }
-    $aapt = Join-Path $BuildToolsDirectory "aapt.exe"
-    $signerTool = Join-Path $BuildToolsDirectory "apksigner.bat"
-    if (-not (Test-Path -LiteralPath $aapt -PathType Leaf) -or -not (Test-Path -LiteralPath $signerTool -PathType Leaf)) { throw "Android build tools not found." }
-    $packagePath = Get-TestDeviceShellOutput -Command "pm path neth.iecal.curbox.debug"
-    if ($packagePath -notmatch '^package:(/data/app/[A-Za-z0-9_./~=-]+/base\.apk)$') { throw "Cannot identify installed Curbox APK." }
-    $installedPath = $Matches[1]
-    $installedOutput = Get-TestDeviceShellOutput -Command "sha256sum $installedPath"
-    if ($installedOutput -notmatch '^([0-9a-fA-F]{64})\s') { throw "Cannot hash installed Curbox APK." }
-    $installedHash = $Matches[1]
-    $artifactHash = (Get-FileHash -LiteralPath $ApkPath -Algorithm SHA256).Hash
-    $manifest = (& $aapt dump xmltree $ApkPath AndroidManifest.xml | Out-String)
-    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect APK manifest." }
-    $previousErrorPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $signerOutput = (& $signerTool verify --print-certs $ApkPath 2>$null | Out-String)
-        $signerExitCode = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $previousErrorPreference }
-    if ($signerExitCode -ne 0 -or $signerOutput -notmatch 'Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]{64})') { throw "Cannot verify APK signer." }
-    $signer = $Matches[1]
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $ApkPath).Path)
-    try {
-        $dex = New-Object System.Text.StringBuilder
-        $entries = @($archive.Entries | Where-Object { $_.FullName -match '^classes[0-9]*\.dex$' })
-        if ($entries.Count -eq 0) { throw "APK contains no DEX." }
-        foreach ($entry in $entries) {
-            $stream = $entry.Open()
-            try {
-                $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::GetEncoding(28591))
-                try { [void]$dex.Append($reader.ReadToEnd()) } finally { $reader.Dispose() }
-            } finally { $stream.Dispose() }
-        }
-    } finally { $archive.Dispose() }
-    if (-not (Test-ApprovedLearningApk $ExpectedHash $artifactHash $installedHash $signer $manifest $dex.ToString())) { throw "Installed APK did not pass fake debug identity checks." }
-}
-
-function Get-LearningRegistrationNames {
-    $raw = Get-TestDeviceShellOutput -Command "run-as neth.iecal.curbox.debug sh -c 'if [ -f files/datastore/learning-fake-state.json ]; then if [ -s files/datastore/learning-fake-state.json ]; then printf STATE:; cat files/datastore/learning-fake-state.json; fi; else echo __ABSENT__; fi'"
-    if ($raw -ceq '' -or $raw.Trim() -eq '__ABSENT__') { return }
-    if ($raw.StartsWith('STATE:')) { $raw = $raw.Substring(6) }
-    try { $document = $raw | ConvertFrom-Json -ErrorAction Stop } catch { throw "Invalid fake learning state." }
-    if (-not $document.state -or -not $document.monitor -or
-        -not $document.monitor.PSObject.Properties['registrations'] -or
-        $document.monitor.registrations -isnot [pscustomobject] -or
-        $document.state.accountId -cne $document.monitor.accountId) { throw "Unsupported fake learning state." }
-    $names = @($document.monitor.registrations.PSObject.Properties | ForEach-Object { $_.Name })
-    if ($names.Count -eq 0 -and $document.monitor.childName) { return [string]$document.monitor.childName }
-    return $names
-}
-function Get-LearningRegistrationCount { return @(Get-LearningRegistrationNames).Count }
-
-function Get-LearningNotifications {
-    $dump = Get-TestDeviceShellOutput -Command "dumpsys notification --noredact"
-    if ($dump -notmatch '(?ms)^  Notification List:\s*\r?\n(.*?)(?=^  \S|\z)') { throw "Unsupported notification dump format." }
-    $active = $Matches[1]
-    foreach ($record in ($active -split '(?m)(?=^    NotificationRecord\()')) {
-        if ($record -match '(?s)^\s*NotificationRecord\([^\r\n]*pkg=neth\.iecal\.curbox\.debug\s[^\r\n]*id=(-?\d+)\s+tag=(learning:[^\s]+)') {
-            [PSCustomObject]@{ Id = $Matches[1]; Tag = $Matches[2]; Text = $record }
-        }
-    }
-}
-
-function Set-LearningFixture([string]$Json) {
-    if ($Json -notmatch '^[A-Za-z0-9{},:"_\[\] ]+$') { throw "Invalid synthetic fixture characters." }
-    $output = Get-TestDeviceShellOutput -Command "content call --uri content://neth.iecal.curbox.debug.synthetic.fixture --method write --arg '$Json'"
-    if ($output -notmatch 'ok=true') { throw "Synthetic fixture write failed: $output" }
-}
-
-function Reset-LearningFixture {
-    $output = Get-TestDeviceShellOutput -Command "content call --uri content://neth.iecal.curbox.debug.synthetic.fixture --method reset"
-    if ($output -notmatch 'ok=true') { throw "Synthetic fixture reset failed: $output" }
 }
 
 function Assert-AdbDevice {
@@ -200,23 +113,6 @@ function Start-TestApp(
     Invoke-TestDeviceShell -Command $launchCommand
 }
 
-# These backups remain private to the Debug app and contain no copied host-side credentials.
-function Get-TodoSettlementFailureCount {
-    $count = (Get-TestDeviceShellOutput -Command "run-as neth.iecal.curbox.debug sh -c 'if [ -f files/crash_log.txt ]; then grep -c `"Todo settlement lookup failed`" files/crash_log.txt || true; else echo 0; fi'").Trim()
-    if ($count -notmatch '^\d+$') { throw 'Cannot read Todo settlement failure count.' }
-    return [long]$count
-}
-function Backup-FakeLearningFiles {
-    $id = [guid]::NewGuid().ToString('N')
-    $directory = "files/.codex-learning-$id"
-    Invoke-TestDeviceShell -Command "run-as neth.iecal.curbox.debug sh -c 'umask 077; mkdir $directory || exit 1; for name in learning-fake-state.json learning-fake-session.json; do if [ -e files/datastore/`$name ]; then cp -p files/datastore/`$name $directory/`$name || exit 1; fi; done'"
-    return $id
-}
-function Restore-FakeLearningFiles([string]$BackupId) {
-    if ($BackupId -notmatch '^[a-f0-9]{32}$') { throw 'Invalid fake learning backup identifier.' }
-    $directory = "files/.codex-learning-$BackupId"
-    Invoke-TestDeviceShell -Command "run-as neth.iecal.curbox.debug sh -c 'test -d $directory || exit 1; for name in learning-fake-state.json learning-fake-session.json; do if [ -e $directory/`$name ]; then cp -p $directory/`$name files/datastore/`$name.restore || exit 1; mv -f files/datastore/`$name.restore files/datastore/`$name || exit 1; else rm -f files/datastore/`$name || exit 1; fi; done; rm -f $directory/learning-fake-state.json $directory/learning-fake-session.json; rmdir $directory'"
-}
 function Get-DeviceGlobalSetting([string]$Name) {
     if ($Name -notin @('auto_time', 'auto_time_zone', 'stay_on_while_plugged_in')) { throw 'Unsupported global setting.' }
     $value = (Get-TestDeviceShellOutput -Command "settings get global $Name").Trim()
@@ -1193,7 +1089,7 @@ function Set-DeviceGuardianAuthConfig($GuardianAuthConfig, [string]$PackageName 
     return $true
 }
 
-function Get-DeviceProcessPid([string]$ProcessOutput = "", [string]$ProcessName = ":app_blocker_service") {
+function Get-DeviceProcessPid([string]$ProcessOutput = "", [string]$ProcessName = "neth.iecal.curbox.debug:app_blocker_service") {
     if (-not $PSBoundParameters.ContainsKey('ProcessOutput')) {
         $ProcessOutput = (adb shell "ps -ef" | Out-String)
         if (-not $ProcessOutput -or $ProcessOutput -notmatch [regex]::Escape($ProcessName)) {
@@ -1212,7 +1108,7 @@ function Get-DeviceProcessPid([string]$ProcessOutput = "", [string]$ProcessName 
 
         if ($tokens.Count -ge 2 -and $tokens[1] -match '^\d+$') {
             $cmd = $tokens[-1]
-            if ($cmd -eq $ProcessName -or $cmd.EndsWith($ProcessName)) {
+            if ($cmd -eq $ProcessName) {
                 return [int]$tokens[1]
             }
         }
@@ -1220,36 +1116,36 @@ function Get-DeviceProcessPid([string]$ProcessOutput = "", [string]$ProcessName 
     return $null
 }
 
-function Test-AccessibilityServiceBound([string]$DumpsysOutput = "", [string]$ServiceName = "AppBlockerService") {
-    if (-not $PSBoundParameters.ContainsKey('DumpsysOutput')) {
-        $DumpsysOutput = (adb shell "dumpsys accessibility" | Out-String)
+function Test-AccessibilityServiceBound(
+    [string]$DumpsysOutput = "",
+    [string]$PackageName = "neth.iecal.curbox.debug",
+    [string]$ServiceName = "neth.iecal.curbox.services.AppBlockerService",
+    [string]$ActivityServicesOutput = ""
+) {
+    $component = "$PackageName/$ServiceName"
+    if (-not $PSBoundParameters.ContainsKey('ActivityServicesOutput')) {
+        $ActivityServicesOutput = (adb shell "dumpsys activity services $component" | Out-String)
     }
-    if ([string]::IsNullOrWhiteSpace($DumpsysOutput)) {
-        return $false
-    }
-
-    if ($DumpsysOutput -match "Crashed services:\{([^}]*)\}") {
-        $crashedContent = $matches[1]
-        if ($crashedContent -match $ServiceName -or $crashedContent -match "Curbox App Blocker") {
-            return $false
-        }
-    }
-
-    if ($DumpsysOutput -match "Bound services:\{([^}]*)\}") {
-        $boundContent = $matches[1]
-        if ($boundContent -match $ServiceName -or $boundContent -match "Curbox App Blocker") {
-            return $true
-        }
-    }
-
-    return $false
+    $escapedComponent = [regex]::Escape($component)
+    $escapedProcess = [regex]::Escape("${PackageName}:app_blocker_service")
+    # Accessibility's bound list identifies services by label, which both builds share.
+    return ($ActivityServicesOutput -match "ServiceRecord\{[^}]*\s$escapedComponent\}" -and
+        $ActivityServicesOutput -match "app=ProcessRecord\{[^}]*\s\d+:$escapedProcess/" -and
+        $ActivityServicesOutput -match 'requested=true\s+received=true\s+hasBound=true' -and
+        $ActivityServicesOutput -match 'Client AppBindRecord\{[^\r\n]*\d+:system/\d+' -and
+        $ActivityServicesOutput -match "ConnectionRecord\{[^}]*\s$escapedComponent(?:[:}\s])")
 }
 
-function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = ":app_blocker_service") {
+function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = "neth.iecal.curbox.debug:app_blocker_service") {
     if ($TargetPid -le 0) {
         return $false
     }
-    adb shell "kill -9 $TargetPid 2>/dev/null || su 0 kill -9 $TargetPid 2>/dev/null" | Out-Null
+    if ($ProcessName -notmatch '^[a-zA-Z0-9_.]+(?::[a-zA-Z0-9_.]+)?$' -or
+        (Get-DeviceProcessPid -ProcessName $ProcessName) -ne $TargetPid) {
+        return $false
+    }
+    $packageName = ($ProcessName -split ':', 2)[0]
+    adb shell "run-as $packageName kill -9 $TargetPid" | Out-Null
     Start-Sleep -Milliseconds 300
     $currentPid = Get-DeviceProcessPid -ProcessName $ProcessName
     if ($currentPid -eq $TargetPid) {
@@ -1261,14 +1157,15 @@ function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = ":app_block
 function Restart-DeviceAccessibilityServiceIfEnabled(
     $AccessibilitySettings,
     [int]$TimeoutSeconds = 30,
-    [string]$ProcessName = ":app_blocker_service"
+    [string]$PackageName = "neth.iecal.curbox.debug",
+    [string]$ProcessName = "${PackageName}:app_blocker_service"
 ) {
     if (-not $AccessibilitySettings) {
         Write-Error "Accessibility settings backup is required before restarting the service."
         return $null
     }
 
-    $serviceComponent = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
+    $serviceComponent = "$PackageName/neth.iecal.curbox.services.AppBlockerService"
     $enabledComponents = @(([string]$AccessibilitySettings.EnabledServices) -split ":" | Where-Object { $_ })
     if ([string]$AccessibilitySettings.AccessibilityEnabled -ne "1" -or $enabledComponents -notcontains $serviceComponent) {
         return [PSCustomObject]@{ Skipped = $true; ProcessId = $null }
@@ -1282,7 +1179,7 @@ function Restart-DeviceAccessibilityServiceIfEnabled(
     $wait = [System.Diagnostics.Stopwatch]::StartNew()
     while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         $currentPid = Get-DeviceProcessPid -ProcessName $ProcessName
-        if ($currentPid -and (!$initialPid -or $currentPid -ne $initialPid) -and (Test-AccessibilityServiceBound)) {
+        if ($currentPid -and (!$initialPid -or $currentPid -ne $initialPid) -and (Test-AccessibilityServiceBound -PackageName $PackageName)) {
             return [PSCustomObject]@{ Skipped = $false; ProcessId = [int]$currentPid }
         }
         Start-Sleep -Milliseconds 500
@@ -1422,16 +1319,59 @@ function Test-AppRuleGuardianGrant(
     return $false
 }
 
+function Test-GuardianPinEntry([string]$Xml, [int]$ExpectedLength) {
+    try {
+        [xml]$doc = $Xml
+        $node = $doc.SelectSingleNode('//node[@password="true"]')
+        if ($node -and $ExpectedLength -eq 0 -and $node.GetAttribute('text') -eq 'Password') { return $true }
+        return ($null -ne $node -and $node.GetAttribute('text').Length -eq $ExpectedLength)
+    } catch {
+        return $false
+    }
+}
+
+function Get-GuardianPinUi {
+    if ($script:DeviceTestPinUiDumpHandler -is [scriptblock]) { return (& $script:DeviceTestPinUiDumpHandler) }
+    return Dump-UI
+}
+
+function Get-GuardianPinSubmitButton([string]$Xml) {
+    try {
+        [xml]$doc = $Xml
+        foreach ($selector in @(
+            "//node[@resource-id='android:id/button1']",
+            "//node[@class='android.widget.Button' and @text='계속']",
+            "//node[@class='android.widget.Button' and @text='Continue']"
+        )) {
+            foreach ($node in @($doc.SelectNodes($selector))) {
+                if ($node.GetAttribute('enabled') -ne 'true' -or $node.GetAttribute('visible-to-user') -eq 'false') { continue }
+                $bounds = [regex]::Match($node.GetAttribute('bounds'), '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$')
+                if (-not $bounds.Success) { continue }
+                $x1, $y1, $x2, $y2 = 1..4 | ForEach-Object { [int]$bounds.Groups[$_].Value }
+                if ($x2 -gt $x1 -and $y2 -gt $y1) {
+                    return @{ Found = $true; X = [int](($x1 + $x2) / 2); Y = [int](($y1 + $y2) / 2) }
+                }
+            }
+        }
+    } catch { }
+    return @{ Found = $false }
+}
+
 function Submit-GuardianPin([string]$PinValue) {
-    $uiPinDialog = Wait-For-UI "guardian_enter_password|Enter guardian password|비밀번호 입력|Password" 6
-    if (-not ($uiPinDialog -match "Enter guardian password" -or $uiPinDialog -match "비밀번호 입력" -or $uiPinDialog -match "Password")) {
+    if ($PinValue -notmatch '^\d{1,32}$') {
+        Write-Fail "Guardian PIN must contain 1 to 32 digits."
+        return $false
+    }
+    $pinDialogPattern = 'guardian_enter_password|Enter guardian password|비밀번호 입력|Password|Guardian authentication|보호자 인증'
+    $uiPinDialog = Wait-For-UI $pinDialogPattern 6
+    if ($uiPinDialog -notmatch $pinDialogPattern) {
         Write-Fail "Guardian PIN input dialog was NOT displayed."
         return $false
     }
 
-    $nodePin = Get-NodeBounds $uiPinDialog 'class="android.widget.EditText"'
+    $nodePin = Get-NodeBounds $uiPinDialog 'password="true"'
     if (-not $nodePin.Found) {
-        $nodePin = Get-NodeBounds $uiPinDialog 'password="true"'
+        $nodePin = Get-NodeBounds $uiPinDialog 'class="android.widget.EditText"'
     }
     if (-not $nodePin.Found) {
         $nodePin = Get-NodeBounds $uiPinDialog 'text="Password"'
@@ -1442,24 +1382,51 @@ function Submit-GuardianPin([string]$PinValue) {
         return $false
     }
 
-    adb shell "input tap $($nodePin.X) $($nodePin.Y)" | Out-Null
+    Invoke-TestDeviceShell -Command "input tap $($nodePin.X) $($nodePin.Y)"
     Start-Sleep -Milliseconds 500
-    # Android IME Backspace keyevent 67 repeated per device-tests/AGENTS.md
-    adb shell "input keyevent 67 67 67 67 67" | Out-Null
-    adb shell "input text $PinValue" | Out-Null
-    Start-Sleep -Milliseconds 500
-
-    $uiAfterTyping = Dump-UI
-    # Resolution hierarchy: Resource-ID -> Primary Locale (Korean) -> Fallback Locale (English)
-    $continued = Tap-Node $uiAfterTyping 'resource-id="android:id/button1"' "계속/확인 버튼 (Resource-ID)" -Optional
-    if (-not $continued) {
-        $continued = Tap-Node $uiAfterTyping 'text="계속"' "계속 텍스트 버튼 (Korean)" -Optional
+    $uiAfterTyping = ''
+    $entered = $false
+    for ($attempt = 0; $attempt -lt 2 -and -not $entered; $attempt++) {
+        $uiAfterTyping = Get-GuardianPinUi
+        if ($uiAfterTyping -notmatch $pinDialogPattern) { break }
+        $nodePin = Get-NodeBounds $uiAfterTyping 'password="true"'
+        if (-not $nodePin.Found) { break }
+        Invoke-TestDeviceShell -Command "input tap $($nodePin.X) $($nodePin.Y)"
+        $clearKeys = (@('67') * 64) -join ' '
+        Invoke-TestDeviceShell -Command "input keyevent 123 $clearKeys"
+        $clearedUi = Get-GuardianPinUi
+        if (-not (Test-GuardianPinEntry -Xml $clearedUi -ExpectedLength 0)) { continue }
+        Invoke-TestDeviceShell -Command "input text $PinValue"
+        $entryWait = [System.Diagnostics.Stopwatch]::StartNew()
+        do {
+            $uiAfterTyping = Get-GuardianPinUi
+            $entered = Test-GuardianPinEntry -Xml $uiAfterTyping -ExpectedLength $PinValue.Length
+            if (-not $entered) { Start-Sleep -Milliseconds 250 }
+        } while (-not $entered -and $entryWait.Elapsed.TotalSeconds -lt 3)
     }
-    if (-not $continued) {
-        $continued = Tap-Node $uiAfterTyping 'text="Continue"' "Continue text button (English)"
+    if (-not $entered) {
+        Write-Fail "Guardian PIN field did not contain the expected number of characters."
+        return $false
     }
-
-    return $continued
+    $inputMethodState = Get-TestDeviceShellOutput -Command "dumpsys input_method"
+    if ($inputMethodState -match 'mInputShown=true') {
+        Invoke-TestDeviceShell -Command "input keyevent 4"
+    }
+    $buttonWait = [System.Diagnostics.Stopwatch]::StartNew()
+    $button = @{ Found = $false }
+    do {
+        $uiAfterTyping = Get-GuardianPinUi
+        if ($uiAfterTyping -match $pinDialogPattern -and (Test-GuardianPinEntry -Xml $uiAfterTyping -ExpectedLength $PinValue.Length)) {
+            $button = Get-GuardianPinSubmitButton -Xml $uiAfterTyping
+        }
+        if (-not $button.Found) { Start-Sleep -Milliseconds 250 }
+    } while (-not $button.Found -and $buttonWait.Elapsed.TotalSeconds -lt 6)
+    if (-not $button.Found) {
+        Write-Fail "Guardian PIN submit button was not found."
+        return $false
+    }
+    Invoke-TestDeviceShell -Command "input tap $($button.X) $($button.Y)"
+    return $true
 }
 
 function Get-RuleRolloverPool(

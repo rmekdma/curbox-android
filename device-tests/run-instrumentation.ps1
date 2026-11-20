@@ -1,6 +1,6 @@
 param(
     [ValidateSet('Functional', 'Performance')][string]$Mode = 'Functional',
-    [string]$DeviceId = '', [string]$LearningApkPath = '', [string]$ExpectedApkSha256 = '',
+    [string]$DeviceId = '', [string]$TargetApkPath = '', [string]$ExpectedApkSha256 = '',
     [string]$BuildToolsDirectory = '', [string]$PseudonymousDeviceId = '',
     [string]$SourceCommit = '', [string]$HarnessCommit = '',
     [string]$InstrumentationApkPath = '', [string]$InstrumentationApkSha256 = ''
@@ -20,15 +20,25 @@ function Assert-InstrumentationApk([string]$ApkPath, [string]$ExpectedHash, [str
     if ($exitCode -ne 0 -or $output -notmatch 'Signer #1 certificate SHA-256 digest: ([a-fA-F0-9]{64})' -or $Matches[1] -ne '2429a67995d6e0a03312ff8f67d7df53c40dbdeb86e454d62f87d8e8243e4c6a') { throw 'Instrumentation APK signer mismatch.' }
 }
 
+function Assert-TargetApk([string]$ApkPath, [string]$ExpectedHash, [string]$BuildToolsDirectory) {
+    $verifiers = @(Get-ChildItem -Path (Join-Path $PSScriptRoot '..') -Directory | ForEach-Object {
+        Get-Item -LiteralPath (Join-Path $_.FullName 'device-tests/instrumentation-apk-verifier.ps1') -ErrorAction SilentlyContinue
+    } | Sort-Object FullName)
+    if ($verifiers.Count -eq 0) { throw 'No target APK verifier is configured.' }
+    foreach ($verifier in $verifiers) {
+        & $verifier.FullName -ApkPath $ApkPath -ExpectedHash $ExpectedHash -BuildToolsDirectory $BuildToolsDirectory
+    }
+}
+
 function Invoke-CurboxInstrumentation {
     param(
-        [string]$Mode, [string]$DeviceId, [string]$LearningApkPath, [string]$ExpectedApkSha256,
+        [string]$Mode, [string]$DeviceId, [string]$TargetApkPath, [string]$ExpectedApkSha256,
         [string]$BuildToolsDirectory, [string]$PseudonymousDeviceId, [string]$SourceCommit,
         [string]$HarnessCommit, [string]$InstrumentationApkPath, [string]$InstrumentationApkSha256
     )
     if ($Mode -notin @('Functional', 'Performance')) { throw 'Invalid mode.' }
-    foreach ($value in @($DeviceId, $LearningApkPath, $ExpectedApkSha256, $BuildToolsDirectory, $InstrumentationApkPath, $InstrumentationApkSha256)) {
-        if ([string]::IsNullOrWhiteSpace($value)) { throw 'Device and fake debug APK identity are required.' }
+    foreach ($value in @($DeviceId, $TargetApkPath, $ExpectedApkSha256, $BuildToolsDirectory, $InstrumentationApkPath, $InstrumentationApkSha256)) {
+        if ([string]::IsNullOrWhiteSpace($value)) { throw 'Device and target debug APK identity are required.' }
     }
     if ($DeviceId -notmatch '^[A-Za-z0-9._:-]+$' -or $ExpectedApkSha256 -notmatch '^[a-fA-F0-9]{64}$' -or $InstrumentationApkSha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid device or APK identity.' }
     if ($Mode -eq 'Performance') {
@@ -46,7 +56,7 @@ function Invoke-CurboxInstrumentation {
         $enabledServices = Get-DeviceSecureSetting -Name 'enabled_accessibility_services'
         if ([string]::IsNullOrWhiteSpace($enabledServices)) { throw 'Cannot read enabled accessibility services.' }
         if ($enabledServices -match '(?i)neth\.iecal\.curbox\.debug/') { throw 'Disable the Curbox accessibility service before instrumentation.' }
-        Assert-LearningFakeApk $LearningApkPath $ExpectedApkSha256 $BuildToolsDirectory
+        Assert-TargetApk $TargetApkPath $ExpectedApkSha256 $BuildToolsDirectory
         Assert-InstrumentationApk $InstrumentationApkPath $InstrumentationApkSha256 $BuildToolsDirectory
         $installed = Get-TestDeviceShellOutput -Command 'pm path neth.iecal.curbox.debug.test'
         if ($installed -notmatch '^package:(/data/app/[A-Za-z0-9_./~=-]+/base\.apk)$') { throw 'Cannot identify installed instrumentation APK.' }

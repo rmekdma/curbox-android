@@ -1,5 +1,6 @@
 package neth.iecal.curbox.data.models
 
+import neth.iecal.curbox.plugins.StoredPluginTime
 import neth.iecal.curbox.utils.UseDay
 import neth.iecal.curbox.utils.UseDayResetTime
 
@@ -46,10 +47,7 @@ data class Settings(
     val appRuleOverrideState: AppRuleOverrideState = AppRuleOverrideState(),
     /** Multi-day accumulated rollover state across all app rules. */
     val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState(),
-    val todoAwardConnection: TodoAwardConnection? = null,
-    val todoAwardLedger: List<TodoAwardLedgerEntry> = emptyList(),
-    val todoPendingSettlements: List<TodoPendingSettlement> = emptyList(),
-    val todoAwardConnectionRevision: String = ""
+    val pluginTimes: Map<String, StoredPluginTime> = emptyMap()
 ) {
     /** Convenient scalar form for settings UIs and deterministic tests. */
     val useDayResetTimeMinutes: Int
@@ -61,7 +59,6 @@ data class Settings(
     val guardianPasswordConfigured: Boolean
         get() = guardianAuthConfig.isConfigured
 }
-
 /** Multi-day accumulated rollover pool for a single app rule. */
 data class RuleRolloverPool(
     val ruleId: String = "",
@@ -79,28 +76,3 @@ data class AppRuleRolloverState(
     fun withPool(pool: RuleRolloverPool): AppRuleRolloverState =
         copy(pools = pools + (pool.ruleId to pool))
 }
-
-
-/** The current link is identified separately each time it is saved. */
-data class TodoAwardConnection(
-    val accountId: String = "",
-    val childName: String = "",
-    val ruleId: String = "",
-    val connectedUseDayId: String = "",
-    val revision: String = ""
-)
-
-/** Direct Todo awards survive rule changes and use day resets. */
-data class TodoAwardLedgerEntry(
-    val accountId: String = "",
-    val childName: String = "",
-    val useDayId: String = "",
-    val grantedMinutes: Long = 0,
-    val settled: Boolean = false
-)
-
-/** An ended report awaiting its first successful settlement. */
-data class TodoPendingSettlement(
-    val connection: TodoAwardConnection = TodoAwardConnection(),
-    val useDayId: String = ""
-)

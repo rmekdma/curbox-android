@@ -265,8 +265,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         return h
     }
-    private val todoSettlementWake = Channel<Unit>(Channel.CONFLATED)
-    private var todoSettlementJob: Job? = null
+    private val pluginSettlementWake = Channel<Unit>(Channel.CONFLATED)
+    private var pluginSettlementJob: Job? = null
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var notificationTickJob: kotlinx.coroutines.Job? = null
     private var liveNotificationJob: kotlinx.coroutines.Job? = null
@@ -749,7 +749,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         // already visible while the service is alive.
         postVisibleApplicationCheck(connectionGeneration = connectionGeneration)
         scheduleNextSettlementAlarm()
-        startTodoSettlement()
+        startPluginSettlement()
     }
 
 
@@ -2345,7 +2345,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         scope.launch {
             try {
                 val settlement = coordinator.reconcileSettlement(wallClockMs)
-                if (settlement.committed) startTodoSettlement()
+                if (settlement.committed) startPluginSettlement()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -2366,30 +2366,29 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 return
             }
         }
-        if (outcome.succeeded && outcome.result?.committed == true) startTodoSettlement()
+        if (outcome.succeeded && outcome.result?.committed == true) startPluginSettlement()
         scheduleNextSettlementAlarm()
         postVisibleApplicationCheck(observationKind = ObservationKind.REFRESH)
     }
 
-    private fun startTodoSettlement() {
-        todoSettlementWake.trySend(Unit)
+    private fun startPluginSettlement() {
+        pluginSettlementWake.trySend(Unit)
         synchronized(runtimeLock) {
-            if (todoSettlementJob?.isActive == true) return
-            todoSettlementJob = scope.launch(Dispatchers.IO) {
+            if (pluginSettlementJob?.isActive == true) return
+            pluginSettlementJob = scope.launch(Dispatchers.IO) {
                 while (isActive) {
-                    todoSettlementWake.receive()
+                    pluginSettlementWake.receive()
                     val pending = try {
-                        neth.iecal.curbox.learning.TodoAwardRepository(service, service.dataStoreManager)
-                            .settleEndedReports(now = { observationWallClockMs() }, onFailure = ::logNonFatal)
+                        neth.iecal.curbox.plugins.PluginRuntime(service).settleEnded()
                     } catch (e: CancellationException) {
                         throw e
                     } catch (_: Throwable) {
-                        logNonFatal(IllegalStateException("Todo settlement failed"))
+                        logNonFatal(IllegalStateException("Plugin settlement failed"))
                         true
                     }
                     if (pending) {
-                        withTimeoutOrNull(15 * 60 * 1000L) { todoSettlementWake.receive() }
-                        todoSettlementWake.trySend(Unit)
+                        withTimeoutOrNull(15 * 60 * 1000L) { pluginSettlementWake.receive() }
+                        pluginSettlementWake.trySend(Unit)
                     }
                 }
             }

@@ -13,9 +13,10 @@ param(
     [string]$ContributorPackage = "com.initialcoms.ridi",
     [string]$OtherPackage = "com.initialcoms.ridi",
     [string]$DeviceId = "",
-    [string]$LearningApkPath = "",
+    [string]$TargetApkPath = "",
     [string]$ExpectedApkSha256 = "",
-    [string]$BuildToolsDirectory = ""
+    [string]$BuildToolsDirectory = "",
+    [switch]$ListOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,25 +44,6 @@ $suiteBaselineRestored = $false
 $suiteBackupPath = Join-Path (Join-Path $env:TEMP "curbox_device_test_suite") "settings_backup.json"
 $suiteTargetPackages = @($TargetPackage, $ContributorPackage, $OtherPackage)
 
-function Stop-SuiteMainProcessAndWait([int]$TimeoutSeconds = 10) {
-    $processName = "neth.iecal.curbox.debug"
-    $initialPid = Get-DeviceProcessPid -ProcessName $processName
-    if (-not $initialPid) {
-        return [PSCustomObject]@{ Stopped = $true; ProcessId = $null }
-    }
-
-    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $processName | Out-Null
-    $wait = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        $currentPid = Get-DeviceProcessPid -ProcessName $processName
-        if (-not $currentPid -or $currentPid -ne $initialPid) {
-            return [PSCustomObject]@{ Stopped = $true; ProcessId = $currentPid }
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    return [PSCustomObject]@{ Stopped = $false; ProcessId = $initialPid }
-}
-
 $knownContributorScripts = @(
     "test-device-apprules.ps1",
     "test-device-contributor-flow.ps1",
@@ -74,18 +56,25 @@ $knownOtherPackageScripts = @(
     "test-device-guardian-extra-time.ps1",
     "test-device-main-app-extra-time.ps1"
 )
-$learningScripts = @(
-    "test-device-learning-monitor.ps1",
-    "test-device-todo-extra-time.ps1"
-)
+
 
 try {
     . "$PSScriptRoot/lib/device-test-common.ps1"
     $commonLoaded = $true
 
-    Assert-AdbDevice
-    if ($LearningApkPath) {
-        Assert-LearningFakeApk $LearningApkPath $ExpectedApkSha256 $BuildToolsDirectory
+    if (-not $ListOnly) { Assert-AdbDevice }
+    $pluginScripts = @()
+    $pluginSuites = @(Get-ChildItem -Path (Join-Path $PSScriptRoot '..') -Directory | ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName 'device-tests/device-test-suite.ps1') -ErrorAction SilentlyContinue } | Sort-Object FullName)
+    foreach ($suite in $pluginSuites) {
+        $artifact = if ($ListOnly) { '' } else { $TargetApkPath }
+        $pluginScripts += @(& $suite.FullName -ApkPath $artifact -ExpectedApkSha256 $ExpectedApkSha256 -BuildToolsDirectory $BuildToolsDirectory)
+    }
+    if ($ListOnly) {
+        $recovery = 'test-device-service-recovery.ps1'
+        $scripts = @(Get-ChildItem -Path $scriptsRoot -Filter 'test-device-*.ps1' -File | Sort-Object Name)
+        @($scripts | Where-Object { $_.Name -ne $recovery }) + $pluginScripts + @($scripts | Where-Object { $_.Name -eq $recovery }) |
+            ForEach-Object { $_.FullName }
+        return
     }
     $suiteBackupDirectory = Split-Path -Parent $suiteBackupPath
     if (-not (Test-Path -LiteralPath $suiteBackupDirectory)) {
@@ -100,6 +89,13 @@ try {
     $suiteAccessibilityBackupReady = $true
 
     Write-Host "`nBacking up suite baseline and enabling Curbox accessibility for E2E tests..." -ForegroundColor Cyan
+    if (-not (Test-AccessibilityServiceBound)) {
+        try {
+            Start-TestApp -PackageName "neth.iecal.curbox.debug" -ActivityName "neth.iecal.curbox.ui.activity.FragmentActivity"
+        } finally {
+            Invoke-TestDeviceShell -Command "input keyevent 3"
+        }
+    }
     Enable-AccessibilityService -PackageName "neth.iecal.curbox.debug" | Out-Null
     $bound = $false
     $bindTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -115,11 +111,17 @@ try {
     }
     Write-Host "Curbox AppBlockerService is bound; the original accessibility state will be restored after the suite." -ForegroundColor Cyan
 
-    $testScripts = @(Get-ChildItem -Path $scriptsRoot -Filter "test-device-*.ps1" -File | Sort-Object Name)
+    # Run the deliberate service recovery scenario after the other tests.
+    $recoveryScript = "test-device-service-recovery.ps1"
+    $discoveredScripts = @(Get-ChildItem -Path $scriptsRoot -Filter "test-device-*.ps1" -File | Sort-Object Name)
+    $testScripts = @($discoveredScripts | Where-Object { $_.Name -ne $recoveryScript })
+    $testScripts += $pluginScripts
+    $testScripts += @($discoveredScripts | Where-Object { $_.Name -eq $recoveryScript })
     foreach ($scriptFile in $testScripts) {
-        if ($learningScripts -contains $scriptFile.Name -and -not $LearningApkPath) {
-            $results.Add([PSCustomObject]@{ Name = $scriptFile.Name; Status = "SKIPPED"; Detail = "Fake debug artifact was not provided." })
-            Write-Host "[SKIPPED] $($scriptFile.Name) — fake debug artifact was not provided." -ForegroundColor Yellow
+        $isPlugin = $null -ne $scriptFile.PSObject.Properties['Arguments']
+        if ($isPlugin -and $scriptFile.SkipReason) {
+            $results.Add([PSCustomObject]@{ Name = $scriptFile.Name; Status = "SKIPPED"; Detail = $scriptFile.SkipReason })
+            Write-Host "[SKIPPED] $($scriptFile.Name) - $($scriptFile.SkipReason)" -ForegroundColor Yellow
             continue
         }
         if ($scriptFile.Name -eq "test-device-deep-sleep.ps1") {
@@ -132,14 +134,8 @@ try {
             continue
         }
 
-        $childArguments = @("-TargetPackage", $TargetPackage)
-        if ($learningScripts -contains $scriptFile.Name) {
-            $childArguments = @("-TargetPackage", "neth.iecal.curbox.apitester", "-LearningApkPath", $LearningApkPath, "-ExpectedApkSha256", $ExpectedApkSha256, "-BuildToolsDirectory", $BuildToolsDirectory)
-        }
-        if ($scriptFile.Name -eq "test-device-todo-extra-time.ps1") {
-            $childArguments += @("-Scenario", "Daily")
-        }
-        if ($learningScripts -notcontains $scriptFile.Name -and -not [string]::IsNullOrWhiteSpace($TargetActivity)) {
+        $childArguments = if ($isPlugin) { @($scriptFile.Arguments) } else { @("-TargetPackage", $TargetPackage) }
+        if (-not $isPlugin -and -not [string]::IsNullOrWhiteSpace($TargetActivity)) {
             $childArguments += @("-TargetActivity", $TargetActivity)
         }
         if ($knownContributorScripts -contains $scriptFile.Name) {
@@ -180,31 +176,67 @@ try {
                 -TargetPackages $suiteTargetPackages `
                 -AccessibilitySettings $suiteAccessibilityBaseline
 
-            $mainProcessReload = Stop-SuiteMainProcessAndWait
-            if (-not $mainProcessReload.Stopped) {
-                throw "The main Curbox process did not retire after suite settings were restored."
-            }
-            $serviceReload = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings $suiteAccessibilityBaseline
-            if ($serviceReload.Skipped) {
-                Write-Host "Accessibility was disabled in the saved baseline; service restart was skipped." -ForegroundColor DarkGray
-            } elseif ($serviceReload.ProcessId) {
-                Write-Host "AppBlockerService re-bound as PID $($serviceReload.ProcessId) from the restored suite settings." -ForegroundColor Green
+            $cleanupErrors = @()
+            $debugComponent = "neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
+            $baselineServices = @(([string]$suiteAccessibilityBaseline.EnabledServices) -split ':' | Where-Object { $_ })
+            if ([string]$suiteAccessibilityBaseline.AccessibilityEnabled -eq '1' -and $baselineServices -contains $debugComponent) {
+                try {
+                    Invoke-TestDeviceShell -Command "am force-stop neth.iecal.curbox.debug"
+                    try {
+                        Start-TestApp -PackageName "neth.iecal.curbox.debug" -ActivityName "neth.iecal.curbox.ui.activity.FragmentActivity"
+                    } finally {
+                        Invoke-TestDeviceShell -Command "input keyevent 3"
+                    }
+                    Enable-AccessibilityService -PackageName "neth.iecal.curbox.debug" | Out-Null
+                    $rebindTimer = [System.Diagnostics.Stopwatch]::StartNew()
+                    $rebound = $false
+                    while ($rebindTimer.Elapsed.TotalSeconds -lt 30) {
+                        if (Test-AccessibilityServiceBound) { $rebound = $true; break }
+                        Start-Sleep -Milliseconds 500
+                    }
+                    if (-not $rebound) { throw "AppBlockerService did not rebind from the restored suite settings." }
+                    Write-Host "AppBlockerService re-bound from the restored suite settings." -ForegroundColor Green
+                } catch {
+                    $cleanupErrors += $_.Exception.Message
+                }
             } else {
-                throw "AppBlockerService did not rebind from the restored suite settings."
+                try {
+                    $mainPid = Get-DeviceProcessPid -ProcessName "neth.iecal.curbox.debug"
+                    $servicePid = Get-DeviceProcessPid -ProcessName "neth.iecal.curbox.debug:app_blocker_service"
+                    if ($mainPid -or $servicePid) {
+                        Invoke-TestDeviceShell -Command "am force-stop neth.iecal.curbox.debug"
+                        $stopTimer = [System.Diagnostics.Stopwatch]::StartNew()
+                        do {
+                            $mainPid = Get-DeviceProcessPid -ProcessName "neth.iecal.curbox.debug"
+                            $servicePid = Get-DeviceProcessPid -ProcessName "neth.iecal.curbox.debug:app_blocker_service"
+                            if (-not $mainPid -and -not $servicePid) { break }
+                            Start-Sleep -Milliseconds 500
+                        } while ($stopTimer.Elapsed.TotalSeconds -lt 10)
+                        if ($mainPid -or $servicePid) {
+                            throw "Debug Curbox processes did not stop after suite settings were restored."
+                        }
+                    }
+                    Write-Host "Debug accessibility was disabled in the saved baseline; service reload was skipped." -ForegroundColor DarkGray
+                } catch { $cleanupErrors += $_.Exception.Message }
             }
 
             Start-Sleep -Seconds 1
-            $restoredSettings = Get-DeviceSettings
-            if ([string]$restoredSettings -cne [string]$suiteSettingsBaseline) {
-                throw "Suite settings did not match the saved baseline after cleanup."
-            }
-            if ($suiteAccessibilityBackupReady) {
-                $restoredAccessibility = Backup-DeviceAccessibilitySettings
-                if ([string]$restoredAccessibility.EnabledServices -cne [string]$suiteAccessibilityBaseline.EnabledServices -or
-                    [string]$restoredAccessibility.AccessibilityEnabled -cne [string]$suiteAccessibilityBaseline.AccessibilityEnabled) {
-                    throw "Accessibility settings did not match the saved baseline after cleanup."
+            try {
+                $restoredSettings = Get-DeviceSettings
+                if ([string]$restoredSettings -cne [string]$suiteSettingsBaseline) {
+                    throw "Suite settings did not match the saved baseline after cleanup."
                 }
+            } catch { $cleanupErrors += $_.Exception.Message }
+            if ($suiteAccessibilityBackupReady) {
+                try {
+                    $restoredAccessibility = Backup-DeviceAccessibilitySettings
+                    if ([string]$restoredAccessibility.EnabledServices -cne [string]$suiteAccessibilityBaseline.EnabledServices -or
+                        [string]$restoredAccessibility.AccessibilityEnabled -cne [string]$suiteAccessibilityBaseline.AccessibilityEnabled) {
+                        throw "Accessibility settings did not match the saved baseline after cleanup."
+                    }
+                } catch { $cleanupErrors += $_.Exception.Message }
             }
+            if ($cleanupErrors.Count -gt 0) { throw ($cleanupErrors -join ' | ') }
             $suiteBaselineRestored = $true
             Write-Host "Suite settings and accessibility baseline restored and verified." -ForegroundColor Green
         } catch {

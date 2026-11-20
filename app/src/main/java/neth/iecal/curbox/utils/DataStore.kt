@@ -1,6 +1,11 @@
 package neth.iecal.curbox.utils
 
-import neth.iecal.curbox.domain.apprules.isTodoAwardEligible
+import neth.iecal.curbox.plugins.PluginTimeProjection
+import neth.iecal.curbox.plugins.StoredPluginTime
+import neth.iecal.curbox.plugins.PluginCatalog
+import neth.iecal.curbox.plugins.PluginMigrationException
+import neth.iecal.curbox.plugins.PluginRuntime
+import neth.iecal.plugin.PluginTimeState
 
 import android.content.Context
 import android.content.Intent
@@ -53,13 +58,17 @@ import kotlin.jvm.java
 class GsonSerializer<T>(
     private val gson: Gson,
     private val type: Type,
-    override val defaultValue: T
+    override val defaultValue: T,
+    private val migratePluginSettings: (JsonObject, Gson) -> Unit = PluginCatalog::migrateSettings
 ) : Serializer<T> {
 
     override suspend fun readFrom(input: InputStream): T {
         return try {
             val raw = input.readBytes().decodeToString()
             gson.fromJson(normalizeSettingsJson(raw), type) ?: defaultValue
+        } catch (e: PluginMigrationException) {
+            // Keep the original file intact so migration can be retried.
+            throw e
         } catch (e: Exception) {
             e.printStackTrace()
             defaultValue
@@ -144,6 +153,13 @@ class GsonSerializer<T>(
             !marker.isJsonPrimitive || !marker.asJsonPrimitive.isNumber
         ) {
             root.addProperty("appRuleMigrationVersion", 0)
+        }
+        try {
+            migratePluginSettings(root, gson)
+        } catch (e: PluginMigrationException) {
+            throw e
+        } catch (e: Exception) {
+            throw PluginMigrationException(e)
         }
         return root.toString()
     }
@@ -306,25 +322,6 @@ class DataStoreManager(private val context: Context) {
     private val gson = Gson()
 
     companion object {
-        @Volatile private var learningStateStore: androidx.datastore.core.DataStore<String>? = null
-        @Volatile private var learningSessionStore: androidx.datastore.core.DataStore<String>? = null
-
-        fun learningStateDataStore(context: Context): androidx.datastore.core.DataStore<String> =
-            learningStateStore ?: synchronized(this) {
-                learningStateStore ?: MultiProcessDataStoreFactory.create(
-                    serializer = neth.iecal.curbox.learning.LearningStringSerializer,
-                    produceFile = { File(context.applicationContext.filesDir, if (neth.iecal.curbox.BuildConfig.LEARNING_FAKE_ONLY) "datastore/learning-fake-state.json" else "datastore/learning-state.json") }
-                ).also { learningStateStore = it }
-            }
-
-        fun learningSessionDataStore(context: Context): androidx.datastore.core.DataStore<String> =
-            learningSessionStore ?: synchronized(this) {
-                learningSessionStore ?: MultiProcessDataStoreFactory.create(
-                    serializer = neth.iecal.curbox.learning.LearningStringSerializer,
-                    produceFile = { File(context.applicationContext.filesDir, if (neth.iecal.curbox.BuildConfig.LEARNING_FAKE_ONLY) "datastore/learning-fake-session.json" else "datastore/learning-session.json") }
-                ).also { learningSessionStore = it }
-            }
-
         @Volatile
         private var INSTANCE: androidx.datastore.core.DataStore<Settings>? = null
 
@@ -470,23 +467,72 @@ class DataStoreManager(private val context: Context) {
         )
     }
 
-    /** Stores an authenticated Todo grant while the caller holds its learning registration fence. */
-    internal suspend fun grantTodoAppRuleTime(
-        password: String,
-        basis: TodoAwardGrantBasis,
-        manualMinutes: Long,
-        todoMinutes: Long
-    ): GuardianExtraTimeGrantWrite.Result {
-        if (manualMinutes < 0 || todoMinutes <= 0 || manualMinutes > Long.MAX_VALUE - todoMinutes) {
-            return GuardianExtraTimeGrantWrite.Result.Rejected
+    internal suspend fun readPluginTime(id: String): PluginTimeState =
+        PluginTimeProjection.from(settings.first(), id, System.currentTimeMillis())
+
+    internal suspend fun updatePluginTime(
+        id: String, expected: PluginTimeState, data: String?, linkedRuleId: String?
+    ): Boolean {
+        val revision = java.util.UUID.randomUUID().toString()
+        val updated = settingsDataStore.updateData { current ->
+            val state = PluginTimeProjection.from(current, id, System.currentTimeMillis())
+            if (state != expected || !GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured) ||
+                linkedRuleId != null && state.rules.none { it.id == linkedRuleId && it.eligibleForContributions }
+            ) return@updateData current
+            current.copy(pluginTimes = current.pluginTimes + (id to StoredPluginTime(data, linkedRuleId, revision)))
         }
-        val total = manualMinutes + todoMinutes
+        return updated.pluginTimes[id]?.revision == revision
+    }
+
+    internal suspend fun settlePluginTime(
+        id: String, expected: PluginTimeState, endedUseDayId: String, minutes: Long, data: String
+    ): Boolean {
+        if (expected.linkedRuleId == null) return false
+        val endedDay = runCatching { java.time.LocalDate.parse(endedUseDayId) }.getOrNull() ?: return false
+        val currentDay = runCatching { java.time.LocalDate.parse(expected.useDayId) }.getOrNull() ?: return false
+        if (endedDay >= currentDay || minutes < 0L) return false
+        val revision = java.util.UUID.randomUUID().toString()
+        val updated = settingsDataStore.updateData { current ->
+            neth.iecal.curbox.plugins.PluginTimeSettlementWrite.next(
+                current, id, expected, minutes, data, revision, System.currentTimeMillis()
+            )
+        }
+        return updated.pluginTimes[id]?.revision == revision
+    }
+
+    internal suspend fun grantPluginTime(
+        id: String,
+        password: String,
+        basis: GuardianExtraTimeGrantBasis,
+        expected: PluginTimeState,
+        manual: Long,
+        contributed: Long,
+        data: String
+    ): GuardianExtraTimeGrantWrite.Result {
+        if (manual < 0L || contributed <= 0L || manual > Long.MAX_VALUE - contributed ||
+            expected.linkedRuleId != basis.ruleId || expected.useDayId != basis.useDayId
+        ) return GuardianExtraTimeGrantWrite.Result.Rejected
+        val total = manual + contributed
         if (total > Long.MAX_VALUE / 60_000L) return GuardianExtraTimeGrantWrite.Result.Rejected
         val at = GuardianExtraTimeGrantWrite.nextGrantTimestamp()
-        val receipt = GuardianApprovalGrantReceipt(basis.grant.ruleId, basis.grant.useDayId, at, total * 60_000L)
+        val receipt = GuardianApprovalGrantReceipt(basis.ruleId, basis.useDayId, at, total * 60_000L)
+        val revision = java.util.UUID.randomUUID().toString()
         val updated = try {
             settingsDataStore.updateData { current ->
-                TodoAwardGrantWrite.nextSettings(current, password, basis, manualMinutes, todoMinutes, at, System.currentTimeMillis())
+                val now = System.currentTimeMillis()
+                val state = PluginTimeProjection.from(current, id, now)
+                if (state != expected || state.data == data ||
+                    state.rules.none { it.id == basis.ruleId && it.eligibleForContributions }) {
+                    return@updateData current
+                }
+                val next = GuardianExtraTimeGrantWrite.nextSettings(current, password, basis, total, at, now)
+                if (next == current) return@updateData current
+                val grants = next.appRuleOverrideState.grants
+                val tagged = grants.last().copy(contributedMillisByPlugin = mapOf(id to contributed * 60_000L))
+                next.copy(
+                    appRuleOverrideState = next.appRuleOverrideState.copy(grants = grants.dropLast(1) + tagged),
+                    pluginTimes = next.pluginTimes + (id to StoredPluginTime(data, basis.ruleId, revision))
+                )
             }.also { guardianApprovalWriteCommitObserverForTest?.invoke(it) }
         } catch (error: kotlinx.coroutines.CancellationException) {
             throw error
@@ -494,40 +540,17 @@ class DataStoreManager(private val context: Context) {
             logGuardianApprovalWriteFailure(error)
             return GuardianExtraTimeGrantWrite.Result.Uncertain(receipt)
         }
-        val result = GuardianExtraTimeGrantWrite.resultFor(updated, basis.grant, total, at, System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        val result = GuardianExtraTimeGrantWrite.resultFor(updated, basis, total, at, now)
         if (result == GuardianExtraTimeGrantWrite.Result.Stored) {
             return GuardianExtraTimeGrantWrite.Result.StoredWithReceipt(receipt)
         }
-        val latest = GuardianExtraTimeGrantBasis.capture(updated, basis.grant.ruleId, System.currentTimeMillis())
+        val latest = GuardianExtraTimeGrantBasis.capture(updated, basis.ruleId, now)
             ?: return GuardianExtraTimeGrantWrite.Result.Unavailable
-        return if (TodoAwardGrantBasis.capture(updated, latest, basis.reportedMinutes) != basis)
+        return if (PluginTimeProjection.from(updated, id, now) != expected)
             GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation(latest) else result
     }
 
-    /** Saves a new link only while its learning registration is held by the caller. */
-    internal suspend fun setTodoAwardConnection(accountId: String, childName: String, ruleId: String, expectedRevision: String): Boolean {
-        val revision = java.util.UUID.randomUUID().toString()
-        val updated = settingsDataStore.updateData { current ->
-            if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured) ||
-                current.todoAwardConnectionRevision != expectedRevision) return@updateData current
-            val rule = current.appRuleSnapshot.appRules.singleOrNull { it.id == ruleId }
-            if (accountId.isBlank() || childName.isBlank() || rule == null || !rule.isTodoAwardEligible()) return@updateData current
-            val day = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime).idAt(System.currentTimeMillis())
-            current.copy(todoAwardConnection = neth.iecal.curbox.data.models.TodoAwardConnection(accountId, childName, ruleId, day, revision),
-                todoAwardConnectionRevision = revision)
-        }
-        return updated.todoAwardConnection?.revision == revision
-    }
-
-    internal suspend fun clearTodoAwardConnection(expectedRevision: String): Boolean {
-        val revision = java.util.UUID.randomUUID().toString()
-        val updated = settingsDataStore.updateData { current ->
-            if (!GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured) ||
-                current.todoAwardConnectionRevision != expectedRevision) current
-            else current.copy(todoAwardConnection = null, todoAwardConnectionRevision = revision)
-        }
-        return updated.todoAwardConnectionRevision == revision
-    }
     /** Stores a direct grant authorized by the app's current guardian management session. */
     internal suspend fun grantAppRuleTimeFromAuthenticatedSession(
         basis: GuardianExtraTimeGrantBasis,
@@ -781,16 +804,6 @@ class DataStoreManager(private val context: Context) {
         )
     }
 
-    internal suspend fun completeTodoSettlement(link: neth.iecal.curbox.data.models.TodoAwardConnection,
-        day: String, minutes: Long, now: () -> Long, zone: java.time.ZoneId, basedOn: Settings) {
-        settingsDataStore.updateData { current ->
-            neth.iecal.curbox.domain.apprules.TodoSettlement.complete(current, link, day, minutes, now(), zone, basedOn)
-        }
-    }
-
-    internal suspend fun pruneTodoSettlements(now: Long, zone: java.time.ZoneId): Settings =
-        settingsDataStore.updateData { neth.iecal.curbox.domain.apprules.TodoSettlement.prunePending(it, now, zone) }
-
     /** Trusted runtime settlement and in-app management use this immediate write path. */
     suspend fun writeAppRuleRolloverState(state: AppRuleRolloverState, basedOn: Settings): Boolean {
         val updated = settingsDataStore.updateData { current ->
@@ -810,7 +823,7 @@ class DataStoreManager(private val context: Context) {
                     mergedPools[ruleId] = newPool
                 }
             }
-            neth.iecal.curbox.domain.apprules.TodoSettlement.recordPending(current, AppRuleRolloverState(mergedPools))
+            PluginRuntime(context).recordRollover(current, AppRuleRolloverState(mergedPools))
         }
         return state.pools.all { (ruleId, pool) ->
             val settled = updated.appRuleRolloverState.pools[ruleId]
@@ -907,10 +920,7 @@ class DataStoreManager(private val context: Context) {
                 guardianAuthConfig = current.guardianAuthConfig,
                 appRuleOverrideState = current.appRuleOverrideState,
                 appRuleRolloverState = current.appRuleRolloverState,
-                todoAwardConnection = current.todoAwardConnection,
-                todoAwardLedger = current.todoAwardLedger,
-                todoPendingSettlements = current.todoPendingSettlements,
-                todoAwardConnectionRevision = current.todoAwardConnectionRevision,
+                pluginTimes = current.pluginTimes,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -1418,10 +1428,7 @@ class DataStoreManager(private val context: Context) {
         val withLocalRuntime = proposed.copy(
             appRuleOverrideState = current.appRuleOverrideState,
             appRuleRolloverState = current.appRuleRolloverState,
-            todoAwardConnection = current.todoAwardConnection,
-            todoAwardLedger = current.todoAwardLedger,
-            todoPendingSettlements = current.todoPendingSettlements,
-            todoAwardConnectionRevision = current.todoAwardConnectionRevision
+            pluginTimes = current.pluginTimes
         )
         if (disabledRuleIds.isEmpty()) return withLocalRuntime
 
@@ -1674,13 +1681,15 @@ internal fun Settings.clearGuardianExtraTimeForRules(
             lastSettledUseDayId = currentUseDayId
         )
     }
-    val link = todoAwardConnection
-    val invalidatedLink = link?.takeIf { it.ruleId in ruleIds }?.copy(
-        connectedUseDayId = currentUseDayId, revision = java.util.UUID.randomUUID().toString()
-    )
     return copy(
-        todoAwardConnection = invalidatedLink ?: link,
-        todoAwardConnectionRevision = invalidatedLink?.revision ?: todoAwardConnectionRevision,
+        pluginTimes = pluginTimes.mapValues { (id, state) ->
+            if (state.linkedRuleId !in ruleIds) state
+            else state.copy(
+                data = PluginCatalog.factories.find { it.id == id }
+                    ?.onLinkedTimeRevoked(state.data, currentUseDayId) ?: state.data,
+                revision = java.util.UUID.randomUUID().toString()
+            )
+        },
         appRuleOverrideState = appRuleOverrideState.copy(
             grants = appRuleOverrideState.grants.filterNot { it.ruleId in ruleIds }
         ),

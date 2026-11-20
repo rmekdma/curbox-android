@@ -212,19 +212,19 @@ try {
     Write-Host "Current use day: $todayUseDayId (Weekday: $todayWeekday)" -ForegroundColor Cyan
     Write-Host "Previous use day: $yesterdayUseDayId (Weekday: $yesterdayWeekday)" -ForegroundColor Cyan
 
-    Write-Step "3. Generating and injecting Guardian PIN auth config (PIN: $Pin)..."
+    Write-Step "3. Generating and injecting Guardian PIN auth config..."
     $guardianAuth = New-GuardianPinAuthConfig -Pin $Pin
     $injectedAuth = Set-DeviceGuardianAuthConfig -GuardianAuthConfig $guardianAuth
     if (-not $injectedAuth) {
-        Write-Fail "Failed to inject Guardian PIN auth config into device settings.json!"
-        $passedAll = $false
+        throw "Failed to inject Guardian PIN auth config into device settings.json."
     } else {
         $deviceSettings = Get-DeviceSettings -AsObject
-        if (Test-GuardianAuthConfig $deviceSettings) {
+        if ((Test-GuardianAuthConfig $deviceSettings) -and
+            $deviceSettings.guardianAuthConfig.passwordSalt -eq $guardianAuth.passwordSalt -and
+            $deviceSettings.guardianAuthConfig.passwordVerifier -eq $guardianAuth.passwordVerifier) {
             Write-Success "Guardian PIN auth config successfully verified."
         } else {
-            Write-Fail "Injected Guardian PIN auth config was not active in settings.json!"
-            $passedAll = $false
+            throw "The persisted Guardian PIN config does not match the test fixture."
         }
     }
 
@@ -326,26 +326,29 @@ try {
         $passedAll = $false
     }
 
-    Write-Step "11. Authenticating with Guardian PIN ($Pin)..."
+    Write-Step "11. Authenticating with Guardian PIN..."
     $pinSuccess = Submit-GuardianPin -PinValue $Pin
     if ($pinSuccess) {
-        Write-Success "Guardian PIN successfully submitted."
+        Write-Host "Guardian PIN submitted; waiting for the recorded grant." -ForegroundColor Cyan
     } else {
         Write-Fail "Failed to submit Guardian PIN."
         $passedAll = $false
     }
 
     Write-Step "12. Verifying DataStore: pool deducted and AppRuleGuardianGrant(isFromAccumulatedPool = true) issued..."
-    Start-Sleep -Seconds 2
-    $updatedSettings = Get-DeviceSettings -AsObject
     $expectedGrantedMillis = [long]($initialPoolMinutes * 60 * 1000)
-
-    $grantRecorded = Test-AppRuleGuardianGrant `
-        -OverrideState $updatedSettings.appRuleOverrideState `
-        -RuleId $ruleId `
-        -ExpectedGrantedMillis $expectedGrantedMillis `
-        -IsFromAccumulatedPool $true `
-        -ExpectedUseDayId $todayUseDayId
+    $grantWait = [System.Diagnostics.Stopwatch]::StartNew()
+    $grantRecorded = $false
+    do {
+        $updatedSettings = Get-DeviceSettings -AsObject
+        $grantRecorded = Test-AppRuleGuardianGrant `
+            -OverrideState $updatedSettings.appRuleOverrideState `
+            -RuleId $ruleId `
+            -ExpectedGrantedMillis $expectedGrantedMillis `
+            -IsFromAccumulatedPool $true `
+            -ExpectedUseDayId $todayUseDayId
+        if (-not $grantRecorded) { Start-Sleep -Milliseconds 500 }
+    } while (-not $grantRecorded -and $grantWait.Elapsed.TotalSeconds -lt 10)
 
     if ($grantRecorded) {
         Write-Success "DataStore successfully recorded AppRuleGuardianGrant with isFromAccumulatedPool = true ($expectedGrantedMillis ms)!"

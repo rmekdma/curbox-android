@@ -19,7 +19,7 @@ param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
     [string]$TargetActivity = "",
     [string]$ContributorPackage = "com.initialcoms.ridi",
-    [string]$ServiceProcessName = ":app_blocker_service",
+    [string]$ServiceProcessName = "neth.iecal.curbox.debug:app_blocker_service",
     [int]$MaxRecoveryWaitSeconds = 30,
     [int]$WarmupWaitSeconds = 2
 )
@@ -28,6 +28,10 @@ $ErrorActionPreference = "Stop"
 
 # Dot-source common device testing harness
 . "$PSScriptRoot/lib/device-test-common.ps1"
+
+if ($ServiceProcessName -cne "neth.iecal.curbox.debug:app_blocker_service") {
+    throw "Service recovery requires the Debug service process."
+}
 
 Assert-AdbDevice
 $accessibilityBackup = Backup-DeviceAccessibilitySettings
