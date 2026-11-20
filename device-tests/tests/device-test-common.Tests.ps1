@@ -47,6 +47,24 @@ Describe "Device Test Common Helpers" {
         }
     }
 
+    Context "Get-TestGrantInputState" {
+        It "accepts empty fields and Android hint labels" {
+            $ui = '<hierarchy><node resource-id="neth.iecal.curbox.debug:id/additional_minutes_input" text="Additional minutes"/><node resource-id="neth.iecal.curbox.debug:id/total_minutes_input" text=""/></hierarchy>'
+            (Get-TestGrantInputState -Xml $ui).Reset | Should Be $true
+        }
+        It "rejects stale numeric values in either field" {
+            foreach ($name in @('additional_minutes_input', 'total_minutes_input')) {
+                $other = if ($name -eq 'additional_minutes_input') { 'total_minutes_input' } else { 'additional_minutes_input' }
+                $ui = "<hierarchy><node resource-id='neth.iecal.curbox.debug:id/$name' text='15'/><node resource-id='neth.iecal.curbox.debug:id/$other' text=''/></hierarchy>"
+                (Get-TestGrantInputState -Xml $ui).Reset | Should Be $false
+            }
+        }
+        It "rejects missing fields and malformed XML" {
+            (Get-TestGrantInputState -Xml '<hierarchy/>').Reset | Should Be $false
+            (Get-TestGrantInputState -Xml '<hierarchy>').Reset | Should Be $false
+        }
+    }
+
     Context "New-GuardianPinAuthConfig" {
         It "generates valid salt, verifier, iterations, and algorithm" {
             $auth = New-GuardianPinAuthConfig -Pin "1234" -Iterations 120000
@@ -799,6 +817,36 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
         }
     }
 
+    Context "Ensure-AccessibilityServiceBound" {
+        It "does not toggle an already bound service" {
+            Mock Enable-AccessibilityService { return $true }
+            Mock Disable-AccessibilityService { throw "Healthy service must not be toggled." }
+            Mock Wait-AccessibilityServiceBound { return $true }
+            (Ensure-AccessibilityServiceBound) | Should Be $true
+            Assert-MockCalled Disable-AccessibilityService -Times 0 -Exactly
+        }
+
+        It "toggles once and waits longer when initial binding is delayed" {
+            $originalWait = (Get-Item Function:\Wait-AccessibilityServiceBound).ScriptBlock
+            $originalEnable = (Get-Item Function:\Enable-AccessibilityService).ScriptBlock
+            $originalDisable = (Get-Item Function:\Disable-AccessibilityService).ScriptBlock
+            $script:bindWaits = @(); $script:enableCount = 0; $script:disableCount = 0
+            try {
+                Set-Item Function:\Wait-AccessibilityServiceBound { param($PackageName, $TimeoutSeconds) $script:bindWaits += $TimeoutSeconds; return ($TimeoutSeconds -eq 45) }
+                Set-Item Function:\Enable-AccessibilityService { param($PackageName) $script:enableCount++; return $true }
+                Set-Item Function:\Disable-AccessibilityService { param($PackageName) $script:disableCount++; return $true }
+                (Ensure-AccessibilityServiceBound) | Should Be $true
+                ($script:bindWaits -join ',') | Should Be '15,45'
+                $script:disableCount | Should Be 1
+                $script:enableCount | Should Be 2
+            } finally {
+                Set-Item Function:\Wait-AccessibilityServiceBound $originalWait
+                Set-Item Function:\Enable-AccessibilityService $originalEnable
+                Set-Item Function:\Disable-AccessibilityService $originalDisable
+            }
+        }
+    }
+
     Context "Enable-AccessibilityService" {
         It "adds Curbox without replacing other enabled services and enables accessibility" {
             $script:secureValues = @{
@@ -946,52 +994,46 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
         }
     }
 
+    Context "Restart-TestCurboxCold" {
+        It "stops both processes, restores accessibility and launches the requested route" {
+            $names = @('Get-DeviceProcessPid', 'Disable-AccessibilityService', 'Invoke-TestDeviceShell', 'Start-TestApp', 'Restore-DeviceAccessibilitySettings', 'Test-AccessibilityServiceBound')
+            $originals = @{}; foreach ($name in $names) { $originals[$name] = (Get-Item "Function:\$name").ScriptBlock }
+            $script:events = @(); $script:pidRead = 0
+            try {
+                Set-Item Function:\Get-DeviceProcessPid { param($ProcessName) $script:pidRead++; if ($script:pidRead -eq 1) { return 123 }; if ($script:pidRead -eq 4) { return 456 }; return $null }
+                Set-Item Function:\Disable-AccessibilityService { param($PackageName) $script:events += 'disable'; return $true }
+                Set-Item Function:\Invoke-TestDeviceShell { param($Command) $script:events += $Command }
+                Set-Item Function:\Start-TestApp { param($PackageName, $ActivityName, $IntentArguments) $script:events += $IntentArguments }
+                Set-Item Function:\Restore-DeviceAccessibilitySettings { param($AccessibilitySettings) $script:events += 'restore' }
+                Set-Item Function:\Test-AccessibilityServiceBound { param($PackageName) return $true }
+                $baseline = [pscustomobject]@{ EnabledServices = 'other/.Reader:neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService'; AccessibilityEnabled = '1' }
+                $result = Restart-TestCurboxCold -AccessibilitySettings $baseline -IntentArguments '--es fragment app_rule_groups' -TimeoutSeconds 2
+                $result.ProcessId | Should Be 456
+                ($script:events -join ',') | Should Be 'disable,am force-stop neth.iecal.curbox.debug,--es fragment app_rule_groups,restore'
+                $global:DeviceTestUnexpectedAdbCalls | Should Be 0
+            } finally { foreach ($name in $names) { Set-Item "Function:\$name" $originals[$name] } }
+        }
+        It "restores accessibility when force stop fails" {
+            $names = @('Get-DeviceProcessPid', 'Disable-AccessibilityService', 'Invoke-TestDeviceShell', 'Restore-DeviceAccessibilitySettings')
+            $originals = @{}; foreach ($name in $names) { $originals[$name] = (Get-Item "Function:\$name").ScriptBlock }
+            $script:restored = $false
+            try {
+                Set-Item Function:\Get-DeviceProcessPid { param($ProcessName) return $null }
+                Set-Item Function:\Disable-AccessibilityService { param($PackageName) return $true }
+                Set-Item Function:\Invoke-TestDeviceShell { param($Command) throw 'stop failed' }
+                Set-Item Function:\Restore-DeviceAccessibilitySettings { param($AccessibilitySettings) $script:restored = $true }
+                try { Restart-TestCurboxCold -AccessibilitySettings ([pscustomobject]@{ EnabledServices = 'other/.Reader'; AccessibilityEnabled = '1' }) } catch { }
+                $script:restored | Should Be $true
+            } finally { foreach ($name in $names) { Set-Item "Function:\$name" $originals[$name] } }
+        }
+    }
     Context "Restart-DeviceAccessibilityServiceIfEnabled" {
-        It "rebinds the service only when it was enabled in the saved baseline" {
-            $script:servicePidReads = 0
-            $script:stoppedServicePid = 0
-            Mock Get-DeviceProcessPid {
-                $script:queriedServiceProcessName = $ProcessName
-                $script:servicePidReads++
-                if ($script:servicePidReads -eq 1) { return 123 }
-                return 456
-            }
-            Mock Stop-ServiceProcess {
-                $script:stoppedServicePid = $TargetPid
-                return $true
-            }
-            Mock Test-AccessibilityServiceBound { return $true }
-            $baseline = [PSCustomObject]@{
-                EnabledServices = "com.example/.Reader:neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
-                AccessibilityEnabled = "1"
-            }
-
-            $result = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings $baseline -TimeoutSeconds 2
-
-            $result.Skipped | Should Be $false
-            $result.ProcessId | Should Be 456
-            $script:stoppedServicePid | Should Be 123
-            $script:queriedServiceProcessName | Should Be "neth.iecal.curbox.debug:app_blocker_service"
-            $global:DeviceTestUnexpectedAdbCalls | Should Be 0
-        }
-
-        It "skips without process commands when the saved baseline disabled accessibility" {
-            $script:serviceProcessQueried = $false
-            Mock Get-DeviceProcessPid { $script:serviceProcessQueried = $true; return 123 }
-            Mock Stop-ServiceProcess { throw "Disabled baseline must not stop the service process." }
-            $baseline = [PSCustomObject]@{
-                EnabledServices = "com.example/.Reader:neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService"
-                AccessibilityEnabled = "0"
-            }
-
-            $result = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings $baseline -TimeoutSeconds 1
-
+        It "skips when the saved baseline disabled accessibility" {
+            $baseline = [pscustomobject]@{ EnabledServices = 'neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService'; AccessibilityEnabled = '0' }
+            $result = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings $baseline
             $result.Skipped | Should Be $true
-            $result.ProcessId | Should Be $null
-            $script:serviceProcessQueried | Should Be $false
             $global:DeviceTestUnexpectedAdbCalls | Should Be 0
         }
-
     }
 
     Context "New-RolloverAppRuleConfig" {

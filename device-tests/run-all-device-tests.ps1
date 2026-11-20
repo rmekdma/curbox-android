@@ -96,17 +96,7 @@ try {
             Invoke-TestDeviceShell -Command "input keyevent 3"
         }
     }
-    Enable-AccessibilityService -PackageName "neth.iecal.curbox.debug" | Out-Null
-    $bound = $false
-    $bindTimer = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($bindTimer.Elapsed.TotalSeconds -lt 15) {
-        if (Test-AccessibilityServiceBound) {
-            $bound = $true
-            break
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    if (-not $bound) {
+    if (-not (Ensure-AccessibilityServiceBound -PackageName "neth.iecal.curbox.debug")) {
         throw "Curbox AppBlockerService did not bind after enabling accessibility."
     }
     Write-Host "Curbox AppBlockerService is bound; the original accessibility state will be restored after the suite." -ForegroundColor Cyan

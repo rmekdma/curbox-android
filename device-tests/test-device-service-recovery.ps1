@@ -79,6 +79,9 @@ try {
         adb shell "input keyevent 3" | Out-Null # Home
         Start-Sleep -Seconds 1
     }
+    if (-not (Ensure-AccessibilityServiceBound)) {
+        throw "Debug AppBlockerService did not bind during recovery test preflight."
+    }
 
     Write-Step "1. Backing up device settings.json..."
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
@@ -138,7 +141,7 @@ try {
     }
 
     Write-Step "5. Forcibly terminating $ServiceProcessName (PID: $initialPid)..."
-    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $ServiceProcessName | Out-Null
+    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $ServiceProcessName -AllowCrashFallback | Out-Null
     Write-Host "Dispatched kill signal / termination for PID $initialPid." -ForegroundColor DarkGray
 
     # Verify initial PID is terminated

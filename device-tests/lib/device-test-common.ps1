@@ -643,6 +643,21 @@ function Get-TestRulePickerOptions([string]$CurrentUi, [int]$CandidateCount) {
     }
 }
 
+function Get-TestGrantInputState([string]$Xml) {
+    $fields = @()
+    try { [xml]$doc = $Xml } catch { $doc = $null }
+    foreach ($name in @('additional_minutes_input', 'total_minutes_input')) {
+        $node = if ($doc) { $doc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/$name']") } else { $null }
+        $value = if ($node) { $node.GetAttribute('text') } else { '' }
+        $kind = if (-not $node) { 'missing' } elseif ($value -eq '') { 'empty' } elseif ($value -match '\d') { 'numeric content' } else { 'nonnumeric hint' }
+        $fields += [PSCustomObject]@{ Name = $name; Kind = $kind }
+    }
+    return [PSCustomObject]@{
+        Reset = (@($fields | Where-Object { $_.Kind -notin @('empty', 'nonnumeric hint') }).Count -eq 0)
+        Fields = $fields
+    }
+}
+
 function Select-TestRulePickerOption([string]$CurrentUi, $CandidateOptions, [string]$RuleName) {
     $options = @($CandidateOptions)
     $matches = @($options | Where-Object { $_.Label -eq $RuleName })
@@ -1136,7 +1151,7 @@ function Test-AccessibilityServiceBound(
         $ActivityServicesOutput -match "ConnectionRecord\{[^}]*\s$escapedComponent(?:[:}\s])")
 }
 
-function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = "neth.iecal.curbox.debug:app_blocker_service") {
+function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = "neth.iecal.curbox.debug:app_blocker_service", [switch]$AllowCrashFallback) {
     if ($TargetPid -le 0) {
         return $false
     }
@@ -1148,34 +1163,45 @@ function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = "neth.iecal
     adb shell "run-as $packageName kill -9 $TargetPid" | Out-Null
     Start-Sleep -Milliseconds 300
     $currentPid = Get-DeviceProcessPid -ProcessName $ProcessName
-    if ($currentPid -eq $TargetPid) {
+    if ($currentPid -eq $TargetPid -and $AllowCrashFallback -and $ProcessName -ceq "neth.iecal.curbox.debug:app_blocker_service") {
         adb shell "am crash $TargetPid" | Out-Null
     }
     return $true
 }
 
-function Restart-DeviceAccessibilityServiceIfEnabled(
+function Restart-TestCurboxCold(
     $AccessibilitySettings,
     [int]$TimeoutSeconds = 30,
     [string]$PackageName = "neth.iecal.curbox.debug",
-    [string]$ProcessName = "${PackageName}:app_blocker_service"
+    [string]$ProcessName = "${PackageName}:app_blocker_service",
+    [string]$ActivityName = "neth.iecal.curbox.ui.activity.FragmentActivity",
+    [string]$IntentArguments = ""
 ) {
     if (-not $AccessibilitySettings) {
-        Write-Error "Accessibility settings backup is required before restarting the service."
-        return $null
+        throw "Accessibility settings backup is required before restarting Curbox."
     }
-
     $serviceComponent = "$PackageName/neth.iecal.curbox.services.AppBlockerService"
     $enabledComponents = @(([string]$AccessibilitySettings.EnabledServices) -split ":" | Where-Object { $_ })
-    if ([string]$AccessibilitySettings.AccessibilityEnabled -ne "1" -or $enabledComponents -notcontains $serviceComponent) {
+    $shouldBind = [string]$AccessibilitySettings.AccessibilityEnabled -eq "1" -and $enabledComponents -contains $serviceComponent
+    $initialPid = Get-DeviceProcessPid -ProcessName $ProcessName
+    try {
+        Disable-AccessibilityService -PackageName $PackageName | Out-Null
+        Invoke-TestDeviceShell -Command "am force-stop $PackageName"
+        $stopWait = [System.Diagnostics.Stopwatch]::StartNew()
+        do {
+            $mainPid = Get-DeviceProcessPid -ProcessName $PackageName
+            $servicePid = Get-DeviceProcessPid -ProcessName $ProcessName
+            if (-not $mainPid -and -not $servicePid) { break }
+            Start-Sleep -Milliseconds 500
+        } while ($stopWait.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+        if ($mainPid -or $servicePid) { throw "Curbox processes did not stop for a cold restart." }
+        Start-TestApp -PackageName $PackageName -ActivityName $ActivityName -IntentArguments $IntentArguments
+    } finally {
+        Restore-DeviceAccessibilitySettings -AccessibilitySettings $AccessibilitySettings
+    }
+    if (-not $shouldBind) {
         return [PSCustomObject]@{ Skipped = $true; ProcessId = $null }
     }
-
-    $initialPid = Get-DeviceProcessPid -ProcessName $ProcessName
-    if ($initialPid) {
-        Stop-ServiceProcess -TargetPid $initialPid -ProcessName $ProcessName | Out-Null
-    }
-
     $wait = [System.Diagnostics.Stopwatch]::StartNew()
     while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         $currentPid = Get-DeviceProcessPid -ProcessName $ProcessName
@@ -1185,6 +1211,40 @@ function Restart-DeviceAccessibilityServiceIfEnabled(
         Start-Sleep -Milliseconds 500
     }
     return [PSCustomObject]@{ Skipped = $false; ProcessId = $null }
+}
+
+function Restart-DeviceAccessibilityServiceIfEnabled(
+    $AccessibilitySettings,
+    [int]$TimeoutSeconds = 30,
+    [string]$PackageName = "neth.iecal.curbox.debug",
+    [string]$ProcessName = "${PackageName}:app_blocker_service"
+) {
+    if (-not $AccessibilitySettings) { throw "Accessibility settings backup is required before restarting the service." }
+    $component = "$PackageName/neth.iecal.curbox.services.AppBlockerService"
+    $enabled = @(([string]$AccessibilitySettings.EnabledServices) -split ":" | Where-Object { $_ })
+    if ([string]$AccessibilitySettings.AccessibilityEnabled -ne "1" -or $enabled -notcontains $component) {
+        return [PSCustomObject]@{ Skipped = $true; ProcessId = $null }
+    }
+    return (Restart-TestCurboxCold -AccessibilitySettings $AccessibilitySettings -TimeoutSeconds $TimeoutSeconds -PackageName $PackageName -ProcessName $ProcessName)
+}
+
+function Wait-AccessibilityServiceBound([string]$PackageName = "neth.iecal.curbox.debug", [int]$TimeoutSeconds = 15) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (Test-AccessibilityServiceBound -PackageName $PackageName) { return $true }
+        Start-Sleep -Milliseconds 500
+    } while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    return $false
+}
+
+function Ensure-AccessibilityServiceBound([string]$PackageName = "neth.iecal.curbox.debug") {
+    Enable-AccessibilityService -PackageName $PackageName | Out-Null
+    if (Wait-AccessibilityServiceBound -PackageName $PackageName -TimeoutSeconds 15) { return $true }
+
+    Write-Host "Accessibility service is not bound; retrying its connection once." -ForegroundColor Yellow
+    if (-not (Disable-AccessibilityService -PackageName $PackageName)) { return $false }
+    Enable-AccessibilityService -PackageName $PackageName | Out-Null
+    return (Wait-AccessibilityServiceBound -PackageName $PackageName -TimeoutSeconds 45)
 }
 
 function Enable-AccessibilityService([string]$PackageName = "neth.iecal.curbox.debug", [string]$ServiceName = "neth.iecal.curbox.services.AppBlockerService") {

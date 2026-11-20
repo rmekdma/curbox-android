@@ -54,24 +54,6 @@ function Get-MainGrantUiAfterEntry([string]$RuleName) {
     return $ui
 }
 
-function Stop-MainCurboxProcessAndWait([int]$TimeoutSeconds = 10) {
-    $processName = "neth.iecal.curbox.debug"
-    $initialPid = Get-DeviceProcessPid -ProcessName $processName
-    if (-not $initialPid) {
-        return [PSCustomObject]@{ Stopped = $true; ProcessId = $null }
-    }
-
-    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $processName | Out-Null
-    $wait = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        $currentPid = Get-DeviceProcessPid -ProcessName $processName
-        if (-not $currentPid -or $currentPid -ne $initialPid) {
-            return [PSCustomObject]@{ Stopped = $true; ProcessId = $currentPid }
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    return [PSCustomObject]@{ Stopped = $false; ProcessId = $initialPid }
-}
 
 try {
     Write-Step "1. Backing up current device settings..."
@@ -121,15 +103,14 @@ try {
     Write-Success "Test PIN and four-rule snapshot are active with clean grant state."
 
     Write-Step "3. Opening the protected app-rule screen in Curbox..."
-    $retiredMainProcess = Stop-MainCurboxProcessAndWait
-    if (-not $retiredMainProcess.Stopped) {
-        throw "The main Curbox process did not retire after the persisted app-rule fixture was written."
-    }
-    Write-Success "Retired the stale main Curbox task so the protected fragment opens with the persisted fixture."
-    Start-TestApp `
-        -PackageName "neth.iecal.curbox.debug" `
+    $currentAccessibility = Backup-DeviceAccessibilitySettings
+    $coldStart = Restart-TestCurboxCold -AccessibilitySettings $currentAccessibility `
         -ActivityName "neth.iecal.curbox.ui.activity.FragmentActivity" `
         -IntentArguments "-f 0x10008000 --es fragment app_rule_groups"
+    if (-not $coldStart.Skipped -and -not $coldStart.ProcessId) {
+        throw "The Debug accessibility service did not rebind after the cold start."
+    }
+    Write-Success "Opened the protected fragment with the persisted fixture after a cold start."
 
     $authUi = Wait-For-UI "guardian_enter_password|Enter guardian password|비밀번호 입력|Password" 8
     if ($authUi -match "guardian_enter_password|Enter guardian password|비밀번호 입력|Password") {
@@ -202,18 +183,14 @@ try {
                     $futureSelection = Select-TestRulePickerOption -CurrentUi $ui -CandidateOptions $pickerCandidates.Options -RuleName "FutureRule"
                     if ($futureSelection.Success) {
                         $resetUi = Get-MainGrantFormReadyUi -RuleName "FutureRule"
-                        try {
-                            [xml]$resetDoc = $resetUi
-                            $resetAdditional = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
-                            $resetTotal = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/total_minutes_input']")
-                            $inputsReset = ($resetAdditional -and $resetTotal -and $resetAdditional.GetAttribute("text") -eq "" -and $resetTotal.GetAttribute("text") -eq "")
-                        } catch {
-                            $inputsReset = $false
-                        }
-                        if ($inputsReset) {
+                        $resetState = Get-TestGrantInputState -Xml $resetUi
+                        if ($resetState.Reset) {
                             Write-Success "Changing to FutureRule cleared both inputs from UsageRule."
                         } else {
                             Write-Fail "Changing rules retained a stale UsageRule input value."
+                            foreach ($field in $resetState.Fields) {
+                                Write-Host "[DIAGNOSTIC] $($field.Name): $($field.Kind)." -ForegroundColor DarkYellow
+                            }
                             $passedAll = $false
                         }
                         $ui = $resetUi

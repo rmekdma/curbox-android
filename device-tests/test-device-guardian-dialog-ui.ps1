@@ -160,21 +160,20 @@ try {
                     adb shell "input text 15" | Out-Null
                     Start-Sleep -Milliseconds 500
                     $ui = Hide-GrantFormKeyboard
+                    [xml]$entryDoc = $ui
+                    $enteredInput = $entryDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
+                    if (-not $enteredInput -or $enteredInput.GetAttribute('text') -ne '15') { throw "The grant form did not retain the entered 15 minutes." }
                     $futureSelection = Select-TestRulePickerOption -CurrentUi $ui -CandidateOptions $pickerCandidates.Options -RuleName "FutureRule"
                     if ($futureSelection.Success) {
                         $resetUi = $futureSelection.Ui
-                        try {
-                            [xml]$resetDoc = $resetUi
-                            $resetAdditional = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
-                            $resetTotal = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/total_minutes_input']")
-                            $fieldsReset = ($resetAdditional -and $resetTotal -and $resetAdditional.GetAttribute("text") -eq "" -and $resetTotal.GetAttribute("text") -eq "")
-                        } catch {
-                            $fieldsReset = $false
-                        }
-                        if ($fieldsReset) {
+                        $resetState = Get-TestGrantInputState -Xml $resetUi
+                        if ($resetState.Reset) {
                             Write-Success "Changing rules clears both input fields instead of carrying the prior rule's value."
                         } else {
                             Write-Fail "Changing rules left stale input values or hid an input field."
+                            foreach ($field in $resetState.Fields) {
+                                Write-Host "[DIAGNOSTIC] $($field.Name): $($field.Kind)." -ForegroundColor DarkYellow
+                            }
                             $passedAll = $false
                         }
 

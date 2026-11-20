@@ -727,12 +727,32 @@ try {
         $passedAll = $false
     }
     $allAllowLogs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
-    $allAllowReceiptReceived = $allAllowLogs -match "service_check_received action=neth\.iecal\.curbox\.guardian\.approval\.stored .*receipt_valid=true" -and
-        $allAllowLogs -match "check_request test=- action=neth\.iecal\.curbox\.guardian\.approval\.stored .*kind=direct_grant rule=$([regex]::Escape($controlRuleId))"
+    $allAllowReceiptReceived = $false
+    $checkId = $null
+    $requestLine = $allAllowLogs -split "`r?`n" | Where-Object {
+        $_ -match "check_request test=- action=neth\.iecal\.curbox\.guardian\.approval\.stored .*kind=direct_grant rule=$([regex]::Escape($controlRuleId))(?:\s|$)"
+    } | Select-Object -Last 1
+    if ($requestLine -and $requestLine -match '(?:^|\s)check=([^\s]+)') {
+        $checkId = $Matches[1]
+        $checkPattern = [regex]::Escape($checkId)
+        $received = $allAllowLogs -match "service_check_received action=neth\.iecal\.curbox\.guardian\.approval\.stored .*check=$checkPattern(?:\s|$).*receipt_valid=true"
+        $accepted = $allAllowLogs -match "service_check_accepted .*check=$checkPattern(?:\s|$)"
+        $allAllowReceiptReceived = $received -and $accepted
+    }
     if ($controlGrantSaved -and $allAllowReceiptReceived -and $allowedLaunch -and $allowedLaunch.Success) {
         Write-Success "After a valid stored receipt, the fresh all-allow evaluation launches the requested app."
     } else {
-        Write-Fail "The all-allow control did not complete a stored receipt before the target app was allowed."
+        if (-not $controlGrantSaved) { Write-Fail "The all-allow grant was not submitted." }
+        if (-not $allAllowReceiptReceived) { Write-Fail "The all-allow control did not receive and accept its typed receipt." }
+        if ($checkId) {
+            $statusPattern = "result test=- status=([a-z_]+) .*check=$([regex]::Escape($checkId))(?:\s|$)"
+            $resultLine = $allAllowLogs -split "`r?`n" | Where-Object { $_ -match $statusPattern } | Select-Object -Last 1
+            if ($resultLine -and $resultLine -match $statusPattern) {
+                Write-Host "[DIAGNOSTIC] All-allow confirmation status: $($Matches[1])." -ForegroundColor DarkYellow
+            } else {
+                Write-Host "[DIAGNOSTIC] No all-allow confirmation status was logged for the submitted check." -ForegroundColor DarkYellow
+            }
+        }
         $passedAll = $false
     }
     if ($allAllowReceiptReceived) {
