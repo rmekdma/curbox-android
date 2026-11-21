@@ -1,6 +1,7 @@
 package neth.iecal.plugin
 
 import android.content.Context
+import androidx.annotation.DrawableRes
 import androidx.fragment.app.Fragment
 import kotlinx.coroutines.flow.Flow
 
@@ -24,7 +25,12 @@ interface HostPlugin {
     suspend fun run(host: CurboxHost) = Unit
 }
 
-data class PluginDestination(val label: String, val route: String, val fragment: () -> Fragment)
+data class PluginDestination(
+    val label: String,
+    val route: String,
+    @DrawableRes val icon: Int? = null,
+    val fragment: () -> Fragment
+)
 
 interface PluginHost {
     val time: PluginTimeHost

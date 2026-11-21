@@ -72,6 +72,10 @@ class ReducersFragment : Fragment() {
         for (destination in neth.iecal.curbox.plugins.PluginRuntime(requireContext()).destinations()) {
             val card = inflater.inflate(R.layout.item_plugin_destination, destinations, false)
             card.findViewById<android.widget.TextView>(R.id.plugin_title).text = destination.label
+            destination.icon?.let { icon ->
+                card.findViewById<ImageView>(R.id.plugin_icon).setImageResource(icon)
+                card.findViewById<View>(R.id.plugin_icon_container).isVisible = true
+            }
             card.setOnClickListener {
                 startActivity(Intent(requireContext(), FragmentActivity::class.java).putExtra("fragment", destination.route))
             }
