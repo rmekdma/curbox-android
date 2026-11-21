@@ -1,0 +1,3 @@
+Set rest cycles for app rules and close the guardian approval screen automatically.
+Link a monitored child's TODO School learning time to an app rule.
+Approve learning time as extra time and carry ungranted time into the weekend.
