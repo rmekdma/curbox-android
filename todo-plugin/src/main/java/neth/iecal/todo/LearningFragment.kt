@@ -489,11 +489,36 @@ class LearningFragment : Fragment() {
         addSetting(text(LearningText.INTERVAL), input, 96)
         addSetting(text(LearningText.ALERTS), alerts, 48)
         addSetting(text(LearningText.SOUND), sound, 160)
+        val connectionSettings = TodoRuleSettings(requireContext(), pluginHost.time,
+            neth.iecal.curbox.learning.LearningStorage(pluginHost, BuildConfig.LEARNING_FAKE_ONLY))
+        val connectionSummary = TextView(requireContext()).apply {
+            text = getString(R.string.todo_award_not_connected)
+        }
+        val connectionButton = com.google.android.material.button.MaterialButton(requireContext()).apply {
+            id = R.id.todo_connection_button
+            setText(R.string.todo_award_connection)
+        }
+        content.addView(connectionSummary)
+        content.addView(connectionButton)
+        fun refreshConnection() {
+            viewLifecycleOwner.lifecycleScope.launch {
+                try { connectionSummary.text = connectionSettings.summary() }
+                catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                catch (_: Exception) { connectionSummary.setText(R.string.todo_award_failed) }
+            }
+        }
+        refreshConnection()
+        val scroll = android.widget.ScrollView(requireContext()).apply { addView(content) }
         val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
-            .setTitle(text(LearningText.GENERAL_SETTINGS)).setView(content)
+            .setTitle(text(LearningText.GENERAL_SETTINGS)).setView(scroll)
             .setNegativeButton(text(LearningText.CANCEL), null)
             .setPositiveButton(text(LearningText.CONFIRM), null).create()
         settingsDialog = dialog
+        connectionButton.setOnClickListener {
+            soundPopup.dismiss()
+            stopSoundPreview()
+            connectionSettings.open(requireActivity(), viewLifecycleOwner) { refreshConnection() }
+        }
         dialog.setOnDismissListener { soundPopup.dismiss(); stopSoundPreview(); if (settingsDialog === dialog) settingsDialog = null }
         dialog.setOnShowListener {
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {

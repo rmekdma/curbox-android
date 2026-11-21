@@ -241,4 +241,7 @@ function Get-TodoAwardState($Settings) {
 
 function Clear-TodoAwardState($Settings) {
     if ($Settings.pluginTimes) { $Settings.pluginTimes.PSObject.Properties.Remove('todo') }
+    foreach ($key in @('todoAwardConnection', 'todoAwardConnectionRevision', 'todoAwardLedger', 'todoPendingSettlements')) {
+        $Settings.PSObject.Properties.Remove($key)
+    }
 }

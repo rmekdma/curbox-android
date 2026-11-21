@@ -2,7 +2,6 @@ package neth.iecal.plugin
 
 import android.content.Context
 import androidx.fragment.app.Fragment
-import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.flow.Flow
 
 /** Factory discovered from the modules packaged with this app. IDs own independent state. */
@@ -22,17 +21,10 @@ data class PluginLegacyTimeState(val data: String, val linkedRuleId: String?)
 interface HostPlugin {
     val destination: PluginDestination? get() = null
     val timeProvider: AdditionalTimeProvider? get() = null
-    val ruleSettings: PluginRuleSettings? get() = null
     suspend fun run(host: CurboxHost) = Unit
 }
 
 data class PluginDestination(val label: String, val route: String, val fragment: () -> Fragment)
-
-interface PluginRuleSettings {
-    val label: String
-    suspend fun summary(): String?
-    fun open(activity: FragmentActivity, onChanged: () -> Unit)
-}
 
 interface PluginHost {
     val time: PluginTimeHost

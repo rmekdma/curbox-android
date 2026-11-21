@@ -96,7 +96,6 @@ internal class PluginRuntime(context: Context) {
     }
 
     fun destinations() = plugins.values.mapNotNull { plugin -> safely { plugin.destination } }
-    fun ruleSettings() = plugins.values.mapNotNull { plugin -> safely { plugin.ruleSettings } }
 
     suspend fun run(host: CurboxHost) = supervisorScope {
         for (plugin in plugins.values) {

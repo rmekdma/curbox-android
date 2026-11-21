@@ -27,7 +27,6 @@ class TodoPluginFactory : PluginFactory {
         return object : HostPlugin {
             override val destination = PluginDestination(app.getString(R.string.learning_title), "learning") { LearningFragment() }
             override val timeProvider = award
-            override val ruleSettings = TodoRuleSettings(app, host.time, storage)
             override suspend fun run(hostConnection: CurboxHost) = coroutineScope {
                 val permission = LearningPermission(app, this, host::logFailure)
                 try {

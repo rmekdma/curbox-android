@@ -203,11 +203,19 @@ Describe "Learning Device Test Helpers" {
 
     Context "Plugin award state" {
         It "reads only the Todo plugin payload" {
-            $settings = [pscustomobject]@{ pluginTimes = [pscustomobject]@{ todo = [pscustomobject]@{ data = '{"connection":{"childName":"Child1"},"ledger":[],"pending":[]}' }; other = [pscustomobject]@{ data = '{}' } } }
+            $settings = [pscustomobject]@{ pluginTimes = [pscustomobject]@{ todo = [pscustomobject]@{ data = '{"connection":{"childName":"Child1"},"ledger":[],"pending":[]}' }; other = [pscustomobject]@{ data = '{}' } }; todoAwardConnection = @{}; todoAwardConnectionRevision = 1; todoAwardLedger = @(); todoPendingSettlements = @(); otherSetting = 'kept' }
             (Get-TodoAwardState $settings).connection.childName | Should Be 'Child1'
             Clear-TodoAwardState $settings
             $settings.pluginTimes.other.data | Should Be '{}'
             $settings.pluginTimes.PSObject.Properties['todo'] | Should BeNullOrEmpty
+            foreach ($key in @('todoAwardConnection', 'todoAwardConnectionRevision', 'todoAwardLedger', 'todoPendingSettlements')) { $settings.PSObject.Properties[$key] | Should BeNullOrEmpty }
+            $settings.otherSetting | Should Be 'kept'
+        }
+        It "clears legacy Todo fields when plugin state is absent" {
+            $settings = [pscustomobject]@{ todoAwardConnection = @{ childName = 'Child1' }; todoAwardConnectionRevision = 1; todoAwardLedger = @(); todoPendingSettlements = @(); otherSetting = 'kept' }
+            Clear-TodoAwardState $settings
+            foreach ($key in @('todoAwardConnection', 'todoAwardConnectionRevision', 'todoAwardLedger', 'todoPendingSettlements')) { $settings.PSObject.Properties[$key] | Should BeNullOrEmpty }
+            $settings.otherSetting | Should Be 'kept'
         }
         It "fails closed for invalid payloads" {
             $settings = [pscustomobject]@{ pluginTimes = [pscustomobject]@{ todo = [pscustomobject]@{ data = '{' } } }

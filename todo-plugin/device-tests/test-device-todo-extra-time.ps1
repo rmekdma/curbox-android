@@ -51,6 +51,18 @@ function Initialize-TodoSyntheticChild($State, [string]$ReportDate) {
     }
     throw 'Synthetic registration did not complete.'
 }
+function Connect-TodoSyntheticChild {
+    $ui = Start-TodoSyntheticLearning
+    if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/intervalSettings"' 'Learning settings')) { throw 'Cannot open learning settings.' }
+    $ui = Wait-For-UI 'id/todo_connection_button' 15
+    if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/todo_connection_button"' 'Connect Todo')) { throw 'Cannot open Todo connection.' }
+    $ui = Wait-For-UI 'TodoTestRule' 15
+    if (-not (Tap-Node $ui 'text="TodoTestRule"' 'Test rule')) { throw 'Test rule was not available.' }
+    $summary = 'text="(?:Connected|연결됨): Child1, TodoTestRule"'
+    $ui = Wait-For-UI $summary 20
+    if ($ui -notmatch $summary) { throw 'Learning settings did not show the saved child and rule.' }
+    if (-not (Tap-Node $ui 'resource-id="android:id/button2"' 'Close learning settings')) { throw 'Cannot close learning settings.' }
+}
 function Remove-TodoSyntheticChild($State) {
     if (-not $State.RegistrationMayBeOwned) { return }
     $names = @(Get-LearningRegistrationNames)
@@ -213,14 +225,7 @@ function Invoke-TodoWeekendScenario {
         Initialize-TodoSyntheticChild $childState $reportDay
         $fixtureWritten = $true
         Set-LearningFixture $failure
-        Start-TestApp -PackageName 'neth.iecal.curbox.debug' -ActivityName 'neth.iecal.curbox.ui.activity.FragmentActivity' -IntentArguments '-f 0x10008000 --es fragment app_rule_groups' | Out-Null
-        $ui = Wait-For-UI 'plugin_settings_button|password="true"' 15
-        if ($ui -match 'password="true"') { Submit-TestPin; $ui = Wait-For-UI 'plugin_settings_button' 15 }
-        if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/plugin_settings_button"' 'Connect Todo')) { throw 'Cannot open connection.' }
-        $ui = Wait-For-UI 'Child1' 15
-        if (-not (Tap-Node $ui 'text="Child1"' 'Child1')) { throw 'Child1 missing.' }
-        $ui = Wait-For-UI 'TodoTestRule' 15
-        if (-not (Tap-Node $ui 'text="TodoTestRule"' 'Test rule')) { throw 'Rule missing.' }
+        Connect-TodoSyntheticChild
         $linked = Wait-WeekendState { param($s) (Get-TodoAwardState $s).connection.ruleId -eq $ruleId -and (Get-TodoAwardState $s).connection.childName -eq 'Child1' -and (Get-TodoAwardState $s).connection.connectedUseDayId -eq $dayId } 'connection'
         # The service starts before the boundary so its elapsed-realtime alarm stays valid.
         $liveProcess = Get-WeekendServicePid
@@ -344,7 +349,16 @@ try {
     Invoke-TestDeviceShell -Command 'input keyevent 224'
     Invoke-TestDeviceShell -Command 'input keyevent 82'
     Disable-AccessibilityService | Out-Null
-    Invoke-TestDeviceShell -Command 'am force-stop neth.iecal.curbox.debug'
+    Invoke-TestDeviceShell -Command 'input keyevent 3'
+    Invoke-TestDeviceShell -Command 'am kill neth.iecal.curbox.debug'
+    $stopTimer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $mainPid = Get-DeviceProcessPid -ProcessName 'neth.iecal.curbox.debug'
+        $servicePid = Get-DeviceProcessPid -ProcessName 'neth.iecal.curbox.debug:app_blocker_service'
+        if (-not $mainPid -and -not $servicePid) { break }
+        Start-Sleep -Milliseconds 500
+    } while ($stopTimer.Elapsed.TotalSeconds -lt 15)
+    if ($mainPid -or $servicePid) { throw 'Debug processes did not stop before fixture setup.' }
     $fakeBackup = Backup-FakeLearningFiles
     $ruleId = 'test-todo-extra-time'
     $snapshot = New-RolloverAppRuleConfig -TargetPackage $TargetPackage -RuleId $ruleId -AllowedMinutes 0
@@ -367,17 +381,7 @@ try {
     Initialize-TodoSyntheticChild $childState $reportDay
     $fixtureWritten = $true
     Set-LearningFixture $fixture
-    Start-TestApp -PackageName 'neth.iecal.curbox.debug' -ActivityName 'neth.iecal.curbox.ui.activity.FragmentActivity' -IntentArguments '-f 0x10008000 --es fragment app_rule_groups'
-    $ui = Wait-For-UI 'plugin_settings_button|password="true"' 15
-    if ($ui -match 'password="true"') {
-        Submit-TestPin
-        $ui = Wait-For-UI 'plugin_settings_button' 15
-    }
-    if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/plugin_settings_button"' 'Connect Todo')) { throw "Cannot open Todo connection. UI: $ui" }
-    $ui = Wait-For-UI 'Child1' 15
-    if (-not (Tap-Node $ui 'text="Child1"' 'Child1')) { throw 'Synthetic child was not available.' }
-    $ui = Wait-For-UI 'TodoTestRule' 15
-    if (-not (Tap-Node $ui 'text="TodoTestRule"' 'Test rule')) { throw 'Test rule was not available.' }
+    Connect-TodoSyntheticChild
     Start-Sleep -Seconds 2
     $linked = Get-DeviceSettings -AsObject
     if ((Get-TodoAwardState $linked).connection.ruleId -ne $ruleId -or (Get-TodoAwardState $linked).connection.childName -ne 'Child1') { throw 'Synthetic connection was not saved.' }

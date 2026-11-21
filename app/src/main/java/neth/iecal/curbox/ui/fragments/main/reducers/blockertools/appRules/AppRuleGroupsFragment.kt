@@ -29,7 +29,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
-import neth.iecal.curbox.plugins.PluginRuntime
 import neth.iecal.curbox.data.models.RuleRolloverPool
 import neth.iecal.curbox.databinding.DialogGuardianAccumulatedTimeBinding
 import neth.iecal.curbox.domain.apprules.InAppAccumulatedTimeFormState
@@ -101,21 +100,6 @@ class AppRuleGroupsFragment : Fragment() {
         binding.addGroupButton.setOnClickListener { open(CreateAppRuleGroupFragment.FRAGMENT_ID) }
         binding.addRuleButton.setOnClickListener { open(CreateAppRuleFragment.FRAGMENT_ID) }
         binding.changeExtraTimeButton.setOnClickListener { requestGuardianExtraTimeGrant() }
-        val pluginSettings = PluginRuntime(requireContext()).ruleSettings()
-        pluginSettings.forEachIndexed { index, settings ->
-            val button = MaterialButton(requireContext()).apply {
-                id = if (index == 0) R.id.plugin_settings_button else View.generateViewId()
-                text = settings.label
-                setOnClickListener {
-                    settings.open(requireActivity()) {
-                        viewLifecycleOwner.lifecycleScope.launch { latestSettings?.let { refresh(it) } }
-                    }
-                }
-            }
-            binding.pluginSettingsList.addView(button, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-        }
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {

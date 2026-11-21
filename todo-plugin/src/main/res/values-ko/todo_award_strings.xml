@@ -7,4 +7,9 @@
     <string name="todo_award_no_choices">먼저 자녀 감시를 켜고 주말 이월 규칙을 만드세요.</string>
     <string name="todo_award_saved">토도 연결을 저장했어요.</string>
     <string name="todo_award_failed">토도 연결을 바꾸지 못했어요.</string>
+    <string name="todo_award_not_connected">토도 연결 없음</string>
+    <string name="todo_award_current">연결됨: %1$s, %2$s</string>
+    <string name="todo_award_change">토도 연결 변경</string>
+    <string name="todo_award_change_warning">이미 지급하거나 적립한 시간은 기존 규칙에 남아요. 이전에 정산하지 않은 시간은 사라져요.</string>
+    <string name="todo_award_rule_unavailable">규칙을 찾을 수 없음</string>
 </resources>
