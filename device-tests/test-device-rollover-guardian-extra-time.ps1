@@ -109,25 +109,6 @@ function Write-RolloverBoundaryDiagnostics([string]$Phase) {
     foreach ($line in $settlementLogLines) { Write-Host "  $line" -ForegroundColor DarkGray }
 }
 
-function Stop-RolloverMainProcessAndWait([int]$TimeoutSeconds = 10) {
-    $processName = "neth.iecal.curbox.debug"
-    $initialPid = Get-DeviceProcessPid -ProcessName $processName
-    if (-not $initialPid) {
-        return [PSCustomObject]@{ Stopped = $true; ProcessId = $null }
-    }
-
-    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $processName | Out-Null
-    $wait = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        $currentPid = Get-DeviceProcessPid -ProcessName $processName
-        if (-not $currentPid -or $currentPid -ne $initialPid) {
-            return [PSCustomObject]@{ Stopped = $true; ProcessId = $currentPid }
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    return [PSCustomObject]@{ Stopped = $false; ProcessId = $initialPid }
-}
-
 function Test-RolloverBoundaryWakeScheduled([System.DateTime]$TargetResetAt, [int]$ToleranceSeconds = 20) {
     $clockRaw = (Get-TestDeviceShellOutput -Command "date +'%Y-%m-%d %H %M %S'").Trim()
     if ($clockRaw -notmatch '^(\d{4}-\d{2}-\d{2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})$') {
@@ -212,19 +193,19 @@ try {
     Write-Host "Current use day: $todayUseDayId (Weekday: $todayWeekday)" -ForegroundColor Cyan
     Write-Host "Previous use day: $yesterdayUseDayId (Weekday: $yesterdayWeekday)" -ForegroundColor Cyan
 
-    Write-Step "3. Generating and injecting Guardian PIN auth config (PIN: $Pin)..."
+    Write-Step "3. Generating and injecting Guardian PIN auth config..."
     $guardianAuth = New-GuardianPinAuthConfig -Pin $Pin
     $injectedAuth = Set-DeviceGuardianAuthConfig -GuardianAuthConfig $guardianAuth
     if (-not $injectedAuth) {
-        Write-Fail "Failed to inject Guardian PIN auth config into device settings.json!"
-        $passedAll = $false
+        throw "Failed to inject Guardian PIN auth config into device settings.json."
     } else {
         $deviceSettings = Get-DeviceSettings -AsObject
-        if (Test-GuardianAuthConfig $deviceSettings) {
+        if ((Test-GuardianAuthConfig $deviceSettings) -and
+            $deviceSettings.guardianAuthConfig.passwordSalt -eq $guardianAuth.passwordSalt -and
+            $deviceSettings.guardianAuthConfig.passwordVerifier -eq $guardianAuth.passwordVerifier) {
             Write-Success "Guardian PIN auth config successfully verified."
         } else {
-            Write-Fail "Injected Guardian PIN auth config was not active in settings.json!"
-            $passedAll = $false
+            throw "The persisted Guardian PIN config does not match the test fixture."
         }
     }
 
@@ -326,26 +307,29 @@ try {
         $passedAll = $false
     }
 
-    Write-Step "11. Authenticating with Guardian PIN ($Pin)..."
+    Write-Step "11. Authenticating with Guardian PIN..."
     $pinSuccess = Submit-GuardianPin -PinValue $Pin
     if ($pinSuccess) {
-        Write-Success "Guardian PIN successfully submitted."
+        Write-Host "Guardian PIN submitted; waiting for the recorded grant." -ForegroundColor Cyan
     } else {
         Write-Fail "Failed to submit Guardian PIN."
         $passedAll = $false
     }
 
     Write-Step "12. Verifying DataStore: pool deducted and AppRuleGuardianGrant(isFromAccumulatedPool = true) issued..."
-    Start-Sleep -Seconds 2
-    $updatedSettings = Get-DeviceSettings -AsObject
     $expectedGrantedMillis = [long]($initialPoolMinutes * 60 * 1000)
-
-    $grantRecorded = Test-AppRuleGuardianGrant `
-        -OverrideState $updatedSettings.appRuleOverrideState `
-        -RuleId $ruleId `
-        -ExpectedGrantedMillis $expectedGrantedMillis `
-        -IsFromAccumulatedPool $true `
-        -ExpectedUseDayId $todayUseDayId
+    $grantWait = [System.Diagnostics.Stopwatch]::StartNew()
+    $grantRecorded = $false
+    do {
+        $updatedSettings = Get-DeviceSettings -AsObject
+        $grantRecorded = Test-AppRuleGuardianGrant `
+            -OverrideState $updatedSettings.appRuleOverrideState `
+            -RuleId $ruleId `
+            -ExpectedGrantedMillis $expectedGrantedMillis `
+            -IsFromAccumulatedPool $true `
+            -ExpectedUseDayId $todayUseDayId
+        if (-not $grantRecorded) { Start-Sleep -Milliseconds 500 }
+    } while (-not $grantRecorded -and $grantWait.Elapsed.TotalSeconds -lt 10)
 
     if ($grantRecorded) {
         Write-Success "DataStore successfully recorded AppRuleGuardianGrant with isFromAccumulatedPool = true ($expectedGrantedMillis ms)!"
@@ -453,17 +437,18 @@ try {
     Write-Host "Injected $preTransitionMinutes minutes on unlock use day '$transitionUseDayId'; accrual use day '$nextUseDayId' begins at $($targetResetAt.ToString('yyyy-MM-dd HH:mm:ss'))." -ForegroundColor Cyan
 
     Write-Step "14a. Reloading persisted rollover settings into a fresh app blocker process..."
-    $freshMainProcess = Stop-RolloverMainProcessAndWait
-    if (-not $freshMainProcess.Stopped) {
-        throw "The main Curbox process did not retire after the persisted rollover settings were written."
-    }
-    $freshServiceResult = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings $accessibilityBackup
+    $freshServiceResult = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings (Backup-DeviceAccessibilitySettings)
     if ($freshServiceResult.Skipped -or -not $freshServiceResult.ProcessId) {
         throw "AppBlockerService did not rebind to a fresh process from the persisted rollover settings."
     }
     Start-Sleep -Seconds 2
     $freshServicePid = $freshServiceResult.ProcessId
     Write-Success "AppBlockerService re-bound as PID $freshServicePid after the fixture settings were persisted."
+    $clockBeforeBoundary = (Get-TestDeviceShellOutput -Command "date +'%Y-%m-%d %H %M %S'").Trim()
+    $clockBeforeBoundary = [datetime]::ParseExact($clockBeforeBoundary, 'yyyy-MM-dd HH mm ss', [Globalization.CultureInfo]::InvariantCulture)
+    if (($targetResetAt - $clockBeforeBoundary).TotalSeconds -lt 30) {
+        throw "Insufficient time remains before the rollover boundary after the cold restart."
+    }
     if (-not (Test-RolloverBoundaryWakeScheduled -TargetResetAt $targetResetAt)) {
         Write-RolloverBoundaryDiagnostics -Phase "fresh service schedule verification"
         throw "Fresh AppBlockerService did not schedule a wake for the configured use-day reset boundary."
@@ -538,10 +523,6 @@ try {
     Write-Step "16. Cleanup & Restoring original settings..."
     Complete-DeviceTest -BackupPath $backupFile -TargetPackages @($TargetPackage) -AccessibilitySettings $accessibilityBackup
     try {
-        $restoredMainProcess = Stop-RolloverMainProcessAndWait
-        if (-not $restoredMainProcess.Stopped) {
-            throw "The main Curbox process did not retire after the saved user settings were restored."
-        }
         $restoredServiceResult = Restart-DeviceAccessibilityServiceIfEnabled -AccessibilitySettings $accessibilityBackup
         if ($restoredServiceResult.Skipped) {
             Write-Host "Accessibility was disabled in the saved baseline; the app blocker service restart was skipped." -ForegroundColor DarkGray

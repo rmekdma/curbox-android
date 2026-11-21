@@ -81,7 +81,6 @@ Room uses `fallbackToDestructiveMigration()`. Any entity change requires a datab
 
 The only configured flavor is `full`; it includes sync, UI hider, anti uninstall, and internet access. Keep optional behavior gated at every entry point (UI, service lifecycle, manifests, API responses).
 
-Learning uses the fake composition by default. `-PlearningReal=true` selects the real composition; test task requests are rejected in that mode. Use fake composition for tests and device verification; never call the real Todo API in tests.
 Relevant flags: `SUPPORTS_UI_HIDER`, `SUPPORTS_ANTI_UNINSTALL`, `SUPPORTS_WRITE_SECURE_SETTINGS`, `FDROID_VARIANT`, `SYNC_USE_FCM`.
 
 ## UI and product copy
@@ -131,7 +130,7 @@ Consult these targeted guides when working in corresponding areas:
 | --- | --- |
 | Adding a blocker/tracker, adding app or browser mod support, or updating the database | [`docs/recipes.md`](docs/recipes.md) |
 | Navigating feature subsystems, service protection, or warning/approval screens | [`docs/architecture/features.md`](docs/architecture/features.md) |
-| Changing learning UI, monitoring, storage, or plugin composition | [`docs/architecture/learning.md`](docs/architecture/learning.md) |
+| Changing learning UI, monitoring, storage, or plugin composition | [`todo-plugin/docs/learning.md`](todo-plugin/docs/learning.md) |
 | App rule evaluation, enforcement pipelines, or domain specifications | [`docs/architecture/app-rule-enforcement.md`](docs/architecture/app-rule-enforcement.md) and [`docs/spec/`](docs/spec/) |
 | Understanding system design choices, trade-offs, or historical rationale | [`docs/adr/`](docs/adr/) |
 | Working on multi-device sync, encryption, Supabase REST, Firebase/FCM, or cleanup | [`docs/sync.md`](docs/sync.md) |

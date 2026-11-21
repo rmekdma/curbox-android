@@ -1,0 +1,52 @@
+package neth.iecal.todo
+
+import android.content.Context
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import neth.iecal.curbox.learning.LearningComposition
+import neth.iecal.curbox.learning.LearningNotifications
+import neth.iecal.curbox.learning.LearningPermission
+import neth.iecal.curbox.learning.LearningStorage
+import neth.iecal.plugin.*
+
+class TodoPluginFactory : PluginFactory {
+    override val id = "todo"
+    override val storeNames = setOf("learning-state", "learning-session", "learning-fake-state", "learning-fake-session")
+    override val legacySettingKeys get() = TodoAwardLegacyMigration.keys
+    override val legacyGrantSourceKey = "todoGrantedMillis"
+    override fun onLinkedTimeRevoked(data: String?, currentUseDayId: String): String? =
+        TodoAwardLegacyMigration.onLinkedTimeRevoked(data, currentUseDayId)
+    override fun migrateLegacySettings(fields: Map<String, String>): PluginLegacyTimeState? =
+        TodoAwardLegacyMigration.migrate(fields)?.let { PluginLegacyTimeState(it.first, it.second) }
+
+    override fun create(context: Context, host: PluginHost): HostPlugin {
+        val app = context.applicationContext
+        val storage = LearningStorage(host, BuildConfig.LEARNING_FAKE_ONLY)
+        val api = LearningComposition.createApi(app)
+        val award = TodoAwardRepository(host.time, storage, api, app.getString(R.string.todo_award_source_label), host::logFailure)
+        return object : HostPlugin {
+            override val destination = PluginDestination(app.getString(R.string.learning_title), "learning") { LearningFragment() }
+            override val timeProvider = award
+            override suspend fun run(hostConnection: CurboxHost) = coroutineScope {
+                val permission = LearningPermission(app, this, host::logFailure)
+                try {
+                    permission.start()
+                    val monitor = InitialMonitor(api, storage, permission.state, permission::isGranted,
+                        { document, expected ->
+                            try { LearningNotifications.publish(app, storage, document, permission.state, expected) }
+                            catch (e: CancellationException) { throw e }
+                            catch (t: Throwable) { host.logFailure(t) }
+                        },
+                        elapsed = android.os.SystemClock::elapsedRealtime,
+                        subjectPackages = LearningComposition.subjectPackages(),
+                        achievement = { document, expected, child, subject, stillValid ->
+                            try { LearningNotifications.publish(app, storage, document, permission.state, expected, child, subject, stillValid) }
+                            catch (e: CancellationException) { throw e }
+                            catch (t: Throwable) { host.logFailure(t) }
+                        })
+                    monitor.run(hostConnection)
+                } finally { permission.stop() }
+            }
+        }
+    }
+}

@@ -19,17 +19,21 @@ import neth.iecal.curbox.domain.apprules.GuardianExtraTimeGrantFormState
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeInputSource
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeSubmission
 import neth.iecal.curbox.domain.apprules.GuardianExtraTimeValidationError
+import neth.iecal.curbox.domain.apprules.AdditionalTimeOfferFormState
 import neth.iecal.curbox.utils.GuardianOwnedDialog
+import neth.iecal.curbox.plugins.PluginTimeOffer
 
 /** Shared form used by the lock screen and the authenticated app rule screen. */
-class GuardianExtraTimeGrantFormDialog(
+internal class GuardianExtraTimeGrantFormDialog(
     private val context: Context,
     private val inflater: LayoutInflater,
     private val scope: CoroutineScope,
     private val readCurrentBasis: suspend (String) -> GuardianExtraTimeGrantBasis?,
     private val readCurrentCandidates: suspend () -> List<GuardianExtraTimeGrantCandidate>,
     private val onSubmit: (GuardianExtraTimeGrantBasis, Long) -> Unit,
-    private val onDismiss: (AlertDialog) -> Unit = {}
+    private val onDismiss: (AlertDialog) -> Unit = {},
+    private val readOffer: suspend (GuardianExtraTimeGrantBasis) -> PluginTimeOffer? = { null },
+    private val onOfferSubmit: (GuardianExtraTimeGrantBasis, PluginTimeOffer, Long, Long) -> Unit = { _, _, _, _ -> }
 ) {
     fun show(
         options: List<GuardianExtraTimeGrantCandidate>,
@@ -43,6 +47,57 @@ class GuardianExtraTimeGrantFormDialog(
         var positiveButton: android.widget.Button? = null
         var dialog: AlertDialog? = null
         var updatingDerivedValue = false
+        var normalInputEdited = false
+        var offerState = AdditionalTimeOfferFormState.initial(state.input.currentTotalMinutes)
+        var currentOffer: PluginTimeOffer? = null
+        var offerRequest = 0L
+
+        fun offerMode() = currentOffer != null
+
+        fun renderOfferTotal() {
+            updatingDerivedValue = true
+            binding.totalMinutesInput.setText(offerState.totalMinutes?.toString().orEmpty())
+            updatingDerivedValue = false
+        }
+
+        fun startOfferLookup() {
+            val basis = state.basis ?: return
+            val request = ++offerRequest
+            currentOffer = null
+            binding.offerMinutesLayout.visibility = android.view.View.GONE
+            binding.offerStatus.visibility = android.view.View.GONE
+            binding.additionalMinutesLayout.hint = context.getString(R.string.guardian_extra_minutes)
+            binding.totalMinutesInput.isFocusable = true
+            binding.totalMinutesInput.isFocusableInTouchMode = true
+            scope.launch {
+                val offer = try {
+                    readOffer(basis)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                if (request != offerRequest || dialog?.isShowing != true || state.basis != basis || offer == null) return@launch
+                if (offer.maxMinutes < 0 || offer.proposedMinutes !in 0..offer.maxMinutes) return@launch
+                if (normalInputEdited && state.input.activeSource == GuardianExtraTimeInputSource.TOTAL_MINUTES &&
+                    state.input.submit() is GuardianExtraTimeSubmission.Invalid
+                ) return@launch
+                currentOffer = offer
+                val manualText = binding.additionalMinutesInput.text?.toString().orEmpty()
+                offerState = AdditionalTimeOfferFormState.initial(basis.currentTotalMinutes)
+                    .editManual(if (normalInputEdited) manualText else manualText.ifEmpty { "0" })
+                    .receiveOffer(0, offer.maxMinutes, if (normalInputEdited) 0 else offer.proposedMinutes)
+                binding.offerMinutesLayout.hint = offer.displayName
+                binding.offerMinutesLayout.visibility = android.view.View.VISIBLE
+                binding.totalMinutesInput.isFocusable = false
+                binding.totalMinutesInput.isFocusableInTouchMode = false
+                updatingDerivedValue = true
+                if (manualText != offerState.manualText) binding.additionalMinutesInput.setText(offerState.manualText)
+                binding.offerMinutesInput.setText(offerState.offeredText)
+                updatingDerivedValue = false
+                renderOfferTotal()
+            }
+        }
 
         val adapter = ArrayAdapter(
             context,
@@ -76,11 +131,19 @@ class GuardianExtraTimeGrantFormDialog(
                 }
                 state = state.receiveBasis(state.selectionRevision, basis)
             }
+            normalInputEdited = false
             updatingDerivedValue = true
             binding.additionalMinutesInput.setText("")
             binding.totalMinutesInput.setText("")
             updatingDerivedValue = false
             render()
+            if (basis != null) startOfferLookup() else {
+                offerRequest++
+                currentOffer = null
+                binding.offerMinutesLayout.visibility = android.view.View.GONE
+                binding.totalMinutesInput.isFocusable = true
+                binding.totalMinutesInput.isFocusableInTouchMode = true
+            }
         }
 
         binding.additionalMinutesInput.setOnFocusChangeListener { _, hasFocus ->
@@ -103,6 +166,12 @@ class GuardianExtraTimeGrantFormDialog(
 
             override fun afterTextChanged(editable: Editable?) {
                 if (updatingDerivedValue) return
+                if (offerMode()) {
+                    offerState = offerState.editManual(editable?.toString().orEmpty())
+                    renderOfferTotal()
+                    return
+                }
+                normalInputEdited = true
                 state = state.editAdditionalMinutes(editable?.toString().orEmpty())
                 binding.additionalMinutesLayout.error = null
                 binding.totalMinutesLayout.error = null
@@ -111,12 +180,23 @@ class GuardianExtraTimeGrantFormDialog(
                 updatingDerivedValue = false
             }
         })
+        binding.offerMinutesInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(editable: Editable?) {
+                if (updatingDerivedValue || !offerMode()) return
+                offerState = offerState.editOffer(editable?.toString().orEmpty())
+                binding.offerMinutesLayout.error = null
+                renderOfferTotal()
+            }
+        })
         binding.totalMinutesInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
 
             override fun afterTextChanged(editable: Editable?) {
                 if (updatingDerivedValue) return
+                normalInputEdited = true
                 state = state.editTotalMinutes(editable?.toString().orEmpty())
                 binding.additionalMinutesLayout.error = null
                 binding.totalMinutesLayout.error = null
@@ -139,6 +219,7 @@ class GuardianExtraTimeGrantFormDialog(
                 if (currentBasis != null) {
                     state = state.receiveBasis(revision, currentBasis)
                     render()
+                    startOfferLookup()
                     return@launch
                 }
 
@@ -181,8 +262,21 @@ class GuardianExtraTimeGrantFormDialog(
         grantDialog.setOnShowListener {
             positiveButton = grantDialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
             positiveButton?.isEnabled = state.basis != null
+            startOfferLookup()
             positiveButton?.setOnClickListener {
                 val basis = state.basis ?: return@setOnClickListener
+                if (offerMode()) {
+                    val submission = offerState.submission()
+                    val offer = currentOffer ?: return@setOnClickListener
+                    if (submission == null) {
+                        binding.offerMinutesLayout.error = context.getString(R.string.guardian_invalid_minutes)
+                        return@setOnClickListener
+                    }
+                    positiveButton?.isEnabled = false
+                    grantDialog.dismiss()
+                    onOfferSubmit(basis, offer, submission.first, submission.second)
+                    return@setOnClickListener
+                }
                 when (val submission = state.input.submit()) {
                     is GuardianExtraTimeSubmission.Invalid -> {
                         val errorLayout = if (

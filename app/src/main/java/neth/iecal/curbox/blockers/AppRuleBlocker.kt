@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
@@ -270,6 +271,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         }
         return h
     }
+    private val pluginSettlementWake = Channel<Unit>(Channel.CONFLATED)
+    private var pluginSettlementJob: Job? = null
     private var settingsJob: kotlinx.coroutines.Job? = null
     private var notificationTickJob: kotlinx.coroutines.Job? = null
     private var liveNotificationJob: kotlinx.coroutines.Job? = null
@@ -752,6 +755,7 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         // already visible while the service is alive.
         postVisibleApplicationCheck(connectionGeneration = connectionGeneration)
         scheduleNextSettlementAlarm()
+        startPluginSettlement()
     }
 
 
@@ -2372,7 +2376,8 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
         val coordinator = rolloverCoordinator ?: return
         scope.launch {
             try {
-                coordinator.reconcileSettlement(wallClockMs)
+                val settlement = coordinator.reconcileSettlement(wallClockMs)
+                if (settlement.committed) startPluginSettlement()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -2393,8 +2398,33 @@ class AppRuleBlocker(wakeScheduler: AppRuleWakeScheduler? = null) {
                 return
             }
         }
+        if (outcome.succeeded && outcome.result?.committed == true) startPluginSettlement()
         scheduleNextSettlementAlarm()
         postVisibleApplicationCheck(observationKind = ObservationKind.REFRESH)
+    }
+
+    private fun startPluginSettlement() {
+        pluginSettlementWake.trySend(Unit)
+        synchronized(runtimeLock) {
+            if (pluginSettlementJob?.isActive == true) return
+            pluginSettlementJob = scope.launch(Dispatchers.IO) {
+                while (isActive) {
+                    pluginSettlementWake.receive()
+                    val pending = try {
+                        neth.iecal.curbox.plugins.PluginRuntime(service).settleEnded()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Throwable) {
+                        logNonFatal(IllegalStateException("Plugin settlement failed"))
+                        true
+                    }
+                    if (pending) {
+                        withTimeoutOrNull(15 * 60 * 1000L) { pluginSettlementWake.receive() }
+                        pluginSettlementWake.trySend(Unit)
+                    }
+                }
+            }
+        }
     }
 
     internal fun scheduleNextSettlementAlarm() {

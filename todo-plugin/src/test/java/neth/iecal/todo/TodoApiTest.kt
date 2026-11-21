@@ -28,6 +28,57 @@ class TodoApiTest {
         } finally { server.shutdown() }
     }
 
+    @Test fun `historical duration shape reaches award rounding through HTTP`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":[{"name":"Child","userId":"ko"}]}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":[{"name":"Child","userId":"math"}]}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":[]}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":{"contentsHistory":{"dailyCourse":[{}]},"learningSecondsByCategory":{"course":15.25,"etc":"ignored"}}}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":{"contentsHistory":{"daily":[{},{}]},"learningSecondsByCategory":{"course":"14.75"}}}"""))
+        server.start()
+        try {
+            val api = HttpTodoApi(server.url("/").toString())
+            assertEquals(1L, TodoAwardLookup(api).minutes(TodoSession("123", "synthetic"), "Child", "20261105"))
+            repeat(3) { server.takeRequest() }
+            val korean = server.takeRequest()
+            val math = server.takeRequest()
+            assertEquals("/v3/todoschool/report/daily/hangeul", korean.path)
+            assertEquals("/v3/todoschool/report/daily/math", math.path)
+            assertTrue(korean.body.readUtf8().contains("\"yyyymmdd\":\"20261105\""))
+            assertTrue(math.body.readUtf8().contains("\"yyyymmdd\":\"20261105\""))
+        } finally { server.shutdown() }
+    }
+
+    @Test fun `HTTP report preserves count while rejecting absent or malformed durations`() {
+        val server = MockWebServer()
+        val durations = listOf("", ",\"minutes\":4", ",\"learningSecondsByCategory\":null", ",\"learningSecondsByCategory\":[]", ",\"learningSecondsByCategory\":{\"ok\":30,\"bad\":true}", ",\"learningSecondsByCategory\":{\"bad\":-1}")
+        durations.forEach { server.enqueue(MockResponse().setBody("""{"result":true,"data":{"contentsHistory":{"daily":[{}]}$it}}""")) }
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":{"contentsHistory":{"daily":[]},"learningSecondsByCategory":{}}}"""))
+        server.start()
+        try {
+            val api = HttpTodoApi(server.url("/").toString())
+            val session = TodoSession("123", "synthetic")
+            durations.forEach { assertEquals(DailyReport(1), api.report(session, Subject.MATH, "child", "20261105")) }
+            assertEquals(DailyReport(0, emptyMap()), api.report(session, Subject.MATH, "child", "20261105"))
+        } finally { server.shutdown() }
+    }
+
+    @Test fun `one malformed subject fails the whole HTTP award lookup`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":[{"name":"Child","userId":"ko"}]}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":[{"name":"Child","userId":"math"}]}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":[]}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":{"contentsHistory":{"dailyCourse":[]},"learningSecondsByCategory":{"course":60}}}"""))
+        server.enqueue(MockResponse().setBody("""{"result":true,"data":{"contentsHistory":{"daily":[{}]},"learningSecondsByCategory":{"course":"bad"}}}"""))
+        server.start()
+        try {
+            val failure = assertThrows(TodoApiException::class.java) {
+                TodoAwardLookup(HttpTodoApi(server.url("/").toString())).minutes(TodoSession("123", "synthetic"), "Child", "20261105")
+            }
+            assertEquals(LearningFailure.INVALID_DATA, failure.kind)
+        } finally { server.shutdown() }
+    }
+
     @Test fun `catalog combines subject specific users and rejects failed metadata`() {
         val server = MockWebServer()
         server.enqueue(MockResponse().setBody("""{"result":true,"data":[{"name":"Child","userId":"ko"}]}"""))

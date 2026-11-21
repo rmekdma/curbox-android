@@ -48,12 +48,16 @@ import neth.iecal.curbox.utils.ConfigurableUseDayCalculator
 import neth.iecal.curbox.utils.DataStoreManager
 import neth.iecal.curbox.utils.GuardianOwnedDialog
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantWrite
+import neth.iecal.curbox.plugins.PluginRuntime
+import neth.iecal.curbox.plugins.PluginTimeOffer
 import neth.iecal.curbox.utils.GuardianExtraTimeGrantQueryFactory
 import java.time.Duration
 import java.time.ZoneId
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -71,6 +75,9 @@ class GuardianApprovalActivity : AppCompatActivity() {
     private val grantQuery by lazy {
         GuardianExtraTimeGrantQueryFactory.create(applicationContext, dataStore)
     }
+    private val pluginRuntime by lazy { PluginRuntime(applicationContext) }
+    private var offerPrefetchKey: String? = null
+    private var offerPrefetch = emptyMap<String, Deferred<Pair<GuardianExtraTimeGrantBasis, PluginTimeOffer>?>>()
     private var denials: List<AppRuleGuardianDenial> = emptyList()
     private var targetPackageName: String = ""
     private var selectedRuleId: String? = null
@@ -687,6 +694,7 @@ class GuardianApprovalActivity : AppCompatActivity() {
         val payload = readValidatedPayload(intent) ?: return
         if (isFinishing) return
         val previousScreenRequestId = screenRequestId
+        grantFormDialog?.dismiss()
         setIntent(intent)
         denials = payload.denials
         targetPackageName = payload.packageName
@@ -800,6 +808,35 @@ class GuardianApprovalActivity : AppCompatActivity() {
         renderConfirmationState()
         updateGuardianGrantButton()
         updateAccumulatedButton(selectedRuleId)
+        startOfferPrefetch()
+    }
+
+    private fun startOfferPrefetch() {
+        val exhausted = denials.filter { it.isAllowanceExhausted }.map { it.ruleId }.distinct().sorted()
+        val key = screenRequestId + ":" + exhausted.joinToString(",")
+        if (offerPrefetchKey == key) return
+        offerPrefetch.values.forEach { it.cancel() }
+        offerPrefetchKey = key
+        offerPrefetch = exhausted.associateWith { ruleId ->
+            lifecycleScope.async(Dispatchers.IO) {
+                try {
+                    val basis = grantQuery.currentBasis(ruleId) ?: return@async null
+                    pluginRuntime.offer(basis)?.let { basis to it }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+    }
+
+    private suspend fun offerFor(basis: GuardianExtraTimeGrantBasis): PluginTimeOffer? {
+        val cached = offerPrefetch[basis.ruleId]?.await()
+        if (cached != null && cached.first == basis && pluginRuntime.isCurrent(cached.second, basis)) {
+            return cached.second
+        }
+        return pluginRuntime.offer(basis)
     }
 
     private fun updateGuardianGrantButton() {
@@ -880,9 +917,20 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 toast(R.string.guardian_no_extra_time_rules)
                 return@launch
             }
-            val selectedIndex = options.indexOfFirst { it.rule.id == preferredRuleId }
-                .takeIf { it >= 0 }
-                ?: 0
+            val selected = selectedRuleId
+            val linked = try {
+                dataStore.settings.first().pluginTimes.values.any { it.linkedRuleId == selected }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                false
+            }
+            if (!isCurrentScreenRequest(requestId)) return@launch
+            val initialRuleId = preferredRuleId ?: selected?.takeIf { ruleId ->
+                linked && denials.any { it.ruleId == ruleId && it.isAllowanceExhausted }
+            }
+            val selectedIndex = options.indexOfFirst { it.rule.id == initialRuleId }
+                .takeIf { it >= 0 } ?: 0
             grantDialogOpen = true
             showGrantDialog(options, selectedIndex, requestId)
         }
@@ -927,6 +975,24 @@ class GuardianApprovalActivity : AppCompatActivity() {
                 grantDialogOpen = false
                 ownedDialogs.remove(dismissedDialog)
                 if (grantFormDialog === dismissedDialog) grantFormDialog = null
+            },
+            readOffer = { basis ->
+                if (denials.none { it.ruleId == basis.ruleId && it.isAllowanceExhausted }) null
+                else offerFor(basis)
+            },
+            onOfferSubmit = { basis, offer, manual, contributed ->
+                if (canHandleCallbacks() && !grantInProgress) {
+                    grantInProgress = true
+                    grantInProgressRequestId = requestId
+                    authenticateThen(
+                        ruleId = basis.ruleId,
+                        screenRequestId = requestId,
+                        onCancelled = { clearGrantInProgress(requestId) },
+                        onAuthenticated = { _, password ->
+                            writeGrant(basis, password, manual + contributed, requestId, offer, contributed)
+                        }
+                    )
+                }
             }
         ).show(options, selectedIndex)
         grantFormDialog = dialog
@@ -1119,12 +1185,18 @@ class GuardianApprovalActivity : AppCompatActivity() {
         basis: GuardianExtraTimeGrantBasis,
         password: String,
         minutes: Long,
-        requestId: String
+        requestId: String,
+        pluginOffer: PluginTimeOffer? = null,
+        contributedMinutes: Long = 0L
     ) {
         val operationId = UUID.randomUUID().toString()
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
-                dataStore.grantAppRuleTime(password, basis, minutes)
+                if (contributedMinutes > 0 && pluginOffer != null) {
+                    pluginRuntime.grant(password, pluginOffer, basis, minutes - contributedMinutes, contributedMinutes)
+                } else {
+                    dataStore.grantAppRuleTime(password, basis, minutes)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {

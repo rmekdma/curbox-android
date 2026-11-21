@@ -1,5 +1,12 @@
 package neth.iecal.curbox.utils
 
+import neth.iecal.curbox.plugins.PluginTimeProjection
+import neth.iecal.curbox.plugins.StoredPluginTime
+import neth.iecal.curbox.plugins.PluginCatalog
+import neth.iecal.curbox.plugins.PluginMigrationException
+import neth.iecal.curbox.plugins.PluginRuntime
+import neth.iecal.plugin.PluginTimeState
+
 import android.content.Context
 import android.content.Intent
 import android.os.Handler
@@ -51,13 +58,17 @@ import kotlin.jvm.java
 class GsonSerializer<T>(
     private val gson: Gson,
     private val type: Type,
-    override val defaultValue: T
+    override val defaultValue: T,
+    private val migratePluginSettings: (JsonObject, Gson) -> Unit = PluginCatalog::migrateSettings
 ) : Serializer<T> {
 
     override suspend fun readFrom(input: InputStream): T {
         return try {
             val raw = input.readBytes().decodeToString()
             gson.fromJson(normalizeSettingsJson(raw), type) ?: defaultValue
+        } catch (e: PluginMigrationException) {
+            // Keep the original file intact so migration can be retried.
+            throw e
         } catch (e: Exception) {
             e.printStackTrace()
             defaultValue
@@ -142,6 +153,13 @@ class GsonSerializer<T>(
             !marker.isJsonPrimitive || !marker.asJsonPrimitive.isNumber
         ) {
             root.addProperty("appRuleMigrationVersion", 0)
+        }
+        try {
+            migratePluginSettings(root, gson)
+        } catch (e: PluginMigrationException) {
+            throw e
+        } catch (e: Exception) {
+            throw PluginMigrationException(e)
         }
         return root.toString()
     }
@@ -304,25 +322,6 @@ class DataStoreManager(private val context: Context) {
     private val gson = Gson()
 
     companion object {
-        @Volatile private var learningStateStore: androidx.datastore.core.DataStore<String>? = null
-        @Volatile private var learningSessionStore: androidx.datastore.core.DataStore<String>? = null
-
-        fun learningStateDataStore(context: Context): androidx.datastore.core.DataStore<String> =
-            learningStateStore ?: synchronized(this) {
-                learningStateStore ?: MultiProcessDataStoreFactory.create(
-                    serializer = neth.iecal.curbox.learning.LearningStringSerializer,
-                    produceFile = { File(context.applicationContext.filesDir, if (neth.iecal.curbox.BuildConfig.LEARNING_FAKE_ONLY) "datastore/learning-fake-state.json" else "datastore/learning-state.json") }
-                ).also { learningStateStore = it }
-            }
-
-        fun learningSessionDataStore(context: Context): androidx.datastore.core.DataStore<String> =
-            learningSessionStore ?: synchronized(this) {
-                learningSessionStore ?: MultiProcessDataStoreFactory.create(
-                    serializer = neth.iecal.curbox.learning.LearningStringSerializer,
-                    produceFile = { File(context.applicationContext.filesDir, if (neth.iecal.curbox.BuildConfig.LEARNING_FAKE_ONLY) "datastore/learning-fake-session.json" else "datastore/learning-session.json") }
-                ).also { learningSessionStore = it }
-            }
-
         @Volatile
         private var INSTANCE: androidx.datastore.core.DataStore<Settings>? = null
 
@@ -466,6 +465,90 @@ class DataStoreManager(private val context: Context) {
             durationMinutes = durationMinutes,
             grantedAtMs = grantedAtMs
         )
+    }
+
+    internal suspend fun readPluginTime(id: String): PluginTimeState =
+        PluginTimeProjection.from(settings.first(), id, System.currentTimeMillis())
+
+    internal suspend fun updatePluginTime(
+        id: String, expected: PluginTimeState, data: String?, linkedRuleId: String?
+    ): Boolean {
+        val revision = java.util.UUID.randomUUID().toString()
+        val updated = settingsDataStore.updateData { current ->
+            val state = PluginTimeProjection.from(current, id, System.currentTimeMillis())
+            if (state != expected || !GuardianSessionRegistry.session.isAuthenticated(current.guardianAuthConfig.isConfigured) ||
+                linkedRuleId != null && state.rules.none { it.id == linkedRuleId && it.eligibleForContributions }
+            ) return@updateData current
+            current.copy(pluginTimes = current.pluginTimes + (id to StoredPluginTime(data, linkedRuleId, revision)))
+        }
+        return updated.pluginTimes[id]?.revision == revision
+    }
+
+    internal suspend fun settlePluginTime(
+        id: String, expected: PluginTimeState, endedUseDayId: String, minutes: Long, data: String
+    ): Boolean {
+        if (expected.linkedRuleId == null) return false
+        val endedDay = runCatching { java.time.LocalDate.parse(endedUseDayId) }.getOrNull() ?: return false
+        val currentDay = runCatching { java.time.LocalDate.parse(expected.useDayId) }.getOrNull() ?: return false
+        if (endedDay >= currentDay || minutes < 0L) return false
+        val revision = java.util.UUID.randomUUID().toString()
+        val updated = settingsDataStore.updateData { current ->
+            neth.iecal.curbox.plugins.PluginTimeSettlementWrite.next(
+                current, id, expected, minutes, data, revision, System.currentTimeMillis()
+            )
+        }
+        return updated.pluginTimes[id]?.revision == revision
+    }
+
+    internal suspend fun grantPluginTime(
+        id: String,
+        password: String,
+        basis: GuardianExtraTimeGrantBasis,
+        expected: PluginTimeState,
+        manual: Long,
+        contributed: Long,
+        data: String
+    ): GuardianExtraTimeGrantWrite.Result {
+        if (manual < 0L || contributed <= 0L || manual > Long.MAX_VALUE - contributed ||
+            expected.linkedRuleId != basis.ruleId || expected.useDayId != basis.useDayId
+        ) return GuardianExtraTimeGrantWrite.Result.Rejected
+        val total = manual + contributed
+        if (total > Long.MAX_VALUE / 60_000L) return GuardianExtraTimeGrantWrite.Result.Rejected
+        val at = GuardianExtraTimeGrantWrite.nextGrantTimestamp()
+        val receipt = GuardianApprovalGrantReceipt(basis.ruleId, basis.useDayId, at, total * 60_000L)
+        val revision = java.util.UUID.randomUUID().toString()
+        val updated = try {
+            settingsDataStore.updateData { current ->
+                val now = System.currentTimeMillis()
+                val state = PluginTimeProjection.from(current, id, now)
+                if (state != expected || state.data == data ||
+                    state.rules.none { it.id == basis.ruleId && it.eligibleForContributions }) {
+                    return@updateData current
+                }
+                val next = GuardianExtraTimeGrantWrite.nextSettings(current, password, basis, total, at, now)
+                if (next == current) return@updateData current
+                val grants = next.appRuleOverrideState.grants
+                val tagged = grants.last().copy(contributedMillisByPlugin = mapOf(id to contributed * 60_000L))
+                next.copy(
+                    appRuleOverrideState = next.appRuleOverrideState.copy(grants = grants.dropLast(1) + tagged),
+                    pluginTimes = next.pluginTimes + (id to StoredPluginTime(data, basis.ruleId, revision))
+                )
+            }.also { guardianApprovalWriteCommitObserverForTest?.invoke(it) }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logGuardianApprovalWriteFailure(error)
+            return GuardianExtraTimeGrantWrite.Result.Uncertain(receipt)
+        }
+        val now = System.currentTimeMillis()
+        val result = GuardianExtraTimeGrantWrite.resultFor(updated, basis, total, at, now)
+        if (result == GuardianExtraTimeGrantWrite.Result.Stored) {
+            return GuardianExtraTimeGrantWrite.Result.StoredWithReceipt(receipt)
+        }
+        val latest = GuardianExtraTimeGrantBasis.capture(updated, basis.ruleId, now)
+            ?: return GuardianExtraTimeGrantWrite.Result.Unavailable
+        return if (PluginTimeProjection.from(updated, id, now) != expected)
+            GuardianExtraTimeGrantWrite.Result.NeedsReconfirmation(latest) else result
     }
 
     /** Stores a direct grant authorized by the app's current guardian management session. */
@@ -740,7 +823,7 @@ class DataStoreManager(private val context: Context) {
                     mergedPools[ruleId] = newPool
                 }
             }
-            current.copy(appRuleRolloverState = AppRuleRolloverState(mergedPools))
+            PluginRuntime(context).recordRollover(current, AppRuleRolloverState(mergedPools))
         }
         return state.pools.all { (ruleId, pool) ->
             val settled = updated.appRuleRolloverState.pools[ruleId]
@@ -837,6 +920,7 @@ class DataStoreManager(private val context: Context) {
                 guardianAuthConfig = current.guardianAuthConfig,
                 appRuleOverrideState = current.appRuleOverrideState,
                 appRuleRolloverState = current.appRuleRolloverState,
+                pluginTimes = current.pluginTimes,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 settingsChangeDelayConfig2 = delayConfig,
             )
@@ -1343,7 +1427,8 @@ class DataStoreManager(private val context: Context) {
             .toSet()
         val withLocalRuntime = proposed.copy(
             appRuleOverrideState = current.appRuleOverrideState,
-            appRuleRolloverState = current.appRuleRolloverState
+            appRuleRolloverState = current.appRuleRolloverState,
+            pluginTimes = current.pluginTimes
         )
         if (disabledRuleIds.isEmpty()) return withLocalRuntime
 
@@ -1597,6 +1682,14 @@ internal fun Settings.clearGuardianExtraTimeForRules(
         )
     }
     return copy(
+        pluginTimes = pluginTimes.mapValues { (id, state) ->
+            if (state.linkedRuleId !in ruleIds) state
+            else state.copy(
+                data = PluginCatalog.factories.find { it.id == id }
+                    ?.onLinkedTimeRevoked(state.data, currentUseDayId) ?: state.data,
+                revision = java.util.UUID.randomUUID().toString()
+            )
+        },
         appRuleOverrideState = appRuleOverrideState.copy(
             grants = appRuleOverrideState.grants.filterNot { it.ruleId in ruleIds }
         ),
@@ -1841,4 +1934,3 @@ internal object GuardianManualPoolWrite {
         )
     }
 }
-

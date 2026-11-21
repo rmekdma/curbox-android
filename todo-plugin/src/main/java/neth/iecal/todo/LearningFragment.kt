@@ -41,7 +41,17 @@ class LearningFragment : Fragment() {
     private var soundPreview: android.media.Ringtone? = null
     private var soundPreviewJob: kotlinx.coroutines.Job? = null
     private var renderedDay = LocalDate.now(ZoneId.of("Asia/Seoul"))
-    private val host get() = requireActivity() as LearningHost
+    private val pluginHost get() = neth.iecal.plugin.PluginHostAccess.require(requireContext(), TodoPluginFactory::class.java)
+    private val host: LearningHost get() = object : LearningHost {
+        override suspend fun learningAvailability(): LearningAvailability {
+            val observation = pluginHost.serviceObservation()
+            val notifications = androidx.core.app.NotificationManagerCompat.from(requireContext()).areNotificationsEnabled()
+            return LearningAvailability(observation.accessibilityEnabled, notifications,
+                if (!observation.accessibilityEnabled) false else if (observation.connection == neth.iecal.plugin.Connection.CONNECTED) true else null)
+        }
+        override fun createLearningScreen() = neth.iecal.curbox.learning.LearningComposition.createScreen(requireContext(), pluginHost)
+        override fun learningText(key: LearningText, vararg args: Any) = LearningTextResources(requireContext()).learningText(key, *args)
+    }
     private fun text(key: LearningText, vararg args: Any) = host.learningText(key, *args)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -479,11 +489,36 @@ class LearningFragment : Fragment() {
         addSetting(text(LearningText.INTERVAL), input, 96)
         addSetting(text(LearningText.ALERTS), alerts, 48)
         addSetting(text(LearningText.SOUND), sound, 160)
+        val connectionSettings = TodoRuleSettings(requireContext(), pluginHost.time,
+            neth.iecal.curbox.learning.LearningStorage(pluginHost, BuildConfig.LEARNING_FAKE_ONLY))
+        val connectionSummary = TextView(requireContext()).apply {
+            text = getString(R.string.todo_award_not_connected)
+        }
+        val connectionButton = com.google.android.material.button.MaterialButton(requireContext()).apply {
+            id = R.id.todo_connection_button
+            setText(R.string.todo_award_connection)
+        }
+        content.addView(connectionSummary)
+        content.addView(connectionButton)
+        fun refreshConnection() {
+            viewLifecycleOwner.lifecycleScope.launch {
+                try { connectionSummary.text = connectionSettings.summary() }
+                catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                catch (_: Exception) { connectionSummary.setText(R.string.todo_award_failed) }
+            }
+        }
+        refreshConnection()
+        val scroll = android.widget.ScrollView(requireContext()).apply { addView(content) }
         val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
-            .setTitle(text(LearningText.GENERAL_SETTINGS)).setView(content)
+            .setTitle(text(LearningText.GENERAL_SETTINGS)).setView(scroll)
             .setNegativeButton(text(LearningText.CANCEL), null)
             .setPositiveButton(text(LearningText.CONFIRM), null).create()
         settingsDialog = dialog
+        connectionButton.setOnClickListener {
+            soundPopup.dismiss()
+            stopSoundPreview()
+            connectionSettings.open(requireActivity(), viewLifecycleOwner) { refreshConnection() }
+        }
         dialog.setOnDismissListener { soundPopup.dismiss(); stopSoundPreview(); if (settingsDialog === dialog) settingsDialog = null }
         dialog.setOnShowListener {
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {

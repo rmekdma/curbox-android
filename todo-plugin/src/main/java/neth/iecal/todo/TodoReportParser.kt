@@ -4,7 +4,7 @@ import com.google.gson.JsonParser
 
 /** A subject uses its own user identifier and daily report format. */
 enum class Subject(val defaultGoal: Int) { KOREAN(6), MATH(5), ENGLISH(8) }
-data class DailyReport(val count: Int)
+data class DailyReport(val count: Int, val learningSecondsByCategory: Map<String, java.math.BigDecimal>? = null)
 
 object TodoReportParser {
     /** Rejects incomplete reports; only a valid empty activity list means zero. */
@@ -12,6 +12,17 @@ object TodoReportParser {
         val report = JsonParser.parseString(json).asJsonObject
         val history = report.getAsJsonObject("contentsHistory")
         val activities = history.getAsJsonArray(if (subject == Subject.MATH) "daily" else "dailyCourse")
-        return DailyReport(activities.size())
+        val durations = report.get("learningSecondsByCategory")?.let { element ->
+            runCatching {
+                require(element.isJsonObject)
+                element.asJsonObject.entrySet().filterNot { it.key == "etc" }.associate { (category, value) ->
+                    require(value.isJsonPrimitive && (value.asJsonPrimitive.isNumber || value.asJsonPrimitive.isString))
+                    val seconds = value.asString.toBigDecimal()
+                    require(seconds.signum() >= 0)
+                    category to seconds
+                }
+            }.getOrNull()
+        }
+        return DailyReport(activities.size(), durations)
     }
 }

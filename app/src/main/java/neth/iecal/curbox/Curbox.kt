@@ -1,12 +1,19 @@
 package neth.iecal.curbox
 
 import android.app.Application
+import android.content.Context
 import android.os.Build
 import com.google.android.material.color.DynamicColors
 import neth.iecal.curbox.data.sync.SyncGateway
+import neth.iecal.curbox.plugins.PluginRuntime
 import neth.iecal.curbox.utils.GuardianSessionRegistry
 
 class Curbox: Application() {
+  override fun attachBaseContext(base: Context) {
+    super.attachBaseContext(base)
+    PluginRuntime.installHostAccess()
+  }
+
   override fun onCreate() {
     DynamicColors.applyToActivitiesIfAvailable(this)
     Thread.setDefaultUncaughtExceptionHandler(CrashLogger(this))

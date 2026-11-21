@@ -1,5 +1,6 @@
 package neth.iecal.curbox.ui.fragments.main.reducers.blockertools.appRules
 
+
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.os.Bundle
@@ -22,7 +23,6 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
@@ -720,4 +720,3 @@ internal fun formatAppRuleAccumulatedSummary(
         arrayOf(accumulatedMinutes)
     )
 }
-

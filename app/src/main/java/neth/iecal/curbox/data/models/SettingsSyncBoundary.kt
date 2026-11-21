@@ -6,6 +6,7 @@ object SettingsSyncBoundary {
         useDayGenerationStartedAtMs = 0L,
         guardianAuthConfig = GuardianAuthConfig(),
         appRuleOverrideState = AppRuleOverrideState(),
-        appRuleRolloverState = AppRuleRolloverState()
+        appRuleRolloverState = AppRuleRolloverState(),
+        pluginTimes = emptyMap()
     )
 }

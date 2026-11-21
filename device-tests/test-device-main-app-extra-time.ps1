@@ -28,24 +28,32 @@ if (-not (Test-Path $tmpDir)) {
 $backupFile = Join-Path $tmpDir "settings_backup.json"
 $passedAll = $true
 
-function Stop-MainCurboxProcessAndWait([int]$TimeoutSeconds = 10) {
-    $processName = "neth.iecal.curbox.debug"
-    $initialPid = Get-DeviceProcessPid -ProcessName $processName
-    if (-not $initialPid) {
-        return [PSCustomObject]@{ Stopped = $true; ProcessId = $null }
-    }
-
-    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $processName | Out-Null
-    $wait = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        $currentPid = Get-DeviceProcessPid -ProcessName $processName
-        if (-not $currentPid -or $currentPid -ne $initialPid) {
-            return [PSCustomObject]@{ Stopped = $true; ProcessId = $currentPid }
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    return [PSCustomObject]@{ Stopped = $false; ProcessId = $initialPid }
+function Get-MainGrantFormReadyUi([string]$RuleName) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $ui = Dump-UI
+        try {
+            [xml]$doc = $ui
+            $button = $doc.SelectSingleNode("//node[@resource-id='android:id/button1']")
+            if ((Get-TestRulePickerLabel -Xml $ui) -eq $RuleName -and $button -and $button.GetAttribute('enabled') -eq 'true') { return $ui }
+        } catch { }
+        Start-Sleep -Milliseconds 250
+    } while ($watch.Elapsed.TotalSeconds -lt 10)
+    throw "The app-internal grant form did not become ready for $RuleName."
 }
+
+function Get-MainGrantUiAfterEntry([string]$RuleName) {
+    Start-Sleep -Milliseconds 500
+    if ((Get-TestDeviceShellOutput -Command 'dumpsys input_method') -match 'mInputShown=true') {
+        Invoke-TestDeviceShell -Command 'input keyevent 4'
+    }
+    $ui = Get-MainGrantFormReadyUi -RuleName $RuleName
+    [xml]$doc = $ui
+    $input = $doc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
+    if (-not $input -or $input.GetAttribute('text') -ne '15') { throw "The app-internal grant form did not retain the entered 15 minutes." }
+    return $ui
+}
+
 
 try {
     Write-Step "1. Backing up current device settings..."
@@ -95,20 +103,19 @@ try {
     Write-Success "Test PIN and four-rule snapshot are active with clean grant state."
 
     Write-Step "3. Opening the protected app-rule screen in Curbox..."
-    $retiredMainProcess = Stop-MainCurboxProcessAndWait
-    if (-not $retiredMainProcess.Stopped) {
-        throw "The main Curbox process did not retire after the persisted app-rule fixture was written."
-    }
-    Write-Success "Retired the stale main Curbox task so the protected fragment opens with the persisted fixture."
-    Start-TestApp `
-        -PackageName "neth.iecal.curbox.debug" `
+    $currentAccessibility = Backup-DeviceAccessibilitySettings
+    $coldStart = Restart-TestCurboxCold -AccessibilitySettings $currentAccessibility `
         -ActivityName "neth.iecal.curbox.ui.activity.FragmentActivity" `
         -IntentArguments "-f 0x10008000 --es fragment app_rule_groups"
+    if (-not $coldStart.Skipped -and -not $coldStart.ProcessId) {
+        throw "The Debug accessibility service did not rebind after the cold start."
+    }
+    Write-Success "Opened the protected fragment with the persisted fixture after a cold start."
 
     $authUi = Wait-For-UI "guardian_enter_password|Enter guardian password|비밀번호 입력|Password" 8
     if ($authUi -match "guardian_enter_password|Enter guardian password|비밀번호 입력|Password") {
         if (Submit-GuardianPin -PinValue $Pin) {
-            Write-Success "Guardian management authentication accepted the test PIN."
+            Write-Host "Guardian PIN submitted; waiting for the protected screen." -ForegroundColor Cyan
         } else {
             Write-Fail "Could not submit the guardian PIN for app-rule access."
             $passedAll = $false
@@ -122,8 +129,7 @@ try {
     if ($ui -match "change_extra_time_button") {
         Write-Success "The protected app-rule screen opened after authentication."
     } else {
-        Write-Fail "The protected app-rule screen did not open."
-        $passedAll = $false
+        throw "The protected app-rule screen did not open after PIN submission."
     }
 
     Write-Step "4. Opening app-internal extra-time entry..."
@@ -168,27 +174,23 @@ try {
         if ($hasExpectedPickerCandidates) {
             $usageResetSelection = Select-TestRulePickerOption -CurrentUi $pickerCandidates.Ui -CandidateOptions $pickerCandidates.Options -RuleName "UsageRule"
             if ($usageResetSelection.Success) {
-                $ui = $usageResetSelection.Ui
+                $ui = Get-MainGrantFormReadyUi -RuleName "UsageRule"
                 $additionalNode = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
                 if ($additionalNode.Found) {
                     adb shell "input tap $($additionalNode.X) $($additionalNode.Y)" | Out-Null
                     adb shell "input text 15" | Out-Null
-                    $ui = Dump-UI
+                    $ui = Get-MainGrantUiAfterEntry -RuleName "UsageRule"
                     $futureSelection = Select-TestRulePickerOption -CurrentUi $ui -CandidateOptions $pickerCandidates.Options -RuleName "FutureRule"
                     if ($futureSelection.Success) {
-                        $resetUi = $futureSelection.Ui
-                        try {
-                            [xml]$resetDoc = $resetUi
-                            $resetAdditional = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
-                            $resetTotal = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/total_minutes_input']")
-                            $inputsReset = ($resetAdditional -and $resetTotal -and $resetAdditional.GetAttribute("text") -ne "15" -and $resetTotal.GetAttribute("text") -ne "15")
-                        } catch {
-                            $inputsReset = $false
-                        }
-                        if ($inputsReset) {
+                        $resetUi = Get-MainGrantFormReadyUi -RuleName "FutureRule"
+                        $resetState = Get-TestGrantInputState -Xml $resetUi
+                        if ($resetState.Reset) {
                             Write-Success "Changing to FutureRule cleared both inputs from UsageRule."
                         } else {
                             Write-Fail "Changing rules retained a stale UsageRule input value."
+                            foreach ($field in $resetState.Fields) {
+                                Write-Host "[DIAGNOSTIC] $($field.Name): $($field.Kind)." -ForegroundColor DarkYellow
+                            }
                             $passedAll = $false
                         }
                         $ui = $resetUi
@@ -217,7 +219,7 @@ try {
         $usageSelection = Select-TestRulePickerOption -CurrentUi $ui -CandidateOptions $pickerCandidates.Options -RuleName "UsageRule"
     }
     if ($usageSelection -and $usageSelection.Success -and $usageSelection.Label -eq "UsageRule") {
-        $ui = $usageSelection.Ui
+        $ui = Get-MainGrantFormReadyUi -RuleName "UsageRule"
         $additionalNode = Get-NodeBounds $ui 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
         if ($additionalNode.Found) {
             adb shell "input tap $($additionalNode.X) $($additionalNode.Y)" | Out-Null
@@ -233,7 +235,7 @@ try {
     }
 
     if ($canSubmitUsageGrant) {
-        $ui = Dump-UI
+        $ui = Get-MainGrantUiAfterEntry -RuleName "UsageRule"
         $selectedBeforeSubmit = Get-TestRulePickerLabel -Xml $ui
         if ($selectedBeforeSubmit -ne "UsageRule") {
             Write-Fail "The app-internal form no longer shows UsageRule; refusing to submit the grant."
@@ -245,13 +247,18 @@ try {
         $applied = Tap-Node $ui 'resource-id="android:id/button1"' "적용/Apply 버튼" -Optional
         if (-not $applied) { $applied = Tap-Node $ui 'text="적용"' "적용 버튼" -Optional }
         if (-not $applied) { $applied = Tap-Node $ui 'text="Apply"' "Apply button" }
-        Start-Sleep -Seconds 2
+        if (-not $applied) { throw "Could not submit the app-internal grant." }
     } else {
         Write-Fail "Skipped the app-internal grant because UsageRule was not confirmed in the selector."
     }
 
-    $updatedSettings = Get-DeviceSettings -AsObject
-    $usageGrant = @($updatedSettings.appRuleOverrideState.grants | Where-Object { $_.ruleId -eq "usage-rule" })
+    $grantWait = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $updatedSettings = Get-DeviceSettings -AsObject
+        $usageGrant = @($updatedSettings.appRuleOverrideState.grants | Where-Object { $_.ruleId -eq "usage-rule" })
+        if ($usageGrant.Count -eq 1 -and $usageGrant[0].grantedMillis -eq 900000) { break }
+        Start-Sleep -Milliseconds 500
+    } while ($grantWait.Elapsed.TotalSeconds -lt 10)
     if ($usageGrant.Count -eq 1 -and $usageGrant[0].grantedMillis -eq 900000) {
         Write-Success "Curbox saved exactly 15 minutes to UsageRule."
     } else {

@@ -5,7 +5,7 @@
 ```powershell
 $common = @{
     DeviceId = '<adb serial>'
-    LearningApkPath = '<fake fullDebug APK path>'
+    TargetApkPath = '<fake fullDebug APK path>'
     ExpectedApkSha256 = '<target APK SHA256>'
     InstrumentationApkPath = '<instrumentation APK path>'
     InstrumentationApkSha256 = '<instrumentation APK SHA256>'

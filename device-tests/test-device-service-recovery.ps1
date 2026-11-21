@@ -19,7 +19,7 @@ param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
     [string]$TargetActivity = "",
     [string]$ContributorPackage = "com.initialcoms.ridi",
-    [string]$ServiceProcessName = ":app_blocker_service",
+    [string]$ServiceProcessName = "neth.iecal.curbox.debug:app_blocker_service",
     [int]$MaxRecoveryWaitSeconds = 30,
     [int]$WarmupWaitSeconds = 2
 )
@@ -28,6 +28,10 @@ $ErrorActionPreference = "Stop"
 
 # Dot-source common device testing harness
 . "$PSScriptRoot/lib/device-test-common.ps1"
+
+if ($ServiceProcessName -cne "neth.iecal.curbox.debug:app_blocker_service") {
+    throw "Service recovery requires the Debug service process."
+}
 
 Assert-AdbDevice
 $accessibilityBackup = Backup-DeviceAccessibilitySettings
@@ -74,6 +78,9 @@ try {
         Start-Sleep -Seconds 2
         adb shell "input keyevent 3" | Out-Null # Home
         Start-Sleep -Seconds 1
+    }
+    if (-not (Ensure-AccessibilityServiceBound)) {
+        throw "Debug AppBlockerService did not bind during recovery test preflight."
     }
 
     Write-Step "1. Backing up device settings.json..."
@@ -134,7 +141,7 @@ try {
     }
 
     Write-Step "5. Forcibly terminating $ServiceProcessName (PID: $initialPid)..."
-    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $ServiceProcessName | Out-Null
+    Stop-ServiceProcess -TargetPid $initialPid -ProcessName $ServiceProcessName -AllowCrashFallback | Out-Null
     Write-Host "Dispatched kill signal / termination for PID $initialPid." -ForegroundColor DarkGray
 
     # Verify initial PID is terminated

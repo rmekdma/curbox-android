@@ -79,46 +79,6 @@ function Request-GuardianSkipApproval() {
     return ($clicked -and $optionSelected)
 }
 
-function Submit-GuardianPin([string]$PinValue) {
-    $uiPinDialog = Wait-For-UI "guardian_enter_password|Enter guardian password|비밀번호 입력|Password" 6
-    if (-not ($uiPinDialog -match "Enter guardian password" -or $uiPinDialog -match "비밀번호 입력" -or $uiPinDialog -match "Password")) {
-        Write-Fail "Guardian PIN input dialog was NOT displayed."
-        return $false
-    }
-
-    $nodePin = Get-NodeBounds $uiPinDialog 'class="android.widget.EditText"'
-    if (-not $nodePin.Found) {
-        $nodePin = Get-NodeBounds $uiPinDialog 'password="true"'
-    }
-    if (-not $nodePin.Found) {
-        $nodePin = Get-NodeBounds $uiPinDialog 'text="Password"'
-    }
-
-    if (-not $nodePin.Found) {
-        Write-Fail "Could not locate PIN EditText node in UI dump."
-        return $false
-    }
-
-    adb shell "input tap $($nodePin.X) $($nodePin.Y)" | Out-Null
-    Start-Sleep -Milliseconds 500
-    # Android IME Backspace keyevent 67 repeated per device-tests/AGENTS.md
-    adb shell "input keyevent 67 67 67 67 67" | Out-Null
-    adb shell "input text $PinValue" | Out-Null
-    Start-Sleep -Milliseconds 500
-
-    $uiAfterTyping = Dump-UI
-    # Resolution hierarchy: Resource-ID -> Primary Locale (Korean) -> Fallback Locale (English)
-    $continued = Tap-Node $uiAfterTyping 'resource-id="android:id/button1"' "계속/확인 버튼 (Resource-ID)" -Optional
-    if (-not $continued) {
-        $continued = Tap-Node $uiAfterTyping 'text="계속"' "계속 텍스트 버튼 (Korean)" -Optional
-    }
-    if (-not $continued) {
-        $continued = Tap-Node $uiAfterTyping 'text="Continue"' "Continue text button (English)"
-    }
-
-    return $continued
-}
-
 try {
     Write-Step "1. Backing up device settings.json..."
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
@@ -127,7 +87,7 @@ try {
 
     $testStartTimeMs = [System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 
-    Write-Step "2. Generating and injecting Guardian PIN auth config (PIN: $Pin)..."
+    Write-Step "2. Generating and injecting Guardian PIN auth config..."
     $guardianAuth = New-GuardianPinAuthConfig -Pin $Pin
     $injected = Set-DeviceGuardianAuthConfig -GuardianAuthConfig $guardianAuth
     if (-not $injected) {

@@ -1,5 +1,6 @@
 package neth.iecal.curbox.data.models
 
+import neth.iecal.curbox.plugins.StoredPluginTime
 import neth.iecal.curbox.utils.UseDay
 import neth.iecal.curbox.utils.UseDayResetTime
 
@@ -45,7 +46,8 @@ data class Settings(
     /** Rule-scoped approvals; reset atomically by use-day id. */
     val appRuleOverrideState: AppRuleOverrideState = AppRuleOverrideState(),
     /** Multi-day accumulated rollover state across all app rules. */
-    val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState()
+    val appRuleRolloverState: AppRuleRolloverState = AppRuleRolloverState(),
+    val pluginTimes: Map<String, StoredPluginTime> = emptyMap()
 ) {
     /** Convenient scalar form for settings UIs and deterministic tests. */
     val useDayResetTimeMinutes: Int
@@ -57,7 +59,6 @@ data class Settings(
     val guardianPasswordConfigured: Boolean
         get() = guardianAuthConfig.isConfigured
 }
-
 /** Multi-day accumulated rollover pool for a single app rule. */
 data class RuleRolloverPool(
     val ruleId: String = "",
@@ -75,4 +76,3 @@ data class AppRuleRolloverState(
     fun withPool(pool: RuleRolloverPool): AppRuleRolloverState =
         copy(pools = pools + (pool.ruleId to pool))
 }
-

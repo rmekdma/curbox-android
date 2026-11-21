@@ -34,6 +34,29 @@ if (-not (Test-Path $tmpDir)) {
 $backupFile = Join-Path $tmpDir "settings_backup.json"
 $passedAll = $true
 
+function Get-GrantFormReadyUi {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $currentUi = Dump-UI
+        try {
+            [xml]$doc = $currentUi
+            $button = $doc.SelectSingleNode("//node[@resource-id='android:id/button1']")
+            $picker = $doc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/rule_picker']")
+            if ($picker -and $button -and $button.GetAttribute('enabled') -eq 'true') { return $currentUi }
+        } catch { }
+        Start-Sleep -Milliseconds 250
+    } while ($watch.Elapsed.TotalSeconds -lt 10)
+    throw "The grant form did not become ready."
+}
+
+function Hide-GrantFormKeyboard {
+    $state = Get-TestDeviceShellOutput -Command 'dumpsys input_method'
+    if ($state -match 'mInputShown=true') {
+        Invoke-TestDeviceShell -Command 'input keyevent 4'
+    }
+    return Get-GrantFormReadyUi
+}
+
 try {
     Write-Step "1. Backing up device settings.json..."
     $rawSettings = Backup-DeviceSettings -DestinationPath $backupFile
@@ -93,7 +116,7 @@ try {
         $clicked = Tap-Node $ui 'text="Change extra time"' "Change extra time text"
     }
 
-    $ui = Wait-For-UI "current_total" 6
+    $ui = Get-GrantFormReadyUi
     $hasInitialTotal = ($ui -match "현재 총 추가 시간 0분" -or $ui -match "Current total extra time: 0 minutes" -or ($ui -match "0" -and $ui -match "current_total"))
     if ($hasInitialTotal) {
         Write-Success "Extra Time Dialog displayed initial total 0 minutes!"
@@ -135,22 +158,22 @@ try {
                 if ($nodeAdditional.Found) {
                     adb shell "input tap $($nodeAdditional.X) $($nodeAdditional.Y)" | Out-Null
                     adb shell "input text 15" | Out-Null
-                    $ui = Dump-UI
+                    Start-Sleep -Milliseconds 500
+                    $ui = Hide-GrantFormKeyboard
+                    [xml]$entryDoc = $ui
+                    $enteredInput = $entryDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
+                    if (-not $enteredInput -or $enteredInput.GetAttribute('text') -ne '15') { throw "The grant form did not retain the entered 15 minutes." }
                     $futureSelection = Select-TestRulePickerOption -CurrentUi $ui -CandidateOptions $pickerCandidates.Options -RuleName "FutureRule"
                     if ($futureSelection.Success) {
                         $resetUi = $futureSelection.Ui
-                        try {
-                            [xml]$resetDoc = $resetUi
-                            $resetAdditional = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
-                            $resetTotal = $resetDoc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/total_minutes_input']")
-                            $fieldsReset = ($resetAdditional -and $resetTotal -and $resetAdditional.GetAttribute("text") -ne "15" -and $resetTotal.GetAttribute("text") -ne "15")
-                        } catch {
-                            $fieldsReset = $false
-                        }
-                        if ($fieldsReset) {
+                        $resetState = Get-TestGrantInputState -Xml $resetUi
+                        if ($resetState.Reset) {
                             Write-Success "Changing rules clears both input fields instead of carrying the prior rule's value."
                         } else {
                             Write-Fail "Changing rules left stale input values or hid an input field."
+                            foreach ($field in $resetState.Fields) {
+                                Write-Host "[DIAGNOSTIC] $($field.Name): $($field.Kind)." -ForegroundColor DarkYellow
+                            }
                             $passedAll = $false
                         }
 
@@ -181,6 +204,7 @@ try {
 
     Write-Step "7. Testing Dialog Cancellation & Lockout Prevention (Bugfix verification)..."
     # Dismiss dialog via Cancel button (android:id/button2)
+    $ui = Hide-GrantFormKeyboard
     $canceled = Tap-Node $ui 'resource-id="android:id/button2"' "취소/Cancel 버튼" -Optional
     if (-not $canceled) {
         $canceled = Tap-Node $ui 'text="취소"' "취소 버튼" -Optional
@@ -189,11 +213,20 @@ try {
         $canceled = Tap-Node $ui 'text="Cancel"' "Cancel button"
     }
 
-    $ui = Wait-For-UI "approval_add_time|Change extra time|추가 시간 변경" 6
+    if (-not $canceled) { throw "Could not cancel the grant form." }
+    $closeWait = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $ui = Dump-UI
+        $closed = ($ui -match 'resource-id="neth\.iecal\.curbox\.debug:id/approval_add_time"' -and
+            $ui -notmatch 'resource-id="neth\.iecal\.curbox\.debug:id/current_total"')
+        if (-not $closed) { Start-Sleep -Milliseconds 250 }
+    } while (-not $closed -and $closeWait.Elapsed.TotalSeconds -lt 6)
+    if (-not $closed) { throw "The grant form remained open after cancellation." }
     # Verify we can open the dialog AGAIN without being locked out by grantInProgress
     $clickedAgain = Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/approval_add_time"' "추가 시간 변경 버튼 (2차 클릭)"
+    if (-not $clickedAgain) { throw "Could not reopen the grant form after cancellation." }
 
-    $ui = Wait-For-UI "current_total" 6
+    $ui = Get-GrantFormReadyUi
     if ($ui -match "current_total") {
         Write-Success "Dialog reopened successfully! (Confirmed no-lockout bugfix)"
     } else {
@@ -229,7 +262,7 @@ try {
         adb shell "input keyevent 67 67 67 67 67"
         adb shell "input text 0"
         Start-Sleep -Milliseconds 500
-        $ui = Dump-UI
+        $ui = Hide-GrantFormKeyboard
         $applied = Tap-Node $ui 'resource-id="android:id/button1"' "적용/Apply 버튼 (0 입력)" -Optional
         if (-not $applied) {
             $applied = Tap-Node $ui 'text="적용"' "적용 버튼 (0 입력)" -Optional

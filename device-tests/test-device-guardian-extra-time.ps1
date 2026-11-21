@@ -33,6 +33,32 @@ $backupFile = Join-Path $tmpDir "settings_backup.json"
 $packageName = "neth.iecal.curbox.debug"
 $passedAll = $true
 
+function Get-ReadyGrantUi([string]$RuleName) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $ui = Dump-UI
+        try {
+            [xml]$doc = $ui
+            $button = $doc.SelectSingleNode("//node[@resource-id='android:id/button1']")
+            if ((Get-TestRulePickerLabel -Xml $ui) -eq $RuleName -and $button -and $button.GetAttribute('enabled') -eq 'true') { return $ui }
+        } catch { }
+        Start-Sleep -Milliseconds 250
+    } while ($watch.Elapsed.TotalSeconds -lt 10)
+    throw "The grant form did not become ready for $RuleName."
+}
+
+function Get-GrantUiAfterEntry([string]$RuleName) {
+    Start-Sleep -Milliseconds 500
+    if ((Get-TestDeviceShellOutput -Command 'dumpsys input_method') -match 'mInputShown=true') {
+        Invoke-TestDeviceShell -Command 'input keyevent 4'
+    }
+    $ui = Get-ReadyGrantUi -RuleName $RuleName
+    [xml]$doc = $ui
+    $input = $doc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/additional_minutes_input']")
+    if (-not $input -or $input.GetAttribute('text') -ne '15') { throw "The grant form did not retain the entered 15 minutes." }
+    return $ui
+}
+
 function New-GuardianApprovalRuleSnapshot(
     [string]$TargetPackage,
     [string]$GroupId,
@@ -132,7 +158,8 @@ function Invoke-DirectGuardianGrant([string]$RuleName, [int]$CandidateCount) {
         return $false
     }
 
-    $inputNode = Get-NodeBounds $selection.Ui 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
+    $readyUi = Get-ReadyGrantUi -RuleName $RuleName
+    $inputNode = Get-NodeBounds $readyUi 'resource-id="neth.iecal.curbox.debug:id/additional_minutes_input"'
     if (-not $inputNode.Found) {
         Write-Fail "Could not find the direct grant minutes input."
         return $false
@@ -140,7 +167,7 @@ function Invoke-DirectGuardianGrant([string]$RuleName, [int]$CandidateCount) {
     Invoke-TestDeviceShell -Command "input tap $($inputNode.X) $($inputNode.Y)"
     Start-Sleep -Milliseconds 250
     Invoke-TestDeviceShell -Command "input text 15"
-    $ui = Dump-UI
+    $ui = Get-GrantUiAfterEntry -RuleName $RuleName
     $applied = Tap-Node $ui 'resource-id="android:id/button1"' "Apply" -Optional
     if (-not $applied) { $applied = Tap-Node $ui 'text="적용"' "적용" -Optional }
     if (-not $applied) { $applied = Tap-Node $ui 'text="Apply"' "Apply" }
@@ -212,11 +239,20 @@ function Invoke-AccumulatedGuardianApproval([int]$ExpectedMinutes = 15) {
     if (-not $tapped) { return $false }
 
     $dialogUi = Wait-For-UI "accumulated_minutes_input|accumulated_total_desc" 8
+    Start-Sleep -Milliseconds 500
+    if ((Get-TestDeviceShellOutput -Command 'dumpsys input_method') -match 'mInputShown=true') {
+        Invoke-TestDeviceShell -Command 'input keyevent 4'
+    }
+    $dialogUi = Wait-For-UI 'accumulated_minutes_input' 8
     $inputNode = Get-NodeBounds $dialogUi 'resource-id="neth.iecal.curbox.debug:id/accumulated_minutes_input"'
     if (-not $inputNode.Found) { return $false }
-    $prefilled = $dialogUi -match ('resource-id="neth.iecal.curbox.debug:id/accumulated_minutes_input"[^>]*text="' + $ExpectedMinutes + '"') -or
-        $dialogUi -match ('text="' + $ExpectedMinutes + '"[^>]*resource-id="neth.iecal.curbox.debug:id/accumulated_minutes_input"')
-    if (-not $prefilled) { return $false }
+    try {
+        [xml]$doc = $dialogUi
+        $input = $doc.SelectSingleNode("//node[@resource-id='neth.iecal.curbox.debug:id/accumulated_minutes_input']")
+        $button = $doc.SelectSingleNode("//node[@resource-id='android:id/button1']")
+        if (-not $input -or $input.GetAttribute('text') -ne [string]$ExpectedMinutes -or
+            -not $button -or $button.GetAttribute('enabled') -ne 'true') { return $false }
+    } catch { return $false }
     $applied = Tap-Node $dialogUi 'resource-id="android:id/button1"' "Apply accumulated time" -Optional
     if (-not $applied) { $applied = Tap-Node $dialogUi 'text="적용"' "적용" -Optional }
     if (-not $applied) { $applied = Tap-Node $dialogUi 'text="Apply"' "Apply" -Optional }
@@ -360,7 +396,7 @@ try {
                 $usageSelection = Select-TestRulePickerOption -CurrentUi $futureSelection.Ui -CandidateOptions $pickerCandidates.Options -RuleName "UsageRule"
                 if ($usageSelection.Success -and $usageSelection.Label -eq "UsageRule") {
                     Write-Success "UsageRule is selected for the target app grant."
-                    $ui = $usageSelection.Ui
+                    $ui = Get-ReadyGrantUi -RuleName "UsageRule"
                     $canSubmitUsageGrant = $true
                 } else {
                     Write-Fail "The picker did not confirm UsageRule selection for the target app grant."
@@ -390,7 +426,7 @@ try {
     }
 
     if ($canSubmitUsageGrant) {
-        $ui = Dump-UI
+        $ui = Get-GrantUiAfterEntry -RuleName "UsageRule"
         Write-Step "8. Submitting valid extra time (15 minutes)..."
         $applied = Tap-Node $ui 'resource-id="android:id/button1"' "적용/Apply 버튼" -Optional
         if (-not $applied) {
@@ -493,7 +529,7 @@ try {
 
     Write-Step "13. Paying only UsageRule while NightRule stays active..."
     if (Invoke-DirectGuardianGrant -RuleName "UsageRule" -CandidateCount 1) {
-        Write-Success "Saved a direct grant for UsageRule without changing NightRule."
+        Write-Host "Submitted the direct UsageRule grant; waiting for the receipt." -ForegroundColor Cyan
     } else {
         Write-Fail "Could not save the direct UsageRule grant."
         $passedAll = $false
@@ -674,7 +710,7 @@ try {
     $controlGrantSaved = $false
     if ($controlCaseReady -and (Invoke-DirectGuardianGrant -RuleName "UsageRule" -CandidateCount 1)) {
         $controlGrantSaved = $true
-        Write-Success "Saved the UsageRule grant in the separate all-allow control."
+        Write-Host "Submitted the UsageRule grant in the separate all-allow control." -ForegroundColor Cyan
     } else {
         Write-Fail "Could not save the all-allow control grant."
         $passedAll = $false
@@ -691,12 +727,32 @@ try {
         $passedAll = $false
     }
     $allAllowLogs = Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
-    $allAllowReceiptReceived = $allAllowLogs -match "service_check_received action=neth\.iecal\.curbox\.guardian\.approval\.stored .*receipt_valid=true" -and
-        $allAllowLogs -match "check_request test=- action=neth\.iecal\.curbox\.guardian\.approval\.stored .*kind=direct_grant rule=$([regex]::Escape($controlRuleId))"
+    $allAllowReceiptReceived = $false
+    $checkId = $null
+    $requestLine = $allAllowLogs -split "`r?`n" | Where-Object {
+        $_ -match "check_request test=- action=neth\.iecal\.curbox\.guardian\.approval\.stored .*kind=direct_grant rule=$([regex]::Escape($controlRuleId))(?:\s|$)"
+    } | Select-Object -Last 1
+    if ($requestLine -and $requestLine -match '(?:^|\s)check=([^\s]+)') {
+        $checkId = $Matches[1]
+        $checkPattern = [regex]::Escape($checkId)
+        $received = $allAllowLogs -match "service_check_received action=neth\.iecal\.curbox\.guardian\.approval\.stored .*check=$checkPattern(?:\s|$).*receipt_valid=true"
+        $accepted = $allAllowLogs -match "service_check_accepted .*check=$checkPattern(?:\s|$)"
+        $allAllowReceiptReceived = $received -and $accepted
+    }
     if ($controlGrantSaved -and $allAllowReceiptReceived -and $allowedLaunch -and $allowedLaunch.Success) {
         Write-Success "After a valid stored receipt, the fresh all-allow evaluation launches the requested app."
     } else {
-        Write-Fail "The all-allow control did not complete a stored receipt before the target app was allowed."
+        if (-not $controlGrantSaved) { Write-Fail "The all-allow grant was not submitted." }
+        if (-not $allAllowReceiptReceived) { Write-Fail "The all-allow control did not receive and accept its typed receipt." }
+        if ($checkId) {
+            $statusPattern = "result test=- status=([a-z_]+) .*check=$([regex]::Escape($checkId))(?:\s|$)"
+            $resultLine = $allAllowLogs -split "`r?`n" | Where-Object { $_ -match $statusPattern } | Select-Object -Last 1
+            if ($resultLine -and $resultLine -match $statusPattern) {
+                Write-Host "[DIAGNOSTIC] All-allow confirmation status: $($Matches[1])." -ForegroundColor DarkYellow
+            } else {
+                Write-Host "[DIAGNOSTIC] No all-allow confirmation status was logged for the submitted check." -ForegroundColor DarkYellow
+            }
+        }
         $passedAll = $false
     }
     if ($allAllowReceiptReceived) {
