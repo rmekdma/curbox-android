@@ -31,7 +31,11 @@ a fabricated count. Manual and automatic errors are labeled separately.
   watching checks for today. Failure state survives restart,
   date or permission changes, and unregistering and registering the same child.
   A later temporary report failure after a valid baseline may retry on a
-  subsequent eligible cycle. Authentication failure requires sign in again.
+  subsequent eligible cycle. If Todo rejects the saved session, the screen and
+  monitor share one automatic sign in attempt. A successful attempt retries the
+  failed lookup once. If Todo rejects the sign in or the repeated lookup, sign
+  in manually to resume. A temporary connection or server error allows a later
+  automatic attempt after a cooldown.
   Missing accessibility or notification permission pauses monitoring while
   retaining registrations.
 - A successful account catalog removes registrations for children it no longer
@@ -44,6 +48,10 @@ a fabricated count. Manual and automatic errors are labeled separately.
   the same heads up content. Incomplete subjects show count and goal; completed
   subjects show a green check. Android controls notification expansion and
   channel behavior. Manual report updates republish silently.
+- If automatic sign in fails, the status notifications replace progress with
+  the same sign in error shown on the screen. Signing out from the account
+  dialog stops monitoring and removes the notifications. Signing back into the
+  same account resumes its saved registrations and goals.
 
 ## Boundaries and lifetime
 
@@ -72,8 +80,13 @@ rules in [features.md](../../docs/architecture/features.md) and [AGENTS.md](../.
 `LearningStorage` gets its scoped state and session stores from the plugin host.
 The host owns the multi process DataStores, so both processes observe
 the same persisted document rather than sharing an in memory object. Session
-data is encrypted with an Android Keystore key. Fake and real compositions use
-separate state and session files and key aliases.
+data is encrypted with an Android Keystore key. After a successful manual sign
+in, the same encrypted store holds the password for automatic sign in. The
+session files are excluded from backup and device transfer. Signing out removes
+the saved credentials. If Todo rejects automatic sign in, the password stays
+on the device and automatic sign in stays disabled until a successful manual
+sign in. Fake and real compositions use separate state and session files and
+key aliases.
 
 Manual screen changes and monitor changes have different ownership. The store
 claims a revision for manual work and commits only while that revision and

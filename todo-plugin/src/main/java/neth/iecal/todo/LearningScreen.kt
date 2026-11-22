@@ -14,7 +14,7 @@ data class LearningGoalScope(val accountId: String, val sessionRef: String, val 
 data class LearningRetryScope(val accountId: String, val sessionRef: String, val monitor: MonitorState)
 
 /** Synchronous screen operations; callers run them off the main thread. */
-class LearningScreen(private val api: TodoApi, private val store: LearningStore = MemoryLearningStore(), private val isCurrentDate: ((String) -> Boolean)? = null, private val now: () -> Long = System::currentTimeMillis) {
+class LearningScreen(api: TodoApi, private val store: LearningStore = MemoryLearningStore(), private val isCurrentDate: ((String) -> Boolean)? = null, private val now: () -> Long = System::currentTimeMillis) {
     @Volatile var state = LearningState()
         private set
     @Volatile var monitor = MonitorState()
@@ -22,6 +22,8 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
     private fun dateIsCurrent(date: String): Boolean = isCurrentDate?.invoke(date)
         ?: (date == java.time.Instant.ofEpochMilli(now()).atZone(java.time.ZoneId.of("Asia/Seoul")).toLocalDate().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE))
 
+    private val api: TodoApi = api
+    private val recoveringApi = RecoveringTodoApi(api, store, now)
     private val lock = Any()
     private var generation = 0L
     private var session: TodoSession? = null
@@ -125,10 +127,13 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         }
     }
 
+    var autoAuthFailure: LearningFailure? = null
+        private set
+    fun acceptAuthFailure(value: LearningFailure?) { autoAuthFailure = value }
     val monitorChanges get() = store.changes
     fun acceptMonitor(value: MonitorState) { monitor = value }
 
-    val loginRequired: Boolean get() = state.loginRequired || (monitor.accountId == state.accountId && sessionRef != null && monitor.authenticationRequired(sessionRef))
+    val loginRequired: Boolean get() = autoAuthFailure == LearningFailure.AUTHENTICATION || state.loginRequired || (monitor.accountId == state.accountId && sessionRef != null && monitor.authenticationRequired(sessionRef))
     internal val signedIn: Boolean get() = synchronized(lock) { session != null && sessionRef != null && !loginRequired }
 
     fun canRetryMonitor(childName: String, subject: Subject?): Boolean {
@@ -226,20 +231,48 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         if (updated != null) monitor = updated.monitor
     }
 
-    fun storageFailure() { synchronized(lock) { session = null; sessionRef = null; generation++; state = state.copy(error = true, failure = LearningFailure.STORAGE) } }
+    fun storageFailure() {
+        synchronized(lock) {
+            session = null
+            sessionRef = null
+            generation++
+            autoAuthFailure = null
+            state = state.copy(error = true, loginRequired = false, failure = LearningFailure.STORAGE)
+        }
+    }
 
     fun restore() {
+        val local = synchronized(lock) { generation }
         try {
-            val saved = store.read()
-            val savedSession = saved.sessionRef?.let { store.readSession(it) }
-            synchronized(lock) {
-                val scoped = !saved.state.accountId.isNullOrBlank() && (savedSession == null || savedSession.accountId == saved.state.accountId)
-                state = if (scoped) saved.state else LearningState(loginRequired = true)
-                monitor = saved.monitor
-                session = if (scoped) savedSession else null
-                sessionRef = if (scoped) saved.sessionRef else null
+            while (true) {
+                val saved = store.read()
+                val savedSession = saved.sessionRef?.let { ref ->
+                    try { store.readSession(ref) } catch (e: LearningSessionUnavailableException) {
+                        store.authTransaction { doc ->
+                            if (doc.sessionRef != ref) doc to Unit else
+                                doc.copy(revision = Math.addExact(doc.revision, 1), sessionRef = null,
+                                    state = doc.state.copy(loginRequired = true), authFailure = null, authRetryAfter = 0,
+                                    authClaim = null, authClaimUntil = 0) to Unit
+                        }
+                        null
+                    }
+                }
+                val current = store.read()
+                if (saved.sessionRef != current.sessionRef) continue
+                synchronized(lock) {
+                    if (local != generation) return
+                    if (store.read().sessionRef != current.sessionRef) return
+                    val scoped = !current.state.accountId.isNullOrBlank() && (savedSession == null || savedSession.accountId == current.state.accountId)
+                    state = if (scoped) current.state else LearningState(loginRequired = true)
+                    monitor = current.monitor
+                    autoAuthFailure = current.authFailure
+                    session = if (scoped) savedSession else null
+                    sessionRef = if (scoped && savedSession != null) current.sessionRef else null
+                }
+                return
             }
-        } catch (e: Exception) { storageFailure() }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) { storageFailure() }
     }
 
     val accountEmail: String? get() = synchronized(lock) { session?.email }
@@ -251,16 +284,22 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
         val local = synchronized(lock) { session = null; sessionRef = null; ++generation }
         val claim = store.claim()
         try {
-            val authenticated = api.signIn(email, password).copy(email = email)
             val ref = UUID.randomUUID().toString()
-            store.writeSession(ref, authenticated)
+            val authenticated = api.signIn(email, password).copy(email = email, password = password, storageRef = ref)
             synchronized(lock) {
                 if (local != generation) return
                 val previous = if (!claim.state.accountId.isNullOrBlank() && claim.state.accountId == authenticated.accountId) claim.state else LearningState(goalsByAccount = claim.state.goalsByAccount)
                 val next = previous.copy(error = false, loginRequired = false, failure = null, accountId = authenticated.accountId)
-                if (!store.commit(claim.revision, next, ref)) return
+                val committed = store.authTransaction { doc ->
+                    if (doc.revision != claim.revision) doc to false else {
+                        store.clearSessions()
+                        store.writeSession(ref, authenticated)
+                        doc.withManualState(next, ref).copy(authFailure = null, authRetryAfter = 0, authClaim = null, authClaimUntil = 0) to true
+                    }
+                }
+                if (!committed) return
                 monitor = store.read().monitor
-                state = next; session = authenticated; sessionRef = ref
+                state = next; autoAuthFailure = null; session = authenticated; sessionRef = ref
             }
             refreshForRequest(date, authenticated, local, claim.revision, ref, true)
         } catch (e: TodoApiException) {
@@ -268,8 +307,41 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
                 if (local != generation) return
                 val previous = if (claim.state.accountId.isNullOrBlank()) LearningState() else claim.state
                 val next = previous.copy(error = true, loginRequired = e.authenticationRequired, failure = e.kind)
-                if (store.commit(claim.revision, next, null)) state = next
+                val committed = store.authTransaction { doc ->
+                    if (doc.revision != claim.revision) doc to false else {
+                        if (doc.authFailure == LearningFailure.AUTHENTICATION && doc.sessionRef != null) {
+                            doc.withManualState(next.copy(loginRequired = true), doc.sessionRef) to true
+                        } else {
+                            store.clearSessions()
+                            doc.withManualState(next, null).copy(authFailure = null, authRetryAfter = 0, authClaim = null, authClaimUntil = 0) to true
+                        }
+                    }
+                }
+                if (committed) {
+                    val saved = store.read()
+                    state = saved.state
+                    autoAuthFailure = saved.authFailure
+                    if (saved.sessionRef != null) {
+                        sessionRef = saved.sessionRef
+                        session = store.readSession(saved.sessionRef)
+                    }
+                }
             }
+        }
+    }
+
+    fun signOut() {
+        synchronized(lock) {
+            generation++
+            val saved = store.authTransaction { doc ->
+                store.clearSessions()
+                val next = doc.copy(revision = Math.addExact(doc.revision, 1), sessionRef = null,
+                    state = doc.state.copy(error = false, loginRequired = false, failure = null),
+                    authFailure = null, authRetryAfter = 0, authClaim = null, authClaimUntil = 0,
+                    monitor = doc.monitor.resetLearningBaselines().copy(controlRevision = Math.addExact(doc.monitor.controlRevision, 1)))
+                next to next
+            }
+            state = saved.state; monitor = saved.monitor; autoAuthFailure = null; session = null; sessionRef = null
         }
     }
 
@@ -286,12 +358,11 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
     }
 
     private fun refreshForRequest(date: String, current: TodoSession, local: Long, revision: Long, ref: String, includeFailed: Boolean) {
-        val children = try { api.catalog(current) } catch (e: TodoApiException) {
+        val children = try { kotlinx.coroutines.runBlocking { recoveringApi.catalog(current) } } catch (e: TodoApiException) {
             synchronized(lock) {
                 if (local != generation) return
                 val next = state.copy(error = true, loginRequired = e.authenticationRequired, failure = e.kind)
-                val nextRef = if (e.authenticationRequired) null else ref
-                if (store.commit(revision, next, nextRef, ref)) { state = next; if (nextRef == null) { session = null; sessionRef = null } }
+                if (store.commit(revision, next, ref, ref)) state = next
             }
             return
         }
@@ -309,7 +380,7 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             if (learningSubjects(latest.state, latest.monitor, child.name)[subject] != id) continue
             if (!dateIsCurrent(date)) return
             var authFailure = false
-            val result = try { ReportState(api.report(current, subject, id, date), now(), date) }
+            val result = try { ReportState(kotlinx.coroutines.runBlocking { recoveringApi.report(current, subject, id, date) }, now(), date) }
             catch (e: TodoApiException) {
                 authFailure = e.authenticationRequired
                 synchronized(lock) {
@@ -320,10 +391,9 @@ class LearningScreen(private val api: TodoApi, private val store: LearningStore 
             synchronized(lock) {
                 if (local != generation || !dateIsCurrent(date)) return
                 val next = state.copy(reports = state.reports + (key to result), loginRequired = authFailure)
-                val nextRef = if (authFailure) null else ref
-                if (!store.commit(revision, next, nextRef, ref)) return
+                if (!store.commit(revision, next, ref, ref)) return
                 state = next
-                if (authFailure) { session = null; sessionRef = null; return }
+                if (authFailure) return
             }
         }
     }

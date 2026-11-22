@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <exclude domain="sharedpref" path="curbox_sync_secrets.xml" />
+    <exclude domain="file" path="datastore/learning-session.json" />
+    <exclude domain="file" path="datastore/learning-fake-session.json" />
 </full-backup-content>

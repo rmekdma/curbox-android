@@ -27,7 +27,7 @@ interface LearningHost {
     fun learningText(key: LearningText, vararg args: Any): String
 }
 
-enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, UNKNOWN_PROGRESS, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, SETTINGS_CHANGED, ZERO_GOAL, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT, GENERAL_SETTINGS, ALERTS, SOUND, SOUND_DEFAULT, SOUND_SILENT, SOUND_SELECTED }
+enum class LearningText { TITLE, EMAIL, PASSWORD, SIGN_IN, SIGN_OUT, RELOGIN_REQUIRED, RELOGIN_CONNECTION, CHANGE_ACCOUNT, CANCEL, RETRY, UNKNOWN, UNKNOWN_PROGRESS, EMPTY, ERROR, NETWORK_ERROR, SERVER_ERROR, INVALID_ERROR, STORAGE_ERROR, LOGIN_REQUIRED, SUBJECT_KOREAN, SUBJECT_MATH, SUBJECT_ENGLISH, REFRESH, GOAL, SAVE_GOAL, INVALID_GOAL, COMPLETE, INCOMPLETE, MONITOR_START, MONITOR_STOP, MONITOR_STATUS, INTERVAL, SAVE_INTERVAL, INVALID_INTERVAL, ACCESSIBILITY_NEEDED, NOTIFICATIONS_NEEDED, SERVICE_UNKNOWN, ACCESSIBILITY_SETTINGS, NOTIFICATION_SETTINGS, MONITOR_PROGRESS, SUBJECT_SETTINGS, CONFIRM, WATCHING, NOT_WATCHING, SETTINGS_CHANGED, ZERO_GOAL, MANUAL_ERROR, AUTOMATIC_ERROR, PROGRESS_COUNT, GENERAL_SETTINGS, ALERTS, SOUND, SOUND_DEFAULT, SOUND_SILENT, SOUND_SELECTED }
 
 class LearningFragment : Fragment() {
     private var binding: FragmentLearningBinding? = null
@@ -38,6 +38,7 @@ class LearningFragment : Fragment() {
     private var availability: LearningAvailability? = null
     private var availabilityJob: kotlinx.coroutines.Job? = null
     private var settingsDialog: androidx.appcompat.app.AlertDialog? = null
+    private var accountDialog: androidx.appcompat.app.AlertDialog? = null
     private var soundPreview: android.media.Ringtone? = null
     private var soundPreviewJob: kotlinx.coroutines.Job? = null
     private var renderedDay = LocalDate.now(ZoneId.of("Asia/Seoul"))
@@ -96,8 +97,9 @@ class LearningFragment : Fragment() {
         }
         runRequest { screen.restore() }
         viewLifecycleOwner.lifecycleScope.launch {
-            screen.monitorChanges.map { it.monitor }.distinctUntilChanged().collectLatest { monitor ->
+            screen.monitorChanges.map { it.monitor to it.authFailure }.distinctUntilChanged().collectLatest { (monitor, authFailure) ->
                 screen.acceptMonitor(monitor)
+                screen.acceptAuthFailure(authFailure)
                 if (binding != null) render()
             }
         }
@@ -182,7 +184,8 @@ class LearningFragment : Fragment() {
         val selected = date()
         val signedIn = screen.signedIn
         val showLogin = !signedIn && !accountSubmitting
-        if (showLogin) settingsDialog?.dismiss()
+        val canManageAccount = signedIn || screen.accountEmail != null || accountSubmitting
+        if (showLogin && (!canManageAccount || settingsDialog !== accountDialog)) settingsDialog?.dismiss()
         if (showingLogin && !showLogin) {
             val focused = b.root.findFocus()
             focused?.clearFocus()
@@ -193,12 +196,21 @@ class LearningFragment : Fragment() {
         val loginVisibility = if (showLogin) View.VISIBLE else View.GONE
         b.dashboard.visibility = if (showLogin) View.GONE else View.VISIBLE
         b.intervalSettings.visibility = if (showLogin) View.GONE else View.VISIBLE
-        b.changeAccount.visibility = if (signedIn || accountSubmitting) View.VISIBLE else View.GONE
+        b.changeAccount.visibility = if (canManageAccount) View.VISIBLE else View.GONE
         b.emailLayout.visibility = loginVisibility
         b.passwordLayout.visibility = loginVisibility
         b.signIn.visibility = loginVisibility
         val monitorCatalogKnown = state.accountId != null && screen.monitor.accountId == state.accountId && (screen.monitor.monitorCatalogOrder ?: 0) > (screen.monitor.manualCatalogOrder ?: 0)
-        b.status.text = when { screen.loginRequired -> text(LearningText.LOGIN_REQUIRED); state.error -> failureText(state.failure); showLogin -> ""; state.catalogCheckedAt == null && !monitorCatalogKnown -> text(LearningText.UNKNOWN); learningCatalog(state, screen.monitor).isEmpty() -> text(LearningText.EMPTY); else -> "" }
+        val authError = screen.autoAuthFailure
+        b.status.text = when {
+            authError != null -> text(authError.automaticSignInErrorText())
+            screen.loginRequired -> text(LearningText.LOGIN_REQUIRED)
+            state.error -> failureText(state.failure)
+            showLogin -> ""
+            state.catalogCheckedAt == null && !monitorCatalogKnown -> text(LearningText.UNKNOWN)
+            learningCatalog(state, screen.monitor).isEmpty() -> text(LearningText.EMPTY)
+            else -> ""
+        }
         b.swipeRefresh.isEnabled = !showLogin
         renderAvailability()
         b.children.removeAllViews()
@@ -355,13 +367,27 @@ class LearningFragment : Fragment() {
         val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
             .setTitle(text(LearningText.CHANGE_ACCOUNT)).setView(content)
             .setNegativeButton(text(LearningText.CANCEL), null)
+            .setNeutralButton(text(LearningText.SIGN_OUT), null)
             .setPositiveButton(text(LearningText.SIGN_IN), null).create()
         settingsDialog = dialog
+        accountDialog = dialog
         dialog.setOnDismissListener {
             password.text?.clear()
             if (settingsDialog === dialog) settingsDialog = null
+            if (accountDialog === dialog) accountDialog = null
         }
         dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                password.text?.clear()
+                accountSubmitting = true
+                dialog.dismiss()
+                val context = requireContext().applicationContext
+                val storage = neth.iecal.curbox.learning.LearningStorage(pluginHost, BuildConfig.LEARNING_FAKE_ONLY)
+                runRequest(onComplete = { accountSubmitting = false }) {
+                    screen.signOut()
+                    neth.iecal.curbox.learning.LearningNotifications.cancelIfSignedOut(context, storage)
+                }
+            }
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val address = email.text.toString()
                 val secret = password.text.toString()
@@ -370,6 +396,7 @@ class LearningFragment : Fragment() {
                 dialog.setCancelable(false)
                 dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).isEnabled = false
                 dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE).isEnabled = false
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL).isEnabled = false
                 val owner = viewLifecycleOwner
                 owner.lifecycleScope.launch {
                     try { withContext(Dispatchers.IO) { screen.signIn(address, secret) } }

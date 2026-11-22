@@ -8,7 +8,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
-data class TodoSession(val accountId: String, val token: String, val email: String? = null) {
+data class TodoSession(val accountId: String, val token: String, val email: String? = null, val password: String? = null, @Transient val storageRef: String? = null) {
     override fun toString(): String = "TodoSession(redacted)"
 }
 
@@ -95,7 +95,9 @@ class HttpTodoApi(private val baseUrl: String) : TodoApi {
             .header("Accept", "application/json, text/plain, */*")
             .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
         return try {
-            client.newCall(request).execute().use { response ->
+            val call = client.newCall(request)
+            call.timeout().timeout(30, TimeUnit.SECONDS)
+            call.execute().use { response ->
                 if (!response.isSuccessful) throw TodoApiException(response.code == 401 || response.code == 403)
                 val envelope = JsonParser.parseString(response.body?.string()).asJsonObject
                 val result = envelope.get("result")

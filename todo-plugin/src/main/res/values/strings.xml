@@ -11,6 +11,9 @@
     <string name="learning_email">Email</string>
     <string name="learning_password">Password</string>
     <string name="learning_sign_in">Sign in</string>
+    <string name="learning_sign_out">Sign out</string>
+    <string name="learning_relogin_required">Please sign in to TODO again.</string>
+    <string name="learning_relogin_connection">Could not connect to TODO. Try again later.</string>
     <string name="learning_retry">Check again</string>
     <string name="learning_unknown_progress">? / %1$d</string>
     <string name="learning_unknown">Not checked yet</string>

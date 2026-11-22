@@ -2,8 +2,12 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="curbox_sync_secrets.xml" />
+        <exclude domain="file" path="datastore/learning-session.json" />
+        <exclude domain="file" path="datastore/learning-fake-session.json" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="curbox_sync_secrets.xml" />
+        <exclude domain="file" path="datastore/learning-session.json" />
+        <exclude domain="file" path="datastore/learning-fake-session.json" />
     </device-transfer>
 </data-extraction-rules>

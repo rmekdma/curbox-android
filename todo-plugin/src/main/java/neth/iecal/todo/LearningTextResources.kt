@@ -1,5 +1,8 @@
 package neth.iecal.todo
 
+internal fun LearningFailure.automaticSignInErrorText(): LearningText =
+    if (this == LearningFailure.AUTHENTICATION) LearningText.RELOGIN_REQUIRED else LearningText.RELOGIN_CONNECTION
+
 internal class LearningTextResources(private val context: android.content.Context) {
     fun learningText(key: neth.iecal.todo.LearningText, vararg args: Any): String {
         val resource = when (key) {
@@ -12,6 +15,9 @@ internal class LearningTextResources(private val context: android.content.Contex
             neth.iecal.todo.LearningText.EMAIL -> R.string.learning_email
             neth.iecal.todo.LearningText.PASSWORD -> R.string.learning_password
             neth.iecal.todo.LearningText.SIGN_IN -> R.string.learning_sign_in
+            neth.iecal.todo.LearningText.SIGN_OUT -> R.string.learning_sign_out
+            neth.iecal.todo.LearningText.RELOGIN_REQUIRED -> R.string.learning_relogin_required
+            neth.iecal.todo.LearningText.RELOGIN_CONNECTION -> R.string.learning_relogin_connection
             neth.iecal.todo.LearningText.CHANGE_ACCOUNT -> R.string.learning_change_account
             neth.iecal.todo.LearningText.CANCEL -> R.string.learning_cancel
             neth.iecal.todo.LearningText.SUBJECT_SETTINGS -> R.string.learning_subject_settings

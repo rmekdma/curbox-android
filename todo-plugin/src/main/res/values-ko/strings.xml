@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="learning_sign_out">로그아웃</string>
+    <string name="learning_relogin_required">토도에 다시 로그인해 주세요.</string>
+    <string name="learning_relogin_connection">토도에 연결할 수 없어요. 나중에 다시 시도해요.</string>
+</resources>

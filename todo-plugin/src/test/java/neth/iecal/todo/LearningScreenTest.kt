@@ -388,9 +388,9 @@ class LearningAuthenticationTest {
         screen.signIn("sample", "sample", "20261105")
         assertTrue(screen.state.loginRequired)
         assertFalse(screen.signedIn)
-        assertEquals(listOf(Subject.MATH), requested)
+        assertEquals(listOf(Subject.MATH, Subject.MATH), requested)
         screen.refresh("20261105")
-        assertEquals(listOf(Subject.MATH), requested)
+        assertEquals(listOf(Subject.MATH, Subject.MATH), requested)
     }
 }
 

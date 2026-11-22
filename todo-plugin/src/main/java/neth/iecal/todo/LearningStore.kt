@@ -77,7 +77,19 @@ fun MonitorState.resetLearningBaselines(): MonitorState = copy(
     latestAchievements = emptyMap()
 )
 
-data class StoredLearning(val revision: Long = 0, val state: LearningState = LearningState(), val sessionRef: String? = null, val monitor: MonitorState = MonitorState())
+class LearningSessionUnavailableException : Exception()
+
+data class StoredLearning(
+    val revision: Long = 0,
+    val state: LearningState = LearningState(),
+    val sessionRef: String? = null,
+    val monitor: MonitorState = MonitorState(),
+    val authFailure: LearningFailure? = null,
+    val authRetryAfter: Long = 0,
+    val authClaim: String? = null,
+    val authClaimUntil: Long = 0,
+    val authGeneration: Long = 0
+)
 
 /** Storage transactions reject effects owned by a superseded request. */
 interface LearningStore {
@@ -88,6 +100,9 @@ interface LearningStore {
     fun commit(revision: Long, state: LearningState, sessionRef: String?, expectedSessionRef: String? = null, catalogSuccess: Boolean = false): Boolean
     /** Applies a monitor change atomically against the latest document. Null rejects the update. */
     fun updateMonitor(change: (StoredLearning) -> MonitorState?): StoredLearning?
+    /** Applies an auth update against the latest document. The action must not wait on the network. */
+    fun <T> authTransaction(action: (StoredLearning) -> Pair<StoredLearning, T>): T
+    fun clearSessions()
     fun readSession(ref: String): TodoSession
     fun writeSession(ref: String, session: TodoSession)
 }
@@ -111,7 +126,14 @@ class MemoryLearningStore : LearningStore {
         updates.value = document
         return document
     }
-    @Synchronized override fun readSession(ref: String) = requireNotNull(sessions[ref])
+    @Synchronized override fun <T> authTransaction(action: (StoredLearning) -> Pair<StoredLearning, T>): T {
+        val (next, result) = action(document)
+        document = next
+        updates.value = next
+        return result
+    }
+    @Synchronized override fun clearSessions() { sessions.clear() }
+    @Synchronized override fun readSession(ref: String) = (sessions[ref] ?: throw LearningSessionUnavailableException()).copy(storageRef = ref)
     @Synchronized override fun writeSession(ref: String, session: TodoSession) { sessions[ref] = session }
 }
 

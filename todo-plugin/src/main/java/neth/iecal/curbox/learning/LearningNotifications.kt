@@ -9,6 +9,8 @@ import neth.iecal.todo.R
 import neth.iecal.todo.StoredLearning
 import neth.iecal.todo.Subject
 import neth.iecal.todo.ReportState
+import neth.iecal.todo.LearningTextResources
+import neth.iecal.todo.automaticSignInErrorText
 import neth.iecal.todo.learningDisplayReports
 import neth.iecal.todo.learningSubjects
 import neth.iecal.todo.registeredChildren
@@ -16,6 +18,18 @@ import neth.iecal.todo.catalogFailureFor
 
 /** Serializes notification effects from replacement service connections. */
 object LearningNotifications {
+    fun cancelIfSignedOut(context: Context, store: neth.iecal.todo.LearningStore) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        store.authTransaction { current ->
+            if (current.sessionRef == null) {
+                for (active in manager.activeNotifications) {
+                    if (active.tag?.startsWith("learning:") == true) manager.cancel(active.tag, active.id)
+                }
+            }
+            current to Unit
+        }
+    }
+
     suspend fun publish(context: Context, store: neth.iecal.todo.LearningStore, committed: StoredLearning,
         permission: kotlinx.coroutines.flow.StateFlow<neth.iecal.todo.NotificationPermission>, expected: neth.iecal.todo.NotificationPermission,
         achievementChild: String? = null, achievementSubject: Subject? = null,
@@ -25,11 +39,16 @@ object LearningNotifications {
                 current.monitor.reportVersions[achievementChild to achievementSubject] != committed.monitor.reportVersions[achievementChild to achievementSubject])) return@publisher
         val notifications = NotificationManagerCompat.from(context)
         val manager = context.getSystemService(NotificationManager::class.java)
-        val children = if (current.monitor.accountId == current.state.accountId) current.monitor.registeredChildren().keys else emptySet()
+        val children = learningNotificationChildren(current)
         fun tag(child: String) = "learning:" + java.util.UUID.nameUUIDFromBytes("${current.monitor.accountId}:$child".toByteArray())
         val tags = children.map(::tag).toSet()
-        for (active in manager.activeNotifications) {
-            if (active.tag?.startsWith("learning:") == true && active.tag !in tags) manager.cancel(active.tag, active.id)
+        store.authTransaction { latest ->
+            if (sameNotificationState(latest, current)) {
+                for (active in manager.activeNotifications) {
+                    if (active.tag?.startsWith("learning:") == true && active.tag !in tags) manager.cancel(active.tag, active.id)
+                }
+            }
+            latest to Unit
         }
         if (children.isEmpty()) return@publisher
         val statusChannel = NotificationChannel("learning_status_v2", context.getString(R.string.learning_notification_channel), NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) }
@@ -60,8 +79,12 @@ object LearningNotifications {
             context.getString(R.string.learning_notification_complete),
             { goal -> context.getString(R.string.learning_unknown_progress, goal) },
             { count, goal -> context.getString(R.string.learning_notification_progress, count, goal) })
-        val compact = if (rows.isEmpty()) pending else rows.joinToString(" · ") { line(it) }
-        val alert = child == achievementChild && allowsLearningAlert(committed.monitor, current.monitor)
+        val authError = current.authFailure?.let {
+            LearningTextResources(context).learningText(it.automaticSignInErrorText())
+        }
+        val content = learningNotificationContent(rows, authError, pending)
+        val compact = content.message ?: content.rows.joinToString(" · ") { line(it) }
+        val alert = authError == null && child == achievementChild && allowsLearningAlert(committed.monitor, current.monitor)
         val sound = current.monitor.alertSound
         val channelId = if (!alert) statusChannel.id else if (sound == null) "learning_achievements" else {
             val digest = java.security.MessageDigest.getInstance("SHA-256").digest(sound.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }
@@ -79,8 +102,11 @@ object LearningNotifications {
             val labelIds = intArrayOf(R.id.learning_notification_label_0, R.id.learning_notification_label_1, R.id.learning_notification_label_2)
             val checkIds = intArrayOf(R.id.learning_notification_check_0, R.id.learning_notification_check_1, R.id.learning_notification_check_2)
             val valueIds = intArrayOf(R.id.learning_notification_value_0, R.id.learning_notification_value_1, R.id.learning_notification_value_2)
-            if (rows.isEmpty()) { view.setViewVisibility(R.id.learning_notification_pending, android.view.View.VISIBLE); view.setTextViewText(R.id.learning_notification_pending, pending) }
-            rows.take(3).forEachIndexed { index, row ->
+            content.message?.let {
+                view.setViewVisibility(R.id.learning_notification_pending, android.view.View.VISIBLE)
+                view.setTextViewText(R.id.learning_notification_pending, it)
+            }
+            content.rows.take(3).forEachIndexed { index, row ->
                 val value = row.report?.value
                 val complete = row.goal == 0 || (value != null && !row.report.failed && value.count >= row.goal)
                 val raw = line(row)
@@ -101,16 +127,40 @@ object LearningNotifications {
             .setOngoing(true).setSilent(!alert).build()
         val latest = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { store.read() }
         if (latest.monitor.alertSettingsRevision != current.monitor.alertSettingsRevision) continue
-        if (permission.value == expected && expected.granted && notifications.areNotificationsEnabled() && (child != achievementChild || stillValid())) notifications.notify(tag(child), 0x4c454152, notification)
+        if (permission.value == expected && expected.granted && notifications.areNotificationsEnabled() && (child != achievementChild || stillValid())) {
+            store.authTransaction { fenced ->
+                if (sameNotificationState(fenced, current) && permission.value == expected && notifications.areNotificationsEnabled()) {
+                    notifications.notify(tag(child), 0x4c454152, notification)
+                }
+                fenced to Unit
+            }
+        }
         }
     }
 }
+
+private fun sameNotificationState(left: StoredLearning, right: StoredLearning): Boolean =
+    left.sessionRef == right.sessionRef && left.authFailure == right.authFailure &&
+        left.state == right.state && left.monitor == right.monitor
 
 internal fun allowsLearningAlert(committed: neth.iecal.todo.MonitorState, current: neth.iecal.todo.MonitorState): Boolean =
     current.completionAlerts != false && committed.alertSettingsRevision == current.alertSettingsRevision &&
         committed.completionAlerts == current.completionAlerts && committed.alertSound == current.alertSound
 
 internal data class LearningNotificationRow(val label: String, val goal: Int, val report: ReportState?, val errors: List<String> = emptyList())
+
+internal fun learningNotificationChildren(document: StoredLearning): Set<String> =
+    if (document.sessionRef != null && document.monitor.accountId == document.state.accountId)
+        document.monitor.registeredChildren().keys else emptySet()
+
+internal data class LearningNotificationContent(val rows: List<LearningNotificationRow>, val message: String?)
+
+internal fun learningNotificationContent(rows: List<LearningNotificationRow>, authError: String?, pending: String): LearningNotificationContent =
+    when {
+        authError != null -> LearningNotificationContent(emptyList(), authError)
+        rows.isEmpty() -> LearningNotificationContent(rows, pending)
+        else -> LearningNotificationContent(rows, null)
+    }
 
 internal fun learningNotificationLine(
     row: LearningNotificationRow, check: String,

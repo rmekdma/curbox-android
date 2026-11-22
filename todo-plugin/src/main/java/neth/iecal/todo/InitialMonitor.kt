@@ -33,7 +33,7 @@ data class NotificationPermission(val granted: Boolean, val revision: Long = 0)
 
 /** Runs initial reports in the service process; the publisher only sees committed state. */
 class InitialMonitor(
-    private val api: TodoApi,
+    api: TodoApi,
     private val store: LearningStore,
     private val permission: StateFlow<NotificationPermission>,
     private val freshPermission: () -> Boolean,
@@ -43,6 +43,7 @@ class InitialMonitor(
     private val achievement: suspend (StoredLearning, NotificationPermission, String, Subject, suspend () -> Boolean) -> Unit = { _, _, _, _, _ -> },
     private val subjectPackages: SubjectPackages = SubjectPackages()
 ) : CurboxPlugin {
+    private val api = RecoveringTodoApi(api, store, now)
     private companion object { val cycleMutex = Mutex() }
     private data class Control(val owner: Long, val version: Long, val goalVersions: Map<Pair<String, Subject>, Long>, val registration: Long, val account: String?, val child: String?, val registrations: Map<String, Long>, val ref: String?, val goals: Map<Pair<String, Subject>, Int>, val connected: Boolean, val permission: NotificationPermission, val interval: String)
     private class RegularCycle(var started: Boolean = false)
@@ -79,7 +80,7 @@ class InitialMonitor(
                 }.distinctUntilChanged().collect { controls.send(it) }
             }
             launch {
-                store.changes.map { listOf(it.state.accountId, it.state.children, it.state.reports, it.monitor.manualCatalogOrder, it.monitor.alertSettingsRevision) }
+                store.changes.map { listOf(it.state.accountId, it.state.children, it.state.reports, it.monitor.manualCatalogOrder, it.monitor.alertSettingsRevision, it.authFailure, it.sessionRef) }
                     .distinctUntilChanged().collect {
                         val latest = withContext(Dispatchers.IO) { store.read() }
                         if (latest.monitor.ownerEpoch == owner) publish(latest, permission.value)
@@ -139,13 +140,15 @@ class InitialMonitor(
                 }
                 val control = current
                 if (running == null && control != null && control.connected && control.permission.granted && freshPermission() && control.account != null && control.registrations.isNotEmpty() && control.ref != null) {
-                    val initial = pending
                     val observation = host.observations.value
                     val subject = if (observation.screen == Screen.UNLOCKED) subjectPackages.subjectFor((observation.foreground as? Foreground.Confirmed)?.packageName) else null
                     val doc = withContext(Dispatchers.IO) { store.read() }
                     val interval = runCatching { BigInteger(control.interval).multiply(BigInteger.valueOf(1_000)).min(BigInteger.valueOf(Long.MAX_VALUE)).toLong() }.getOrDefault(60_000)
                     val due = doc.monitor.cycleOwner != owner || elapsed() - doc.monitor.cycleStartedElapsedMillis >= interval
-                    if ((initial || (subject != null && due)) && doc.monitor.goalVersions[control.account].orEmpty() == control.goalVersions) {
+                    val autoRetry = doc.authFailure != null && doc.authFailure != LearningFailure.AUTHENTICATION && now() >= doc.authRetryAfter && due
+                    val initial = pending || autoRetry
+                    if (doc.authFailure != LearningFailure.AUTHENTICATION &&
+                        (initial || (subject != null && due)) && doc.monitor.goalVersions[control.account].orEmpty() == control.goalVersions) {
                         pending = false
                         val restart = java.util.concurrent.atomic.AtomicBoolean(false)
                         restartInitial = restart.takeIf { initial }
@@ -156,6 +159,19 @@ class InitialMonitor(
                                 val cycle = if (initial) null else RegularCycle()
                                 for ((child, registration) in control.registrations) {
                                     initialize(control.copy(child = child, registration = registration), host, if (initial) null else subject, cycle, restart, dateEpoch, requestDateEpoch, connectionEpoch, requestConnectionEpoch)
+                                }
+                                if (autoRetry && subject != null) {
+                                    val after = store.read()
+                                    // A regular report can fail after its initial baseline already succeeded.
+                                    val initialSkipped = after.monitor.cycleOwner == doc.monitor.cycleOwner &&
+                                        after.monitor.cycleStartedElapsedMillis == doc.monitor.cycleStartedElapsedMillis
+                                    if (initialSkipped && after.sessionRef == control.ref &&
+                                        after.authFailure == doc.authFailure && after.authRetryAfter == doc.authRetryAfter) {
+                                        val regularCycle = RegularCycle()
+                                        for ((child, registration) in control.registrations) {
+                                            initialize(control.copy(child = child, registration = registration), host, subject, regularCycle, restart, dateEpoch, requestDateEpoch, connectionEpoch, requestConnectionEpoch)
+                                        }
+                                    }
                                 }
                             }
                         }.also { job -> job.invokeOnCompletion { finished.trySend(Unit) } }
@@ -178,7 +194,7 @@ class InitialMonitor(
         if (doc.monitor.catalogRetryRequested || doc.monitor.reportRetryRequested != null) {
             doc = store.updateMonitor { if (valid(it)) it.monitor.migrateRetries(it.sessionRef) else null } ?: return
         }
-        val session = store.readSession(requireNotNull(control.ref))
+        val session = try { store.readSession(requireNotNull(control.ref)) } catch (e: LearningSessionUnavailableException) { return }
         if (session.accountId != control.account) return
         val childName = requireNotNull(control.child)
         fun failure(monitor: MonitorState) = monitor.catalogFailureFor(childName)
@@ -233,6 +249,8 @@ class InitialMonitor(
             val catalogIntent = doc.monitor.catalogRetries[childName]?.takeIf(::eligible)
             val children = try { api.catalog(session) } catch (e: TodoApiException) {
                 currentCoroutineContext().ensureActive()
+                val auth = store.read()
+                if (auth.authFailure != null && auth.authFailure != LearningFailure.AUTHENTICATION) { publish(auth, control.permission); return }
                 val failed = store.updateMonitor { if (valid(it)) it.monitor.copy(catalogAttempted = true, catalogFailure = e.kind, catalogFailureSession = control.ref, catalogFailures = it.monitor.catalogFailures + (childName to e.kind), catalogFailureSessions = it.monitor.catalogFailureSessions + (childName to requireNotNull(control.ref)), catalogRetries = if (catalogIntent != null && it.monitor.catalogRetries[childName] == catalogIntent) it.monitor.catalogRetries - childName else it.monitor.catalogRetries) else null }
                 if (failed != null && valid(store.read())) publish(failed, control.permission)
                 return
@@ -269,6 +287,8 @@ class InitialMonitor(
             val result = try { ReportState(api.report(session, subject, id, date), now(), date) }
                 catch (e: TodoApiException) { (previous ?: ReportState(date = date)).copy(failed = true, failure = e.kind, initialFailure = regularSubject == null || !hasBaseline) }
             currentCoroutineContext().ensureActive()
+            val auth = store.read()
+            if (result.failed && auth.authFailure != null && auth.authFailure != LearningFailure.AUTHENTICATION) { publish(auth, control.permission); return }
             var achieved = false
             val committed = store.updateMonitor { current ->
                 val old = current.monitor.reports[key]

@@ -13,6 +13,7 @@ import neth.iecal.todo.StoredLearning
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import neth.iecal.todo.MonitorState
+import neth.iecal.todo.LearningSessionUnavailableException
 import neth.iecal.todo.LearningStore
 import neth.iecal.todo.TodoSession
 import neth.iecal.todo.acceptsApiResult
@@ -79,14 +80,29 @@ class LearningStorage(host: PluginHost, fake: Boolean) : LearningStore {
         }
         updated
     }
+    override fun <T> authTransaction(action: (StoredLearning) -> Pair<StoredLearning, T>): T = runBlocking {
+        var result: Result<T>? = null
+        stateStore.updateData { raw ->
+            val current = document(raw)
+            val (next, value) = action(current)
+            result = Result.success(value)
+            if (next == current) raw else gson.toJson(next)
+        }
+        checkNotNull(result).getOrThrow()
+    }
+
+    override fun clearSessions() { runBlocking {
+        sessionStore.updateData { "" }
+    } }
+
     override fun readSession(ref: String): TodoSession = runBlocking {
         val raw = sessionStore.data.first()
         val entries = if (raw.isEmpty()) JsonObject() else JsonParser.parseString(raw).asJsonObject
-        val bytes = Base64.decode(requireNotNull(entries.get(ref)).asString, Base64.NO_WRAP)
+        val bytes = Base64.decode((entries.get(ref) ?: throw LearningSessionUnavailableException()).asString, Base64.NO_WRAP)
         require(bytes.size > 12)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(ref, false), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
-        decodeLearningSession(cipher.doFinal(bytes.copyOfRange(12, bytes.size)).decodeToString())
+        decodeLearningSession(cipher.doFinal(bytes.copyOfRange(12, bytes.size)).decodeToString()).copy(storageRef = ref)
     }
     override fun writeSession(ref: String, session: TodoSession) { runBlocking {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -103,7 +119,7 @@ class LearningStorage(host: PluginHost, fake: Boolean) : LearningStore {
         val alias = "${alias}_$ref"
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
-        check(create) { "Learning session key is unavailable" }
+        if (!create) throw LearningSessionUnavailableException()
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         generator.init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
@@ -121,5 +137,6 @@ internal fun decodeLearningSession(raw: String): TodoSession {
     val account = decoded.get("accountId")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString?.takeIf { it.isNotBlank() }
     val token = decoded.get("token")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString?.takeIf { it.isNotBlank() }
     val email = decoded.get("email")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
-    return TodoSession(requireNotNull(account), requireNotNull(token), email)
+    val password = decoded.get("password")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+    return TodoSession(requireNotNull(account), requireNotNull(token), email, password)
 }

@@ -1,5 +1,6 @@
 package neth.iecal.curbox.learning
 
+import neth.iecal.todo.LearningFailure
 import neth.iecal.todo.StoredLearning
 import neth.iecal.todo.Subject
 import neth.iecal.todo.authenticationRequired
@@ -21,6 +22,7 @@ data class TodoRegistrationScope(
             val session = document.sessionRef ?: return null
             val monitor = document.monitor
             if (account.isBlank() || childName.isBlank() || session.isBlank() ||
+                document.authFailure == LearningFailure.AUTHENTICATION ||
                 monitor.accountId != account || monitor.authenticationRequired(session)) return null
             val registration = monitor.registeredChildren()[childName] ?: return null
             val child = monitor.children.singleOrNull { it.name == childName } ?: return null
