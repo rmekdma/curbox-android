@@ -1,0 +1,2 @@
+Curbox can sign in to Todo School again automatically when your session ends.
+Sign out from the account menu in Todo School.
