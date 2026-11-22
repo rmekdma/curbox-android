@@ -166,9 +166,29 @@ function Release-ServiceEvaluationGate([string]$GateId) {
         -Action "neth.iecal.curbox.blockers.TEST_RELEASE_GUARDIAN_EVALUATION_GATE" `
         -GateId $GateId
     [void](Wait-ForGuardianLog `
-        -Pattern "service_gate action=neth\.iecal\.curbox\.blockers\.TEST_RELEASE_GUARDIAN_EVALUATION_GATE id=$GateId accepted=true" `
+        -Pattern "service_gate_released id=$([regex]::Escape($GateId)) accepted=true consumed=true " `
         -Label "service-process evaluation gate release acknowledgement")
     $script:activeGateId = ""
+}
+
+function Get-ActivityTaskState([string]$ActivityName) {
+    $dump = Get-TestDeviceShellOutput -Command "dumpsys activity activities"
+    return Get-ActivityTaskStateFromDump -Dump $dump -PackageName $packageName -ActivityName $ActivityName
+}
+
+function Wait-ForPausedGuardianInTask([string]$TaskId) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $guardian = $null
+    $permission = $null
+    while ($watch.Elapsed.TotalSeconds -lt 10) {
+        $guardian = Get-ActivityTaskState "neth.iecal.curbox.ui.activity.GuardianApprovalActivity"
+        $permission = Get-ActivityTaskState "neth.iecal.curbox.api.ApiPermissionActivity"
+        if ($guardian -and $permission -and $guardian.TaskId -eq $TaskId -and
+            $permission.TaskId -eq $TaskId -and $guardian.State -eq 'PAUSED' -and
+            $permission.State -eq 'RESUMED') { return }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "Expected paused guardian and resumed permission Activity in task $TaskId. Guardian: $($guardian | Out-String) Permission: $($permission | Out-String)"
 }
 
 function Release-UnconsumedServiceGate([string]$GateId) {
@@ -757,6 +777,8 @@ function Invoke-ForegroundOwnershipRegressionCase(
 ) {
     $gateId = "$runId-foreground-ownership"
     $gateConsumed = $false
+    $guardianActivity = $null
+    $requesterPackage = "curbox.guardian.foreground.$runId"
     try {
         Start-GuardianApproval -ExpectedRuleName $RuleName
         Arm-ServiceEvaluationGate -GateId $gateId
@@ -784,13 +806,16 @@ function Invoke-ForegroundOwnershipRegressionCase(
             -Label "all-allow outcome held before foreground replacement")
         $gateConsumed = $true
 
-        $appliesAtMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() + 3600000
-        $requesterPackage = "curbox.guardian.foreground.$runId"
-        Invoke-TestDeviceShell -Command "am start -W -a neth.iecal.curbox.api.REQUEST_PERMISSION -n $packageName/neth.iecal.curbox.api.ApiPermissionActivity --es android.intent.extra.REFERRER_NAME android-app://$requesterPackage"
+        $guardianActivity = Get-ActivityTaskState "neth.iecal.curbox.ui.activity.GuardianApprovalActivity"
+        if (-not $guardianActivity -or -not $guardianActivity.TaskId -or $guardianActivity.State -ne 'RESUMED') {
+            throw "Could not identify the resumed guardian Activity and its task: $($guardianActivity | Out-String)"
+        }
+        Invoke-TestDeviceShell -Command "am start -W --task $($guardianActivity.TaskId) -a neth.iecal.curbox.api.REQUEST_PERMISSION -n $packageName/neth.iecal.curbox.api.ApiPermissionActivity --es android.intent.extra.REFERRER_NAME android-app://$requesterPackage"
         $overlayFocus = Wait-ForWindowFocus -ExpectedActivity "ApiPermissionActivity" -TimeoutSeconds 10
         if (-not $overlayFocus.Success) {
             throw "The other translucent Curbox Activity did not take foreground focus. Focus: $($overlayFocus.RawFocus)"
         }
+        Wait-ForPausedGuardianInTask -TaskId $guardianActivity.TaskId
         $closedBeforeResult = [regex]::IsMatch(
             (Get-GuardianApprovalLogs),
             "(?m)^.*screen_closed screen=$([regex]::Escape($screenRequestId)) package=$([regex]::Escape($TargetPackage)) .*"
@@ -803,6 +828,7 @@ function Invoke-ForegroundOwnershipRegressionCase(
         [void](Wait-ForGuardianLog `
             -Pattern "result test=$([regex]::Escape($gateId)) status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId))" `
             -Label "foreground ownership result for the paused approval Activity")
+        Wait-ForPausedGuardianInTask -TaskId $guardianActivity.TaskId
         $overlayFocus = Wait-ForWindowFocus -ExpectedActivity "ApiPermissionActivity" -TimeoutSeconds 10
         if (-not $overlayFocus.Success) {
             throw "The target replaced the current Curbox Activity after approval; focus: $($overlayFocus.RawFocus)"
@@ -824,17 +850,43 @@ function Invoke-ForegroundOwnershipRegressionCase(
         Assert-GuardianLedger -Settings $settings -RuleId $RuleId -Kind "rule_skip" -UseDayId $useDayId
         Write-Success "A paused approval Activity rejected a current all-allow result while another Curbox Activity held focus; the target stayed behind, and the skip was written once."
     } finally {
-        if ($script:activeGateId -eq $gateId) {
-            if ($gateConsumed) {
-                Release-ServiceEvaluationGate -GateId $gateId
-            } else {
-                Release-UnconsumedServiceGate -GateId $gateId
+        try {
+            if ($script:activeGateId -eq $gateId) {
+                if ($gateConsumed) {
+                    Release-ServiceEvaluationGate -GateId $gateId
+                } else {
+                    Release-UnconsumedServiceGate -GateId $gateId
+                }
+            }
+        } finally {
+            try {
+                Clear-WriteFailure
+            } finally {
+                try {
+                    $permissionFocus = Wait-ForWindowFocus -ExpectedActivity "ApiPermissionActivity" -TimeoutSeconds 2
+                    if ($permissionFocus.Success) {
+                        $permissionActivity = Get-ActivityTaskState "neth.iecal.curbox.api.ApiPermissionActivity"
+                        if (-not $guardianActivity -or -not $permissionActivity -or
+                            $permissionActivity.TaskId -ne $guardianActivity.TaskId) {
+                            throw "Refusing to dismiss an API permission Activity outside the test task."
+                        }
+                        $permissionUi = Wait-For-UI -Pattern ([regex]::Escape($requesterPackage)) -TimeoutSeconds 5
+                        Tap-Node $permissionUi 'resource-id="android:id/button2"' "Deny the test API request" | Out-Null
+                        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                        do {
+                            $permissionActivity = Get-ActivityTaskState "neth.iecal.curbox.api.ApiPermissionActivity"
+                            if (-not $permissionActivity -or $permissionActivity.TaskId -ne $guardianActivity.TaskId) { break }
+                            Start-Sleep -Milliseconds 300
+                        } while ($watch.Elapsed.TotalSeconds -lt 5)
+                        if ($permissionActivity -and $permissionActivity.TaskId -eq $guardianActivity.TaskId) {
+                            throw "The test API permission Activity remained in the guardian task after Deny."
+                        }
+                    }
+                } finally {
+                    Invoke-TestDeviceShell -Command "input keyevent 3" | Out-Null
+                }
             }
         }
-        Clear-WriteFailure
-        Invoke-TestDeviceShell -Command "input keyevent 4" | Out-Null
-        Start-Sleep -Milliseconds 250
-        Invoke-TestDeviceShell -Command "input keyevent 3" | Out-Null
     }
 }
 

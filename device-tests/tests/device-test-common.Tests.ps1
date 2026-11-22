@@ -41,6 +41,32 @@ Describe "Device Test Common Helpers" {
         $global:DeviceTestUnexpectedAdbCalls = 0
         $ErrorActionPreference = "Continue"
     }
+    Context "Activity task state parsing" {
+        It "reads each activity state from its own history record" {
+            $dump = @'
+ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)
+  * Task{abc #3567}
+    * Hist  #1: ActivityRecord{111 u0 neth.iecal.curbox.debug/neth.iecal.curbox.api.ApiPermissionActivity t3567}
+      state=RESUMED stopped=false
+    * Hist  #0: ActivityRecord{222 u0 neth.iecal.curbox.debug/.ui.activity.GuardianApprovalActivity t3567}
+      state=PAUSED stopped=false
+'@
+            $guardian = Get-ActivityTaskStateFromDump $dump 'neth.iecal.curbox.debug' 'neth.iecal.curbox.ui.activity.GuardianApprovalActivity'
+            $permission = Get-ActivityTaskStateFromDump $dump 'neth.iecal.curbox.debug' 'neth.iecal.curbox.api.ApiPermissionActivity'
+            $guardian.TaskId | Should Be '3567'
+            $guardian.State | Should Be 'PAUSED'
+            $permission.TaskId | Should Be '3567'
+            $permission.State | Should Be 'RESUMED'
+        }
+        It "rejects absent, truncated, and unheaded activity records" {
+            $name = 'neth.iecal.curbox.ui.activity.GuardianApprovalActivity'
+            $package = 'neth.iecal.curbox.debug'
+            $truncated = "* Hist  #0: ActivityRecord{222 u0 $package/.ui.activity.GuardianApprovalActivity t3567}`n* Task{other #2}`n state=RESUMED"
+            (Get-ActivityTaskStateFromDump $truncated $package $name) | Should BeNullOrEmpty
+            (Get-ActivityTaskStateFromDump 'state=RESUMED' $package $name) | Should BeNullOrEmpty
+            (Get-ActivityTaskStateFromDump "ActivityRecord{222 u0 $package/.ui.activity.GuardianApprovalActivity t3567}`nstate=RESUMED" $package $name) | Should BeNullOrEmpty
+        }
+    }
     AfterEach {
         if ($global:DeviceTestUnexpectedAdbCalls -gt 0) {
             throw "A helper attempted adb during the offline Pester suite."

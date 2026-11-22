@@ -185,6 +185,30 @@ function Get-TestDeviceShellOutput([string]$Command) {
     return (adb shell $Command | Out-String).TrimEnd()
 }
 
+function Get-ActivityTaskStateFromDump([string]$Dump, [string]$PackageName, [string]$ActivityName) {
+    $basePackage = $PackageName -replace '\.debug$', ''
+    $shortName = if ($ActivityName.StartsWith("$basePackage.")) {
+        $ActivityName.Substring($basePackage.Length)
+    } else { $ActivityName }
+    $component = [regex]::Escape("$PackageName/") + '(?:' +
+        [regex]::Escape($ActivityName) + '|' + [regex]::Escape($shortName) + ')'
+    $heading = '(?m)^[ \t]*(?:\*[ \t]*)?Hist[ \t]+#\d+:[ \t]*'
+    $records = [regex]::Split($Dump, $heading)
+    foreach ($record in ($records | Select-Object -Skip 1)) {
+        $match = [regex]::Match($record, "\AActivityRecord\{[^\r\n]*$component\b[^\r\n]*\bt(?<task>\d+)\}")
+        if (-not $match.Success) { continue }
+        $record = [regex]::Split($record, '(?m)^[ \t]*\*[ \t]*Task\{')[0]
+        $state = [regex]::Match($record, '(?m)\bstate=(?<state>[A-Z_]+)\b')
+        if (-not $state.Success) { return $null }
+        return [pscustomobject]@{
+            TaskId = $match.Groups['task'].Value
+            State = $state.Groups['state'].Value
+            Record = $record
+        }
+    }
+    return $null
+}
+
 function Get-TestDeviceEpochTimeMs {
     $timestamp = Get-TestDeviceShellOutput -Command "date +%s%3N"
     if ($timestamp -notmatch '^\d{13}$') {

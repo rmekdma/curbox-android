@@ -37,6 +37,13 @@ try {
     if ((Get-LearningRegistrationCount) -ne 0 -or @(Get-LearningNotifications).Count -ne 0) { throw "Remove existing learning registrations on this dedicated test device first." }
     $existingFixture = Get-TestDeviceShellOutput -Command "run-as neth.iecal.curbox.debug sh -c 'if [ -e files/synthetic-learning-fixture.json ]; then echo PRESENT; else echo ABSENT; fi'"
     if ($existingFixture.Trim() -ne 'ABSENT') { throw "Remove the existing synthetic fixture before running." }
+    $accessibilityBackup = Backup-DeviceAccessibilitySettings
+    $previousServicePid = Get-DeviceProcessPid -ProcessName 'neth.iecal.curbox.debug:app_blocker_service'
+    if (-not $previousServicePid) { throw "Cannot identify the bound Curbox service process." }
+    $coldStart = Restart-TestCurboxCold -AccessibilitySettings $accessibilityBackup
+    if ($coldStart.Skipped -or -not $coldStart.ProcessId -or $coldStart.ProcessId -eq $previousServicePid) {
+        throw "Curbox service did not restart and bind with a new process."
+    }
     $baseline = "{`"revision`":`"baseline`",`"children`":[{`"name`":`"Child1`",`"users`":{`"MATH`":`"user1`"}}],`"reports`":[{`"user`":`"user1`",`"subject`":`"MATH`",`"date`":`"$date`",`"count`":2}]}"
     $fixtureWritten = $true
     Set-LearningFixture $baseline
