@@ -64,6 +64,46 @@ class TodoAwardStateTest {
         assertNotEquals(link.revision, invalidated.connection!!.revision)
         assertTrue(TodoSettlement.prunePending(invalidated, LocalDate.parse("2026-11-07")).pending.isEmpty())
     }
+    @Test fun arbitraryScheduleExpiresPreviousCycleAndIncludesConsecutiveUnlockDays() {
+        val days = setOf(2, 3)
+        val pending = TodoSettlement.recordPending(state, "2026-11-02", "2026-11-05", true, days)
+        assertEquals(emptyList<String>(), pending.pending.map { it.useDayId })
+        val next = TodoSettlement.recordPending(state, "2026-11-02", "2026-11-04", true, days)
+        assertEquals(listOf("2026-11-02", "2026-11-03"), next.pending.map { it.useDayId })
+        assertTrue(TodoSettlement.prunePending(next, LocalDate.parse("2026-11-05"), days).pending.isEmpty())
+    }
+
+    @Test fun allUnlockDaysRetainPendingAcrossWeeks() {
+        val old = state.copy(connection = link.copy(connectedUseDayId = "2026-10-01"))
+        val days = (0..6).toSet()
+        val result = TodoSettlement.recordPending(old, "2026-10-01", "2026-11-10", true, days)
+        assertEquals(40, result.pending.size)
+        assertEquals("2026-10-01", result.pending.first().useDayId)
+        val later = LocalDate.parse("2026-11-20")
+        val retained = TodoSettlement.prunePending(result, later, days)
+        assertEquals(result.pending, retained.pending)
+        val (settled, unpaid) = TodoSettlement.complete(retained, old.connection!!, "2026-10-01", 60, later, days)!!
+        assertEquals(60L, unpaid)
+        assertNull(TodoSettlement.complete(settled, old.connection!!, "2026-10-01", 60, later, days))
+    }
+
+    @Test fun togglingClearsPendingAndRestartsWithoutLosingGrantLedger() {
+        val original = state.copy(ledger = listOf(TodoAwardLedgerEntry("account", "Child", "2026-11-06", 40)),
+            pending = listOf(TodoPendingSettlement(link, "2026-11-06")))
+        val disabled = original.withAutoSettlement(false, "2026-11-07")
+        assertTrue(disabled.pending.isEmpty())
+        assertEquals(original.ledger, disabled.ledger)
+        val enabled = disabled.withAutoSettlement(true, "2026-11-08")
+        assertEquals("2026-11-08", enabled.connection!!.settlementStartUseDayId)
+        assertEquals(20L, TodoAwardBasis.capture(enabled, "rule", "2026-11-06", 60)!!.availableMinutes)
+        assertTrue(TodoSettlement.recordPending(enabled, "2026-11-05", "2026-11-08", true).pending.isEmpty())
+    }
+
+    @Test fun oldJsonDefaultsToAutomaticSettlement() {
+        val json = """{"accountId":"account","childName":"Child","ruleId":"rule","connectedUseDayId":"2026-11-02","revision":"revision"}"""
+        assertTrue(com.google.gson.Gson().fromJson(json, TodoAwardConnection::class.java).autoSettlementEnabled)
+    }
+
     @Test fun invalidLegacyLedgerIsRejected() {
         try {
             TodoAwardLegacyMigration.migrate(mapOf("todoAwardLedger" to "true"))

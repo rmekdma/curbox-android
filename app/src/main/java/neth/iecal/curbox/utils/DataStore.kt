@@ -936,14 +936,16 @@ class DataStoreManager(private val context: Context) {
                     RestrictionComparator.isSameOrStricter(field, current, proposed)
                 ) {
                     val now = System.currentTimeMillis()
-                    updated = proposed.copy(
+                    val effective = proposed.copy(
                         settingsChangeDelayConfig2 = proposed.settingsChangeDelayConfig2.copy(
                             pendingChanges = proposed.settingsChangeDelayConfig2.pendingChanges
                                 .filterNot { it.field == field.name }
                         )
                     )
-                    if (field == GatedSettingsField.APP_RULES) {
-                        updated = applyGuardianExtraTimeRevocations(updated, proposed, now)
+                    updated = if (field == GatedSettingsField.APP_RULES) {
+                        applyGuardianExtraTimeRevocations(updated, effective, now)
+                    } else {
+                        effective
                     }
                 } else {
                     val now = System.currentTimeMillis()
@@ -1425,14 +1427,25 @@ class DataStoreManager(private val context: Context) {
             .filterNot { it.guardianExtraTimeAllowed }
             .map { it.id }
             .toSet()
+        val rolloverRuleIds = current.appRuleSnapshot.appRules.filter { it.rolloverEnabled }.map { it.id }.toSet()
+        val stoppedRolloverIds = proposed.appRuleSnapshot.appRules
+            .filter { !it.rolloverEnabled && it.id in rolloverRuleIds }
+            .map { it.id }
+            .toSet()
+        if (disabledRuleIds.isEmpty() && stoppedRolloverIds.isEmpty()) return proposed
+
+        val useDayId = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime).idAt(nowMs)
         val withLocalRuntime = proposed.copy(
             appRuleOverrideState = current.appRuleOverrideState,
             appRuleRolloverState = current.appRuleRolloverState,
-            pluginTimes = current.pluginTimes
+            pluginTimes = current.pluginTimes.mapValues { (id, state) ->
+                if (state.linkedRuleId !in stoppedRolloverIds) return@mapValues state
+                val factory = PluginCatalog.factories.find { it.id == id } ?: return@mapValues state
+                val data = factory.onLinkedRolloverDisabled(state.data, useDayId)
+                if (data == state.data) state
+                else state.copy(data = data, revision = java.util.UUID.randomUUID().toString())
+            }
         )
-        if (disabledRuleIds.isEmpty()) return withLocalRuntime
-
-        val useDayId = ConfigurableUseDayCalculator(resetTime = current.useDayResetTime).idAt(nowMs)
         return withLocalRuntime.clearGuardianExtraTimeForRules(disabledRuleIds, useDayId)
     }
 

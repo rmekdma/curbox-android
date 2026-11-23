@@ -14,6 +14,13 @@ class TodoPluginFactory : PluginFactory {
     override val storeNames = setOf("learning-state", "learning-session", "learning-fake-state", "learning-fake-session")
     override val legacySettingKeys get() = TodoAwardLegacyMigration.keys
     override val legacyGrantSourceKey = "todoGrantedMillis"
+    override fun onLinkedRolloverDisabled(data: String?, currentUseDayId: String): String? {
+        if (data.isNullOrBlank()) return data
+        val gson = com.google.gson.Gson()
+        val state = gson.fromJson(data, TodoAwardState::class.java)
+        return gson.toJson(state.withAutoSettlement(false, currentUseDayId))
+    }
+
     override fun onLinkedTimeRevoked(data: String?, currentUseDayId: String): String? =
         TodoAwardLegacyMigration.onLinkedTimeRevoked(data, currentUseDayId)
     override fun migrateLegacySettings(fields: Map<String, String>): PluginLegacyTimeState? =

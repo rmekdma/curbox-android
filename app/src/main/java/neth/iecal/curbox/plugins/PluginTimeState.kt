@@ -24,8 +24,14 @@ internal object PluginTimeProjection {
         val fingerprint = java.util.Base64.getEncoder().encodeToString(
             MessageDigest.getInstance("SHA-256").digest(basis.toByteArray()))
         val rules = settings.appRuleSnapshot.appRules.map { rule ->
-            PluginRule(rule.id, rule.name, rule.isActive && rule.guardianExtraTimeAllowed && rule.rolloverEnabled,
-                settings.appRuleRolloverState.pools[rule.id]?.lastSettledUseDayId, rule.unlockDays)
+            PluginRule(
+                id = rule.id,
+                label = rule.name,
+                eligibleForContributions = rule.isActive && rule.guardianExtraTimeAllowed,
+                lastSettledUseDayId = settings.appRuleRolloverState.pools[rule.id]?.lastSettledUseDayId,
+                unlockDays = rule.unlockDays,
+                rolloverEnabled = rule.rolloverEnabled
+            )
         }
         return PluginTimeState(day, fingerprint, rules, stored.linkedRuleId, stored.data)
     }
@@ -38,7 +44,8 @@ internal object PluginTimeSettlementWrite {
         val ruleId = expected.linkedRuleId ?: return current
         val state = PluginTimeProjection.from(current, id, now)
         val pool = current.appRuleRolloverState.pools[ruleId] ?: return current
-        if (minutes < 0 || state != expected || state.rules.none { it.id == ruleId && it.eligibleForContributions } ||
+        if (minutes < 0 || state != expected ||
+            state.rules.none { it.id == ruleId && it.eligibleForContributions && it.rolloverEnabled } ||
             pool.lastSettledUseDayId != state.useDayId || state.data == data) return current
         val balance = neth.iecal.curbox.domain.apprules.AppRuleRolloverPolicy.safeAdd(pool.accumulatedMinutes.coerceAtLeast(0), minutes)
         return current.copy(appRuleRolloverState = current.appRuleRolloverState.withPool(pool.copy(accumulatedMinutes = balance)),

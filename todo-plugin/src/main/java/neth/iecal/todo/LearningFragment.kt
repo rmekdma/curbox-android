@@ -348,10 +348,11 @@ class LearningFragment : Fragment() {
 
     private fun showAccountDialog() {
         val content = dialogContent()
-        fun field(hint: String, inputType: Int, initial: String): com.google.android.material.textfield.TextInputEditText {
+        fun field(hint: String, inputType: Int, initial: String, isPassword: Boolean = false): com.google.android.material.textfield.TextInputEditText {
             val layout = com.google.android.material.textfield.TextInputLayout(requireContext()).apply {
                 this.hint = hint
-                endIconMode = com.google.android.material.textfield.TextInputLayout.END_ICON_CLEAR_TEXT
+                endIconMode = if (isPassword) com.google.android.material.textfield.TextInputLayout.END_ICON_PASSWORD_TOGGLE else com.google.android.material.textfield.TextInputLayout.END_ICON_CLEAR_TEXT
+                if (isPassword) setEndIconDrawable(neth.iecal.todo.R.drawable.learning_password_visibility)
             }
             val input = com.google.android.material.textfield.TextInputEditText(layout.context).apply {
                 setSingleLine()
@@ -363,7 +364,7 @@ class LearningFragment : Fragment() {
             return input
         }
         val email = field(text(LearningText.EMAIL), android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS, screen.accountEmail.orEmpty())
-        val password = field(text(LearningText.PASSWORD), android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD, "")
+        val password = field(text(LearningText.PASSWORD), android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD, "", isPassword = true)
         val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
             .setTitle(text(LearningText.CHANGE_ACCOUNT)).setView(content)
             .setNegativeButton(text(LearningText.CANCEL), null)

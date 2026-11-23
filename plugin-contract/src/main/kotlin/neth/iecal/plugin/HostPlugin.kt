@@ -14,6 +14,8 @@ interface PluginFactory {
     fun migrateLegacySettings(fields: Map<String, String>): PluginLegacyTimeState? = null
     /** Resets plugin policy for a linked rule after the host revokes the rule's extra time. */
     fun onLinkedTimeRevoked(data: String?, currentUseDayId: String): String? = data
+    /** Updates linked plugin state atomically when the rule's rollover setting turns off. */
+    fun onLinkedRolloverDisabled(data: String?, currentUseDayId: String): String? = data
     fun create(context: Context, host: PluginHost): HostPlugin
 }
 

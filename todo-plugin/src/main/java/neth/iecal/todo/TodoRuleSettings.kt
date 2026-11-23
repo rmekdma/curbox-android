@@ -2,6 +2,12 @@ package neth.iecal.todo
 
 import android.content.Context
 import android.widget.Toast
+import android.widget.ArrayAdapter
+import android.widget.LinearLayout
+import android.widget.Spinner
+import android.widget.AdapterView
+import android.view.View
+import com.google.android.material.checkbox.MaterialCheckBox
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.LifecycleOwner
@@ -14,11 +20,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.learning.LearningStorage
 import neth.iecal.curbox.learning.TodoRegistrationScope
-import neth.iecal.plugin.PluginRule
 import neth.iecal.plugin.PluginTimeHost
 import java.util.UUID
-
-internal fun PluginRule.isTodoEligible() = eligibleForContributions && unlockDays == setOf(0, 6)
 
 class TodoRuleSettings(private val context: Context, private val host: PluginTimeHost, private val storage: LearningStorage) {
     private val gson = Gson()
@@ -57,7 +60,7 @@ class TodoRuleSettings(private val context: Context, private val host: PluginTim
                     val document = storage.read()
                     document.monitor.registeredChildren().keys.mapNotNull { TodoRegistrationScope.capture(document, it) }
                 }
-                val rules = snapshot.rules.filter { it.isTodoEligible() }
+                val rules = snapshot.rules.filter { it.eligibleForContributions }
                 fun result(saved: Boolean) {
                     Toast.makeText(activity, if (saved) R.string.todo_award_saved else R.string.todo_award_failed, Toast.LENGTH_SHORT).show()
                     if (saved) onChanged()
@@ -72,24 +75,63 @@ class TodoRuleSettings(private val context: Context, private val host: PluginTim
                         Toast.makeText(activity, R.string.todo_award_no_choices, Toast.LENGTH_LONG).show()
                         return
                     }
+                    val old = state.connection
+                    val sameChild = old?.accountId == scope.accountId && old.childName == scope.childName
+                    val initialIndex = rules.indexOfFirst { sameChild && it.id == old?.ruleId }.coerceAtLeast(0)
+                    val content = LinearLayout(activity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        val padding = (24 * resources.displayMetrics.density).toInt()
+                        setPadding(padding, 0, padding, 0)
+                    }
+                    val selector = Spinner(activity).apply {
+                        adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item,
+                            rules.map { it.label.ifBlank { it.id } })
+                        setSelection(initialIndex)
+                    }
+                    val automatic = MaterialCheckBox(activity).apply {
+                        setText(R.string.todo_award_auto_settlement)
+                    }
+                    content.addView(selector)
+                    content.addView(automatic)
+                    fun selectRule(position: Int) {
+                        val rule = rules[position]
+                        automatic.isEnabled = rule.rolloverEnabled
+                        automatic.isChecked = rule.rolloverEnabled &&
+                            if (sameChild && old?.ruleId == rule.id) old.autoSettlementEnabled else true
+                    }
+                    selectRule(initialIndex)
+                    selector.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                        override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                        override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                            selectRule(position)
+                        }
+                    }
                     show(MaterialAlertDialogBuilder(activity).setTitle(R.string.todo_award_choose_rule)
-                        .setItems(rules.map { it.label.ifBlank { it.id } }.toTypedArray()) { _, index ->
-                            val rule = rules[index]
-                            val old = state.connection
-                            if (old?.accountId == scope.accountId && old.childName == scope.childName && old.ruleId == rule.id) return@setItems
+                        .setView(content)
+                        .setPositiveButton(android.R.string.ok) { _, _ ->
+                            val rule = rules.getOrNull(selector.selectedItemPosition) ?: return@setPositiveButton
+                            val enabled = rule.rolloverEnabled && automatic.isChecked
+                            val sameLink = sameChild && old?.ruleId == rule.id
+                            if (sameLink && old?.autoSettlementEnabled == enabled) return@setPositiveButton
                             val apply = {
                                 owner.lifecycleScope.launch {
-                                    val link = TodoAwardConnection(scope.accountId, scope.childName, rule.id, snapshot.useDayId, UUID.randomUUID().toString())
+                                    val updated = if (sameLink) {
+                                        state.withAutoSettlement(enabled, snapshot.useDayId)
+                                    } else {
+                                        val link = TodoAwardConnection(scope.accountId, scope.childName, rule.id,
+                                            snapshot.useDayId, UUID.randomUUID().toString(), autoSettlementEnabled = enabled)
+                                        state.copy(connection = link, pending = emptyList())
+                                    }
                                     val saved = save { withContext(Dispatchers.IO) {
                                         storage.withRegistration(scope) {
-                                            host.update(snapshot, gson.toJson(state.copy(connection = link, pending = emptyList())), rule.id)
+                                            host.update(snapshot, gson.toJson(updated), rule.id)
                                         } == true
                                     } }
                                     result(saved)
                                 }
                                 Unit
                             }
-                            if (old == null) apply() else confirm(R.string.todo_award_change, apply)
+                            if (old != null && (!sameLink || !enabled)) confirm(R.string.todo_award_change, apply) else apply()
                         }.setNegativeButton(android.R.string.cancel, null))
                 }
                 fun chooseChild() {

@@ -5,7 +5,8 @@ data class PluginRule(
     val label: String,
     val eligibleForContributions: Boolean,
     val lastSettledUseDayId: String?,
-    val unlockDays: Set<Int> = emptySet()
+    val unlockDays: Set<Int> = emptySet(),
+    val rolloverEnabled: Boolean = false
 )
 
 /** Host-owned rule information and opaque, plugin-scoped state captured together. */

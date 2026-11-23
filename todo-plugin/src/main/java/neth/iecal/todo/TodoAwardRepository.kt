@@ -30,8 +30,9 @@ class TodoAwardRepository(
         val data = decode(state.data)
         val link = data.connection ?: return null
         if (state.linkedRuleId != link.ruleId) return null
-        val eligible = state.rules.singleOrNull { it.id == link.ruleId }?.isTodoEligible() == true
-        val updated = TodoSettlement.recordPending(data, previouslySettledUseDayId, settledUseDayId, eligible)
+        val rule = state.rules.singleOrNull { it.id == link.ruleId }
+        val eligible = rule?.eligibleForContributions == true && rule.rolloverEnabled
+        val updated = TodoSettlement.recordPending(data, previouslySettledUseDayId, settledUseDayId, eligible, rule?.unlockDays ?: emptySet())
         return if (updated == data) null else gson.toJson(updated)
     }
 
@@ -40,7 +41,7 @@ class TodoAwardRepository(
         val state = decode(before.data)
         val link = state.connection ?: return@withContext null
         if (before.linkedRuleId != ruleId || link.ruleId != ruleId ||
-            before.rules.singleOrNull { it.id == ruleId }?.isTodoEligible() != true) return@withContext null
+            before.rules.singleOrNull { it.id == ruleId }?.eligibleForContributions != true) return@withContext null
         val scope = TodoRegistrationScope.capture(storage.read(), link.childName) ?: return@withContext null
         if (scope.accountId != link.accountId) return@withContext null
         val date = LocalDate.parse(before.useDayId).format(DateTimeFormatter.BASIC_ISO_DATE)
@@ -60,14 +61,17 @@ class TodoAwardRepository(
         val link = state.connection ?: return@withContext false
         if (snapshot.linkedRuleId != link.ruleId) return@withContext false
         val rule = snapshot.rules.singleOrNull { it.id == link.ruleId }
-        if (rule?.isTodoEligible() != true || rule.lastSettledUseDayId != snapshot.useDayId) return@withContext false
+        if (rule?.eligibleForContributions != true || !rule.rolloverEnabled || !link.autoSettlementEnabled ||
+            rule.lastSettledUseDayId != snapshot.useDayId
+        ) return@withContext false
         val today = LocalDate.parse(snapshot.useDayId)
-        state = TodoSettlement.prunePending(state, today)
-        val days = state.pending.map { it.useDayId }.filter { it in TodoSettlement.dates(state, today) }
+        state = TodoSettlement.prunePending(state, today, rule.unlockDays)
+        val days = state.pending.map { it.useDayId }
         if (days.isEmpty()) return@withContext false
         val scope = TodoRegistrationScope.capture(storage.read(), link.childName) ?: return@withContext true
         if (scope.accountId != link.accountId) return@withContext true
         for (day in days) {
+            if (state.pending.none { it.connection == link && it.useDayId == day }) continue
             val reported = try {
                 TodoAwardLookup(api).minutes(storage.readSession(scope.sessionRef), link.childName,
                     LocalDate.parse(day).format(DateTimeFormatter.BASIC_ISO_DATE), scope.subjects)
@@ -77,14 +81,15 @@ class TodoAwardRepository(
                 onFailure(IllegalStateException("Todo settlement lookup failed"))
                 continue
             }
-            val (updated, unpaid) = TodoSettlement.complete(state, link, day, reported, today) ?: continue
+            val (updated, unpaid) = TodoSettlement.complete(state, link, day, reported, today, rule.unlockDays) ?: continue
             val committed = storage.withRegistration(scope) { host.settle(snapshot, day, unpaid, gson.toJson(updated)) } == true
             if (!committed) return@withContext true
             snapshot = host.read()
             state = decode(snapshot.data)
-            if (state.connection != link || snapshot.useDayId != today.toString()) return@withContext true
+            if (state.connection != link || snapshot.useDayId != today.toString() ||
+                snapshot.rules.singleOrNull { it.id == link.ruleId } != rule) return@withContext true
         }
-        TodoSettlement.prunePending(state, today).pending.isNotEmpty()
+        TodoSettlement.prunePending(state, today, rule.unlockDays).pending.isNotEmpty()
     }
 }
 

@@ -2,7 +2,7 @@
     <string name="todo_award_source_label">Todo</string>
     <string name="todo_award_connection">Connect Todo learning time</string>
     <string name="todo_award_disconnect">Disconnect Todo</string>
-    <string name="todo_award_no_choices">Turn on monitoring and choose a rule with weekend rollover first.</string>
+    <string name="todo_award_no_choices">Turn on monitoring and choose a rule that allows extra time first.</string>
     <string name="todo_award_choose_child">Choose a child</string>
     <string name="todo_award_choose_rule">Choose an app rule</string>
     <string name="todo_award_saved">Todo connection saved.</string>
@@ -13,4 +13,5 @@
     <string name="todo_award_change_warning">Time already given or saved stays with the old rule. Previous time that has not been settled will be lost.</string>
     <item name="todo_connection_button" type="id" />
     <string name="todo_award_rule_unavailable">Rule unavailable</string>
+    <string name="todo_award_auto_settlement">Add previous day Todo learning time</string>
 </resources>

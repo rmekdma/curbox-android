@@ -1,6 +1,5 @@
 package neth.iecal.todo
 
-import java.time.DayOfWeek
 import java.time.LocalDate
 
 /** Persisted Todo award data. The host stores this as plugin-owned opaque state. */
@@ -15,8 +14,18 @@ data class TodoAwardConnection(
     val childName: String = "",
     val ruleId: String = "",
     val connectedUseDayId: String = "",
-    val revision: String = ""
+    val revision: String = "",
+    val autoSettlementEnabled: Boolean = true,
+    val settlementStartUseDayId: String = ""
 )
+
+/** Changes automatic settlement without altering the grant ledger. */
+fun TodoAwardState.withAutoSettlement(enabled: Boolean, useDayId: String): TodoAwardState {
+    val link = connection ?: return this
+    if (link.autoSettlementEnabled == enabled) return if (!enabled && pending.isNotEmpty()) copy(pending = emptyList()) else this
+    return copy(connection = link.copy(autoSettlementEnabled = enabled,
+        settlementStartUseDayId = if (enabled) useDayId else link.settlementStartUseDayId), pending = emptyList())
+}
 
 data class TodoAwardLedgerEntry(
     val accountId: String = "",
@@ -68,41 +77,54 @@ private fun TodoAwardState.entries(link: TodoAwardConnection, day: String) = led
 
 /** Computes pending and completed reports; host rollover updates and state writes must be atomic. */
 object TodoSettlement {
-    fun recordPending(state: TodoAwardState, previousDay: String?, nextDay: String, eligible: Boolean): TodoAwardState {
+    fun recordPending(state: TodoAwardState, previousDay: String?, nextDay: String, eligible: Boolean,
+                      unlockDays: Set<Int> = setOf(0, 6)): TodoAwardState {
         val link = state.connection ?: return state
-        val start = parse(link.connectedUseDayId) ?: return state
+        val start = settlementStart(link) ?: return state
         val end = parse(nextDay) ?: return state
         val old = previousDay?.let(::parse) ?: start
-        if (!eligible || old >= end) return state
-        val monday = end.minusDays((end.dayOfWeek.value - 1).toLong())
-        val added = generateSequence(maxOf(start, old, monday)) { it.plusDays(1) }.takeWhile { it < end }
-            .filter { it.dayOfWeek != DayOfWeek.SUNDAY }
+        if (!eligible || !link.autoSettlementEnabled || old >= end) return state
+        val cycleStart = cycleStart(end, unlockDays) ?: start
+        val retained = prunePending(state, end, unlockDays).pending
+        val added = generateSequence(maxOf(start, old, cycleStart)) { it.plusDays(1) }.takeWhile { it < end }
             .map { TodoPendingSettlement(link, it.toString()) }
             .filter { item -> state.entries(link, item.useDayId).none { it.settled } }.toList()
-        return state.copy(pending = (state.pending + added).distinct())
+        return state.copy(pending = (retained + added).distinct())
     }
 
-    fun dates(state: TodoAwardState, today: LocalDate): List<String> {
-        val start = state.connection?.connectedUseDayId?.let(::parse) ?: return emptyList()
-        val monday = today.minusDays((today.dayOfWeek.value - 1).toLong())
-        return generateSequence(monday) { it.plusDays(1) }.takeWhile { it < today }
-            .filter { it >= start && it.dayOfWeek != DayOfWeek.SUNDAY }.map { it.toString() }.toList()
+    private fun isEligibleDay(link: TodoAwardConnection, day: String, today: LocalDate, unlockDays: Set<Int>): Boolean {
+        if (!link.autoSettlementEnabled) return false
+        val date = parse(day) ?: return false
+        val start = settlementStart(link) ?: return false
+        val cycleStart = cycleStart(today, unlockDays)
+        return date >= start && date < today && (cycleStart == null || date >= cycleStart)
     }
 
-    fun prunePending(state: TodoAwardState, today: LocalDate): TodoAwardState {
+    fun prunePending(state: TodoAwardState, today: LocalDate, unlockDays: Set<Int> = setOf(0, 6)): TodoAwardState {
         val pending = state.pending.filter { item ->
-            val day = parse(item.useDayId)
-            val start = parse(item.connection.connectedUseDayId)
-            item.connection == state.connection && day != null && start != null && day >= start &&
-                day.dayOfWeek != DayOfWeek.SUNDAY && today < day.plusDays((8 - day.dayOfWeek.value).toLong()) &&
+            item.connection == state.connection && isEligibleDay(item.connection, item.useDayId, today, unlockDays) &&
                 state.entries(item.connection, item.useDayId).none { it.settled }
         }
         return if (pending == state.pending) state else state.copy(pending = pending)
     }
 
+    // A weekly schedule with a reset reaches its most recent boundary within seven days.
+    private fun cycleStart(today: LocalDate, unlockDays: Set<Int>): LocalDate? {
+        for (offset in 1L..7L) {
+            val day = today.minusDays(offset)
+            if (day.dayOfWeek.value % 7 in unlockDays && day.plusDays(1).dayOfWeek.value % 7 !in unlockDays) {
+                return day.plusDays(1)
+            }
+        }
+        return null
+    }
+
+    private fun settlementStart(link: TodoAwardConnection): LocalDate? =
+        parse(link.settlementStartUseDayId.ifBlank { link.connectedUseDayId })
+
     /** Returns the next opaque state and unpaid minutes for one atomic host settlement. */
-    fun complete(state: TodoAwardState, link: TodoAwardConnection, day: String, reported: Long, today: LocalDate): Pair<TodoAwardState, Long>? {
-        if (state.connection != link || reported < 0 || day !in dates(state, today)) return null
+    fun complete(state: TodoAwardState, link: TodoAwardConnection, day: String, reported: Long, today: LocalDate, unlockDays: Set<Int> = setOf(0, 6)): Pair<TodoAwardState, Long>? {
+        if (state.connection != link || reported < 0 || !isEligibleDay(link, day, today, unlockDays)) return null
         val entries = state.entries(link, day)
         if (entries.size > 1) return null
         val existing = entries.singleOrNull() ?: TodoAwardLedgerEntry(link.accountId, link.childName, day)
