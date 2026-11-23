@@ -28,7 +28,7 @@ Broadcast actions use companion constants (e.g. `AppBlocker.INTENT_ACTION_REFRES
 - `anti_stimulants/`: `AutoDnd`, `GrayScaleFilter`, and `MindfulMessage`. DND state requests are aggregated via `AppBlockerService.syncDndState()`.
 - `hardcoded/`: View IDs and per-app configuration for reel apps and browsers. Never inline view IDs in feature code.
 - `api/`: Exported AIDL service, user approval flows, and auth storage. See `docs/CURBOX_API.md` and `:apitester`.
-- Plugins: bundled feature implementation and its host contract. See the [plugin guide](../../todo-plugin/docs/learning.md).
+- Plugins: bundled feature implementation and its host contract. See the [Todo plugin spec](../spec/todo-plugin.md) for behavior and the [plugin guide](../../todo-plugin/docs/learning.md) for integration.
 
 ## User-facing blocking screens
 

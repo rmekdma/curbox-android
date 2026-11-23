@@ -1,118 +1,48 @@
-# Learning feature
+# Todo plugin guide
 
-Curbox hosts the TODO School screen and monitor in the same APK. The screen
-supports sign in, goals, manual reports for today. Watching is enabled
-per child; the automatic monitor uses today in `Asia/Seoul`, as does the dashboard. Learning goals do not change Curbox blocking rules.
+Read the [Todo plugin spec](../../docs/spec/todo-plugin.md) when changing account, dashboard, monitoring, notification, connection, grant, or settlement behavior.
 
-The dashboard opens account changes, learning settings and each child’s subject goals in separate
-settings dialogs. Goal changes are validated and saved together for the account,
-session and subject identities captured when the dialog opened. Only subscribed
-subjects are offered; saving a goal does not add a subscription.
+## Host integration
 
-The dashboard uses today in Seoul and has no date selector. Each subscribed subject
-shows the count and goal from the newest available report today. A successful
-report at its goal shows a green check. A zero goal shows a local check without
-a fabricated count. Manual and automatic errors are labeled separately.
-
-## Monitoring behavior
-
-- Registration checks the subscribed subjects with positive goals. A zero goal
-  is locally complete and never requests a report, including on manual refresh
-  or explicit retry. Catalog checks remain separate. The first valid report is
-  a silent baseline.
-- Regular checks require an unlocked screen and a confirmed foreground subject
-  app. They exclude unregistered children, unsubscribed subjects and completed
-  goals. Initial and regular work is serialized and shares the configured interval.
-  A positive goal can still be refreshed manually after completion. Only an
-  incomplete to complete transition after a baseline requests an achievement alert.
-- An initial catalog or report failure waits for an explicit retry; an explicit
-  sign in can also start a new initial check. Pulling down on the signed in
-  dashboard refreshes today and explicitly retries eligible failed
-  watching checks for today. Failure state survives restart,
-  date or permission changes, and unregistering and registering the same child.
-  A later temporary report failure after a valid baseline may retry on a
-  subsequent eligible cycle. If Todo rejects the saved session, the screen and
-  monitor share one automatic sign in attempt. A successful attempt retries the
-  failed lookup once. If Todo rejects the sign in or the repeated lookup, sign
-  in manually to resume. A temporary connection or server error allows a later
-  automatic attempt after a cooldown.
-  Missing accessibility or notification permission pauses monitoring while
-  retaining registrations.
-- A successful account catalog removes registrations for children it no longer
-  contains. A failed catalog leaves registrations and saved learning data intact.
-- The shared check interval uses seconds; stored minute settings remain valid.
-  Completion alerts and their sound can be changed independently of the ongoing
-  status notification. Selecting a sound previews it briefly; opening the
-  settings does not play it. Android channel settings can affect sound and heads up.
-- Each registered child has a status notification with one compact summary and
-  the same heads up content. Incomplete subjects show count and goal; completed
-  subjects show a green check. Android controls notification expansion and
-  channel behavior. Manual report updates republish silently.
-- If automatic sign in fails, the status notifications replace progress with
-  the same sign in error shown on the screen. Signing out from the account
-  dialog stops monitoring and removes the notifications. Signing back into the
-  same account resumes its saved registrations and goals.
-
-## Boundaries and lifetime
-
-`:plugin-contract` defines `CurboxHost`, `HostObservation` and `CurboxPlugin`.
-This is an internal Kotlin contract in the accessibility service process, not
-the exported AIDL API described in [CURBOX_API.md](../../docs/CURBOX_API.md). It passes
-current observations, not accessibility events or nodes. Its StateFlow is not
-a cross process transport.
+`:plugin-contract` exposes the in-process host contract to bundled plugins. The
+learning monitor consumes current host observations and shares the service
+lifecycle. The contract passes observations without accessibility events or
+nodes. Its StateFlow stays in the service process. Use the [AIDL guide](../../docs/CURBOX_API.md)
+for external clients.
 
 The UI runs in the main process. `AppBlockerService` starts and cancels the
-monitor in `:app_blocker_service`; `PluginServiceHost` supplies observations.
-The host refreshes observations on a worker. Unknown foreground, screen off,
-lock or failed observation cannot establish a subject app for regular checks.
-The observation is current state, not an event history. Callback silence alone
-does not establish disconnection. The monitor assumes a single full screen
-app; split screen and multiple window focus selection are not supported.
+monitor in `:app_blocker_service`. `PluginServiceHost` refreshes foreground
+observations on a worker and publishes the current state. Callback silence alone
+does not establish disconnection.
 
 `:todo-plugin` owns the learning UI, API, monitor, notifications, permissions,
-composition and storage format. `:app` exposes generic, scoped host APIs for
-observations, storage and atomic time transactions. Service errors are contained and
-coroutine cancellation propagates; follow the service lifecycle and safety
-rules in [features.md](../../docs/architecture/features.md) and [AGENTS.md](../../AGENTS.md) when changing the wiring.
+composition and storage formats. `:app` supplies scoped observations, stores and
+atomic time transactions. Follow the [service safety rules](../../docs/architecture/features.md)
+when changing host wiring. Contain feature errors and propagate coroutine
+cancellation.
 
-## State and ownership
+## State ownership
 
-`LearningStorage` gets its scoped state and session stores from the plugin host.
-The host owns the multi process DataStores, so both processes observe
-the same persisted document rather than sharing an in memory object. Session
-data is encrypted with an Android Keystore key. After a successful manual sign
-in, the same encrypted store holds the password for automatic sign in. The
-session files are excluded from backup and device transfer. Signing out removes
-the saved credentials. If Todo rejects automatic sign in, the password stays
-on the device and automatic sign in stays disabled until a successful manual
-sign in. Fake and real compositions use separate state and session files and
-key aliases.
+`LearningStorage` gets state and session stores from the plugin host. Use the
+host's multi process DataStores for reads and writes from either process.
+Session stores use Android Keystore encryption. Fake and real compositions
+use separate stores and key aliases.
 
-Manual screen changes and monitor changes have different ownership. The store
-claims a revision for manual work and commits only while that revision and
-expected session remain valid. Monitor updates run atomically against the
-latest document. Monitor owner, registration, session, goal, date and permission
-checks fence stale work before it changes current state or publishes effects.
-Preserve these checks and the persisted initial failure latch when changing
-registration, retries or lifecycle recovery. Resetting a baseline does not
-itself clear historical reports or retry latches.
+Manual screen work claims a revision before performing asynchronous work.
+Monitor writes transform the latest document atomically. Keep their ownership
+checks when changing lifecycle or retry handling. Todo award state is stored
+through the host's plugin time API and accompanies the corresponding grant or
+rollover transaction.
 
 ## Where to change behavior
 
-- `todo-plugin/src/main/java/neth/iecal/todo/LearningScreen.kt` and
-  `LearningFragment.kt`: screen actions, manual state and presentation.
-- `HttpTodoApi.kt`, `TodoReportParser.kt` and `SubjectPackages.kt` in that
-  package: API adapter, report interpretation and subject app mapping.
-- `InitialMonitor.kt`, `LearningStore.kt` and `OrderedLearningPublisher.kt` in
-  that package: scheduling, persistent monitor state and ordered publication.
-- `todo-plugin/src/main/java/neth/iecal/curbox/learning/`: learning storage,
-  permission and notification adapters.
-- `app/src/main/java/neth/iecal/curbox/plugins/`: generic plugin runtime, scoped
-  stores and host observations. The service lifecycle is wired in
-  `services/AppBlockerService.kt`.
+Paths in the first four items are under `todo-plugin/src/main/java/`.
 
-Reuse the learning API and store contracts for screen and monitor changes.
-The host observation contract contains no Todo account or subject policy.
+- Screen and manual requests (`neth/iecal/todo/LearningFragment.kt`, `LearningScreen.kt`).
+- API, report parsing and subject apps (`neth/iecal/todo/HttpTodoApi.kt`, `TodoReportParser.kt`, `SubjectPackages.kt`).
+- Monitoring and publication (`neth/iecal/todo/InitialMonitor.kt`, `LearningStore.kt`, `OrderedLearningPublisher.kt`) and device adapters (`neth/iecal/curbox/learning/`).
+- Connections and awards (`neth/iecal/todo/TodoRuleSettings.kt`, `TodoAwardRepository.kt`, `TodoAwardState.kt`).
+- Host runtime and stores (`app/src/main/java/neth/iecal/curbox/plugins/`) and service lifecycle (`services/AppBlockerService.kt` in the app package).
 
 ## Build and verification
 

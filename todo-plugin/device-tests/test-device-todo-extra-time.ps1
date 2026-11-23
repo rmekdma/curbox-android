@@ -51,13 +51,17 @@ function Initialize-TodoSyntheticChild($State, [string]$ReportDate) {
     }
     throw 'Synthetic registration did not complete.'
 }
-function Connect-TodoSyntheticChild {
+function Connect-TodoSyntheticChild([bool]$RolloverEnabled = $true) {
     $ui = Start-TodoSyntheticLearning
     if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/intervalSettings"' 'Learning settings')) { throw 'Cannot open learning settings.' }
     $ui = Wait-For-UI 'id/todo_connection_button' 15
     if (-not (Tap-Node $ui 'resource-id="neth.iecal.curbox.debug:id/todo_connection_button"' 'Connect Todo')) { throw 'Cannot open Todo connection.' }
     $ui = Wait-For-UI 'TodoTestRule' 15
-    if (-not (Tap-Node $ui 'text="TodoTestRule"' 'Test rule')) { throw 'Test rule was not available.' }
+    [xml]$dialog = $ui
+    $automatic = $dialog.SelectSingleNode('//node[@class="android.widget.CheckBox"]')
+    $expected = $RolloverEnabled.ToString().ToLowerInvariant()
+    if (-not $automatic -or $automatic.enabled -ne $expected -or $automatic.checked -ne $expected) { throw 'Automatic settlement did not match the rule rollover setting.' }
+    if (-not (Tap-Node $ui 'resource-id="android:id/button1"' 'Confirm test rule')) { throw 'Cannot confirm test rule.' }
     $summary = 'text="(?:Connected|연결됨): Child1, TodoTestRule"'
     $ui = Wait-For-UI $summary 20
     if ($ui -notmatch $summary) { throw 'Learning settings did not show the saved child and rule.' }
@@ -362,6 +366,7 @@ try {
     $fakeBackup = Backup-FakeLearningFiles
     $ruleId = 'test-todo-extra-time'
     $snapshot = New-RolloverAppRuleConfig -TargetPackage $TargetPackage -RuleId $ruleId -AllowedMinutes 0
+    $snapshot.appRules[0].rolloverEnabled = $false
     $snapshot.appRules[0].name = 'TodoTestRule'
     $original | Add-Member -Force -NotePropertyName guardianAuthConfig -NotePropertyValue (New-GuardianPinAuthConfig -Pin '1234')
     $original | Add-Member -Force -NotePropertyName appRuleSnapshot -NotePropertyValue $snapshot
@@ -381,7 +386,7 @@ try {
     Initialize-TodoSyntheticChild $childState $reportDay
     $fixtureWritten = $true
     Set-LearningFixture $fixture
-    Connect-TodoSyntheticChild
+    Connect-TodoSyntheticChild $false
     Start-Sleep -Seconds 2
     $linked = Get-DeviceSettings -AsObject
     if ((Get-TodoAwardState $linked).connection.ruleId -ne $ruleId -or (Get-TodoAwardState $linked).connection.childName -ne 'Child1') { throw 'Synthetic connection was not saved.' }

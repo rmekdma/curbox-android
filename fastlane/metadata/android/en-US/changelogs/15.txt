@@ -1,0 +1,3 @@
+Show or hide your password when signing in or changing your Todo School account.
+Link Todo study time to rules with or without rollover.
+Choose whether to carry over Todo study time that has yet to be granted.

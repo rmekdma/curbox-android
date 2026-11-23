@@ -130,7 +130,8 @@ Consult these targeted guides when working in corresponding areas:
 | --- | --- |
 | Adding a blocker/tracker, adding app or browser mod support, or updating the database | [`docs/recipes.md`](docs/recipes.md) |
 | Navigating feature subsystems, service protection, or warning/approval screens | [`docs/architecture/features.md`](docs/architecture/features.md) |
-| Changing learning UI, monitoring, storage, or plugin composition | [`todo-plugin/docs/learning.md`](todo-plugin/docs/learning.md) |
+| Changing Todo sign-in, goals, monitoring, notifications, or extra time | [Todo plugin spec](docs/spec/todo-plugin.md) |
+| Changing Todo storage, host wiring, test fixtures, or build composition | [Todo plugin guide](todo-plugin/docs/learning.md) |
 | App rule evaluation, enforcement pipelines, or domain specifications | [`docs/architecture/app-rule-enforcement.md`](docs/architecture/app-rule-enforcement.md) and [`docs/spec/`](docs/spec/) |
 | Understanding system design choices, trade-offs, or historical rationale | [`docs/adr/`](docs/adr/) |
 | Working on multi-device sync, encryption, Supabase REST, Firebase/FCM, or cleanup | [`docs/sync.md`](docs/sync.md) |
