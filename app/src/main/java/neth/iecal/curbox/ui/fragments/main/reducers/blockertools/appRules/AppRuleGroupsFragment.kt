@@ -498,6 +498,10 @@ class AppRuleGroupsFragment : Fragment() {
             if (!usageAvailable || evaluation == null) {
                 append(getString(R.string.app_rules_current_usage_unavailable))
             } else {
+                append(getString(R.string.app_rules_used_summary, evaluation.usedMillis.toMinutesForDisplay()))
+                append("\n")
+                append(getString(R.string.app_rules_skipped_usage_summary, evaluation.skippedUsageMillis.toMinutesForDisplay()))
+                append("\n")
                 if (evaluation.conditionEnabled) {
                     append(
                         getString(
