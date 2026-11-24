@@ -2,6 +2,7 @@ package neth.iecal.curbox.domain.apprules
 
 import neth.iecal.curbox.data.models.AppRule
 import neth.iecal.curbox.data.models.AppRuleAppGroup
+import neth.iecal.curbox.data.models.AppRuleGuardianSkip
 import neth.iecal.curbox.data.models.AppRuleGuardianGrant
 import neth.iecal.curbox.data.models.AppRuleOverrideState
 import neth.iecal.curbox.data.models.AppRuleSnapshot
@@ -21,6 +22,86 @@ class AppRuleEvaluatorTest {
     private val now = Instant.parse("2026-08-17T10:30:00Z").toEpochMilli()
     private val group = AppRuleAppGroup.create("Study", listOf("com.example.reader"))
 
+    @Test
+    fun expiredSkipReportsExcludedUsageAlongsideChargedUsage() {
+        val rule = rule(allowedMinutes = 120)
+        val result = AppRuleEvaluator.evaluateRule(
+            rule = rule,
+            targetPackages = setOf("com.example.reader"),
+            useDayId = "2026-08-17",
+            sessions = listOf(session("com.example.reader", 75 * 60_000L)),
+            nowMs = now,
+            zone = zone,
+            overrides = AppRuleOverrideState(
+                useDayId = "2026-08-17",
+                skips = listOf(AppRuleGuardianSkip(rule.id, "2026-08-17", now - 15 * 60_000L, now - 30 * 60_000L))
+            )
+        )
+        assertEquals(60 * 60_000L, result.usedMillis)
+        assertEquals(15 * 60_000L, result.skippedUsageMillis)
+    }
+    @Test
+    fun overlappingSkipsCountOnceAndIgnoreOtherRulesAndOutOfScopeUsage() {
+        val rule = rule(allowedMinutes = 120)
+        val day = "2026-08-17"
+        val result = AppRuleEvaluator.evaluateRule(
+            rule = rule,
+            targetPackages = setOf("com.example.reader"),
+            useDayId = day,
+            sessions = listOf(
+                session("com.example.reader", 75 * 60_000L),
+                session("com.example.other", 75 * 60_000L)
+            ),
+            nowMs = now,
+            zone = zone,
+            overrides = AppRuleOverrideState(day, skips = listOf(
+                AppRuleGuardianSkip(rule.id, day, now - 15 * 60_000L, now - 30 * 60_000L),
+                AppRuleGuardianSkip(rule.id, day, now - 20 * 60_000L, now - 35 * 60_000L),
+                AppRuleGuardianSkip("other", day, now, now - 60 * 60_000L)
+            ))
+        )
+        assertEquals(55 * 60_000L, result.usedMillis)
+        assertEquals(20 * 60_000L, result.skippedUsageMillis)
+    }
+
+    @Test
+    fun inactiveRuleStillReportsCurrentDayUsageWithinItsWindow() {
+        val rule = rule(endMinute = 10 * 60, allowedMinutes = 120)
+        val day = "2026-08-17"
+        val result = AppRuleEvaluator.evaluateRule(
+            rule = rule,
+            targetPackages = setOf("com.example.reader"),
+            useDayId = day,
+            sessions = listOf(session("com.example.reader", 75 * 60_000L)),
+            nowMs = now,
+            zone = zone,
+            overrides = AppRuleOverrideState(day, skips = listOf(
+                AppRuleGuardianSkip(rule.id, day, now - 15 * 60_000L, now - 45 * 60_000L)
+            ))
+        )
+        assertFalse(result.isActive)
+        assertTrue(result.isAllowed)
+        assertEquals(30 * 60_000L, result.usedMillis)
+        assertEquals(15 * 60_000L, result.skippedUsageMillis)
+    }
+
+    @Test
+    fun previousUseDaySkipDoesNotExcludeCurrentDayUsage() {
+        val rule = rule(allowedMinutes = 120)
+        val result = AppRuleEvaluator.evaluateRule(
+            rule = rule,
+            targetPackages = setOf("com.example.reader"),
+            useDayId = "2026-08-17",
+            sessions = listOf(session("com.example.reader", 75 * 60_000L)),
+            nowMs = now,
+            zone = zone,
+            overrides = AppRuleOverrideState("2026-08-16", skips = listOf(
+                AppRuleGuardianSkip(rule.id, "2026-08-16", now, now - 75 * 60_000L)
+            ))
+        )
+        assertEquals(75 * 60_000L, result.usedMillis)
+        assertEquals(0L, result.skippedUsageMillis)
+    }
     @Test
     fun zeroAllowanceDeniesImmediatelyDuringActiveInterval() {
         val rule = rule(allowedMinutes = 0)
