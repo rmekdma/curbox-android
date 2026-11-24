@@ -4,6 +4,35 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TodoRequestDiagnosticsTest {
+    @Test fun `window log distinguishes no request success and failure without private data`() {
+        val dir = java.nio.file.Files.createTempDirectory("todo-diagnostics").toFile()
+        try {
+            val window = neth.iecal.plugin.TodoDiagnosticsFile(dir)
+            window.activate(1000, 5000)
+            assertEquals("window start=1970-01-01T00:00:01Z end=1970-01-01T00:00:05Z\n", window.read())
+            var nextId = 0
+            val diagnostics = TodoRequestDiagnostics(window::append, { 2000 }, { "request${++nextId}" }, { window.enabled(2000) })
+            val api = DiagnosticTodoApi(object : TodoApi {
+                override fun signIn(email: String, password: String) = error("unused")
+                override fun catalog(session: TodoSession) = emptyList<TodoChild>()
+                override fun report(session: TodoSession, subject: Subject, userId: String, date: String): DailyReport {
+                    if (subject == Subject.ENGLISH) throw TodoApiException(kind = LearningFailure.NETWORK)
+                    return DailyReport(2)
+                }
+            }, diagnostics, "automatic")
+            val session = TodoSession("private-account", "secret-token", "secret-email", "secret-password")
+            api.report(session, Subject.MATH, "private-child", "20261125")
+            assertThrows(TodoApiException::class.java) { api.report(session, Subject.ENGLISH, "private-child", "20261125") }
+            assertEquals(
+                "window start=1970-01-01T00:00:01Z end=1970-01-01T00:00:05Z\n" +
+                    "1970-01-01T00:00:02Z automatic request1 start MATH\n" +
+                    "1970-01-01T00:00:02Z automatic request1 success MATH\n" +
+                    "1970-01-01T00:00:02Z automatic request2 start ENGLISH\n" +
+                    "1970-01-01T00:00:02Z automatic request2 failure NETWORK ENGLISH\n",
+                window.read()
+            )
+        } finally { dir.deleteRecursively() }
+    }
     @Test fun `logging failure is reported without changing request outcome`() {
         val failures = mutableListOf<Throwable>()
         val diagnostics = TodoRequestDiagnostics({ throw java.io.IOException("disk") }, { 123L }, { "request" }, { true }, { failures.add(it) })
