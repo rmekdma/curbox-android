@@ -68,7 +68,7 @@ try {
     $record = $null
     while ($wait.Elapsed.TotalSeconds -lt 40) {
         $items = @(Get-LearningNotifications)
-        if ($items.Count -eq 1 -and $items[0].Text -match '(?m)^                android\.title=String \(Child1\)' -and $items[0].Text -match '(?m)^                android\.text=(?:String|SpannableString|SpannedString|SpannableStringBuilder) \(\uc218\ud559 2/5\)' -and $items[0].Text -match '(?m)^    NotificationRecord\([^\r\n]*sound=null[^\r\n]*groupKey=silent') { $record = $items[0]; break }
+        if ($items.Count -eq 1 -and (Test-SilentLearningBaseline $items[0].Text)) { $record = $items[0]; break }
         Start-Sleep -Seconds 2
     }
     if (-not $record) { throw "Silent 2 of 5 baseline notification was not observed." }

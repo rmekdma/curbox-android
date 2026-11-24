@@ -141,6 +141,21 @@ Describe "Learning Device Test Helpers" {
     }
 
     Context "Learning notifications" {
+        It "recognizes Android 16 silent baseline output" {
+            $record = "    NotificationRecord(x: sound=null defaults=0 flags=ONGOING_EVENT|SILENT color=0x00000000 vis=PRIVATE))`n                android.title=String (Child1)`n                android.text=String (수학 2/5)"
+            (Test-SilentLearningBaseline $record) | Should Be $true
+        }
+        It "recognizes the legacy silent group baseline" {
+            $record = "    NotificationRecord(x: sound=null defaults=0x0 flags=0x2 color=0x00000000 groupKey=silent vis=PRIVATE))`n                android.title=String (Child1)`n                android.text=String (수학 2/5)"
+            (Test-SilentLearningBaseline $record) | Should Be $true
+            (Test-SilentLearningBaseline $record.Replace('sound=null', 'sound=content://sound')) | Should Be $false
+        }
+        It "rejects sound, another child, another progress, and missing silent markers" {
+            $record = "    NotificationRecord(x: sound=null defaults=0 flags=ONGOING_EVENT|SILENT color=0x00000000 vis=PRIVATE))`n                android.title=String (Child1)`n                android.text=String (수학 2/5)"
+            foreach ($other in @($record.Replace('sound=null', 'sound=content://sound'), $record.Replace('Child1', 'Child2'), $record.Replace('2/5', '3/5'), $record.Replace('|SILENT', ''), $record.Replace('|SILENT', '|NOT_SILENT'))) {
+                (Test-SilentLearningBaseline $other) | Should Be $false
+            }
+        }
         It "returns only active child notification records" {
             $dump = "  Notification List:`n    NotificationRecord(x: pkg=neth.iecal.curbox.debug user=UserHandle{0} id=1279611218 tag=learning:abc importance=2`n title=Child1 Items: 2`n  mArchive=Child1 completed Math Items: 5`n"
             $script:DeviceTestShellOutputHandler = { param($command) $dump }
