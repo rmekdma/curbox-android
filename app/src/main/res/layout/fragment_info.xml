@@ -460,6 +460,13 @@
                     android:layout_height="56dp"
                     app:cornerRadius="16dp"
                     android:text="@string/view_crash_logs"/>
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_todo_diagnostics"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/todo_diagnostics_start"/>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

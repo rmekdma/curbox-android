@@ -30,7 +30,11 @@ class TodoPluginFactory : PluginFactory {
         val app = context.applicationContext
         val storage = LearningStorage(host, BuildConfig.LEARNING_FAKE_ONLY)
         val api = LearningComposition.createApi(app)
-        val award = TodoAwardRepository(host.time, storage, api, app.getString(R.string.todo_award_source_label), host::logFailure)
+        val log = TodoDiagnosticsFile(app.filesDir)
+        val diagnostics = TodoRequestDiagnostics(log::append, enabled = { log.enabled(System.currentTimeMillis()) }, onFailure = host::logFailure)
+        val automaticApi = DiagnosticTodoApi(api, diagnostics, "automatic")
+        val settlementApi = DiagnosticTodoApi(api, diagnostics, "settlement")
+        val award = TodoAwardRepository(host.time, storage, api, app.getString(R.string.todo_award_source_label), host::logFailure, settlementApi)
         return object : HostPlugin {
             override val destination = PluginDestination(app.getString(R.string.learning_title), "learning", R.drawable.learning_chart) { LearningFragment() }
             override val timeProvider = award
@@ -38,7 +42,7 @@ class TodoPluginFactory : PluginFactory {
                 val permission = LearningPermission(app, this, host::logFailure)
                 try {
                     permission.start()
-                    val monitor = InitialMonitor(api, storage, permission.state, permission::isGranted,
+                    val monitor = InitialMonitor(automaticApi, storage, permission.state, permission::isGranted,
                         { document, expected ->
                             try { LearningNotifications.publish(app, storage, document, permission.state, expected) }
                             catch (e: CancellationException) { throw e }

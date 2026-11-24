@@ -1872,4 +1872,6 @@
     <string name="unit_minutes">Minutes</string>
     <string name="unit_hours">Hours</string>
     <string name="unit_days">Days</string>
+    <string name="todo_diagnostics_start">Record Todo diagnostics for 15 minutes</string>
+    <string name="todo_diagnostics_started">Todo diagnostics are on for 15 minutes. Reproduce the problem, then open the logs.</string>
 </resources>
