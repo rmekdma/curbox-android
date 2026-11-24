@@ -195,7 +195,7 @@ function Get-ActivityTaskStateFromDump([string]$Dump, [string]$PackageName, [str
     $heading = '(?m)^[ \t]*(?:\*[ \t]*)?Hist[ \t]+#\d+:[ \t]*'
     $records = [regex]::Split($Dump, $heading)
     foreach ($record in ($records | Select-Object -Skip 1)) {
-        $match = [regex]::Match($record, "\AActivityRecord\{[^\r\n]*$component\b[^\r\n]*\bt(?<task>\d+)\}")
+        $match = [regex]::Match($record, "\AActivityRecord\{[^\r\n]*$component\b[^\r\n]*\bt(?<task>\d+)(?:,[^{}]*)?\}")
         if (-not $match.Success) { continue }
         $record = [regex]::Split($record, '(?m)^[ \t]*\*[ \t]*Task\{')[0]
         $state = [regex]::Match($record, '(?m)\bstate=(?<state>[A-Z_]+)\b')

@@ -58,10 +58,27 @@ ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)
             $permission.TaskId | Should Be '3567'
             $permission.State | Should Be 'RESUMED'
         }
+        It "reads Android 16 activity records with wrapped extra fields" {
+            $dump = @'
+  * Task{abc #3567}
+    * Hist  #1: ActivityRecord{111 u0 neth.iecal.curbox.debug/neth.iecal.curbox.api.ApiPermissionActivity t3567, isEmbedded=true}
+      state=RESUMED stopped=false
+    * Hist  #0: ActivityRecord{222 u0 neth.iecal.curbox.debug/neth.iecal.curbox.ui.activity.GuardianApprovalActivity t3567,
+ isEmbedded=false}
+      state=PAUSED stopped=false
+'@
+            $guardian = Get-ActivityTaskStateFromDump $dump 'neth.iecal.curbox.debug' 'neth.iecal.curbox.ui.activity.GuardianApprovalActivity'
+            $permission = Get-ActivityTaskStateFromDump $dump 'neth.iecal.curbox.debug' 'neth.iecal.curbox.api.ApiPermissionActivity'
+            $guardian.TaskId | Should Be '3567'
+            $guardian.State | Should Be 'PAUSED'
+            $permission.TaskId | Should Be '3567'
+            $permission.State | Should Be 'RESUMED'
+        }
         It "rejects absent, truncated, and unheaded activity records" {
             $name = 'neth.iecal.curbox.ui.activity.GuardianApprovalActivity'
             $package = 'neth.iecal.curbox.debug'
             $truncated = "* Hist  #0: ActivityRecord{222 u0 $package/.ui.activity.GuardianApprovalActivity t3567}`n* Task{other #2}`n state=RESUMED"
+            (Get-ActivityTaskStateFromDump ($truncated.Replace('t3567}', 't3567,')) $package $name) | Should BeNullOrEmpty
             (Get-ActivityTaskStateFromDump $truncated $package $name) | Should BeNullOrEmpty
             (Get-ActivityTaskStateFromDump 'state=RESUMED' $package $name) | Should BeNullOrEmpty
             (Get-ActivityTaskStateFromDump "ActivityRecord{222 u0 $package/.ui.activity.GuardianApprovalActivity t3567}`nstate=RESUMED" $package $name) | Should BeNullOrEmpty
