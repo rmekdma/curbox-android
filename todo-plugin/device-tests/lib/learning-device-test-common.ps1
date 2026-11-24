@@ -64,6 +64,14 @@ function Get-LearningRegistrationNames {
 }
 function Get-LearningRegistrationCount { return @(Get-LearningRegistrationNames).Count }
 
+function Test-SilentLearningBaseline([string]$Record) {
+    return ($Record -match '(?m)^    NotificationRecord\([^\r\n]*\bsound=null(?:\s|\))' -and
+        ($Record -match '(?m)^    NotificationRecord\([^\r\n]*\bflags=(?:[^\s|]+\|)*SILENT(?:\||\s)' -or
+         $Record -match '(?m)^    NotificationRecord\([^\r\n]*\bgroupKey=silent(?:\s|\))') -and
+        $Record -match '(?m)^\s+android\.title=String \(Child1\)\s*$' -and
+        $Record -match '(?m)^\s+android\.text=(?:String|SpannableString|SpannedString|SpannableStringBuilder) \(\uc218\ud559 2/5\)\s*$')
+}
+
 function Get-LearningNotifications {
     $dump = Get-TestDeviceShellOutput -Command "dumpsys notification --noredact"
     if ($dump -notmatch '(?ms)^  Notification List:\s*\r?\n(.*?)(?=^  \S|\z)') { throw "Unsupported notification dump format." }
