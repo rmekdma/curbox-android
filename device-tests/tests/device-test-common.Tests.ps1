@@ -837,6 +837,31 @@ u0_a1351      6271   964 0 11:03 ?        00:00:54 neth.iecal.curbox.debug
             (Test-AccessibilityServiceBound -ActivityServicesOutput ($dump -replace '1676:system/1000', '2222:other/1000')) | Should Be $false
         }
 
+        It "recognizes the Android 16 service record with an extra field" {
+            $dump = @"
+  * ServiceRecord{875d498 u0 neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService c:android}
+    app=ProcessRecord{22706b3 13762:neth.iecal.curbox.debug:app_blocker_service/u0a252}
+    requested=true received=true hasBound=true doRebind=false
+    * Client AppBindRecord{fd284f9 ProcessRecord{8bada83 1130:system/1000}}
+      ConnectionRecord{ef40e7b u0 CR FGSA CAPS neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService:@cef460a flags=0x2101001}
+"@
+            (Test-AccessibilityServiceBound -ActivityServicesOutput $dump) | Should Be $true
+        }
+        It "rejects binding evidence from a different service record" {
+            $dump = @"
+  * ServiceRecord{debug u0 neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService c:android}
+    app=ProcessRecord{abc 123:neth.iecal.curbox.debug:app_blocker_service/u0a252}
+    requested=true received=true hasBound=false doRebind=false
+    * Client AppBindRecord{abc ProcessRecord{def 1130:system/1000}}
+      ConnectionRecord{abc u0 CR neth.iecal.curbox.debug/neth.iecal.curbox.services.AppBlockerService:@abc}
+  * ServiceRecord{release u0 neth.iecal.curbox/neth.iecal.curbox.services.AppBlockerService c:android}
+    app=ProcessRecord{abc 124:neth.iecal.curbox:app_blocker_service/u0a253}
+    requested=true received=true hasBound=true doRebind=false
+    * Client AppBindRecord{abc ProcessRecord{def 1130:system/1000}}
+      ConnectionRecord{abc u0 CR neth.iecal.curbox/neth.iecal.curbox.services.AppBlockerService:@abc}
+"@
+            (Test-AccessibilityServiceBound -ActivityServicesOutput $dump) | Should Be $false
+        }
         It "rejects a label alone and an empty service dump" {
             (Test-AccessibilityServiceBound -ActivityServicesOutput 'Bound services:{Service[label=Curbox App Blocker]}') | Should Be $false
             (Test-AccessibilityServiceBound -ActivityServicesOutput '') | Should Be $false
