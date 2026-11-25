@@ -195,7 +195,7 @@ function Get-ActivityTaskStateFromDump([string]$Dump, [string]$PackageName, [str
     $heading = '(?m)^[ \t]*(?:\*[ \t]*)?Hist[ \t]+#\d+:[ \t]*'
     $records = [regex]::Split($Dump, $heading)
     foreach ($record in ($records | Select-Object -Skip 1)) {
-        $match = [regex]::Match($record, "\AActivityRecord\{[^\r\n]*$component\b[^\r\n]*\bt(?<task>\d+)\}")
+        $match = [regex]::Match($record, "\AActivityRecord\{[^\r\n]*$component\b[^\r\n]*\bt(?<task>\d+)(?:,[^{}]*)?\}")
         if (-not $match.Success) { continue }
         $record = [regex]::Split($record, '(?m)^[ \t]*\*[ \t]*Task\{')[0]
         $state = [regex]::Match($record, '(?m)\bstate=(?<state>[A-Z_]+)\b')
@@ -1168,11 +1168,18 @@ function Test-AccessibilityServiceBound(
     $escapedComponent = [regex]::Escape($component)
     $escapedProcess = [regex]::Escape("${PackageName}:app_blocker_service")
     # Accessibility's bound list identifies services by label, which both builds share.
-    return ($ActivityServicesOutput -match "ServiceRecord\{[^}]*\s$escapedComponent\}" -and
-        $ActivityServicesOutput -match "app=ProcessRecord\{[^}]*\s\d+:$escapedProcess/" -and
-        $ActivityServicesOutput -match 'requested=true\s+received=true\s+hasBound=true' -and
-        $ActivityServicesOutput -match 'Client AppBindRecord\{[^\r\n]*\d+:system/\d+' -and
-        $ActivityServicesOutput -match "ConnectionRecord\{[^}]*\s$escapedComponent(?:[:}\s])")
+    $records = $ActivityServicesOutput -split '(?m)^\s*\* ServiceRecord\{'
+    foreach ($record in $records) {
+        $record = ($record -split '(?m)^\s*Connection bindings to services:', 2)[0]
+        if ($record -match "^[^}]*\s$escapedComponent(?:\s[^}]*)?\}" -and
+            $record -match "app=ProcessRecord\{[^}]*\s\d+:$escapedProcess/" -and
+            $record -match 'requested=true\s+received=true\s+hasBound=true' -and
+            $record -match 'Client AppBindRecord\{[^\r\n]*\d+:system/\d+' -and
+            $record -match "ConnectionRecord\{[^}]*\s$escapedComponent(?:[:}\s])") {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Stop-ServiceProcess([int]$TargetPid, [string]$ProcessName = "neth.iecal.curbox.debug:app_blocker_service", [switch]$AllowCrashFallback) {

@@ -15,7 +15,9 @@ data class TodoSession(val accountId: String, val token: String, val email: Stri
 enum class LearningFailure { NETWORK, SERVER, INVALID_DATA, STORAGE, AUTHENTICATION }
 class TodoApiException(
     val authenticationRequired: Boolean = false,
-    val kind: LearningFailure = if (authenticationRequired) LearningFailure.AUTHENTICATION else LearningFailure.SERVER
+    val kind: LearningFailure = if (authenticationRequired) LearningFailure.AUTHENTICATION else LearningFailure.SERVER,
+    val httpStatus: Int? = null,
+    val resultRejected: Boolean = false
 ) : Exception()
 
 data class TodoChild(val name: String, val userIds: Map<Subject, String>)
@@ -68,11 +70,11 @@ class HttpTodoApi(private val baseUrl: String) : TodoApi {
             .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
         return try {
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw TodoApiException(response.code == 401 || response.code == 403)
+                if (!response.isSuccessful) throw TodoApiException(response.code == 401 || response.code == 403, httpStatus = response.code)
                 val envelope = JsonParser.parseString(response.body?.string()).asJsonObject
                 val result = envelope.get("result")
                 if (result == null || !result.isJsonPrimitive || !result.asJsonPrimitive.isBoolean) throw TodoApiException(kind = LearningFailure.INVALID_DATA)
-                if (!result.asBoolean) throw TodoApiException()
+                if (!result.asBoolean) throw TodoApiException(resultRejected = true)
                 envelope.get("data")?.takeUnless { it.isJsonNull } ?: throw TodoApiException(kind = LearningFailure.INVALID_DATA)
             }
         } catch (e: TodoApiException) { throw e } catch (e: java.io.IOException) { throw TodoApiException(kind = LearningFailure.NETWORK) } catch (e: Exception) { throw TodoApiException(kind = LearningFailure.INVALID_DATA) }
@@ -98,7 +100,7 @@ class HttpTodoApi(private val baseUrl: String) : TodoApi {
             val call = client.newCall(request)
             call.timeout().timeout(30, TimeUnit.SECONDS)
             call.execute().use { response ->
-                if (!response.isSuccessful) throw TodoApiException(response.code == 401 || response.code == 403)
+                if (!response.isSuccessful) throw TodoApiException(response.code == 401 || response.code == 403, httpStatus = response.code)
                 val envelope = JsonParser.parseString(response.body?.string()).asJsonObject
                 val result = envelope.get("result")
                 if (result == null || !result.isJsonPrimitive || !result.asJsonPrimitive.isBoolean) throw TodoApiException(kind = LearningFailure.INVALID_DATA)
@@ -117,8 +119,3 @@ class HttpTodoApi(private val baseUrl: String) : TodoApi {
         } catch (e: TodoApiException) { throw e } catch (e: java.io.IOException) { throw TodoApiException(kind = LearningFailure.NETWORK) } catch (e: Exception) { throw TodoApiException(kind = LearningFailure.INVALID_DATA) }
     }
 }
-
-
-
-
-

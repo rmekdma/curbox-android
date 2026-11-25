@@ -34,7 +34,8 @@ data class AppRuleEvaluation(
     val isSkipped: Boolean = false,
     val conditionProgresses: List<AppRuleConditionProgress> = emptyList(),
     val isAllowanceExhausted: Boolean = false,
-    val earnedAllowanceEnabled: Boolean = false
+    val earnedAllowanceEnabled: Boolean = false,
+    val skippedUsageMillis: Long = 0L
 ) {
     val effectiveAllowanceMillis: Long
         get() = if (isConditionMet) allowanceMillis else AppRuleEvaluator.safeAdd(directAllowanceMillis, guardianAllowanceMillis)
@@ -334,31 +335,6 @@ object AppRuleEvaluator {
         val guardianAllowanceMillis = grants.fold(0L) { total, grant ->
             safeAdd(total, grant.grantedMillis)
         }
-        if (activeWindow == null) {
-            return AppRuleEvaluation(
-                ruleId = rule.id,
-                isApplicable = true,
-                isActive = false,
-                usedMillis = 0L,
-                allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
-                remainingMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
-                isAllowed = !hasMissingContributor,
-                validationErrors = validationErrors,
-                contributorUsageMillis = contributorUsageMillis,
-                conditionRequiredMillis = conditionRequiredMillis,
-                conditionEnabled = rule.usageConditionEnabled,
-                isConditionMet = isConditionMet,
-                directAllowanceMillis = directAllowanceMillis,
-                earnedAllowanceMillis = earnedAllowanceMillis,
-                guardianAllowanceMillis = guardianAllowanceMillis,
-                guardianRemainingMillis = guardianAllowanceMillis,
-                isSkipped = isSkipped,
-                conditionProgresses = conditionProgresses,
-                isAllowanceExhausted = false,
-                earnedAllowanceEnabled = rule.earnedAllowanceEnabled
-            )
-        }
-
         val usageWindows = AppRuleSchedule.usageWindowsForUseDay(
             rule,
             useDayId,
@@ -405,6 +381,33 @@ object AppRuleEvaluator {
             grants = grants
         )
         val usedMillis = effectiveUsageIntervals.sumOf { it.end - it.start }
+        val skippedUsageMillis = usageIntervals.sumOf { it.end - it.start } - usedMillis
+        if (activeWindow == null) {
+            return AppRuleEvaluation(
+                ruleId = rule.id,
+                isApplicable = true,
+                isActive = false,
+                usedMillis = usedMillis,
+                skippedUsageMillis = skippedUsageMillis,
+                allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
+                remainingMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
+                isAllowed = !hasMissingContributor,
+                validationErrors = validationErrors,
+                contributorUsageMillis = contributorUsageMillis,
+                conditionRequiredMillis = conditionRequiredMillis,
+                conditionEnabled = rule.usageConditionEnabled,
+                isConditionMet = isConditionMet,
+                directAllowanceMillis = directAllowanceMillis,
+                earnedAllowanceMillis = earnedAllowanceMillis,
+                guardianAllowanceMillis = guardianAllowanceMillis,
+                guardianRemainingMillis = guardianAllowanceMillis,
+                isSkipped = isSkipped,
+                conditionProgresses = conditionProgresses,
+                isAllowanceExhausted = false,
+                earnedAllowanceEnabled = rule.earnedAllowanceEnabled
+            )
+        }
+
         val remainingMillis = safeAdd(allocation.baseRemainingMillis, allocation.guardianRemainingMillis)
         val potentialAllowanceMillis = if (hasMissingContributor) {
             0L
@@ -417,6 +420,7 @@ object AppRuleEvaluator {
             isApplicable = true,
             isActive = true,
             usedMillis = usedMillis,
+            skippedUsageMillis = skippedUsageMillis,
             allowanceMillis = safeAdd(allowanceMillis, guardianAllowanceMillis),
             remainingMillis = remainingMillis,
             isAllowed = !hasMissingContributor && (isSkipped || remainingMillis > 0L),

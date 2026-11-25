@@ -1514,6 +1514,8 @@
     <string name="app_rules_earning_summary">Earned allowance: %1$s</string>
     <string name="app_rules_earned_actual_summary">Earned now: %1$d minutes</string>
     <string name="app_rules_direct_summary">Direct allowance: %1$d minutes</string>
+    <string name="app_rules_used_summary">Time used: %1$d minutes</string>
+    <string name="app_rules_skipped_usage_summary">Time excluded while skipped: %1$d minutes</string>
     <string name="app_rules_remaining_summary">Final remaining: %1$d minutes</string>
     <string name="app_rules_guardian_time_summary">Guardian time remaining: %1$d minutes</string>
     <string name="app_rules_guardian_skipped">Guardian skip is active</string>
@@ -1872,4 +1874,6 @@
     <string name="unit_minutes">Minutes</string>
     <string name="unit_hours">Hours</string>
     <string name="unit_days">Days</string>
+    <string name="todo_diagnostics_start">Record Todo activity for 15 minutes</string>
+    <string name="todo_diagnostics_started">Todo activity is being recorded for 15 minutes. Try again, then open the logs.</string>
 </resources>

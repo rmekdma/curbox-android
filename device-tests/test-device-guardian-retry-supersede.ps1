@@ -11,11 +11,15 @@ param(
     [string]$TargetPackage = "com.woodenpharm.choseonggacha",
     [string]$TargetActivity = "",
     [string]$DeviceId = "",
-    [switch]$GateCleanupOnly
+    [switch]$GateCleanupOnly,
+    [string]$EvidencePath = "",
+    [switch]$HomeOnly,
+    [switch]$ForegroundOnly
 )
 
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/lib/device-test-common.ps1"
+. "$PSScriptRoot/lib/guardian-diagnostics.ps1"
 
 if ($DeviceId) { $env:ANDROID_SERIAL = $DeviceId }
 Assert-AdbDevice
@@ -29,11 +33,41 @@ $accessibilityBackup = Backup-DeviceAccessibilitySettings
 $activeGateId = ""
 $writeFailureArmed = $false
 $restoreVerified = $true
+$restorationChecked = $false
 $originalSettings = $null
 $originalOverlayMode = ""
 $originalAccelerometerRotation = ""
 $originalUserRotation = ""
 $displayRotationChanged = $false
+$diagnosticGateId = ""
+$diagnosticLastStage = "setup"
+
+function Save-GuardianObservation([string]$Stage, [string]$Outcome) {
+    if (-not $EvidencePath -or -not $script:diagnosticGateId) { return }
+    try {
+        $dump = Get-TestDeviceShellOutput -Command "dumpsys activity activities"
+        $guardian = Get-ActivityTaskStateFromDump -Dump $dump -PackageName $packageName -ActivityName "neth.iecal.curbox.ui.activity.GuardianApprovalActivity"
+        $permission = Get-ActivityTaskStateFromDump -Dump $dump -PackageName $packageName -ActivityName "neth.iecal.curbox.api.ApiPermissionActivity"
+        $focus = Assert-WindowFocus -ExpectedActivity "GuardianApprovalActivity" -PassThru
+        $accessibility = Get-TestDeviceShellOutput -Command "dumpsys accessibility"
+        $observation = [ordered]@{
+            observed_utc = [DateTime]::UtcNow.ToString("o")
+            gate = $script:diagnosticGateId
+            stage = $Stage
+            outcome = $Outcome
+            service_bound = [bool](Test-AccessibilityServiceBound -DumpsysOutput $accessibility)
+            guardian_focused = [bool]$focus.Success
+            guardian_task = if ($guardian) { $guardian.TaskId } else { $null }
+            guardian_state = if ($guardian) { $guardian.State } else { $null }
+            permission_task = if ($permission) { $permission.TaskId } else { $null }
+            permission_state = if ($permission) { $permission.State } else { $null }
+            events = @(ConvertTo-GuardianDiagnosticEvents -Log (Get-GuardianApprovalLogs) -GateId $script:diagnosticGateId)
+        }
+        Add-Content -LiteralPath $EvidencePath -Value (ConvertTo-Json -InputObject $observation -Depth 5 -Compress) -Encoding UTF8
+    } catch {
+        Write-Warning "Could not capture a guardian diagnostic observation."
+    }
+}
 
 function Get-GuardianApprovalLogs {
     return Get-TestDeviceShellOutput -Command "logcat -d -s GuardianApprovalE2E:I"
@@ -42,13 +76,19 @@ function Get-GuardianApprovalLogs {
 function Wait-ForGuardianLog([string]$Pattern, [string]$Label, [int]$TimeoutSeconds = 25) {
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $lastLogs = ""
+    $script:diagnosticLastStage = $Label
+    Save-GuardianObservation -Stage $Label -Outcome "waiting"
     while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         $lastLogs = Get-GuardianApprovalLogs
         $match = [regex]::Match($lastLogs, "(?m)^.*$Pattern.*$")
-        if ($match.Success) { return $match.Value }
+        if ($match.Success) {
+            Save-GuardianObservation -Stage $Label -Outcome "observed"
+            return $match.Value
+        }
         Start-Sleep -Milliseconds 300
     }
-    throw "Timed out waiting for $Label. Recent GuardianApprovalE2E logs:`n$lastLogs"
+    Save-GuardianObservation -Stage $Label -Outcome "timeout"
+    throw "Timed out waiting for $Label."
 }
 
 function Wait-ForAccessibilityBoundState([bool]$Expected, [string]$Label, [int]$TimeoutSeconds = 20) {
@@ -188,6 +228,7 @@ function Wait-ForPausedGuardianInTask([string]$TaskId) {
             $permission.State -eq 'RESUMED') { return }
         Start-Sleep -Milliseconds 300
     }
+    Save-GuardianObservation -Stage "paused guardian and resumed permission in same task" -Outcome "timeout"
     throw "Expected paused guardian and resumed permission Activity in task $TaskId. Guardian: $($guardian | Out-String) Permission: $($permission | Out-String)"
 }
 
@@ -428,6 +469,10 @@ function Invoke-AmbiguousConfirmationCase(
     [bool]$HomeReplaceReconnectDuringCheck = $false
 ) {
     $gateId = "$runId-$CaseName"
+    if ($HomeReplaceReconnectDuringCheck) {
+        $script:diagnosticGateId = $gateId
+        Save-GuardianObservation -Stage "start approval" -Outcome "started"
+    }
     Start-GuardianApproval -ExpectedRuleName $RuleName
     & $SubmitOperation $gateId
 
@@ -645,6 +690,7 @@ function Invoke-AmbiguousConfirmationCase(
             throw "$CaseName recovered the old cancelled screen after reconnect."
         }
         Clear-WriteFailure
+        Save-GuardianObservation -Stage "home replacement reconnect" -Outcome "passed"
         Write-Success "$CaseName cancelled at Home, kept the replacement request through reconnect, ignored the old same-package CLOSED and ALLOWED messages, and wrote only once."
         return
     }
@@ -776,6 +822,8 @@ function Invoke-ForegroundOwnershipRegressionCase(
     [string]$RuleName
 ) {
     $gateId = "$runId-foreground-ownership"
+    $script:diagnosticGateId = $gateId
+    Save-GuardianObservation -Stage "foreground approval" -Outcome "started"
     $gateConsumed = $false
     $guardianActivity = $null
     $requesterPackage = "curbox.guardian.foreground.$runId"
@@ -808,6 +856,8 @@ function Invoke-ForegroundOwnershipRegressionCase(
 
         $guardianActivity = Get-ActivityTaskState "neth.iecal.curbox.ui.activity.GuardianApprovalActivity"
         if (-not $guardianActivity -or -not $guardianActivity.TaskId -or $guardianActivity.State -ne 'RESUMED') {
+            $script:diagnosticLastStage = "resumed guardian task"
+            Save-GuardianObservation -Stage $script:diagnosticLastStage -Outcome "missing"
             throw "Could not identify the resumed guardian Activity and its task: $($guardianActivity | Out-String)"
         }
         Invoke-TestDeviceShell -Command "am start -W --task $($guardianActivity.TaskId) -a neth.iecal.curbox.api.REQUEST_PERMISSION -n $packageName/neth.iecal.curbox.api.ApiPermissionActivity --es android.intent.extra.REFERRER_NAME android-app://$requesterPackage"
@@ -816,6 +866,7 @@ function Invoke-ForegroundOwnershipRegressionCase(
             throw "The other translucent Curbox Activity did not take foreground focus. Focus: $($overlayFocus.RawFocus)"
         }
         Wait-ForPausedGuardianInTask -TaskId $guardianActivity.TaskId
+        Save-GuardianObservation -Stage "paused guardian and resumed permission in same task" -Outcome "observed"
         $closedBeforeResult = [regex]::IsMatch(
             (Get-GuardianApprovalLogs),
             "(?m)^.*screen_closed screen=$([regex]::Escape($screenRequestId)) package=$([regex]::Escape($TargetPackage)) .*"
@@ -829,6 +880,7 @@ function Invoke-ForegroundOwnershipRegressionCase(
             -Pattern "result test=$([regex]::Escape($gateId)) status=allowed operation=$([regex]::Escape($operationId)) check=$([regex]::Escape($checkId))" `
             -Label "foreground ownership result for the paused approval Activity")
         Wait-ForPausedGuardianInTask -TaskId $guardianActivity.TaskId
+        Save-GuardianObservation -Stage "paused guardian and resumed permission in same task" -Outcome "observed"
         $overlayFocus = Wait-ForWindowFocus -ExpectedActivity "ApiPermissionActivity" -TimeoutSeconds 10
         if (-not $overlayFocus.Success) {
             throw "The target replaced the current Curbox Activity after approval; focus: $($overlayFocus.RawFocus)"
@@ -848,6 +900,7 @@ function Invoke-ForegroundOwnershipRegressionCase(
         }
         $settings = Get-DeviceSettings -PackageName $packageName -AsObject
         Assert-GuardianLedger -Settings $settings -RuleId $RuleId -Kind "rule_skip" -UseDayId $useDayId
+        Save-GuardianObservation -Stage "foreground ownership" -Outcome "passed"
         Write-Success "A paused approval Activity rejected a current all-allow result while another Curbox Activity held focus; the target stayed behind, and the skip was written once."
     } finally {
         try {
@@ -955,6 +1008,7 @@ try {
     }
     Write-Success "Installed a real DataStore snapshot with one currently denying direct-grant rule."
 
+    if (-not $HomeOnly -and -not $ForegroundOnly) {
     Invoke-AmbiguousConfirmationCase `
         -CaseName "direct" `
         -RuleId $directRuleId `
@@ -1132,6 +1186,8 @@ try {
     Invoke-TestDeviceShell -Command "input keyevent 3"
     Start-Sleep -Milliseconds 800
 
+    }
+    if (-not $ForegroundOnly) {
     Write-Step "7. Cancel a live receipt at Home, replace the current intent, reconnect, and deliver the old result..."
     $homeRule = New-GuardianRule `
         -RuleId $homeRuleId `
@@ -1184,6 +1240,7 @@ try {
         } `
         -HomeReplaceReconnectDuringCheck $true
 
+    if (-not $HomeOnly) {
     $finalSettings = Get-DeviceSettings -PackageName $packageName -AsObject
     $finalGrantCount = @($finalSettings.appRuleOverrideState.grants).Count
     $finalSkipCount = @($finalSettings.appRuleOverrideState.skips).Count
@@ -1194,6 +1251,9 @@ try {
         throw "The device log does not contain an actual post-commit failure injection."
     }
 
+    }
+    }
+    if (-not $HomeOnly) {
     Write-Step "8. Keep a second Curbox Activity in front while the current approval becomes all-allow..."
     $foregroundOwnershipRule = New-GuardianRule `
         -RuleId $foregroundOwnershipRuleId `
@@ -1210,10 +1270,20 @@ try {
         -RuleId $foregroundOwnershipRuleId `
         -RuleName "E2E foreground ownership rule"
 
+    }
     Write-Host "`n==========================================================================" -ForegroundColor Green
     Write-Host ">>> [GUARDIAN RETRY AND SUPERSEDE DEVICE RESULT: PASS] <<<" -ForegroundColor Green
-    Write-Host "Direct, accumulated, and skip receipts survived real :app_blocker_service reconnects without another write. Activity recreation restored pending and completed state, including current denial rows and the selected rule. Home cancellation plus same-package replacement ignored stale CLOSED and ALLOWED events. A paused approval also rejected an all-allow result while another Curbox Activity held foreground focus." -ForegroundColor Green
+    if ($HomeOnly) {
+        Write-Host "Home replacement and reconnect passed." -ForegroundColor Green
+    } elseif ($ForegroundOnly) {
+        Write-Host "Foreground ownership passed." -ForegroundColor Green
+    } else {
+        Write-Host "All guardian retry and supersede cases passed." -ForegroundColor Green
+    }
     Write-Host "==========================================================================`n" -ForegroundColor Green
+} catch {
+    Save-GuardianObservation -Stage $diagnosticLastStage -Outcome "failed"
+    throw
 } finally {
     if ($displayRotationChanged) {
         try {
@@ -1248,6 +1318,7 @@ try {
             -AccessibilitySettings $accessibilityBackup `
             -PackageName $packageName
         Start-Sleep -Seconds 1
+        $restorationChecked = $true
         $restoredSettings = Get-DeviceSettings -PackageName $packageName
         $backupSettingsText = (Get-Content -LiteralPath $backupFile -Raw).Trim()
         if ($restoredSettings -ne $backupSettingsText) {
@@ -1270,6 +1341,16 @@ try {
     }
     Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tmpDir -Force -ErrorAction SilentlyContinue
+    if ($EvidencePath -and $diagnosticGateId) {
+        $restoration = [ordered]@{
+            observed_utc = [DateTime]::UtcNow.ToString("o")
+            gate = $diagnosticGateId
+            stage = "restoration"
+            outcome = if (-not $restorationChecked) { "not_checked" } elseif ($restoreVerified) { "verified" } else { "failed" }
+        }
+        Add-Content -LiteralPath $EvidencePath -Value (ConvertTo-Json -InputObject $restoration -Compress) -Encoding UTF8
+    }
+    if (-not $restoreVerified) { throw "The original settings or permissions did not restore exactly." }
 }
 
 if (-not $restoreVerified) {

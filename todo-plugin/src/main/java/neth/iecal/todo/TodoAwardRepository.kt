@@ -20,7 +20,8 @@ class TodoAwardRepository(
     private val storage: LearningStorage,
     private val api: TodoApi,
     private val displayName: String,
-    private val onFailure: (Throwable) -> Unit = {}
+    private val onFailure: (Throwable) -> Unit = {},
+    private val settlementApi: TodoApi = api
 ) : AdditionalTimeProvider {
     private val gson = Gson()
     private fun decode(raw: String?): TodoAwardState = if (raw.isNullOrBlank()) TodoAwardState() else
@@ -73,7 +74,7 @@ class TodoAwardRepository(
         for (day in days) {
             if (state.pending.none { it.connection == link && it.useDayId == day }) continue
             val reported = try {
-                TodoAwardLookup(api).minutes(storage.readSession(scope.sessionRef), link.childName,
+                TodoAwardLookup(settlementApi).minutes(storage.readSession(scope.sessionRef), link.childName,
                     LocalDate.parse(day).format(DateTimeFormatter.BASIC_ISO_DATE), scope.subjects)
             } catch (e: CancellationException) {
                 throw e

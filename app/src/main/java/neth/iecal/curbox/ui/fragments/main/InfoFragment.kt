@@ -189,6 +189,12 @@ class InfoFragment : Fragment() {
             openUrl("https://github.com/curbox-app/curbox-extension")
         }
 
+        binding.btnTodoDiagnostics.setOnClickListener {
+            val now = System.currentTimeMillis()
+            neth.iecal.plugin.TodoDiagnosticsFile(requireContext().filesDir).activate(now, now + 15 * 60_000L)
+            Toast.makeText(requireContext(), R.string.todo_diagnostics_started, Toast.LENGTH_LONG).show()
+        }
+
         binding.btnActionCrashLogs.setOnClickListener {
             showCrashLogs()
         }
@@ -224,21 +230,24 @@ class InfoFragment : Fragment() {
             "No crash logs available."
         }
         
-        val displayContent = if (content.length > 50000) {
-            "...${content.takeLast(50000)}"
+        val diagnosticLog = neth.iecal.plugin.TodoDiagnosticsFile(requireContext().filesDir)
+        val combinedContent = content + "\n" + diagnosticLog.read()
+        val displayContent = if (combinedContent.length > 50000) {
+            "...${combinedContent.takeLast(50000)}"
         } else {
-            content
+            combinedContent
         }
 
         MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.crash_logs_title)
             .setMessage(displayContent)
             .setPositiveButton(R.string.share) { _, _ ->
-                shareCrashLogs(content)
+                shareCrashLogs(combinedContent)
             }
             .setNegativeButton(R.string.close, null)
             .setNeutralButton(R.string.clear) { _, _ ->
-                if (logFile.exists() && logFile.delete()) {
+                diagnosticLog.clear()
+                if (!logFile.exists() || logFile.delete()) {
                     Toast.makeText(requireContext(), getString(R.string.crash_logs_cleared), Toast.LENGTH_SHORT).show()
                 }
             }
